@@ -199,6 +199,7 @@ __all__ = [
     "alternate_database_user_verification_sql",
     "database_secret_name",
     "database_secret_name_for_role",
+    "error_code",
     "migration_role_for_schema",
     "owner_role_for_schema",
     "parameter_path",
@@ -1578,7 +1579,7 @@ def _aws_error_types() -> tuple[type[BaseException], ...]:
     return (ClientError, BotoCoreError)
 
 
-def _error_code(exc: BaseException) -> str:
+def error_code(exc: BaseException) -> str:
     """Return the AWS service error code carried by an exception, or an empty string.
 
     Purpose
@@ -1586,6 +1587,15 @@ def _error_code(exc: BaseException) -> str:
     Read the service's own error code so that "the thing you named is not there" can be
     separated from "you are not allowed to read it" and from every other failure, without this
     module having to import a service-specific exception class for each case.
+
+    Refactoring Rationale: this is PUBLISHED, where it was ``_error_code``, because
+    :func:`carddemo_migration.loaders.s3_stage._claim_generation` -- reached from that module's
+    public ``reserve_generation`` -- read it through the private name to recognise a claim
+    conflict. A public contract in one module therefore rested on a private name in another, one
+    excluded from this module's exported surface and free to be renamed by any tidying pass with
+    no import check noticing. The private spelling is REMOVED rather than kept as an alias, on the
+    precedent set when ``_aws_client`` was promoted for the same reason: two names for one
+    function is how the private one comes back.
 
     Parameters
     ----------
@@ -1862,7 +1872,7 @@ def _ssm_parameter(path: str) -> str:
         # secure value there is a provisioning defect this call cannot detect.
         response = client.get_parameter(Name=path, WithDecryption=False)
     except _aws_error_types() as exc:
-        code = _error_code(exc)
+        code = error_code(exc)
         if code in _MISSING_PARAMETER_CODES:
             raise ConfigurationError(f"the parameter {path} does not exist") from exc
         if code == "AccessDeniedException":
@@ -1916,7 +1926,7 @@ def _secret_credentials(secret_name: str) -> tuple[str, str]:
     try:
         response = client.get_secret_value(SecretId=secret_name)
     except _aws_error_types() as exc:
-        code = _error_code(exc)
+        code = error_code(exc)
         if code in _MISSING_SECRET_CODES:
             # Assumptions: a secret scheduled for deletion reports this same code, and it
             # is reported the same way on purpose. Neither state yields a credential and both

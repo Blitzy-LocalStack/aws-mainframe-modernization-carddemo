@@ -154,7 +154,6 @@ data "aws_availability_zones" "available" {
 
 data "aws_region" "current" {}
 
-# WHAT: The account number and the partition this module is being applied into.
 # WHY : Both are needed to build fully-qualified ARNs by hand rather than by
 #       wildcard. Two places in this file require them.
 #
@@ -611,7 +610,7 @@ resource "aws_security_group" "data" {
 #       the ALB group would collapse two genuinely different flows onto one rule:
 #       an application-to-ALB 443 rule now exists for service-to-service calls,
 #       and folding the endpoint ENIs into the same group would make that one rule
-#       also grant every task access to the eight private service endpoints, so
+#       also grant every task access to the ten private service endpoints, so
 #       withdrawing either permission would withdraw both. A dedicated group keeps
 #       each permitted flow at exactly one source group and one destination group.
 #       Refactoring Rationale: the ALB half of this argument previously read that
@@ -622,9 +621,15 @@ resource "aws_security_group" "data" {
 #       rule it was used to rule out was a rule the system requires. The
 #       conclusion is unchanged and now rests on separation of the two flows,
 #       which is a reason that survives the correction.
-#       Assumptions: this is the one group this module attaches itself, so it is
+#       Assumptions: this is the one group this module attaches itself - to the
+#       interface-endpoint ENIs declared further down this file - so it is
 #       deliberately absent from outputs.tf; no sibling module has anything to
 #       attach to it.
+#       Refactoring Rationale: that attachment is what this paragraph has always
+#       described and what the endpoint resource for a period did not perform,
+#       naming the application group instead and leaving this group created but
+#       carried by nothing. The two now agree, so the reasoning here describes
+#       the delivered topology rather than an intended one.
 # WHY : Refactoring Rationale: the paragraph above previously justified the
 #       dedicated group partly on the claim that an application-to-ALB 443 rule
 #       would permit "a flow no component makes". That claim was false and it is
@@ -718,7 +723,23 @@ resource "aws_vpc_security_group_ingress_rule" "alb_to_app" {
 #       hop a caller makes is application group to load-balancer group on
 #       local.https_port and then the existing alb_to_app pair onward to the
 #       callee. Without this pair the two rules on either side of it exist and
-#       the call still fails, as a connect timeout rather than as a refusal.
+#       the call still fails, as a connect timeout rather than as a refusal - and
+#       for the authorization consumer that timeout surfaces as redelivery until
+#       the queue dead-letters the request, so the operator's symptom is a
+#       stalled queue rather than a network error anyone would look for.
+#       Assumptions: the port is local.https_port (443) and NOT
+#       var.app_container_port. The container port is what the load balancer
+#       forwards TO, and the rule for that flow is the alb_to_app pair above;
+#       this pair is what reaches the LISTENER, which infra/modules/alb fixes at
+#       443 on the same name its certificate is issued for.
+#       Refactoring Rationale: a second, separately named pair once declared this
+#       same flow with a literal 443 in place of local.https_port. A
+#       security-group rule is identified by its tuple and not by its resource
+#       name, so the two were one rule written twice, and whichever was created
+#       second failed the apply with InvalidPermission.Duplicate - the module
+#       could not provision at all. The duplicate is withdrawn, and the two
+#       rulings it carried that this pair did not - the port distinction and the
+#       stalled-queue symptom - are folded in above rather than lost with it.
 #       Alternatives Considered: a task-to-task rule instead - a self reference on
 #       the application group on the callee's container port. Rejected because it
 #       would permit every task to reach every other task, including the pairs
@@ -786,27 +807,33 @@ resource "aws_vpc_security_group_ingress_rule" "app_to_data" {
   to_port                      = var.database_port
 }
 
-# WHY : Assumptions: this pair carries the application tier's traffic to the
-#       eight PRIVATE service endpoints and nothing else. It is not the whole of
-#       that tier's outbound reachability, and the four rules that follow are the
-#       rest of it. Private DNS on those endpoints is what keeps this pair
+# WHY : Assumptions: this pair carries the application tier's traffic to the ten
+#       PRIVATE service endpoints and nothing else. It is not the whole of that
+#       tier's outbound reachability, and the four rules that follow are the rest
+#       of it. Private DNS on those endpoints is what keeps this pair
 #       load-bearing rather than redundant with the broader rule below: for each
-#       of the eight, the SDK's default hostname resolves to the endpoint ENI
+#       of the ten, the SDK's default hostname resolves to the endpoint ENI
 #       inside this VPC, so the packet is destined for the endpoint group and is
 #       matched here, never leaving the VPC even though a wider rule exists.
+#       Refactoring Rationale: both rules formerly named the APPLICATION group on
+#       both sides, which made the flow a self reference and therefore also
+#       permitted task-to-task traffic on 443. Naming the dedicated endpoint
+#       group on the far side of each rule preserves the reachability exactly -
+#       the endpoint ENIs carry that group - while withdrawing the peer-to-peer
+#       path the self reference permitted as an unintended side effect.
 resource "aws_vpc_security_group_egress_rule" "app_to_endpoints" {
   security_group_id            = aws_security_group.app.id
-  referenced_security_group_id = aws_security_group.app.id
-  description                  = "Allow CardDemo tasks to initiate TLS sessions to the private AWS service endpoint ENIs sharing this group"
+  referenced_security_group_id = aws_security_group.vpc_endpoints.id
+  description                  = "Allow CardDemo tasks to initiate TLS sessions to the private AWS service endpoint ENIs"
   ip_protocol                  = "tcp"
   from_port                    = local.https_port
   to_port                      = local.https_port
 }
 
 resource "aws_vpc_security_group_ingress_rule" "app_to_endpoints" {
-  security_group_id            = aws_security_group.app.id
+  security_group_id            = aws_security_group.vpc_endpoints.id
   referenced_security_group_id = aws_security_group.app.id
-  description                  = "Allow the private AWS service endpoint ENIs to receive TLS from CardDemo tasks in this group only"
+  description                  = "Allow the private AWS service endpoint ENIs to receive TLS from CardDemo application tasks only"
   ip_protocol                  = "tcp"
   from_port                    = local.https_port
   to_port                      = local.https_port
@@ -872,7 +899,6 @@ resource "aws_vpc_security_group_egress_rule" "app_to_identity_provider" {
   }
 }
 
-# WHAT: The managed prefix list backing the S3 gateway endpoint in this Region.
 # WHY : The rule below cannot be written as a security-group reference the way
 #       the interface-endpoint pair above is. A gateway endpoint installs a
 #       route-table entry pointing at this prefix list; it places no elastic
@@ -941,54 +967,6 @@ resource "aws_vpc_security_group_egress_rule" "data_to_s3_gateway" {
   from_port         = 443
   to_port           = 443
 }
-
-# WHY : Assumption: this pair carries SERVICE-TO-SERVICE calls, which travel
-#       through the internal load balancer rather than task to task. Three such
-#       calls exist and each is configured by both environment roots as an https
-#       base address at the internal listener's own name:
-#       authorization-service and transaction-service read the account context
-#       (CARDDEMO_ACCOUNT_CONTEXT_BASE_URL) and account-service reads the
-#       reference context's address allow-lists
-#       (CARDDEMO_REFERENCE_CONTEXT_BASE_URL). Without this pair every one of
-#       those calls times out at connect, and each caller reports the callee as
-#       an unavailable dependency -- which for the authorization consumer means
-#       redelivery until the queue dead-letters the request, so the symptom is a
-#       stalled queue rather than a network error anyone would look for.
-#       Assumption: the port is 443 and not var.app_container_port. The task
-#       listener port is what the ALB forwards TO, and the rule for that flow is
-#       the alb_to_app pair above; this rule is what reaches the LISTENER, which
-#       infra/modules/alb fixes at 443 on the same value its certificate is
-#       issued for.
-#       Alternatives Considered: letting the callers reach each other directly on
-#       the container port with a self-referencing rule on the application group.
-#       Rejected on two counts: a self reference permits every task to reach
-#       every other task, which is strictly wider than permitting them to reach
-#       one listener that applies path rules; and the callers verify the
-#       listener's certificate against the internal DNS name, which a task
-#       address does not present.
-#       Trade-offs: a call from one context to another therefore leaves the task,
-#       crosses the load balancer and returns, which costs one extra hop over a
-#       direct connection. That hop is what supplies the listener certificate,
-#       the access log and the per-service path rules, and it is the same hop the
-#       edge already uses.
-resource "aws_vpc_security_group_egress_rule" "app_to_alb_https" {
-  security_group_id            = aws_security_group.app.id
-  referenced_security_group_id = aws_security_group.alb.id
-  description                  = "Allow CardDemo tasks to reach the internal ALB listener for service-to-service calls"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-}
-
-resource "aws_vpc_security_group_ingress_rule" "app_to_alb_https" {
-  security_group_id            = aws_security_group.alb.id
-  referenced_security_group_id = aws_security_group.app.id
-  description                  = "Allow the internal ALB listener to receive service-to-service TLS from CardDemo tasks"
-  ip_protocol                  = "tcp"
-  from_port                    = 443
-  to_port                      = 443
-}
-
 # -----------------------------------------------------------------------------
 # Private AWS service endpoints
 # -----------------------------------------------------------------------------
@@ -1179,12 +1157,17 @@ resource "aws_vpc_endpoint" "interface" {
     for zone in local.availability_zones :
     aws_subnet.private_app[zone].id
   ]
-  # WHY : Assumptions: the ENIs carry the APPLICATION group, so the
-  #       task-to-endpoint flow is a self-referencing rule on that group rather
-  #       than a rule between two groups. See the Refactoring Rationale above
-  #       the application group for why the fourth group this used to carry was
-  #       withdrawn and what bounds the self reference.
-  security_group_ids = [aws_security_group.app.id]
+  # WHY : Assumptions: the ENIs carry the DEDICATED endpoint group, so the
+  #       task-to-endpoint flow is a rule between two distinct groups. The
+  #       comment block above that group records why the boundary needs its own
+  #       group rather than borrowing the application group's.
+  #       Refactoring Rationale: these ENIs previously carried the application
+  #       group, which made the flow a self-referencing 443 rule and therefore
+  #       also permitted task-to-task traffic on 443 - a peer-to-peer path
+  #       nothing in this system uses and the tier boundary is meant to deny.
+  #       Attaching the dedicated group narrows the permission to exactly the
+  #       one direction the callers need without changing what they can reach.
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
 
   # WHY : Assumptions: one document is attached to all eight endpoints rather than
   #       eight per-service documents, because the boundary it draws -- this

@@ -4,7 +4,7 @@
 # Purpose:
 #   The complete public contract of the CardDemo cognito module. Everything a
 #   calling root, a sibling module or a running service can learn about this
-#   user pool, it learns from the sixteen outputs below; nothing else in the
+#   user pool, it learns from the seventeen outputs below; nothing else in the
 #   module is visible outside it. Cognito replaces the mainframe sign-on path
 #   -- the USRSEC VSAM file defined at app/csd/CARDDEMO.CSD L88 and read by the
 #   READ-USER-SEC-FILE paragraph of app/cbl/COSGN00C.cbl (L209-L257) -- so
@@ -23,16 +23,17 @@
 #   undocumented" are indistinguishable to a reader otherwise.
 #
 # Returns:
-#   Sixteen values, grouped below in the order a caller wires them: pool
+#   Seventeen values, grouped below in the order a caller wires them: pool
 #   identity (user_pool_id, user_pool_arn, user_pool_endpoint), the OIDC issuer
 #   (issuer_uri), the app client and a reference to its credential
 #   (user_pool_client_id, app_client_secret_arn, app_client_secret_name), the
-#   API resource server (resource_server_identifier,
-#   interactive_route_authorization_scopes, resource_server_scope_identifiers),
-#   the two group names (admin_group_name, user_group_name), the optional
-#   hosted-UI domain (hosted_ui_domain), and the seed-user credential
-#   references (seed_user_secret_arns, seed_user_secret_names,
-#   seed_user_subjects).
+#   name prefix beneath which credentials for pool accounts are written
+#   (credential_secret_name_prefix), the API resource server
+#   (resource_server_identifier, interactive_route_authorization_scopes,
+#   resource_server_scope_identifiers), the two group names (admin_group_name,
+#   user_group_name), the optional hosted-UI domain (hosted_ui_domain), and the
+#   seed-user credential references (seed_user_secret_arns,
+#   seed_user_secret_names, seed_user_subjects).
 #   WHY the count is enumerated rather than just stated: an earlier revision
 #   said fourteen while sixteen were declared, and a bare number gives a reader
 #   no way to tell WHICH two were missing. Naming every output makes the count
@@ -237,6 +238,37 @@ output "app_client_secret_name" {
   description = "Secrets Manager name of the same entry. Published alongside the ARN because the two are used at different points: an IAM statement scopes to the ARN, while `aws secretsmanager get-secret-value --secret-id` takes the name, which is the form docs/runbooks/deploy.md uses. NO SECRET VALUE IS PUBLISHED. Without it the runbook would have to recover a name from an ARN by string surgery."
   value       = aws_secretsmanager_secret.app_client.name
   depends_on  = [terraform_data.app_client_secret_rotation]
+}
+
+# WHY : (1) Refactoring Rationale: this output exists because the auth service now
+#       creates pool accounts at run time and has to put each new account's
+#       one-time credential somewhere its owner can collect it. It composes that
+#       entry's name itself, from this prefix plus a digest of the identifier, and
+#       before this output existed the calling root had no way to tell it which
+#       prefix to use except by restating this module's own naming rule -- so a
+#       change to the rule here would have left the service writing under a name
+#       no IAM statement in the root scoped, and every runtime user creation would
+#       have failed at the store rather than at plan time.
+#       (2) Assumptions: it is the SAME root the seed-user entries at line 1135 of
+#       this module's main.tf are written under. Both hold a generated initial
+#       credential for one pool identity, and they differ only in which side
+#       created that identity -- Terraform for a seeded one, the service for a
+#       runtime one -- so putting them under one root means an audit or an
+#       operator grant covering pool credentials is one path rather than two that
+#       could drift apart.
+#       (3) Trade-offs: a prefix rather than a set of names, which is the opposite
+#       of how the seed-user entries above are published. It has to be: the names
+#       under it are derived at run time from identifiers that do not exist at
+#       apply time, so there is no set to enumerate. The consequence is that the
+#       root's IAM statement scopes to a wildcard BENEATH this prefix, which is
+#       one level less precise than a per-entry ARN and is why the prefix is
+#       narrow enough that nothing else is written beneath it.
+#       (4) NO SECRET VALUE IS PUBLISHED: this is a name fragment, and the
+#       credentials stored beneath it are readable only with GetSecretValue on the
+#       entry together with a grant on the key it is encrypted with.
+output "credential_secret_name_prefix" {
+  description = "Secrets Manager name prefix beneath which one-time credentials for pool accounts are written, as `<name_prefix>-<environment>/cognito`. The auth service composes an entry name from this prefix, a `/runtime-user/` infix and a digest of the account identifier; the calling root passes it to that service and scopes the service's write grant to a wildcard beneath it. It is the same root the seeded initial-password entries use. No secret value is published."
+  value       = local.secret_name_prefix
 }
 
 # -----------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.carddemo.account.config.SecurityConfig;
+import com.carddemo.account.dto.CustomerDisplayView;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.service.AccountViewService;
@@ -41,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -62,6 +64,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Holds the published contract invariants of the customer read surface.
@@ -147,6 +150,18 @@ class CustomerControllerTest {
      * The bounded ascending scan route, which is the collection address itself.
      */
     private static final String SCAN_ROUTE = CustomerController.BASE_PATH;
+
+    /**
+     * The nine-field screen display route, composed from the controller's own two constants.
+     *
+     * <p>Refactoring Rationale: this route is new and it closes a gap that failed SILENTLY. A neighbouring
+     * context's detail screen read a cardholder's name, two address lines and a telephone number out of the
+     * response of the existence check, which answers 204 or 404 with no body at all by contract -- and a
+     * bodiless answer deserialises to nothing rather than to an error, so those fields rendered as
+     * absent on every request and nothing anywhere failed.</p>
+     */
+    private static final String DISPLAY_ROUTE =
+            CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH;
 
     /**
      * The customer identifier every case in this class reads.
@@ -313,7 +328,6 @@ class CustomerControllerTest {
         guardedContext.register(GuardedSliceWiring.class);
         guardedContext.refresh();
 
-        // WHAT: wraps the security-enabled context in a dispatcher whose requests traverse the chain.
         // WHY : Assumptions: the configurer form is used rather than adding the chain filter by hand,
         //       because the request post-processor that mints an authentication publishes it through the
         //       test context repository this configurer installs. Adding the filter alone would leave
@@ -538,6 +552,118 @@ class CustomerControllerTest {
     }
 
     /**
+     * The display read answers the nine screen fields, and answers no tenth.
+     *
+     * <p>Purpose: the pending-authorization detail screen renders a cardholder's name, two address lines and
+     * a telephone number, and it COMPOSES those two rendered lines out of five stored columns. All nine
+     * come from the customer record this context owns -- {@code CUST-FIRST-NAME PIC X(25)} at L6 of
+     * {@code app/cpy/CVCUS01Y.cpy}, the middle name at L7, the family name at L8, the three address lines
+     * at L9, L10 and L11, {@code CUST-ADDR-STATE-CD} at L12, {@code CUST-ADDR-ZIP} at L14, and
+     * {@code CUST-PHONE-NUM-1} at L15 with L16 at its stored width of fifteen characters.</p>
+     *
+     * <p>Assumptions: the postal code is asserted at its STORED ten characters and not at the five the
+     * screen renders. {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} narrows to
+     * {@code CUST-ADDR-ZIP(1:5)} at L775, at the point of display; asserting the narrowed value here would
+     * accept a projection that had adopted one consumer's truncation as though it were the layout.</p>
+     *
+     * <p>Assumptions: the COUNTRY code is asserted absent even though it sits between two published address
+     * components in the record, at L13. Neither composition on that screen reads it, so its presence would
+     * mean the projection had grown to the contiguous span of the record rather than the field list one
+     * screen needs.</p>
+     *
+     * <p>Assumptions: the member set is asserted EXACTLY rather than by presence, and that is the half of
+     * this case that keeps the projection narrow. The record it is projected from carries eighteen fields
+     * including two encrypted identifiers and a credit score, so a projection that grew a tenth member
+     * would still satisfy every presence assertion while widening what a screen's credential can read.</p>
+     *
+     * <p>Assumptions: the three NAME components are asserted separately and no composed name is expected.
+     * The record declares none, so a composed member would be a value no column holds -- and it is exactly
+     * the member the consumer's own seam record used to declare and nothing could ever populate.</p>
+     *
+     * @throws Exception if the request cannot be performed or the response body cannot be read
+     */
+    @Test
+    @DisplayName("the display read answers exactly the nine screen fields and no protected value")
+    void theDisplayReadAnswersExactlyTheNineScreenFields() throws Exception {
+        when(reads.readCustomerDisplay(CUSTOMER_ID)).thenReturn(new CustomerDisplayView(
+                "JOHN", "Q", "PUBLIC", "1 SYNTHETIC WAY", "APT 2", "SYNTHETIC CITY",
+                "NY", "1000100010", "212-555-0100"));
+
+        String body = this.mockMvc.perform(post(DISPLAY_ROUTE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RECORD_BODY))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.firstName").value("JOHN"))
+                .andExpect(jsonPath("$.middleName").value("Q"))
+                .andExpect(jsonPath("$.lastName").value("PUBLIC"))
+                .andExpect(jsonPath("$.addressLine1").value("1 SYNTHETIC WAY"))
+                .andExpect(jsonPath("$.addressLine2").value("APT 2"))
+                .andExpect(jsonPath("$.addressLine3").value("SYNTHETIC CITY"))
+                .andExpect(jsonPath("$.stateCode").value("NY"))
+                // WHY : Assumptions: the postal code arrives at its stored TEN characters. The screen that
+                //       consumes it renders CUST-ADDR-ZIP(1:5) at L775 of COPAUS0C, so a five-character
+                //       value here would mean this context had taken that consumer's narrowing.
+                .andExpect(jsonPath("$.zipCode").value("1000100010"))
+                .andExpect(jsonPath("$.phoneNumber1").value("212-555-0100"))
+                .andExpect(jsonPath("$.countryCode").doesNotExist())
+                // WHY : Assumptions: the two encrypted identifiers and the credit score are asserted
+                //       ABSENT rather than masked, which is a stronger property than the record read
+                //       beside this one can offer. That one publishes both identifiers in masked form
+                //       because its consumer reads the whole record; this one has nothing to mask,
+                //       and a masked member would still be a member a future consumer would begin
+                //       reading.
+                .andExpect(jsonPath("$.ssnMasked").doesNotExist())
+                .andExpect(jsonPath("$.governmentIssuedIdMasked").doesNotExist())
+                .andExpect(jsonPath("$.ficoScore").doesNotExist())
+                .andExpect(jsonPath("$.customerId").doesNotExist())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        // WHY : Assumptions: the reader is built here rather than held as a field, because this is the one
+        //       case in the class that needs to inspect a response's MEMBER SET rather than a value in it.
+        //       A shared field would be constructed for every other case that does not use it, and the
+        //       mapper's configuration matters to nothing else here.
+        assertThat(JsonMapper.builder().build().readValue(body, Map.class))
+                .as("the projection publishes exactly nine members, so a tenth cannot arrive unnoticed")
+                .containsOnlyKeys("firstName", "middleName", "lastName", "addressLine1",
+                        "addressLine2", "addressLine3", "stateCode", "zipCode", "phoneNumber1");
+        assertThat(body)
+                .as("no composed name member may appear: the record declares no such column")
+                .doesNotContain("customerName");
+
+        verify(reads).readCustomerDisplay(CUSTOMER_ID);
+    }
+
+    /**
+     * An absent customer on the display read answers 404 rather than a body of empty fields.
+     *
+     * <p>Assumptions: the outcome is a NOT-FOUND and not a 200 whose nine members are all absent, and the
+     * difference is what the consumer acts on: it renders the screen with the fields unpopulated for a
+     * customer the master does not hold, and it must be able to tell that case from a customer whose
+     * every stored field happens to be blank. A 200 carrying nine nulls collapses the two.</p>
+     *
+     * <p>Assumptions: this outcome is asserted separately from the record read's own absence case rather
+     * than assumed to follow from it. The two reads raise from different methods, and a handler that
+     * returned an empty projection instead of raising would satisfy every assertion in the case above.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an absent customer on the display read answers 404 and not nine empty fields")
+    void anAbsentCustomerOnTheDisplayReadAnswersNotFound() throws Exception {
+        when(reads.readCustomerDisplay(CUSTOMER_ID))
+                .thenThrow(new NoSuchElementException(NOT_FOUND_SENTENCE));
+
+        this.mockMvc.perform(post(DISPLAY_ROUTE)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(RECORD_BODY))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.firstName").doesNotExist());
+    }
+
+    /**
      * An absent customer answers the problem document, not a server fault and not an empty success.
      *
      * <p>Purpose: the read path raises the standard no-such-element type carrying the reference's own
@@ -691,13 +817,12 @@ class CustomerControllerTest {
         when(reads.listCustomers(isNull(), eq(PAGE_WIDTH)))
                 .thenReturn(PageResponse.ofRows(
                         pageOf("000000001", "000000002", "000000003"),
-                        leading, trailing, true, false));
+                        leading, trailing, true));
 
         this.mockMvc.perform(get(SCAN_ROUTE).param("size", String.valueOf(PAGE_WIDTH)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(PAGE_WIDTH))
                 .andExpect(jsonPath("$.hasNext").value(true))
-                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andExpect(jsonPath("$.firstKey").value(leading))
                 .andExpect(jsonPath("$.lastKey").value(trailing))
                 // WHY : Assumptions: every published identifier is named BY POSITION rather than the
@@ -731,13 +856,12 @@ class CustomerControllerTest {
 
         when(reads.listCustomers(isNull(), anyInt()))
                 .thenReturn(PageResponse.ofRows(
-                        pageOf("000000007", "000000008"), leading, trailing, false, true));
+                        pageOf("000000007", "000000008"), leading, trailing, false));
 
         this.mockMvc.perform(get(SCAN_ROUTE))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(2))
                 .andExpect(jsonPath("$.hasNext").value(false))
-                .andExpect(jsonPath("$.hasPrevious").value(true))
                 .andExpect(jsonPath("$.lastKey").value(trailing));
     }
 
@@ -766,7 +890,6 @@ class CustomerControllerTest {
                 .andExpect(jsonPath("$.items").isArray())
                 .andExpect(jsonPath("$.items").isEmpty())
                 .andExpect(jsonPath("$.hasNext").value(false))
-                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andExpect(jsonPath("$.firstKey", nullValue()))
                 .andExpect(jsonPath("$.lastKey", nullValue()))
                 .andExpect(content().string(not(containsString(CursorToken.VERSION + "."))));
@@ -802,10 +925,10 @@ class CustomerControllerTest {
 
         when(reads.listCustomers(isNull(), eq(PAGE_WIDTH)))
                 .thenReturn(PageResponse.ofRows(
-                        pageOf("000000001", "000000002"), openingLeading, openingTrailing, true, false));
+                        pageOf("000000001", "000000002"), openingLeading, openingTrailing, true));
         when(reads.listCustomers(eq(openingTrailing), eq(PAGE_WIDTH)))
                 .thenReturn(PageResponse.ofRows(
-                        pageOf("000000003", "000000004"), nextLeading, nextTrailing, false, true));
+                        pageOf("000000003", "000000004"), nextLeading, nextTrailing, false));
 
         this.mockMvc.perform(get(SCAN_ROUTE)
                         .param("size", String.valueOf(PAGE_WIDTH)))

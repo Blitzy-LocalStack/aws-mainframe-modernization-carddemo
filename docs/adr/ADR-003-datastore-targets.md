@@ -605,11 +605,11 @@ service properties the configuration has to satisfy.
   auto-pause-seconds argument that a zero floor then makes mandatory — so the
   effective floor for this configuration is the later of the two, **5.81.0**. The
   pinned constraint is `~> 6.56`, which clears it with room; the pin itself belongs to
-  [ADR-009](ADR-009-iac-tool.md) and is not re-decided here. *WHY (Refactoring
-  Rationale):* this bullet credited **5.81.0** with accepting the zero floor. That is
-  off by one release — 5.80.0 introduced it — and since this record owns the capacity
-  model while ADR-009 owns the pin, the misattribution sat in precisely the document a
-  reader would consult to learn which capacity feature needed which release.
+  [ADR-009](ADR-009-iac-tool.md) and is not re-decided here. Assumptions: this record
+  owns the capacity model while ADR-009 owns the pin, so which capacity feature needs
+  which release is stated here per release rather than collapsed into a single floor.
+  Collapsing them puts the misattribution in precisely the document a reader consults
+  to learn which release a capacity feature came from.
 - **Resuming from a paused state takes on the order of fifteen seconds.** This is
   a cited service behaviour, not an estimate of any kind about this project's
   work.
@@ -929,8 +929,16 @@ within its own rights. Separating the owner from the reader closes that path.
 ### One deliberate departure from database-per-service purity
 
 The posting job runs against the same cluster under a role holding
-**narrowly-scoped** cross-schema grants: usage on the four schemas it reads and
-insert and update on the ledger tables it writes, and nothing beyond that. This is
+**narrowly-scoped** cross-schema grants: usage on the three schemas outside its own
+that it reads — `ledger`, `account` and `reference` — and insert and update on the
+ledger tables it writes, and nothing beyond that. Refactoring Rationale: this
+sentence counted four such schemas, because the role also held an unused `SELECT` on
+`card`. That grant was removed once the baseline was re-read: `app/cbl/CBTRN01C.cbl`
+opens `CARD-FILE` at `:309` and closes it at `:417` without ever reading it, and the
+cross-reference it does read is mapped into `account`. Naming the three schemas
+rather than counting them is what keeps the claim checkable against
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+by a reader who has only this sentence. This is
 the mechanism that keeps the three writes at
 [`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) **L440–L442** inside one
 commit. It is recorded as a departure rather than presented as the general

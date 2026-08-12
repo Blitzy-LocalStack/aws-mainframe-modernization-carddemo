@@ -78,11 +78,11 @@ files.
 **Second, the house convention mandates it in `MUST` terms.**
 `tests/fixtures/README.md` section 9.1 (L695 to L719) states at **L697 to L699**
 that every scenario subfolder **MUST** carry a short README, describing it there
-as a mandatory Explainability carrier and not a suggestion. Its **L714 to L719**
-record that the `MUST` wording was restored from an earlier, weaker "should"
-precisely because the weaker form let scenario directories ship with no carrier
-at all. Charter section 8.4 inherits both grounds and maps the required content
-onto Rule 1's four elements, which is the mapping the table above follows.
+as a mandatory Explainability carrier and not a suggestion -- a `MUST` rather
+than a `should`, because the weaker form admits a scenario directory shipping
+with no carrier at all. Charter section 8.4 inherits both grounds and maps the
+required content onto Rule 1's four elements, which is the mapping the table
+above follows.
 
 The gate on this obligation is **human review, with no mechanical fallback**.
 `config/checkstyle/checkstyle.xml` L185 scopes its `Checker` to
@@ -207,9 +207,9 @@ own diagnostic to a client-facing body would disclose the schema and the
 constraint name to whoever reads the response, so the diagnostic goes to the
 operational record instead.
 
-The framing is deliberate and narrow. **The baseline does X; the target
-implements Y; the divergence is documented.** Nothing under `app/**` is altered
-by any of this -- the COBOL baseline is REFERENCE-ONLY and stays byte-identical,
+The divergence is narrow and is registered rather than assumed. Nothing under
+`app/**` is altered by any of this -- the COBOL baseline is REFERENCE-ONLY and
+stays byte-identical,
 and its `-532` message remains exactly as written. `GlobalExceptionHandler`
 **L289 to L292** records that the *condition* itself is unchanged: the
 reference-data foreign key still carries `ON DELETE RESTRICT`, so deleting a
@@ -303,9 +303,9 @@ than one, and both defects land on **exactly the rows this fixture carries**:
 [`V2__seed_reference.sql`](../../../../../main/resources/db/migration/V2__seed_reference.sql)
 deliberately seeds from `app/data/ASCII/` instead. The concrete consequence of
 taking the rejected source is therefore twofold: a control-card-derived fixture
-would carry uppercase descriptions plus a misspelling, so it would no longer
-match the rows seeded into the schema, and it would violate AAP transformation
-rule T8. Charter section 6.6 records the same rejection at tree scope.
+would carry uppercase descriptions plus a misspelling, so it would disagree with
+the rows seeded into the schema, and it would violate AAP transformation rule
+T8. Charter section 6.6 records the same rejection at tree scope.
 
 ### 4.4 The seed casing is inconsistent, and is carried across anyway
 
@@ -421,7 +421,7 @@ Alternatives Considered: copying the full 18-record category extract here, all
 1098 bytes of it, so that this directory mirrored the sibling `happy_path`.
 Rejected because those 18 records name all 7 seeded types, which would make
 every one of them refusable and would leave `99` as the only permitted delete
-for a reason no longer specific to this scenario. 2 records under one type is
+for a reason unconnected to this scenario. 2 records under one type is
 the smallest set that makes exactly one delete refusable and exactly one
 permitted, and both consumers assert that the referring set is **exactly** `06`,
 so a later widening of this file fails a test rather than quietly generalising
@@ -579,8 +579,7 @@ Two properties of that table are load-bearing rather than incidental:
 
 ### 6.2 Who reads these bytes, and what they assert against them
 
-Two classes currently read **both** files in this directory, and both run under
-Surefire:
+Two classes read **both** files in this directory, and both run under Surefire:
 
 - `com.carddemo.reference.fixtures.ReferenceFixtureContractTest` enrols each file
   by its classpath path in a closed geometry inventory that asserts the 60-byte
@@ -595,16 +594,15 @@ Surefire:
   referencing assertion from this directory's own bytes: row 1 is `06` and is
   present in the referencing set, row 2 is `99` and is absent from it.
 
-**Availability status of the other consumers, verified against the branch rather
-than assumed:** these fixtures are also intended for the reference-service
-controller, service and repository tests under
-`services/reference-service/src/test/java`, and **no `*ControllerTest`,
-`*ServiceTest` or `*RepositoryIT` exists in that tree yet**. Whichever such test
-lands is the one that will assert the 409-and-row-survives outcome for `06` and
-the clean committed delete for `99`; that outcome is stated in section 6.1 as the
-contract it is to be written against, not as behaviour already exercised.
-Charter section 9.1 names the same consumers under the same status, and its
-section 10 records which of them are present.
+Trade-offs: what these two classes establish is the **byte contract** -- the
+widths, the record counts and the referencing relation between the two rows --
+and not the runtime outcome. The 409-and-row-survives result for `06` and the
+clean committed delete for `99` are asserted from constructed rows by
+`TransactionTypeServiceTest` and `TransactionCategoryServiceTest` rather than
+from this directory, so no consumer drives THESE bytes end to end through a
+delete. That gap is named narrowly here so a reader does not infer coverage from
+the fixture's existence; section 6.1 states the outcome as the contract such a
+test is written against.
 
 Fixtures reach every consumer from the **test classpath**, not by filesystem
 path: Maven copies `src/test/resources/` into `target/test-classes/`, so each

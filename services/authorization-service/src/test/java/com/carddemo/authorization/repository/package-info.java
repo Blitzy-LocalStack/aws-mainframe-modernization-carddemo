@@ -27,9 +27,10 @@
  * {@code AuthFraudRepository}'s own header separately stated that it relied on such a class to settle
  * five properties. Two documents therefore asserted coverage that did not exist, in the one direction
  * where the absence was invisible: an all-ascending index would have satisfied every check that actually
- * ran. The class was written rather than the entry removed, because the migration plan fixes the
- * descending index as a preserved contract, so removing the entry would have made the paperwork
- * consistent while leaving a required property unverified. The marker is measured by
+ * ran. <b>That class was subsequently WRITTEN and is present beside this charter</b>, because the
+ * migration plan fixes the descending index as a preserved contract, so removing the entry would have
+ * made the paperwork consistent while leaving a required property unverified. The roster below
+ * enumerates it in its own right. The marker is measured by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
  * which additionally holds every class named below to a file in this directory, so a named-but-absent
  * class now fails the build.
@@ -52,11 +53,10 @@
  *       {@code idx_auth_fraud_card_recent} over {@code (card_num ASC, auth_ts DESC)}, asserted
  *       against the live catalogue rather than against the migration text; and the two-column
  *       upsert exercised in both directions and under two writers reaching one row at once.
- *       Refactoring Rationale: this bullet named a class {@code AuthFraudRepositoryIT} that has
- *       never existed. The class beside this charter is named for the writer it exercises, because
- *       the fraud write is one native statement declared on {@code AuthFraudUpserter} rather than a
- *       derived query on the repository, and a charter naming a file nobody can open leaves a reader
- *       unable to tell a missing test from a misspelt reference.</li>
+ *       Assumptions: this class is named for the WRITER it exercises rather than for a repository,
+ *       because the fraud write is one native statement declared on {@code AuthFraudUpserter} and not
+ *       a derived query, so a reader looking for an {@code AuthFraudRepositoryIT} beside this charter
+ *       will not find one and is not missing a test.</li>
  *   <li>{@code OutboxRepositoryIT} -- selection of publishable rows from
  *       {@code auth_reply_outbox}, their ordering, and idempotent marking. The two partial indexes
  *       {@code idx_auth_reply_outbox_unpublished} and {@code idx_auth_reply_outbox_group} fix what
@@ -76,21 +76,19 @@
  *
  * <h2>Why this package exists at all, given the charter one tree above</h2>
  *
- * <p>Refactoring Rationale: the module's test-root charter used to record eight test packages and to
- * state that there was no repository test package, because the one integration test this module then
- * held sat with the fixture tests that supply its rows. That census was accurate when it was written and
- * this package is the ninth. The correction was recorded here first, which was necessary and was not
- * sufficient: a reader consults the ROOT charter before any leaf charter and has no reason to open the
- * charter of a package the root says does not exist. The root census is now a marker line the build
- * measures, and it names this package. The reason this package is added is <b>not</b> that a production package of the
- * same name exists -- the root charter rules that out explicitly, and rightly, since mirroring is
- * not a reason to stand up a test package. It is that four persistence contracts had no assertion
- * anywhere in the module: the summary key's arity, the detail key's composition, the fraud path's
- * split into a key constraint plus a separately ordered index, and the outbox claim, which has no
- * baseline counterpart to have been asserted against. The root charter also supplies the rule that
- * settles precedence here: it fixes no leaf-class count and names no leaf class precisely because
- * each package's own charter is the authority for its own inventory. Nothing is moved and nothing is
- * deleted to make room for this package.
+ * <p>Assumptions: this package exists for a reason that is <b>not</b> the existence of a production
+ * package of the same name -- the root charter rules mirroring out explicitly, and rightly, since it is
+ * no reason to stand up a test package. It exists because four persistence contracts had no assertion
+ * anywhere in the module: the summary key's arity, the detail key's composition, the fraud path's split
+ * into a key constraint plus a separately ordered index, and the outbox claim, which has no baseline
+ * counterpart to have been asserted against.
+ *
+ * <p>Assumptions: the module's ROOT charter carries the package census as a marker line the build
+ * measures, and it names this package. That placement is load-bearing: a reader consults the root charter
+ * before any leaf charter and has no reason to open the charter of a package the root does not list, so a
+ * census recorded only here would not be read. The root charter fixes no leaf-class count and names no
+ * leaf class, precisely because each package's own charter is the authority for its own inventory -- which
+ * is the rule that settles precedence between the two.
  *
  * <p>Refactoring Rationale: three constraints a first reading would place here are already owned by
  * {@code com.carddemo.authorization.fixtures.PendingAuthFraudDomainRepositoryIT}, and re-asserting
@@ -152,9 +150,9 @@
  * than per module, and the cost is paid deliberately. The house determinism convention this tree
  * inherits requires a fresh workspace per test with no shared mutable state, and rests its isolation
  * claim on the fact that tests share nothing, so that a green parallel run demonstrates isolation
- * rather than merely being consistent with it. A shared base couples every class's lifecycle to one
- * container and to one migration, which makes that demonstration unavailable: a pass would no longer
- * distinguish four independent classes from four that happen not to collide.
+ * A shared base couples every class's lifecycle to one container and to one migration, which makes
+ * that demonstration unavailable: such a pass cannot distinguish four independent classes from four
+ * that happen not to collide.
  *
  * <p>Trade-offs: no test method may depend on a row another method inserted, so each method uses
  * <b>distinct</b> key values. The cost is a little arithmetic when authoring keys; what it buys is
@@ -221,16 +219,18 @@
  *
  * <p>Assumptions: a paging query on this boundary returns up to one row <b>more</b> than the
  * caller's page size, and that extra look-ahead row is included in the returned list and is not
- * removed by the repository. The service layer discards it, reads whether a further page exists from
- * whether it arrived, mints the two cursor tokens and assembles the shared page envelope. The
+ * removed by the repository. The service layer discards it, reads whether an adjacent page exists in
+ * the direction it walked from whether that row arrived, mints the two cursor tokens and assembles
+ * the shared page envelope. The
  * consequence for this package is exact and is the thing most often got backwards: a test here
  * asserts that the extra row <b>is</b> returned, and a test that asserts a list of exactly the page
  * size is asserting the service's behaviour against the repository and will fail correctly.
  *
  * <p>Assumptions: the shared envelope {@code com.carddemo.common.web.PageResponse} is neither
  * constructed nor asserted in this package, and its vocabulary does not appear here even in prose.
- * It carries four components -- the rows, the leading cursor, the trailing cursor and whether a
- * further page follows -- and it carries no page number, no page size, no row offset and no total
+ * It carries five components -- the rows, the leading cursor, the trailing cursor, whether a
+ * further page follows and whether an earlier page exists -- and it carries no page number, no page
+ * size, no row offset and no total
  * count, so none of those may be introduced here by the back door of a test that names them.
  * Building the envelope in a repository test would assert the service's assembly in the wrong
  * package and would leave the real subject, the row the query returned, unasserted.

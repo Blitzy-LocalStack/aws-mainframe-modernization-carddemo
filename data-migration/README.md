@@ -78,17 +78,19 @@ VSAM, Db2 or IMS. That is what makes the deployment satisfy the migration's
 > generation writer, the credential-application bootstrap, the schema/role DDL, the
 > masked reporting views, the twelve fixed-width readers, the shared timestamp
 > authority, the Aurora bulk loader with its protected-column ciphers, the
-> three verification passes, and the command-line entry point carrying the eight
+> three verification passes, and the command-line entry point carrying the ten
 > subcommands whose backing modules are present — `list-datasets`, `decode-record`,
-> `stage-dataset`, `apply-credentials`, `load-dataset`, `verify-row-counts`,
-> `verify-checksum` and `verify-money-parity`. The one command still **not registered**
+> `stage-dataset`, `apply-credentials`, `reconcile-sequences`, `load-dataset`,
+> `verify-row-counts`, `verify-checksum`, `verify-money-parity` and
+> `verify-row-count-report`. The one command still
+> **not registered**
 > is `verify-all`, which would sequence the three passes and stop at the first failure:
 > it needs a dataset-to-source manifest this distribution does not carry, because every
 > verification command here is told its source explicitly.
 >
 > Refactoring Rationale: this note previously recorded the readers, the loader and the
 > verification passes as undelivered, and the parser correspondingly advertised four
-> subcommands rather than eight. Those modules are present, so the entry point was the
+> subcommands rather than the eight then delivered. Those modules are present, so the entry point was the
 > only thing standing between an operator and code that already worked — a verification
 > pass reachable from nothing but a test is a pass that has never been run against a
 > real delivery, which is the same argument that put `decode-record` on the parser.
@@ -179,7 +181,7 @@ data-migration/
 │   ├── config.py                 delivered -- runtime settings, resolved when a command runs
 │   ├── credentials.py            delivered -- applies each generated credential to its role
 │   ├── role_credentials.py       delivered -- SCRAM verifier derivation and role bootstrap
-│   ├── cli.py                    delivered -- the eight registered subcommands in section 5
+│   ├── cli.py                    delivered -- the ten registered subcommands in section 5
 │   ├── copybook/
 │   │   ├── __init__.py           delivered -- makes the subpackage a regular package
 │   │   ├── layouts.py            delivered -- offset, length and usage, declared ONCE
@@ -327,7 +329,7 @@ unrelated project from PyPI rather than this directory.
 ## 5. Command-line interface
 
 **This section is the contract.** [`src/carddemo_migration/cli.py`](src/carddemo_migration/cli.py)
-implements the eight subcommands marked **registered** in
+implements the ten subcommands marked **registered** in
 [§5.2](#52-subcommands-and-their-arguments) below, and
 [`MIGRATION_README.md`](../MIGRATION_README.md) publishes the invocation. Nothing here
 describes a flag that should not be implemented, and no two subcommands do the same
@@ -338,7 +340,7 @@ is deliberately **not registered** by the parser, because it is the only one wit
 implementation: sequencing the three passes and stopping at the first failure needs a
 dataset-to-source manifest this distribution does not carry, since every verification
 command here is told its source explicitly. So
-`python -m carddemo_migration.cli --help` lists eight subcommands, not nine, and
+`python -m carddemo_migration.cli --help` lists ten subcommands, not eleven, and
 naming the contracted one is refused as a usage error (exit 2). It remains documented
 because the batch state machine and this package's `Dockerfile` are written against
 the whole set, and filling an interface in later is a smaller change than renaming one.
@@ -390,10 +392,12 @@ carddemo-migrate <subcommand> [options]
 | `decode-record` | **registered** | Decode **one** record of a fixed-length extract through the per-field codec stack and print its fields, so a delivery can be proved against its declared geometry before anything is loaded. Sensitive fields are redacted ([§8.2](#82-sensitive-fields-in-diagnostic-output)) | `--dataset`, `--source` | `--record` (default 1), `--code-page` (default `cp037`) |
 | `stage-dataset` | **registered** | Stage **one** exported extract to object storage under the generation prefix convention, copying bytes verbatim | `--dataset`, `--source`, `--business-date`, `--generation`, `--domain` | `--object-name`, `--retain` (default 5) |
 | `apply-credentials` | **registered** | Give every service login role the credential it authenticates with, then prove each role can log in | none | none |
+| `reconcile-sequences` | **registered** | Advance `ledger.transaction_id_seq` past every sequence-format identifier `ledger.transactions` holds. Run after the last load into that table and **before** writes are enabled; only ever advances, so a repeat run is a no-op | none | none |
 | `load-dataset` | **registered** | Decode **one** dataset per field and bulk-load it into the schema that owns it, as a single committed unit of work | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
 | `verify-row-counts` | **registered** | Verification pass 1 — loaded row count against source record count, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
 | `verify-checksum` | **registered** | Verification pass 2 — per-record digest of the loaded rows against the source image, for one dataset. No field value is printed | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
 | `verify-money-parity` | **registered** | Verification pass 3 — exact money totals from the source bytes against the database's own `SUM` of each column they load into, for one dataset | `--dataset`, `--source`, `--encoding {ascii,ebcdic}` | none |
+| `verify-row-count-report` | **registered** | Verification pass 1 for the WHOLE migration at once — executes [`sql/verify/row_counts.sql`](sql/verify/row_counts.sql) on a session for the read-only `carddemo_reporting` role and prints its six-column verdict for every dataset. The session's role is checked against the server before the query runs, so a pass that could write cannot certify the load. Reads no local extract | none | `--sql-root` (omit in a source checkout; pass `.` in the container image, whose working directory holds the copied `sql` tree) |
 | `verify-all` | contracted | Run all three passes in the fixed order 1, 2, 3 and stop at the first failure. Needs a dataset-to-source manifest this distribution does not carry, so it is not registered | none | none |
 
 Refactoring Rationale: the four rows above were `contracted` for exactly as long as
@@ -478,9 +482,11 @@ becomes optional when the mapping has an authoritative home in code.
 | `stage-dataset` | One object at `<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/<object-name>` in the dataset bucket, carrying a service-verified `ChecksumSHA256` plus the digest and byte count as object metadata, then permanently scratches generations that roll off. The bucket, deployment and effective region are logged before the write, and the digest beside the key after it | the source cannot be staged — absent, a symbolic link, not a regular file, unreadable, or modified while it was being transferred — the dataset identifier is unknown, the generation is outside 1–9999, or the write or the scratch fails |
 | `load-dataset` | Rows in the owning schema's table, inside one transaction; a per-dataset summary on standard output | a record fails the width contract, a field fails to decode, or the load transaction cannot commit |
 | `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
+| `reconcile-sequences` | At most one `setval` on `ledger.transaction_id_seq`, issued as the schema owner reached by `SET ROLE`; both allocator positions and the largest stored identifier on standard output | the owner cannot be assumed, the sequence or the table cannot be read, or the advance is refused — in which case writes must not be enabled |
 | `verify-row-counts` | A per-dataset expected-versus-actual table | any dataset's counts differ |
 | `verify-checksum` | The identifier of every record whose checksum differs, with sensitive fields masked | any record differs |
 | `verify-money-parity` | A per-column source-versus-loaded total table | any total differs by any amount |
+| `verify-row-count-report` | The whole-migration row-count report — one line per declared dataset and one verdict line — rendered so that two runs over unchanged data diff to nothing. Writes nothing anywhere and cannot: the session it runs on holds `SELECT` on the two aggregate verification views and nothing else | any line's baseline and actual count differ, the session is not the reporting role, the shipped query cannot be located, or the report omits a declared dataset |
 | `verify-all` | The three tables above, in order | any one pass fails |
 
 ### 5.3 Applying the DDL is deliberately not a subcommand
@@ -1575,7 +1581,7 @@ mkdir -p data-migration-reports
 python -m pytest data-migration/tests --junitxml=data-migration-reports/pytest.xml
 ```
 
-All **34** modules are delivered — **33** test modules plus the shared `conftest.py`:
+All **35** modules are delivered — **34** test modules plus the shared `conftest.py`:
 
 <!-- carddemo:test-module-roster:begin -->
 [`conftest.py`](tests/conftest.py),
@@ -1591,6 +1597,7 @@ All **34** modules are delivered — **33** test modules plus the shared `confte
 [`test_doubles.py`](tests/test_doubles.py),
 [`test_ebcdic_code_page_allow_list.py`](tests/test_ebcdic_code_page_allow_list.py),
 [`test_ebcdic_codec.py`](tests/test_ebcdic_codec.py),
+[`test_gate_inventory.py`](tests/test_gate_inventory.py),
 [`test_loaders.py`](tests/test_loaders.py),
 [`test_mask_key_material.py`](tests/test_mask_key_material.py),
 [`test_master_disclosure.py`](tests/test_master_disclosure.py),

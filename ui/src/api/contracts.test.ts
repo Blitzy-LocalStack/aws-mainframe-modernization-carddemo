@@ -12,13 +12,11 @@
  * halves, so an operation renamed, moved or withdrawn on the service side is invisible to this build
  * until a user meets a 404. This file is that comparison.
  *
- * Refactoring Rationale: it exists because `docs/adr/ADR-006-api-and-ui.md` recorded a decision that
- * the typed client layer is "built against those documents, so a field that is renamed, retyped or
- * removed on one side is a compile-time failure on the other". No generator and no gate existed, so
- * the stated mechanism was not merely unimplemented -- it was unimplementable with the pinned
- * dependency set, which contains no OpenAPI code generator and may not gain one. What is delivered
- * instead is asserted here and described in that ADR: agreement is checked at the OPERATION level, as a
- * test failure rather than a compile error.
+ * Refactoring Rationale: this gate exists because the compile-time coupling a GENERATED client would
+ * give is unimplementable with the pinned dependency set, which contains no OpenAPI code generator and
+ * may not gain one. `docs/adr/ADR-006-api-and-ui.md` records the same limit and names this step as the
+ * delivered mechanism, so agreement is checked at the OPERATION level, as a test failure rather than a
+ * compile error.
  *
  * Trade-offs: this gate decides which operations exist on each side; it does not decide field-level
  * agreement, and a generated client would have. That limit is stated rather than left implied, because
@@ -50,7 +48,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { API_PATH_PREFIX, isApiError, requestPath } from './types';
+import { API_PATH_PREFIX, isApiError, requestPath } from './client';
 import type { ContractOperation } from './types';
 import { CARD_CONTRACT_OPERATIONS } from './cards';
 import { AUTH_CONTRACT_OPERATIONS } from './auth';
@@ -97,16 +95,15 @@ const SERVICES_WITHOUT_A_CONTRACT = ['batch'] as const;
  *
  * Assumptions: `account` is ABSENT because no client module for it has been written yet, and NOT
  * because none may be. That is a change of reason rather than of the list: the account contract used to
- * publish an internal read surface alone -- three operations governed by `InternalApiSecurityConfig`,
- * an ordered filter chain requiring a machine token that no browser holds -- and it now publishes three
+ * publish an internal read surface alone -- operations governed by `InternalApiSecurityConfig`, an
+ * ordered filter chain requiring a machine token that no browser holds -- and it now publishes three
  * end-user operations beside them, which a browser client legitimately may address.
  *
  * Trade-offs: the three end-user account operations therefore have no client-side gate at present, so a
  * drift between them and a future `accounts.ts` would not be caught here until that module is added to
  * this list. What IS still enforced is the boundary that matters for correctness:
  * {@link theInternalContractHasNoClient} asserts that no client addresses an operation the contract
- * marks internal, keyed by method and path, so a client cannot acquire the machine read by sharing an
- * address with the end-user edit.
+ * marks internal, keyed by method and path, so a client cannot acquire a machine read by declaring one.
  */
 const BROWSER_CLIENTS: ReadonlyArray<
   readonly [keyof typeof CONTRACTS, readonly ContractOperation[]]
@@ -120,10 +117,10 @@ const BROWSER_CLIENTS: ReadonlyArray<
 ];
 
 /**
- * How many operations the five browser-facing contracts declare in total.
+ * How many operations the six browser-facing contracts declare in total.
  *
  * Assumptions: this figure is the scanner's self-check and not a target. It was measured across the
- * six documents -- auth 8, authorization 5, card 5, reference 19, reporting 5 and transaction 4 -- and
+ * six documents -- auth 8, authorization 5, card 5, reference 19, reporting 5 and transaction 5 -- and
  * its only job is to fail loudly if the scanner ever stops matching, because a scanner that matches
  * nothing agrees with an empty manifest.
  *
@@ -132,8 +129,14 @@ const BROWSER_CLIENTS: ReadonlyArray<
  * were added because the service methods behind them had no caller at all: no controller reached them
  * and no contract declared them, while the service package's own documentation described them as
  * published. Raising the figure records the new surface rather than the scanner having drifted.
+ *
+ * Refactoring Rationale: it is now 47 with transaction counted at 5, for the same class of reason. The
+ * baseline's PF5 copy-last action -- `app/cbl/COTRN02C.cbl` L146 and L147 performing
+ * COPY-LAST-TRAN-DATA at L471 -- was transcribed in `TransactionAddService.copyLastTransactionData` and
+ * reachable from nothing: no controller route, no contract entry, no client function. It is now
+ * published as `POST /api/v1/transactions/copy-last`.
  */
-const EXPECTED_OPERATION_COUNT = 46;
+const EXPECTED_OPERATION_COUNT = 47;
 
 /** The methods a path item may declare, matching the set the Java-side contract tests filter on. */
 const HTTP_METHODS = ['get', 'post', 'put', 'delete', 'patch'] as const;
@@ -423,15 +426,19 @@ function theClientMatchesItsContract(
  *
  * Refactoring Rationale: this gate compared client paths against EVERY operation the account contract
  * declares, on the premise that the whole document was internal. That premise no longer holds: the
- * document now publishes three end-user operations beside its three internal reads, and it distinguishes
- * them with a tag. Comparing against the whole document would therefore reject a legitimate account
- * client, and comparing by path alone could not have separated the surfaces in any case -- the machine
- * read and the end-user edit share one address and differ only in method.
+ * document publishes end-user operations beside its internal reads, and it distinguishes them with a
+ * tag. Comparing against the whole document would therefore reject a legitimate account client.
  *
- * Assumptions: the comparison is by METHOD and path together for that reason. A client declaring
- * `PUT /api/v1/accounts/{accountId}` addresses the end-user edit and is admissible; one declaring
- * `GET` on the same address addresses the machine read, which no browser token can satisfy, and is
- * not.
+ * Assumptions: the comparison is by METHOD and path together, and it stays that way although no
+ * end-user operation currently shares an address with an internal one. It once did -- the machine
+ * account read was a keyed `GET` at the address the end-user edit served under `PUT` -- and both have
+ * since moved onto fixed sub-paths, because every operation on the account prefix now carries its
+ * selector in a body so that the account identifier never enters a request line the load balancer
+ * records. A client declaring `POST /api/v1/accounts/update` addresses the end-user edit and is
+ * admissible; one declaring `POST /api/v1/accounts/lookup` addresses the machine read, which no browser
+ * token can satisfy, and is not. Trade-offs: comparing by path alone would be shorter and would pass
+ * today; it is not used, because the surfaces sharing one address is a state this document has already
+ * been in once and a method-blind gate could not see it recur.
  * @throws {Error} If any client manifest names an operation the account contract marks internal.
  */
 function theInternalContractHasNoClient(): void {
@@ -727,6 +734,189 @@ function problemDocumentNarrowing(): void {
   it('rejects a body that is not a problem document', rejectsANonProblemDocument);
 }
 
+/*
+ * WHY : Refactoring Rationale: the erasability of `types.ts` is asserted by reading its SOURCE rather
+ *       than by importing it, because there is nothing to import -- a module that declares only types
+ *       exports no runtime binding, so a test that imported it could observe nothing and would pass
+ *       whatever the file contained. Reading the text is the only way the property is checkable at
+ *       all. It needs checking because the module carried a constant, a regular expression and two
+ *       functions while its own header claimed everything in it was erased, and nothing failed.
+ * WHY : Assumptions: the scan is anchored to declarations at column ZERO. Every declaration in that
+ *       module is top-level, and a nested `const` inside a generic constraint or a template literal
+ *       type is not a runtime value, so anchoring is what keeps the gate from reporting type-level
+ *       syntax as a violation. The anchoring is itself made loud by the non-emptiness assertion
+ *       below: a scanner that matched nothing at all would otherwise pass silently.
+ */
+
+/** Declaration keywords that would put a runtime value in a module that must be fully erased. */
+const RUNTIME_DECLARATION_PATTERN =
+  /^(?:export\s+)?(?:const|let|var|function|class|enum|namespace)\s/gmu;
+
+/** Any import at all, which a types-only module cannot carry unless it is an `import type`. */
+const VALUE_IMPORT_PATTERN = /^import\s+(?!type\s)/gmu;
+
+/**
+ * Reads the wire-type module's own source, so the gate inspects text rather than bindings.
+ * @returns {string} The full source of `ui/src/api/types.ts`, never empty.
+ */
+function wireTypeModuleSource(): string {
+  const source = readFileSync(join(REPOSITORY_ROOT, 'ui', 'src', 'api', 'types.ts'), 'utf8');
+  expect(source.length, 'the wire-type module source must be readable').toBeGreaterThan(0);
+  return source;
+}
+
+/**
+ * Asserts the wire-type module declares no runtime value of any kind.
+ * @returns {void} Nothing; the case asserts.
+ */
+function theWireTypeModuleDeclaresNoRuntimeValue(): void {
+  const offenders = wireTypeModuleSource().match(RUNTIME_DECLARATION_PATTERN) ?? [];
+
+  expect(
+    offenders,
+    'types.ts must declare only types, so that importing it adds nothing to a bundle; move any' +
+      ' constant, function or class to client.ts, which owns the runtime request boundary',
+  ).toHaveLength(0);
+}
+
+/**
+ * Asserts the wire-type module imports nothing at runtime either.
+ *
+ * Assumptions: this half matters independently of the one above. A module can declare no value and
+ * still import one, and an `import` that is not an `import type` is retained by the compiler under
+ * `verbatimModuleSyntax`, so it would pull code into every bundle that reads a type from here.
+ * @returns {void} Nothing; the case asserts.
+ */
+function theWireTypeModuleImportsNothingAtRuntime(): void {
+  const offenders = wireTypeModuleSource().match(VALUE_IMPORT_PATTERN) ?? [];
+
+  expect(offenders, 'types.ts may carry only `import type` declarations, if any').toHaveLength(0);
+}
+
+/**
+ * Asserts the scanner still finds runtime declarations where they legitimately live.
+ *
+ * Assumptions: this is the negative control for the two cases above, and without it they are worth
+ * little. Both assert an ABSENCE, so a pattern that had stopped matching anything -- through a syntax
+ * change, a bad escape, a lost `m` flag -- would report zero offenders and read as a pass. Pointing
+ * the same pattern at the module the declarations were moved INTO proves it can still see one.
+ * @returns {void} Nothing; the case asserts.
+ */
+function theRuntimeScannerStillMatchesRealDeclarations(): void {
+  const clientSource = readFileSync(join(REPOSITORY_ROOT, 'ui', 'src', 'api', 'client.ts'), 'utf8');
+
+  expect(
+    clientSource.match(RUNTIME_DECLARATION_PATTERN) ?? [],
+    'the scanner must still match runtime declarations in the module that owns them',
+  ).not.toHaveLength(0);
+  expect(clientSource).toContain('export const API_PATH_PREFIX');
+  expect(clientSource).toContain('export function requestPath(');
+  expect(clientSource).toContain('export function isApiError(');
+}
+
+/**
+ * Groups the cases that keep the wire-type module fully erasable.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function wireTypeModuleErasability(): void {
+  it('declares no runtime value', theWireTypeModuleDeclaresNoRuntimeValue);
+  it('imports nothing at runtime', theWireTypeModuleImportsNothingAtRuntime);
+  it(
+    'is checked by a scanner that still matches real declarations',
+    theRuntimeScannerStillMatchesRealDeclarations,
+  );
+}
+
+/*
+ * WHY : Refactoring Rationale: the single-definition rule needs a gate, because it is the kind of rule
+ *       that is followed until someone adds a shape without knowing it exists. Every wire shape of all
+ *       seven contracts is declared in `types.ts`, and each client module RE-EXPORTS its own contract's
+ *       shapes rather than declaring them -- which the two cases below distinguish, since a re-export
+ *       and a declaration both begin with `export type`.
+ * WHY : Alternatives Considered: asserting that each client module declares a specific COUNT of types.
+ *       Rejected because a count has to be updated whenever a contract legitimately gains an operation,
+ *       so it would be edited routinely and would stop being read -- and it would pass a module that
+ *       replaced one declaration with another. Distinguishing the two SYNTAXES tests the property that
+ *       actually matters and needs no maintenance when a contract grows.
+ */
+
+/** The six client modules, each of which implements one contract and declares none of its shapes. */
+const CLIENT_MODULES = [
+  'auth.ts',
+  'cards.ts',
+  'transactions.ts',
+  'reference.ts',
+  'authorization.ts',
+  'reporting.ts',
+] as const;
+
+/** A local declaration of an interface or a type alias, which a client module may not carry. */
+const LOCAL_TYPE_DECLARATION = /^export (?:interface|type) [A-Za-z0-9_]+(?![^=;]*from ')/gmu;
+
+/** A re-export of declarations owned by the wire-type module, which every client module carries. */
+const TYPE_REEXPORT = /^export type \{/gmu;
+
+/**
+ * Reads one client module's source.
+ * @param {string} name - The module's file name within `ui/src/api`.
+ * @returns {string} The module's full source, never empty.
+ */
+function clientModuleSource(name: string): string {
+  const source = readFileSync(join(REPOSITORY_ROOT, 'ui', 'src', 'api', name), 'utf8');
+  expect(source.length, `${name} must be readable`).toBeGreaterThan(0);
+  return source;
+}
+
+/**
+ * Asserts no client module declares a wire shape of its own.
+ *
+ * Assumptions: the pattern excludes a re-export by requiring that no `from '` follows the declared name
+ * before an `=` or a `;`, which is what separates `export type { A, B } from './types';` from
+ * `export type A = ...`. A module that declared its own shape would match, and a module that re-exports
+ * one would not.
+ * @returns {void} Nothing; the case asserts.
+ */
+function noClientModuleDeclaresAWireShape(): void {
+  for (const name of CLIENT_MODULES) {
+    const declarations = clientModuleSource(name).match(LOCAL_TYPE_DECLARATION) ?? [];
+
+    expect(
+      declarations,
+      `${name} must not declare a wire shape; declare it in types.ts and re-export it here, so that` +
+        ' every shape has exactly one definition',
+    ).toHaveLength(0);
+  }
+}
+
+/**
+ * Asserts every client module still re-exports its contract's shapes.
+ *
+ * Assumptions: this is the other half of the pair, and without it the case above is satisfied by a
+ * module that simply stopped exposing its shapes at all -- which would compile, because a screen could
+ * import from `./types` directly, and would silently break the promise that no consumer import had to
+ * move when the declarations were relocated.
+ * @returns {void} Nothing; the case asserts.
+ */
+function everyClientModuleReexportsItsShapes(): void {
+  for (const name of CLIENT_MODULES) {
+    expect(
+      clientModuleSource(name).match(TYPE_REEXPORT) ?? [],
+      `${name} must re-export its contract's shapes from types.ts`,
+    ).not.toHaveLength(0);
+  }
+}
+
+/**
+ * Groups the cases that keep every wire shape defined exactly once.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function singleDefinitionPerWireShape(): void {
+  it('leaves no wire shape declared in a client module', noClientModuleDeclaresAWireShape);
+  it('keeps every client module re-exporting its shapes', everyClientModuleReexportsItsShapes);
+}
+
 describe('service contract agreement', serviceContractAgreement);
 describe('request target composition', requestTargetComposition);
 describe('problem document narrowing', problemDocumentNarrowing);
+describe('wire-type module erasability', wireTypeModuleErasability);
+describe('single definition per wire shape', singleDefinitionPerWireShape);

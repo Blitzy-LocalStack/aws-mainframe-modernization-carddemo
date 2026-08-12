@@ -30,9 +30,33 @@
  * produces a container that starts, validates its arguments and then fails inside the state machine, so
  * the gap is decidable at build time and is worth deciding there.</p>
  *
- * <p>Assumptions: the two tokens with no landed job are enumerated explicitly in that case rather than
- * left to be inferred from a failure, so the gap is a measured statement a reader can find rather than
- * something discovered from an incident. It cannot widen without that file changing.</p>
+ * <p>Refactoring Rationale: that case previously enumerated two tokens as having no landed job, export
+ * and import, and compared the vocabulary against the union of the landed set and that declared gap.
+ * All seven tokens now resolve to a job bean, so the enumerated gap has been removed and the case
+ * asserts set equality directly -- every advertised token has a landed job, and no landed job sits
+ * outside the vocabulary. A declared gap that outlives the artifacts it described weakens the
+ * assertion silently, because the union it is compared against grows to cover whatever is missing.</p>
+ *
+ * <h2>What this directory holds</h2>
+ *
+ * <pre>
+ * this directory: 7 java files = 6 tests + 1 charter
+ * </pre>
+ *
+ * <ul>
+ *   <li>{@code JobRegistrationCensusTest} across 5 cases -- assembles a context over all seven job
+ *       configurations and asserts bidirectionally that every declared token resolves to a job bean of
+ *       that name and that no bean carries a name outside the vocabulary.</li>
+ *   <li>{@code BatchJobRosterTest} across 5 cases -- the same agreement read from the classes
+ *       themselves by reflection, plus distinctness of the registered names and of the durable ledger
+ *       step names.</li>
+ *   <li>{@code PostTransactionsJobTest} across 9 cases -- the posting job's step, its single
+ *       transactional boundary and its reject-count return code.</li>
+ *   <li>{@code DatasetJobBodiesTest} across 14 cases and {@code GenerationStagingJobsTest} across 6 --
+ *       what the dataset-writing jobs emit and the generation prefix they emit it under.</li>
+ *   <li>{@code CalculateInterestJobTest} across 4 cases -- the interest job's control break and its
+ *       injected business date.</li>
+ * </ul>
  *
  * <h2>Baseline lineage: provenance only</h2>
  *

@@ -31,7 +31,7 @@ Purpose:
       the remainder is carried by review rather than deleted. What each
       module does and does not reach is stated at the module.
 
-  Two consumers read this file. Both are named here, with what they do,
+  This file has two consumers. Both are named here, with what they do,
   so that this file can be understood without opening either of them.
     1. services/pom.xml binds maven-checkstyle-plugin to the Maven
        validate phase with this file as its configuration. It pins the
@@ -62,17 +62,13 @@ Scope:
   import, line-length, metrics or header modules here. Every module left out is
   listed, with the reason it was left out, in the EXCLUDED MODULES section at the
   foot of this file, and the whole import family is among them.
-    Refactoring Rationale: this block previously said the file "enforces Javadoc
-      presence, Javadoc completeness and comment adjacency" and then "It configures
-      nothing else", while RedundantImport and UnusedImports were configured below
-      and the EXCLUDED MODULES section had already been corrected to say so. The two
-      halves of this file therefore contradicted each other. The contradiction is
-      closed from the other side: this gate is chartered documentation-only, so the
-      two import-hygiene modules were withdrawn rather than documented, and they are
-      now recorded in the Import family entry of EXCLUDED MODULES. Withdrawal cost
-      nothing measurable; a scan of every Java file in the reactor found zero
-      duplicate and zero unused imports; and it keeps one charter for the file
-      instead of two groups of different standing.
+    Refactoring Rationale: two import-hygiene modules, RedundantImport and
+      UnusedImports, were WITHDRAWN from this file rather than documented alongside
+      the Javadoc family, because this gate is chartered documentation-only and two
+      groups of different standing in one file is two charters. Withdrawal cost
+      nothing measurable: a scan of every Java file in the reactor finds zero
+      duplicate and zero unused imports. Both are recorded in the Import family
+      entry of EXCLUDED MODULES so the omission reads as a decision.
     Assumptions: the check is by NAME rather than by count of declarations. The
       file declares THIRTEEN module elements, of which Checker, TreeWalker and
       SuppressionFilter are a container, a container and a filter respectively,
@@ -167,12 +163,9 @@ WHY (non-obvious design decisions):
     you also reformat all the code, it will be hard for us to focus on
     your change." The line the admissions follow is whether a finding can
     be satisfied by MOVING a line: an ordering finding can, so it is
-    excluded, while a duplicate or unreferenced import cannot, so it is
-    admitted. Refactoring Rationale: this entry read "the Javadoc family
-    plus one comment-placement check" and listed "import-order" among the
-    rejected families without qualification, which described the file as it
-    stood before RedundantImport and UnusedImports were added and would
-    tell a reader those two modules should not be there.
+    excluded, while a duplicate or unreferenced import cannot, which is why
+    the two are argued separately here rather than dismissed as one import
+    family.
   - Assumptions: the house comment idiom used in
     .github/workflows/tests.yml cannot be reproduced literally in XML, and
     the adaptation below is deliberate rather than careless. XML 1.0
@@ -415,8 +408,7 @@ Presence AND completeness, never presence alone.
         Javadoc block but is exempt from having a complete one is the gap
         Rule 1's forbidden pattern describes. Widening one without the other
         is the mistake this repetition is meant to prevent, and it is why all
-        four Javadoc modules in this file now name the same widest visibility
-        rather than three naming one and the fourth naming another.
+        four Javadoc modules in this file name the same widest visibility.
       Assumptions: this module exists specifically to close the record DTO
         gap, which is also why it is not redundant with MissingJavadocType
         above. The presence check asks only whether a Javadoc block exists on
@@ -626,40 +618,23 @@ Trade-offs: the suppression filters below are an integrity decision rather
     list of exemptions in one place.
 
 Import family:
-  - RedundantImport and UnusedImports. Both were configured inside TreeWalker
-    and both are withdrawn. Neither is a documentation or comment check, and
-    this rule set enforces Javadoc presence, Javadoc completeness and comment
-    adjacency and nothing else; the Scope statement in the header says so in
-    those words, and a module outside that scope makes the statement false
-    whatever its individual merit. Import linting is a separate concern and
-    belongs to a gate authorised as such, where its findings are read as import
-    hygiene rather than as documentation failures.
+  - RedundantImport and UnusedImports. Neither is configured, and neither is a
+    documentation or comment check: this rule set enforces Javadoc presence,
+    Javadoc completeness and comment adjacency and nothing else, and a module
+    outside that scope makes the Scope statement false whatever its individual
+    merit. A reader who saw this gate fail on an unused import would learn that
+    its name misdescribes what it gates. Import linting is a separate
+    concern and belongs to a gate authorised as such, where its findings are read
+    as import hygiene rather than as documentation failures.
 
-    Refactoring Rationale: the reasoning that added them was that a duplicated
-    single-type import had twice survived review, in two SecurityConfig files,
-    and that these two modules would have turned it into a build failure. The
-    observation was true and the conclusion did not follow. What it argued for
-    is an import gate, not a wider documentation gate, and putting it here bought
-    the coverage at the cost of the one property this file's scope statement and
-    its honest-limits note both rest on: that a failure from this gate means a
-    docstring or a comment placement is wrong. A reader who saw this gate fail on
-    an unused import would learn that its name no longer describes what it does.
-    The header showed the same strain: its module-scope trade-off went on stating
-    that the set is "confined to the Javadoc family plus one comment-placement
-    check" for as long as the two import modules sat inside TreeWalker, so the
-    header and the body disagreed and the header was the one a reader would
-    trust. Withdrawing the pair is what makes that statement true again, rather
-    than widening it to cover a scope this file was not authorised for.
+    Assumptions: excluding them masks no live defect, and that is checked rather
+    than assumed: no Java source under services/ carries a repeated import
+    statement or an import whose simple name appears nowhere in the file that
+    declares it. Were one present, the correct move would be to remove the
+    duplication, never to admit an out-of-scope module in order to hold a defect
+    down.
 
-    Assumptions: withdrawing them masks no live defect, and that was checked
-    rather than assumed. The duplicated import the earlier reasoning cited is
-    gone from both files, and no Java source under services/ now carries a
-    repeated import statement or an import whose simple name appears nowhere in
-    the file that declares it. Had either still been present, the correct move
-    would have been to remove the duplication first and withdraw the modules
-    second, never to keep an out-of-scope module in order to hold a defect down.
-
-    Alternatives Considered: keeping UnusedImports alone, on the ground that an
+    Alternatives Considered: admitting UnusedImports alone, on the ground that an
     unused import is the more likely of the two to recur. Rejected for the same
     reason as the pair: one out-of-scope module makes the scope statement no less
     false than two, and the scope statement is the thing readers of a failing
@@ -707,18 +682,15 @@ Whole families:
     Configuring ImportControl would stand up a second engine enforcing an
     overlapping half of one constraint, and a reader could then no longer tell
     which of the two owned a given boundary. That is the whole reason for the
-    exclusion, and it now rests on a running gate rather than on a promise.
+    exclusion, and it rests on a running gate rather than on a promise.
 
-    Refactoring Rationale: this note previously stated that the rule class
-    "lands at a later index of the migration plan and does not exist yet, so
-    at this checkpoint NO engine enforces layering", and that "common-lib
-    binds no test-jar goal, so each module declares the ArchUnit engine at
-    test scope and runs its own copy". Both statements are now false, and the
-    second was the more damaging: a reader who believed each module ran its
-    own copy of the rules would look for a rule class in eight places and find
-    none, and might reasonably conclude the boundary was unenforced and
-    configure ImportControl here after all - which is precisely the second
-    engine this exclusion exists to prevent.
+    Assumptions: there is ONE copy of the rule class and it lives in common-lib,
+    reaching every module through that module's test artifact rather than through
+    a per-module declaration. That is worth stating here because a reader who
+    expected each module to carry its own copy would look for a rule class in
+    eight places, find none, conclude the boundary was unenforced, and configure
+    ImportControl here after all - which is precisely the second engine this
+    exclusion exists to prevent.
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Companion file: config/checkstyle/suppressions.xml.
 

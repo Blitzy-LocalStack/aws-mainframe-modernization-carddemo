@@ -62,14 +62,13 @@
  *    and {@link REDACTED_DIAGNOSTICS} accounts for the compositions whose payload
  *    is a machine-level status value.
  *
- * WHY all three mechanisms are enumerated rather than only the first
- * Refactoring Rationale: the first version of this module was produced by an
- * extraction that matched `MOVE '<literal>'` only. That is a complete method for
- * finished sentences and blind to the other two forms, so 121 condition-name
- * messages and 56 composition fragments were absent while the module still
- * claimed to own every user-visible string. The claim, not the extraction, was
- * the defect: a screen author who could not find a string here would inline it,
- * which is exactly the failure the module exists to prevent.
+ * Assumptions: all three mechanisms are enumerated rather than only the first, because
+ * an extraction that matches `MOVE '<literal>'` alone is complete for finished sentences
+ * and blind to the other two forms - it leaves out 121 condition-name messages and 56
+ * composition fragments. A catalog missing those while claiming to own every
+ * user-visible string is worse than an obviously partial one: a screen author who cannot
+ * find a string here inlines it, which is exactly the failure this module exists to
+ * prevent.
  *
  * Audience: operator text versus diagnostics
  * -----------------------------------------
@@ -88,15 +87,14 @@
  * detail itself belongs in a server-side structured log keyed by the correlation
  * identifier the API layer already propagates.
  *
- * WHY the diagnostics are redacted rather than transcribed. Trade-offs: carrying
- * them verbatim would satisfy the centralisation rule and simultaneously ship the
- * schema's cursor names, a physical table name and raw SQL codes into a bundle any
- * browser can read, which is an information-disclosure defect the migration plan's
- * data-exposure narrowing exists to prevent. Redaction costs message specificity
- * on failure paths only, and every replacement chosen is itself a verbatim
- * baseline string, so no invented wording enters the product. This is an
- * intentional behavioural divergence and {@link REDACTED_DIAGNOSTICS} is its
- * register.
+ * Trade-offs: the diagnostics are redacted rather than transcribed. Carrying them
+ * verbatim would satisfy the centralisation rule and simultaneously ship the schema's
+ * cursor names, a physical table name and raw SQL codes into a bundle any browser can
+ * read, which is an information-disclosure defect the migration plan's data-exposure
+ * narrowing exists to prevent. Redaction costs message specificity on failure paths
+ * only, and every replacement chosen is itself a verbatim baseline string, so no
+ * invented wording enters the product. This is an intentional behavioural divergence
+ * and {@link REDACTED_DIAGNOSTICS} is its register.
  *
  * Quoted baseline operands that are not messages
  * ----------------------------------------------
@@ -114,12 +112,12 @@
  * - Operands of a `DISPLAY` statement, which in a CICS program writes to the
  *   system log rather than to a 3270 field, so nothing reaches the operator.
  *
- * WHY this class is documented rather than silently skipped. Assumptions: the
- * only way to audit "this module owns every user-visible string" is to re-run an
- * extraction and account for every literal it finds. Two of the three outcomes -
- * operator text and diagnostics - already have a home. Without this third list the
- * remainder looks like a shortfall, and the reviewer's only recourse is to open
- * each COBOL site by hand to discover that a `COPY` operand is not a sentence.
+ * Assumptions: this class is documented rather than silently skipped. The only way to
+ * audit "this module owns every user-visible string" is to re-run an extraction and
+ * account for every literal it finds. Two of the three outcomes - operator text and
+ * diagnostics - already have a home. Without this third list the remainder looks like a
+ * shortfall, and the reviewer's only recourse is to open each COBOL site by hand to
+ * discover that a `COPY` operand is not a sentence.
  *
  * Widths
  * ------
@@ -172,21 +170,15 @@
  * to `ui/src/layout/PfKeyBar.tsx`, which derives its key semantics from
  * `app/cpy/CSSTRPFY.cpy` rather than from the painted legend text.
  *
- * Refactoring Rationale: this paragraph previously ended by stating that none of
- * those modules existed yet and that the section therefore said where the text
- * WOULD live. All three now exist and hold it: `ui/src/layout/ScreenHeader.tsx`
- * declares the four status-line prompts, `ui/src/layout/PfKeyBar.tsx` declares the
- * three legend labels whose wording is uniform across the mapsets that use them,
- * and each screen under `ui/src/screens/**` declares its own title, field labels
- * and per-screen legend parts beside the controls they name. The sentence is
- * corrected rather than deleted, because a reader checking this boundary needs to
- * know it is a description of the delivered tree and not a plan for it.
- *
- * Assumptions: the boundary is unchanged by that -- the ownership rule below is
- * what those modules implement, not something they superseded. Screens authored
- * later add their own mapset text the same way, so a string absent from this
- * catalog is still evidence that a `.bms` file holds it rather than evidence of a
- * gap.
+ * Assumptions: this is a description of the delivered tree, not a plan for it.
+ * `ui/src/layout/ScreenHeader.tsx` declares the four status-line prompts,
+ * `ui/src/layout/PfKeyBar.tsx` declares the three legend labels whose wording is
+ * uniform across the mapsets that use them, and each screen under
+ * `ui/src/screens/**` declares its own title, field labels and per-screen legend
+ * parts beside the controls they name. The ownership rule below is what those
+ * modules implement rather than something they supersede, so screens authored later
+ * add their own mapset text the same way and a string absent from this catalog is
+ * still evidence that a `.bms` file holds it rather than evidence of a gap.
  *
  * Alternatives Considered: the boundary is drawn here rather than by absorbing the
  * BMS text into this module. Absorbing it was the obvious alternative and
@@ -211,23 +203,23 @@
  * Transcription is byte-exact. Trailing spaces, doubled interior spaces,
  * inconsistent spacing before an ellipsis, case-only variants of otherwise
  * identical sentences, and outright grammatical defects in the baseline are all
- * reproduced exactly as the COBOL holds them. None of them is a typo to be
- * fixed here: the migration plan forbids correcting baseline defects, and the
- * golden-master tests compare this text against mainframe output.
+ * reproduced exactly as the COBOL holds them. None of them is a typo, because
+ * `app/` is reference-only and is the behavioural oracle for the migration: the
+ * golden-master tests compare this text against mainframe output, so a spelling or
+ * spacing improvement made here would register as a parity failure.
  *
- * WHY the strings are grouped by originating copybook or program rather than by
- * screen -- Assumptions: a downstream screen author works from a COBOL source
- * location, so a key must be derivable from "which program emitted this". Grouping
- * by screen would require knowing the program-to-route mapping, which lives in
- * `router.tsx`, to find a string at all.
+ * Assumptions: the strings are grouped by originating copybook or program rather than
+ * by screen. A downstream screen author works from a COBOL source location, so a key
+ * must be derivable from "which program emitted this". Grouping by screen would require
+ * knowing the program-to-route mapping, which lives in `router.tsx`, to find a string
+ * at all.
  *
- * WHY no internationalisation library -- Alternatives Considered: `react-intl` and
- * `i18next` are the reflexive choices for anything called a message catalog, and
- * both were rejected. The requirement is byte-exact reproduction of one locale,
- * not translation, and an i18n runtime adds a message-compilation step that can
- * normalise whitespace - the single thing this module must never do. It would also
- * breach the pinned dependency set in `ui/package.json`, which contains no i18n
- * package.
+ * Alternatives Considered: no internationalisation library. `react-intl` and `i18next`
+ * are the reflexive choices for anything called a message catalog, and both were
+ * rejected. The requirement is byte-exact reproduction of one locale, not translation,
+ * and an i18n runtime adds a message-compilation step that can normalise whitespace -
+ * the single thing this module must never do. It would also breach the pinned
+ * dependency set in `ui/package.json`, which contains no i18n package.
  *
  * This module imports nothing and performs no work at load time, so it can be
  * consumed by any layer without creating a cycle.
@@ -238,11 +230,11 @@
  * A location in the immutable COBOL baseline that a catalogued string was read
  * from.
  *
- * WHY provenance is structured data rather than a prose comment above each entry
- * Trade-offs: with this many entries, a comment per entry would be ~150 lines of
- * text restating values, which the project's explainability rule explicitly
- * forbids. As data it is also machine-checkable - the validation harness asserts
- * that the cited line still contains the string.
+ * Trade-offs: provenance is structured data rather than a prose comment above each
+ * entry. With this many entries, a comment per entry would be ~150 lines of text
+ * restating values, which the project's explainability rule explicitly forbids. As data
+ * it is also machine-checkable - the validation harness asserts that the cited line
+ * still contains the string.
  */
 export interface SourceRef {
   /** Repository-relative path of the COBOL source file. */
@@ -254,15 +246,13 @@ export interface SourceRef {
 /**
  * A screen constant whose COBOL `PICTURE` clause declares a fixed field width.
  *
- * WHY `text` and `declaredWidth` are separate.
- * Assumptions: several baseline literals are shorter than the field they
- * initialise - both `CSMSG01Y` messages are 49 characters against `PIC X(50)` -
- * so COBOL pads the runtime field with trailing spaces that the source text does
- * not contain.
- * Trade-offs: storing the padded form would fabricate bytes that are not in the
- * source; storing only the text would lose the width contract a renderer needs.
- * Keeping both lets `padToDeclaredWidth` reproduce the runtime value on demand
- * while the transcription stays honest.
+ * Assumptions: `text` and `declaredWidth` are separate. Several baseline literals are
+ * shorter than the field they initialise - both `CSMSG01Y` messages are 49 characters
+ * against `PIC X(50)` - so COBOL pads the runtime field with trailing spaces that the
+ * source text does not contain. Trade-offs: storing the padded form would fabricate
+ * bytes that are not in the source; storing only the text would lose the width contract
+ * a renderer needs. Keeping both lets `padToDeclaredWidth` reproduce the runtime value
+ * on demand while the transcription stays honest.
  */
 export interface FixedWidthText {
   /** The literal exactly as it appears in the copybook, unpadded and untrimmed. */
@@ -294,13 +284,12 @@ export interface FixedWidthField {
  * the text in the field. The condition name is therefore the identity of the
  * message, which is why {@link STATUS_MESSAGES} keys by it.
  *
- * WHY `field` is recorded alongside `declaredWidth`. Assumptions: the same
- * program declares conditions on two different fields at two different widths -
- * `WS-INFO-MSG` is `PIC X(40)` or `X(45)` and carries the guidance line, while
- * `WS-RETURN-MSG` / `WS-ERROR-MSG` is `PIC X(75)` and carries the error line. A
- * renderer that padded a 40-character guidance message to 75 would put it in the
- * wrong region, so the field name is kept as the discriminator rather than
- * inferred from the width.
+ * Assumptions: `field` is recorded alongside `declaredWidth`. The same program declares
+ * conditions on two different fields at two different widths - `WS-INFO-MSG` is `PIC
+ * X(40)` or `X(45)` and carries the guidance line, while `WS-RETURN-MSG` /
+ * `WS-ERROR-MSG` is `PIC X(75)` and carries the error line. A renderer that padded a
+ * 40-character guidance message to 75 would put it in the wrong region, so the field
+ * name is kept as the discriminator rather than inferred from the width.
  */
 export interface StatusMessage {
   /** The literal exactly as the `88` level declares it, unpadded and untrimmed. */
@@ -317,15 +306,14 @@ export interface StatusMessage {
  * One part of a `STRING` composition: either a literal from the source, or a
  * runtime value the program inserts.
  *
- * WHY the delimiter is modelled rather than dropped. Assumptions: COBOL's
- * `DELIMITED BY` is not decoration - it decides how much of a sending field is
- * transferred. `DELIMITED BY SIZE` sends the whole field; `DELIMITED BY SPACE`
- * sends only the characters before the first space, which truncates a padded
- * 35-character menu name to its first word; `DELIMITED BY '  '` sends the
- * characters before the first double space, which trims the same field's padding
- * without truncating it. Two compositions in `COMEN01C` differ *only* in that
- * operand and therefore produce different text from the same input. A model
- * without the delimiter cannot reproduce either of them.
+ * Assumptions: the delimiter is modelled rather than dropped. COBOL's `DELIMITED BY` is
+ * not decoration - it decides how much of a sending field is transferred. `DELIMITED BY
+ * SIZE` sends the whole field; `DELIMITED BY SPACE` sends only the characters before
+ * the first space, which truncates a padded 35-character menu name to its first word;
+ * `DELIMITED BY ' '` sends the characters before the first double space, which trims
+ * the same field's padding without truncating it. Two compositions in `COMEN01C` differ *only*
+ * in that operand and therefore produce different text from the same input. A model without
+ * the delimiter cannot reproduce either of them.
  */
 export type MessageTemplatePart =
   | {
@@ -340,13 +328,13 @@ export type MessageTemplatePart =
        * whole field, `'SPACE'` for everything before the first space, or a literal
        * delimiter.
        *
-       * WHY the third member is the two-space literal rather than `string`
-       * Alternatives Considered: widening it to `string` was rejected because it
-       * absorbs the two named operands, so the type would then permit any text and
-       * describe none of it. Measured across the baseline, the message compositions
-       * use exactly three delimiter forms - `SIZE`, `SPACE` and the literal `'  '`
-       * in `COMEN01C` - so the union enumerates them and a fourth form has to be
-       * added deliberately rather than arriving unnoticed.
+       * Alternatives Considered: the third member is the two-space literal rather than
+       * `string`. Widening it to `string` was rejected because it absorbs the two named
+       * operands, so the type would then permit any text and describe none of it.
+       * Measured across the baseline, the message compositions use exactly three
+       * delimiter forms - `SIZE`, `SPACE` and the literal `' '` in `COMEN01C` - so the
+       * union enumerates them and a fourth form has to be added deliberately rather
+       * than arriving unnoticed.
        */
       readonly delimitedBy: 'SIZE' | 'SPACE' | '  ';
     };
@@ -369,17 +357,17 @@ export interface MessageTemplate {
  * withheld text being present, and so the server-side logging requirement is
  * specific rather than general.
  *
- * WHY these are classification identifiers and not the vendor names they stand for
- * Trade-offs: the value of a register row is that it says what class of detail was
- * removed, and the class can be named without naming the utility, the cursor or the
- * table that produced it. The guarantee this module offers is therefore about its
- * **exported values**: no exported string in this module contains a cursor name, a
- * table name, or an `SQLCODE`, `SQLSTATE` or diagnostic-utility identifier, and that
- * holds in every build mode because it is a property of the data rather than of the
- * toolchain. The precise COBOL data-names appear only in comments, which the
- * production build's minifier strips - measured as zero occurrences in a minified
- * bundle - though an unminified development bundle retains some of them, which is
- * acceptable because a development bundle is not a shipped artifact.
+ * Trade-offs: these are classification identifiers and not the vendor names they stand
+ * for. The value of a register row is that it names the class of detail being withheld,
+ * and a class can be named without naming the utility, the cursor or the table that
+ * produced it. The guarantee this module offers is therefore about its **exported
+ * values**: no exported string in this module contains a cursor name, a table name, or
+ * an `SQLCODE`, `SQLSTATE` or diagnostic-utility identifier, and that holds in every
+ * build mode because it is a property of the data rather than of the toolchain. The
+ * precise COBOL data-names appear only in comments, which the production build's
+ * minifier strips - measured as zero occurrences in a minified bundle - though an
+ * unminified development bundle retains some of them, which is acceptable because a
+ * development bundle is not a shipped artifact.
  */
 export type DiagnosticDetailKind =
   | 'cics-response-and-reason'
@@ -401,12 +389,12 @@ export type DiagnosticDetailKind =
  * server-side structured log. Provenance is retained in full so the original
  * wording remains findable in the baseline, which is the behavioural oracle.
  *
- * WHY the withheld text is not stored here even as a comment. Trade-offs: the
- * point of the redaction is that the message does not reach a browser bundle, and
- * a string literal reaches it in every build mode while a comment survives only in
- * an unminified one. Storing the text "for reference" would reintroduce exactly
- * what the entry exists to remove, and the cited lines already point at the
- * authoritative copy in the baseline, so nothing is lost by leaving it there.
+ * Trade-offs: the withheld text is not stored here even as a comment. The point of the
+ * redaction is that the message does not reach a browser bundle, and a string literal
+ * reaches it in every build mode while a comment survives only in an unminified one.
+ * Storing the text "for reference" would reintroduce exactly what the entry exists to
+ * remove, and the cited lines already point at the authoritative copy in the baseline,
+ * so nothing is lost by leaving it there.
  */
 export interface RedactedDiagnostic {
   /** Program that composes the message, keyed into {@link PROGRAM_SOURCE_FILES}. */
@@ -427,12 +415,12 @@ export interface RedactedDiagnostic {
  * Declared width of every menu option name, from the `PIC X(35)` clause both menu
  * copybooks give `CDEMO-MENU-OPT-NAME` and `CDEMO-ADMIN-OPT-NAME`.
  *
- * WHY this is exported as its own constant as well as being carried on every entry
- * Trade-offs: a renderer that lays the menu out in a fixed-width column needs
- * the width once, not seventeen times, and a test that asserts the padding needs
- * something to assert against. Carrying it on the entries too makes the interface
- * refuse an option that has not declared its width, so a future entry cannot be
- * added with its padding undocumented.
+ * Trade-offs: this is exported as its own constant as well as being carried on every
+ * entry. A renderer that lays the menu out in a fixed-width column needs the width
+ * once, not seventeen times, and a test that asserts the padding needs something to
+ * assert against. Carrying it on the entries too makes the interface refuse an option
+ * that has not declared its width, so a future entry cannot be added with its padding
+ * undocumented.
  */
 export const MENU_OPTION_DECLARED_WIDTH = 35 as const;
 
@@ -455,11 +443,11 @@ export interface MainMenuOption {
 /**
  * One selectable entry on the admin menu, from `app/cpy/COADM02Y.cpy`.
  *
- * WHY this has no `userType` while {@link MainMenuOption} does -- Assumptions: the
- * admin-menu copybook genuinely omits the `USRTYPE` subfield. The admin menu is
- * only reachable after the administrator check has already passed, so a per-option
- * user type would be redundant. Adding one here to make the two interfaces
- * symmetrical would invent a field the baseline does not have.
+ * Assumptions: this has no `userType` while {@link MainMenuOption} does. The admin-menu
+ * copybook genuinely omits the `USRTYPE` subfield. The admin menu is only reachable
+ * after the administrator check has already passed, so a per-option user type would be
+ * redundant. Adding one here to make the two interfaces symmetrical would invent a
+ * field the baseline does not have.
  */
 export interface AdminMenuOption {
   /** Value of `CDEMO-ADMIN-OPT-NUM`, the number the operator types. */
@@ -491,11 +479,10 @@ export const SCREEN_TITLES = {
   /**
    * `CCDA-TITLE02` - the application line of the title band.
    *
-   * WHY the commented-out alternative on line 21 is not catalogued.
-   * Assumptions: line 21 holds a disabled variant reading
-   * "Credit Card Demo Application (CCDA)" which is *also* exactly 40 characters,
-   * so it is indistinguishable from the live value by length or by shape. Only
-   * the `*` in column 7 marks it dead.
+   * Assumptions: the commented-out alternative on line 21 is not catalogued. Line 21
+   * holds a disabled variant reading "Credit Card Demo Application (CCDA)" which is *also*
+   * exactly 40 characters, so it is indistinguishable from the live value by length or by
+   * shape. Only the `*` in column 7 marks it dead.
    *
    * Refactoring Rationale: the same trap appears three more times in the baseline
    * - `COMEN02Y` line 69, `COADM02Y` line 21 and `COACTUPC` line 1614 - so the
@@ -510,14 +497,14 @@ export const SCREEN_TITLES = {
   /**
    * `CCDA-THANK-YOU` - the sign-off line, which names the application "CCDA".
    *
-   * WHY this is kept separate from {@link COMMON_MESSAGES.THANK_YOU}.
-   * Alternatives Considered: the two look like one sentence stored
-   * at two widths, and de-duplicating them - either directly or by comparing their
-   * trimmed forms - is the obvious tidy-up. It loses text. This one says "CCDA";
-   * the `CSMSG01Y` one says "CardDemo". Neither word appears in the other string,
-   * so they are two different sentences and both are displayed. They are also 40
-   * and 49 characters against declared widths of 40 and 50, so a width-based merge
-   * would not reconcile them either.
+   * Alternatives Considered: this is kept separate from {@link
+   * COMMON_MESSAGES.THANK_YOU}. The two look like one sentence stored at two widths,
+   * and de-duplicating them - either directly or by comparing their trimmed forms - is
+   * the obvious tidy-up. It loses text. This one says "CCDA"; the `CSMSG01Y` one says
+   * "CardDemo". Neither word appears in the other string, so they are two different
+   * sentences and both are displayed. They are also 40 and 49 characters against
+   * declared widths of 40 and 50, so a width-based merge would not reconcile them
+   * either.
    */
   THANK_YOU: {
     text: 'Thank you for using CCDA application... ',
@@ -554,13 +541,13 @@ export const COMMON_MESSAGES = {
 /**
  * The abend surface from `app/cpy/CSMSG02Y.cpy`, expressed as field widths.
  *
- * WHY this group carries widths instead of text -- Assumptions: all four fields of
- * `ABEND-DATA` are declared `VALUE SPACES`, so the copybook contributes a
- * structure that the failing program fills at run time, not any message. The
- * displayed wording comes from the programs and is catalogued in
- * {@link SHARED_MESSAGES} as `UNEXPECTED_ABEND_OCCURRED` and
- * `UNEXPECTED_DATA_SCENARIO`. Treating this copybook as a source of text would
- * yield four empty strings and hide where the real wording lives.
+ * Assumptions: this group carries widths instead of text. All four fields of
+ * `ABEND-DATA` are declared `VALUE SPACES`, so the copybook contributes a structure
+ * that the failing program fills at run time, not any message. The displayed wording
+ * comes from the programs and is catalogued in {@link SHARED_MESSAGES} as
+ * `UNEXPECTED_ABEND_OCCURRED` and `UNEXPECTED_DATA_SCENARIO`. Treating this copybook as
+ * a source of text would yield four empty strings and hide where the real wording
+ * lives.
  *
  * The migration plan cites these declarations at lines 45-53; that range does not
  * exist, because the file is only 35 lines long. The declarations are at lines
@@ -613,18 +600,17 @@ export const ABEND_DATA_FIELDS = [
  * 50-character `WS-FRD-ACT-MSG` that `COPAUS1C` then moves into `WS-MESSAGE`
  * (`COPAUS1C.cbl:257`) - an intermediate stage, not a fourth band width.
  *
- * WHY two adjacent screen regions are deliberately *not* modelled here
- * Assumptions: they are not the band, and folding them in would make this
- * constant mean "any text width", which is the ambiguity it exists to remove.
- * `COMEN01C` and `COADM01C` compose their menu lines into a 40-character
- * `WS-MENU-OPT-TXT` / `WS-ADMIN-OPT-TXT` and move them to the menu-row fields
- * `OPTN001O`-`OPTN012O` (`COMEN01C.cbl:48,276`), which is a list region; and
- * `COTRTLIC` sends an 800-character `WS-LONG-MSG` as a full-screen diagnostic
- * (`COTRTLIC.cbl:235,2087`), whose content is redacted and therefore never
+ * Assumptions: two adjacent screen regions are deliberately *not* modelled here. They
+ * are not the band, and folding them in would make this constant mean "any text width",
+ * which is the ambiguity it exists to remove. `COMEN01C` and `COADM01C` compose their
+ * menu lines into a 40-character `WS-MENU-OPT-TXT` / `WS-ADMIN-OPT-TXT` and move them
+ * to the menu-row fields `OPTN001O`-`OPTN012O` (`COMEN01C.cbl:48,276`), which is a list
+ * region; and `COTRTLIC` sends an 800-character `WS-LONG-MSG` as a full-screen
+ * diagnostic (`COTRTLIC.cbl:235,2087`), whose content is redacted and therefore never
  * rendered at all. Both are recorded so their absence reads as a decision.
  *
- * WHY all five are modelled rather than the work area alone (Refactoring
- * Rationale): the 75 of `CVCRD01Y` describes the *work area*, not the region a
+ * Refactoring Rationale: all five widths are modelled rather than the work area
+ * alone. The 75 of `CVCRD01Y` describes the *work area*, not the region a
  * message is rendered in. Measured across the baseline there are 38 `PIC X(78)`
  * `ERRMSGI`/`ERRMSGO` declarations spanning 19 mapsets and 4 `PIC X(80)`
  * declarations in `COCRDSL` and `COCRDUP`, and the `LENGTH=` operand of every
@@ -696,18 +682,17 @@ export const MESSAGE_BAND = {
  * the symbolic-map copybook; `map` is the seven-character map name inside the
  * mapset, verified against the `DFHMDI` label in the corresponding `.bms`.
  *
- * WHY both names are carried. Assumptions: they are never the same string - all
- * 21 differ - and the difference follows two unrelated conventions. Fourteen drop
- * the mapset's trailing digit and append `A` (`COSGN00` defines `COSGN0A`); the
- * other seven drop the `O` of the `CO` prefix instead (`COACTUP` defines
- * `CACTUPA`, `COCRDLI` defines `CCRDLIA`). A reader who assumes one rule and
- * chases a file called `CACTUPA` will not find one, so the mapping is stored
- * rather than derived.
+ * Assumptions: both names are carried. They are never the same string - all 21 differ -
+ * and the difference follows two unrelated conventions. Fourteen drop the mapset's
+ * trailing digit and append `A` (`COSGN00` defines `COSGN0A`); the other seven drop the
+ * `O` of the `CO` prefix instead (`COACTUP` defines `CACTUPA`, `COCRDLI` defines
+ * `CCRDLIA`). A reader who assumes one rule and chases a file called `CACTUPA` will not
+ * find one, so the mapping is stored rather than derived.
  *
- * WHY the exception list is two entries rather than a rule. Assumptions:
- * `COCRDSL` and `COCRDUP` are 80 and the other nineteen are 78, and nothing in the
- * baseline explains why - the two card screens simply declare a wider field. There
- * is no pattern to derive, so the table is exhaustive rather than computed.
+ * Assumptions: the exception list is two entries rather than a rule. `COCRDSL` and
+ * `COCRDUP` are 80 and the other nineteen are 78, and nothing in the baseline explains
+ * why - the two card screens simply declare a wider field. There is no pattern to
+ * derive, so the table is exhaustive rather than computed.
  */
 export const MESSAGE_BAND_BY_MAPSET = {
   COACTUP: { map: 'CACTUPA', displayWidth: 78 },
@@ -739,12 +724,12 @@ export type MapsetName = keyof typeof MESSAGE_BAND_BY_MAPSET;
 /**
  * Number of populated main-menu slots, from `CDEMO-MENU-OPT-COUNT`.
  *
- * WHY the count is exported alongside the array -- Assumptions: the baseline
- * declares `CDEMO-MENU-OPT OCCURS 12 TIMES` but populates only 11 slots, so the
- * twelfth is uninitialised storage. COBOL callers iterate the count, never the
- * `OCCURS`. {@link MAIN_MENU_OPTIONS} holds exactly the populated entries, so the
- * two agree by construction; the count is exported so a reader who checks this
- * against the copybook does not mistake the 11/12 gap for a dropped option.
+ * Assumptions: the count is exported alongside the array. The baseline declares
+ * `CDEMO-MENU-OPT OCCURS 12 TIMES` but populates only 11 slots, so the twelfth is
+ * uninitialised storage. COBOL callers iterate the count, never the `OCCURS`. {@link
+ * MAIN_MENU_OPTIONS} holds exactly the populated entries, so the two agree by
+ * construction; the count is exported so a reader who checks this against the copybook
+ * does not mistake the 11/12 gap for a dropped option.
  */
 export const MAIN_MENU_OPTION_COUNT = 11 as const;
 
@@ -752,13 +737,12 @@ export const MAIN_MENU_OPTION_COUNT = 11 as const;
  * The main-menu options from `app/cpy/COMEN02Y.cpy`, in display order. Each name is
  * padded by the baseline to exactly 35 characters and is stored that way.
  *
- * WHY every entry is `userType: 'U'` -- Assumptions: the copybook sets
- * `OPT-USRTYPE` to `'U'` for all eleven options, so nothing on the main menu is
- * administrator-only in the live configuration. This is also why the
- * "(Admin Only)" wording on option 8 is commented out at line 69 - the
- * restriction was removed and the label went with it. The disabled label is
- * exactly 35 characters, identical in length to the live one, so it is excluded on
- * the strength of its column-7 marker alone.
+ * Assumptions: every entry is `userType: 'U'`. The copybook sets `OPT-USRTYPE` to `'U'`
+ * for all eleven options, so nothing on the main menu is administrator-only in the live
+ * configuration. The copybook's line 69 holds a commented-out variant of option 8 whose
+ * wording carries "(Admin Only)", a restriction no live entry asserts; it is excluded on
+ * the strength of its column-7 comment marker alone, because it is exactly 35 characters
+ * and so indistinguishable from the live label by length.
  */
 export const MAIN_MENU_OPTIONS = [
   {
@@ -919,13 +903,12 @@ export const ADMIN_MENU_OPTIONS = [
  * Repository-relative path of every online program this catalog transcribes,
  * keyed by program name.
  *
- * WHY the path is held once here instead of on each entry. Trade-offs: repeating
- * it on every entry - there are several hundred across the message, status and
- * template groups - would add no information and would let two entries for the same
- * program disagree. Provenance entries therefore carry only line numbers and resolve
- * their file through this map. A count is deliberately not quoted here: it would be
- * one more number to keep in step with the groups below, and it is derivable from
- * them.
+ * Trade-offs: the path is held once here instead of on each entry. Repeating it on
+ * every entry - there are several hundred across the message, status and template
+ * groups - would add no information and would let two entries for the same program
+ * disagree. Provenance entries therefore carry only line numbers and resolve their file
+ * through this map. A count is deliberately not quoted here: it would be one more
+ * number to keep in step with the groups below, and it is derivable from them.
  */
 export const PROGRAM_SOURCE_FILES = {
   COACTUPC: 'app/cbl/COACTUPC.cbl',
@@ -958,19 +941,18 @@ export type ProgramName = keyof typeof PROGRAM_SOURCE_FILES;
 /**
  * Messages emitted verbatim by more than one program.
  *
- * WHY these are a group of their own rather than filed under one program
- * Trade-offs: the catalog is keyed by origin, and these strings have several
- * origins, so filing each under a single program would mean picking one
- * arbitrarily and leaving the other call sites pointing at a key that names the
- * wrong program. A shared group keeps the "keyed by origin" rule honest, and the
- * provenance below lists every site.
+ * Trade-offs: these are a group of their own rather than filed under one program. The
+ * catalog is keyed by origin, and these strings have several origins, so filing each
+ * under a single program would mean picking one arbitrarily and leaving the other call
+ * sites pointing at a key that names the wrong program. A shared group keeps the "keyed
+ * by origin" rule honest, and the provenance below lists every site.
  *
- * WHY the five page-navigation messages are five entries and not one
- * Alternatives Considered: "already at the top", "already at the bottom", "at the
- * top", "reached the top" and "reached the bottom" are near-duplicates that look
- * like accidental drift, and folding them into one paging message would delete four
- * distinct sentences the operator actually sees at four different moments - two
- * describe a refused key press, three describe an arrival.
+ * Alternatives Considered: the five page-navigation messages are five entries and not
+ * one. "already at the top", "already at the bottom", "at the top", "reached the top"
+ * and "reached the bottom" are near-duplicates that look like accidental drift, and
+ * folding them into one paging message would delete four distinct sentences the
+ * operator actually sees at four different moments - two describe a refused key press,
+ * three describe an arrival.
  */
 export const SHARED_MESSAGES = {
   ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER:
@@ -984,8 +966,8 @@ export const SHARED_MESSAGES = {
   LAST_NAME_CAN_NOT_BE_EMPTY: 'Last Name can NOT be empty...',
   PASSWORD_CAN_NOT_BE_EMPTY: 'Password can NOT be empty...',
   /**
-   * WHY this sits in the shared group rather than under `COTRTLIC` (Refactoring
-   * Rationale): it was filed as COTRTLIC-only, but the transaction-type maintenance
+   * Assumptions: this sits in the shared group rather than under `COTRTLIC`, because
+   * two programs compose it. The transaction-type maintenance
    * program composes the same sentence at `COTRTUPC.cbl:1641`, and a group keyed by
    * one program cannot express a second file - the per-program index carries line
    * numbers and resolves its file from the group name. Filing it here keeps the
@@ -1016,9 +998,9 @@ export const SHARED_MESSAGES = {
  * Every baseline site that emits each {@link SHARED_MESSAGES} entry.
  *
  * The `satisfies` clause makes the key set structurally identical to
- * {@link SHARED_MESSAGES}, so a message added there without provenance - or
- * provenance left behind for a message that was removed - is a compile error
- * rather than a silent gap.
+ * {@link SHARED_MESSAGES}, so a message added there without provenance - or provenance
+ * left standing for a message that is not declared there - is a compile error rather
+ * than a silent gap.
  */
 export const SHARED_MESSAGE_SOURCES = {
   ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER: [
@@ -1157,25 +1139,23 @@ export const SHARED_MESSAGE_SOURCES = {
  * them inline into the account-update screen and break the guarantee that this module
  * owns every displayed string, which is the more expensive of the two.
  *
- * WHY the group holds 27 entries when the migration inventory counts 23
- * Refactoring Rationale: the inventory was produced by a scan that only accepted
- * literals of six characters or more, which is a reasonable screen for finding
- * whole sentences but wrong for this class. Four live labels - `SSN`, `State`,
- * `Zip` and `City` - fall under that threshold and were dropped by it. This class
- * is defined by the field it targets, not by length, so all 27 live labels are
- * present; the 23 that clear six characters are still exactly the inventory's set.
- * A twenty-eighth label, `Address Line 2`, is commented out at line 1614 and is
- * excluded.
+ * Refactoring Rationale: the group holds 27 entries when the migration inventory counts
+ * 23. The inventory was produced by a scan that only accepted literals of six
+ * characters or more, which is a reasonable screen for finding whole sentences but
+ * wrong for this class. Four live labels - `SSN`, `State`, `Zip` and `City` - fall
+ * under that threshold and were dropped by it. This class is defined by the field it
+ * targets, not by length, so all 27 live labels are present; the 23 that clear six
+ * characters are still exactly the inventory's set. A twenty-eighth label, `Address
+ * Line 2`, is commented out at line 1614 and is excluded.
  *
- * Refactoring Rationale: this group is declared before {@link PROGRAM_MESSAGES} and
- * is the single definition of these literals. The two objects previously
- * held 23 of these labels as independent string literals, with nothing to keep them
- * equal - a corrected transcription in one would have left the other silently
- * wrong, and the byte-exactness invariant would then be true of one export and
- * false of the other. `PROGRAM_MESSAGES.COACTUPC` is now this object, so there is
- * one definition and one provenance index. The declaration therefore has to precede
- * `PROGRAM_MESSAGES`: a `const` referenced from an earlier initialiser would be a
- * temporal-dead-zone error at module load, not a compile-time warning.
+ * Assumptions: this group is the single definition of these literals, and
+ * `PROGRAM_MESSAGES.COACTUPC` is a reference to it rather than a second copy. Declaring
+ * 23 of these labels independently in both places would leave nothing to keep them
+ * equal: a corrected transcription in one would leave the other silently wrong, and the
+ * byte-exactness invariant would then be true of one export and false of the other. The
+ * declaration has to precede {@link PROGRAM_MESSAGES} for that reference to resolve - a
+ * `const` reached from an earlier initialiser is a temporal-dead-zone error at module
+ * load, not a compile-time warning.
  */
 export const ACCOUNT_UPDATE_FIELD_LABELS = {
   ACCOUNT_STATUS: 'Account Status',
@@ -1204,9 +1184,9 @@ export const ACCOUNT_UPDATE_FIELD_LABELS = {
   PRIMARY_CARD_HOLDER: 'Primary Card Holder',
   SSN_FIRST_3_CHARS: 'SSN: First 3 chars',
   /**
-   * WHY the ampersand is a bare character. Assumptions: the baseline holds a plain
-   * `&`, not an HTML entity. React escapes text children when rendering, so this
-   * must stay `&` here; writing `&amp;` would display the entity literally.
+   * Assumptions: the ampersand is a bare character. The baseline holds a plain `&`, not
+   * an HTML entity. React escapes text children when rendering, so this must stay `&`
+   * here; writing `&amp;` would display the entity literally.
    */
   SSN_4TH_AND_5TH_CHARS: 'SSN 4th & 5th chars',
   SSN_LAST_4_CHARS: 'SSN Last 4 chars',
@@ -1290,15 +1270,15 @@ export const PROGRAM_MESSAGES = {
   /** credit-card list - `app/cbl/COCRDLIC.cbl` (3 messages). */
   COCRDLIC: {
     /**
-     * WHY this survives alongside `COTRTLIC.NO_PREVIOUS_PAGES_TO_DISPLAY` (Alternatives
-     * Considered): the two differ only in letter case. Any de-duplication that compares
+     * Alternatives Considered: de-duplicating this against
+     * `COTRTLIC.NO_PREVIOUS_PAGES_TO_DISPLAY`. The two differ only in letter case. Any de-duplication that compares
      * case-insensitively would keep one and drop the other, changing what one of the two
      * screens renders.
      */
     NO_PREVIOUS_PAGES_TO_DISPLAY: 'NO PREVIOUS PAGES TO DISPLAY',
     /**
-     * WHY this is not merged with `COTRTLIC.NO_MORE_PAGES_TO_DISPLAY` (Alternatives
-     * Considered): the two differ only in letter case, so a case-insensitive
+     * Alternatives Considered: merging this with
+     * `COTRTLIC.NO_MORE_PAGES_TO_DISPLAY`. The two differ only in letter case, so a case-insensitive
      * de-duplication would collapse them. The card-list screen shows this upper-case
      * form and the transaction-type screen shows a mixed-case form; collapsing them
      * would change what one of the two screens renders.
@@ -1309,12 +1289,11 @@ export const PROGRAM_MESSAGES = {
   /** main menu - `app/cbl/COMEN01C.cbl` (1 message). */
   COMEN01C: {
     /**
-     * WHY the trailing space is part of the value.
-     * Assumptions: the COBOL literal ends with a space, and `router.tsx` compares
-     * against this constant when it blocks a non-administrator, so the byte is load
-     * bearing.
-     * Alternatives Considered: trimming it reads as tidier and silently breaks that
-     * comparison and the screen test that asserts the rendered text.
+     * Assumptions: the trailing space is part of the value. The COBOL literal ends with
+     * a space, and `router.tsx` compares against this constant when it blocks a
+     * non-administrator, so the byte is load bearing. Alternatives Considered: trimming
+     * it reads as tidier and silently breaks that comparison and the screen test that
+     * asserts the rendered text.
      */
     NO_ACCESS_ADMIN_ONLY_OPTION: 'No access - Admin Only option... ',
   },
@@ -1368,10 +1347,10 @@ export const PROGRAM_MESSAGES = {
   COTRN00C: {
     TRAN_ID_MUST_BE_NUMERIC: 'Tran ID must be Numeric ...',
     /**
-     * WHY the lower-case "transaction" is preserved -- Assumptions: the shared
-     * `SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION` spells it with a capital T at
-     * its three sites, while this program spells it lower-case at all three of its
-     * own. Normalising either way alters text that a golden-master comparison reads.
+     * Assumptions: the lower-case "transaction" is preserved. The shared
+     * `SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION` spells it with a capital T at its
+     * three sites, while this program spells it lower-case at all three of its own.
+     * Normalising either way alters text that a golden-master comparison reads.
      */
     UNABLE_TO_LOOKUP_TRANSACTION: 'Unable to lookup transaction...',
   },
@@ -1407,10 +1386,10 @@ export const PROGRAM_MESSAGES = {
     UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE: 'Unable to lookup Acct in XREF AIX file...',
     CARD_NUMBER_NOT_FOUND: 'Card Number NOT found...',
     /**
-     * WHY the hash is left as-is -- Assumptions: it is a literal character in the baseline
+     * Assumptions: the hash is left as-is. It is a literal character in the baseline
      * standing for the word "number", not a substitution marker. Treating it as a
-     * placeholder and interpolating a card number into it would invent text the mainframe
-     * never displays - and would leak a card number into an error message.
+     * placeholder and interpolating a card number into it would invent text the
+     * mainframe never displays - and would leak a card number into an error message.
      */
     UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE: 'Unable to lookup Card # in XREF file...',
     UNABLE_TO_ADD_TRANSACTION: 'Unable to Add Transaction...',
@@ -1419,17 +1398,17 @@ export const PROGRAM_MESSAGES = {
    * transaction-type list and update -
    * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` (5 messages exclusive to it).
    *
-   * WHY this group holds 5 of the program's 16 message literals. Trade-offs: ten of
-   * the other eleven exist to carry a Db2 diagnostic to the screen - three declared
-   * cursor names, the physical `TRANSACTION_TYPE` table name, a fetch failure naming
-   * a cursor, the word "Deadlock", and two sentence fragments that only complete once
-   * an `SQLCODE` is appended. Under the audience policy in the module header those
-   * are diagnostics, so they are registered in {@link REDACTED_DIAGNOSTICS} with the
+   * Trade-offs: this group holds 5 of the program's 16 message literals. Ten of the
+   * other eleven exist to carry a Db2 diagnostic to the screen - three declared cursor
+   * names, the physical `TRANSACTION_TYPE` table name, a fetch failure naming a cursor,
+   * the word "Deadlock", and two sentence fragments that only complete once an
+   * `SQLCODE` is appended. Under the audience policy in the module header those are
+   * diagnostics, so they are registered in {@link REDACTED_DIAGNOSTICS} with the
    * verbatim baseline message the target shows instead, and none of their text is
    * exported to a browser bundle. The eleventh, the child-records instruction, is
-   * operator text that a second program also emits, so it moved to
-   * {@link SHARED_MESSAGES}. The five kept here name no schema object and stand as
-   * complete sentences on their own.
+   * operator text that a second program also emits, so it moved to {@link
+   * SHARED_MESSAGES}. The five kept here name no schema object and stand as complete
+   * sentences on their own.
    */
   COTRTLIC: {
     TYPE_CODE_FILTER_IF_SUPPLIED_MUST_BE_A_2_DIGIT_NUMBER:
@@ -1438,11 +1417,11 @@ export const PROGRAM_MESSAGES = {
     NO_PREVIOUS_PAGES_TO_DISPLAY: 'No previous pages to display',
     NO_MORE_PAGES_TO_DISPLAY: 'No more pages to display',
     /**
-     * WHY there is a space on both sides of the question mark. Assumptions: both are
-     * in the baseline literal. The trailing one separated this text from the `SQLCODE`
-     * the baseline appended; the target appends nothing, and the space is still
-     * transcribed because the invariant of this module is the source bytes, not the
-     * bytes the target happens to need.
+     * Assumptions: there is a space on both sides of the question mark. Both are in the
+     * baseline literal. The trailing one separated this text from the `SQLCODE` the
+     * baseline appended; the target appends nothing, and the space is still transcribed
+     * because the invariant of this module is the source bytes, not the bytes the
+     * target happens to need.
      */
     RECORD_NOT_FOUND_DELETED_BY_OTHERS: 'Record not found. Deleted by others ? ',
   },
@@ -1620,16 +1599,17 @@ export const PROGRAM_MESSAGE_SOURCES = {
  * given another one at the join. {@link formatFieldValidationMessage} performs the
  * concatenation.
  *
- * WHY the suffixes are modelled separately from the labels rather than as
- * pre-joined sentences -- Trade-offs: the baseline pairs labels and suffixes at run
- * time according to which edit failed, so enumerating every pairing would produce
- * hundreds of combinations, most of which the program can never emit. Keeping the
- * two axes apart reproduces the same set of reachable messages with the same
- * pieces the COBOL uses.
+ * Trade-offs: the suffixes are modelled separately from the labels rather than as
+ * pre-joined sentences. The baseline pairs labels and suffixes at run time according to
+ * which edit failed, so enumerating every pairing would produce hundreds of
+ * combinations, most of which the program can never emit. Keeping the two axes apart
+ * reproduces the same set of reachable messages with the same pieces the COBOL uses.
  *
- * The capital "A" in the three "must be A n digit number." suffixes is a
- * grammatical defect in the baseline and is reproduced, as are the counterpart
- * defects in the upper-case filter messages.
+ * Assumptions: the capital "A" in the three "must be A n digit number." suffixes is
+ * transcribed as the baseline holds it, as is the upper-case wording of the filter
+ * messages. Both read as typing slips and neither is one to repair here: `app/**` is the
+ * oracle these strings are compared against, so a tidier spelling would diverge from
+ * it.
  */
 export const FIELD_VALIDATION_SUFFIXES = {
   MUST_BE_SUPPLIED: ' must be supplied.',
@@ -1723,13 +1703,12 @@ export const FIELD_VALIDATION_SUFFIX_SOURCES = {
  * screen author reads in the source, so it is the identity that survives
  * translation.
  *
- * WHY the two `DID-NOT-FIND-ACCT-IN-CARDXREF` keys carry a line suffix
- * Assumptions: `COACTUPC` declares that condition name **twice** on the same
- * field, at lines 498 and 514, with different text - a defect in the immutable
- * baseline. Both literals are reachable text, so neither may be dropped, and a
- * single key cannot hold both; the declaration line disambiguates them and the
- * `line` field on each entry records which is which. The defect is not corrected
- * here because `app/**` is reference-only.
+ * Assumptions: the two `DID-NOT-FIND-ACCT-IN-CARDXREF` keys carry a line suffix because
+ * `COACTUPC` declares that condition name **twice** on the same field, at lines 498 and
+ * 514, with different text. Both literals are reachable, so neither may be dropped, and
+ * one key cannot hold both; the declaration line disambiguates them and the `line` field
+ * on each entry records which is which. `app/**` is reference-only, so the duplication
+ * is transcribed rather than reconciled.
  */
 export const STATUS_MESSAGES = {
   COACTUPC: {
@@ -2486,22 +2465,21 @@ export const STATUS_MESSAGES = {
  * machine-level status value are registered in {@link REDACTED_DIAGNOSTICS}.
  * Compose an entry with {@link formatMessageTemplate}.
  *
- * WHY these are parts rather than finished sentences. Trade-offs: each one
- * interleaves source literals with a record value - a transaction id, a user id, a
- * menu option name - so there is no single string to store. Storing a printf-style
- * pattern instead was rejected because the `DELIMITED BY` operand differs per part
- * and a pattern has nowhere to put it, and because a pattern invents punctuation
- * that the source expresses as separate literals.
+ * Trade-offs: these are parts rather than finished sentences. Each one interleaves
+ * source literals with a record value - a transaction id, a user id, a menu option name
+ * - so there is no single string to store. Storing a printf-style pattern instead was
+ * rejected because the `DELIMITED BY` operand differs per part and a pattern has
+ * nowhere to put it, and because a pattern invents punctuation that the source
+ * expresses as separate literals.
  */
 export const MESSAGE_TEMPLATES = {
   /**
    * `COACTUPC` account-filter rejection.
    *
-   * WHY two literals rather than one. Assumptions: the baseline splits the
-   * sentence across two literals whose join has no space -
-   * `'...must be a 11 digit'` then `' Non-Zero Number'` - so the leading space of
-   * the second literal is the word break. Merging them by hand would work here and
-   * would hide that the join is load bearing.
+   * Assumptions: two literals rather than one. The baseline splits the sentence across
+   * two literals whose join has no space - `'...must be a 11 digit'` then `' Non-Zero
+   * Number'` - so the leading space of the second literal is the word break. Merging
+   * them by hand would work here and would hide that the join is load bearing.
    */
   ACCOUNT_NUMBER_MUST_BE_11_DIGIT_NON_ZERO: {
     parts: [
@@ -2518,11 +2496,11 @@ export const MESSAGE_TEMPLATES = {
   /**
    * `COADM01C` unavailable-option message, composed at two sites.
    *
-   * WHY no option name is inserted. Assumptions: the two lines that would insert
-   * `CDEMO-ADMIN-OPT-NAME` are commented out at both sites - `COADM01C.cbl:153-154`
-   * and `:274-275` - so the admin menu says "This option is not installed ..."
-   * without naming the option, while the main menu names it. That asymmetry is
-   * baseline behaviour, not an omission here.
+   * Assumptions: no option name is inserted. The two lines that would insert
+   * `CDEMO-ADMIN-OPT-NAME` are commented out at both sites - `COADM01C.cbl:153-154` and
+   * `:274-275` - so the admin menu says "This option is not installed ..." without
+   * naming the option, while the main menu names it. That asymmetry is baseline
+   * behaviour, not an omission here.
    */
   ADMIN_OPTION_NOT_INSTALLED: {
     parts: [{ literal: 'This option ' }, { literal: 'is not installed ...' }],
@@ -2534,11 +2512,10 @@ export const MESSAGE_TEMPLATES = {
   /**
    * `COADM01C` admin-menu line: option number, separator, option name.
    *
-   * WHY this is not a message-band string. Assumptions: the baseline composes it
-   * into the 40-character `WS-ADMIN-OPT-TXT` and moves it to a menu-row field, not
-   * to `ERRMSGO`, so {@link MESSAGE_BAND} does not govern it and padding it to 78
-   * would be wrong. See the note on {@link MESSAGE_BAND} for why that region is
-   * modelled separately.
+   * Assumptions: this is not a message-band string. The baseline composes it into the
+   * 40-character `WS-ADMIN-OPT-TXT` and moves it to a menu-row field, not to `ERRMSGO`,
+   * so {@link MESSAGE_BAND} does not govern it and padding it to 78 would be wrong. See
+   * the note on {@link MESSAGE_BAND} for why that region is modelled separately.
    */
   ADMIN_MENU_OPTION_LINE: {
     parts: [
@@ -2551,11 +2528,11 @@ export const MESSAGE_TEMPLATES = {
   /**
    * `COMEN01C` unavailable-option message.
    *
-   * WHY the option name is delimited by a double space. Assumptions: the name is a
-   * 35-character padded field, and `DELIMITED BY '  '` stops at the first double
-   * space, which strips the padding without cutting the name. This is the one place
-   * in the baseline where that operand appears, and it is what makes this message
-   * read correctly while the coming-soon message below does not.
+   * Assumptions: the option name is delimited by a double space. The name is a
+   * 35-character padded field, and `DELIMITED BY ' '` stops at the first double space,
+   * which strips the padding without cutting the name. This is the one place in the
+   * baseline where that operand appears, and it is what makes this message read
+   * correctly while the coming-soon message below does not.
    */
   MENU_OPTION_NOT_INSTALLED: {
     parts: [
@@ -2569,13 +2546,12 @@ export const MESSAGE_TEMPLATES = {
    * `COMEN01C` coming-soon message, shown for an option whose target program name
    * begins `DUMMY`.
    *
-   * WHY this one truncates the option name. Assumptions: it delimits by a single
-   * space, so `'Account View                       '` contributes only `'Account'`,
-   * and the next literal has no leading space - the rendered text is
-   * "This option Accountis coming soon ...". That is a defect in the immutable
-   * baseline, reproduced rather than corrected because `app/**` is the behavioural
-   * oracle; the neighbouring not-installed message proves the author knew the
-   * double-space form.
+   * Assumptions: this one truncates the option name. It delimits by a single space, so
+   * `'Account View '` contributes only `'Account'`, and the next literal has no leading
+   * space - the rendered text is "This option Accountis coming soon ...". That reads as
+   * a slip, and the neighbouring not-installed message shows the author knew the
+   * double-space form, but `app/**` is the behavioural oracle so the single space is
+   * transcribed as it stands.
    */
   MENU_OPTION_COMING_SOON: {
     parts: [
@@ -2588,12 +2564,11 @@ export const MESSAGE_TEMPLATES = {
   /**
    * `COMEN01C` main-menu line: option number, separator, option name.
    *
-   * WHY this is not a message-band string. Assumptions: the baseline composes it
-   * into the 40-character `WS-MENU-OPT-TXT` and moves it to one of the menu-row
-   * fields `OPTN001O`-`OPTN012O`, not to `ERRMSGO`. The two unavailable-option
-   * messages above *do* reach the band, because those go to `WS-MESSAGE` instead -
-   * so the same program feeds two different regions and only one of them is
-   * governed by {@link MESSAGE_BAND}.
+   * Assumptions: this is not a message-band string. The baseline composes it into the
+   * 40-character `WS-MENU-OPT-TXT` and moves it to one of the menu-row fields
+   * `OPTN001O`-`OPTN012O`, not to `ERRMSGO`. The two unavailable-option messages above *do*
+   * reach the band, because those go to `WS-MESSAGE` instead - so the same program feeds two
+   * different regions and only one of them is governed by {@link MESSAGE_BAND}.
    */
   MENU_OPTION_LINE: {
     parts: [
@@ -2637,10 +2612,9 @@ export const MESSAGE_TEMPLATES = {
   /**
    * `COBIL00C` bill-payment success message.
    *
-   * WHY the doubled space survives. Assumptions: the first literal ends with a
-   * space and the second begins with one, so the rendered text reads
-   * "Payment successful.  Your Transaction ID is ...". Both spaces are in the
-   * source and neither is removed.
+   * Assumptions: the doubled space survives. The first literal ends with a space and
+   * the second begins with one, so the rendered text reads "Payment successful. Your
+   * Transaction ID is ...". Both spaces are in the source and neither is removed.
    */
   PAYMENT_SUCCESSFUL: {
     parts: [
@@ -2717,20 +2691,19 @@ export const MESSAGE_TEMPLATES = {
  * source files. Every figure here is derivable from the rows themselves by
  * counting them, so it can be re-checked rather than trusted.
  *
- * WHY a register exists at all rather than the diagnostics simply being absent
- * Trade-offs: an omission is indistinguishable from an oversight. Those 44 sites
- * are missing from the displayable catalog on purpose, and without this list the
- * next author would either reinstate them - reintroducing the disclosure - or
- * conclude the extraction was incomplete and re-run it. The rows carry provenance
- * and no withheld text, so the baseline copy stays findable while the bundle stays
- * clean.
+ * Trade-offs: a register exists rather than the diagnostics simply being absent,
+ * because an omission is indistinguishable from an oversight. Those 44 sites are missing from
+ * the displayable catalog on purpose, and without this list the next author would
+ * either reinstate them - reintroducing the disclosure - or conclude the extraction was
+ * incomplete and re-run it. The rows carry provenance and no withheld text, so the
+ * baseline copy stays findable while the bundle stays clean.
  *
- * WHY the `COTRTLIC` rows point at `CSDB2RPY.cpy` for their composition
- * Assumptions: the ten redacted `COTRTLIC` literals are action labels moved into
+ * Assumptions: the `COTRTLIC` rows point at `CSDB2RPY.cpy` for their composition. The
+ * ten redacted `COTRTLIC` literals are action labels moved into
  * `WS-DB2-CURRENT-ACTION`, and the copybook the program includes performs the join
  * `STRING FUNCTION TRIM(WS-DB2-CURRENT-ACTION) ' SQLCODE:' WS-DISP-SQLCODE ' '
- * WS-DSNTIAC-FMTD-TEXT`. The label is meaningless without that join, which is
- * precisely why redacting the label rather than only the code is the correct cut.
+ * WS-DSNTIAC-FMTD-TEXT`. The label is meaningless without that join, which is precisely
+ * why redacting the label rather than only the code is the correct cut.
  */
 export const REDACTED_DIAGNOSTICS = [
   {
@@ -3020,21 +2993,20 @@ export const REDACTED_DIAGNOSTICS = [
  * The shape a correlation reference must have before {@link formatDb2Message} will
  * render it: 8 to 36 characters of ASCII letters, digits and hyphens.
  *
- * WHY the token is validated at all. Refactoring Rationale: the parameter it
- * guards replaced two parameters that carried raw database diagnostics, and a
- * guard is what stops the same text arriving through the replacement. Without it a
- * caller could pass a `SQLCODE` and its `DSNTIAC` detail as the "reference" and
- * the rendered band would be exactly what the fix removed - the defect would have
- * moved one parameter to the left rather than gone.
+ * Assumptions: the token is validated rather than trusted, because the parameter it
+ * guards is the one route by which raw database diagnostics could still reach the band.
+ * A caller could otherwise pass a `SQLCODE` and its `DSNTIAC` detail as the
+ * "reference", and the rendered band would carry exactly the text this module withholds
+ * -- the disclosure would have moved one parameter to the left rather than gone.
  *
- * WHY these bounds. Assumptions: the range spans the two identifier forms the
- * platform actually produces. `CorrelationIdFilter` in the shared kernel accepts a
- * caller-supplied identifier and otherwise generates a UUID, whose canonical form
- * is 36 characters of hexadecimal and hyphens; a shortened trace or request
- * identifier is typically 8 to 32. The 8-character floor rejects a value too short
- * to identify one request among many, and the character class admits nothing that
- * could carry a sentence, a quoted identifier or a statement fragment - a space,
- * a colon, a comma, a quote and a parenthesis are all outside it.
+ * Assumptions: the 8-to-36 range spans the two identifier forms the platform
+ * actually produces. `CorrelationIdFilter` in the shared kernel accepts a
+ * caller-supplied identifier and otherwise generates a UUID, whose canonical form is 36
+ * characters of hexadecimal and hyphens; a shortened trace or request identifier is
+ * typically 8 to 32. The 8-character floor rejects a value too short to identify one
+ * request among many, and the character class admits nothing that could carry a
+ * sentence, a quoted identifier or a statement fragment - a space, a colon, a comma, a
+ * quote and a parenthesis are all outside it.
  */
 export const DB2_CORRELATION_REFERENCE_PATTERN = /^[A-Za-z0-9-]{8,36}$/;
 
@@ -3043,14 +3015,13 @@ export const DB2_CORRELATION_REFERENCE_PATTERN = /^[A-Za-z0-9-]{8,36}$/;
  * public error code, and the correlation identifier that ties the request to the
  * server-side record holding the actual diagnostics.
  *
- * WHY this is three fields rather than one string. Alternatives Considered:
- * returning one pre-joined sentence was the shape the baseline used and was
- * rejected, because the three parts have three different destinations in the user
- * interface. `text` belongs in the 75-character message band, so it has to stay
- * separable to respect that width contract; `code` and `correlationId` belong in a
- * small, copyable footer, because their only purpose is to be quoted to support.
- * Joining them would force every screen to split the string apart again by
- * searching for a separator.
+ * Alternatives Considered: this is three fields rather than one string. Returning one
+ * pre-joined sentence was the shape the baseline used and was rejected, because the
+ * three parts have three different destinations in the user interface. `text` belongs
+ * in the 75-character message band, so it has to stay separable to respect that width
+ * contract; `code` and `correlationId` belong in a small, copyable footer, because
+ * their only purpose is to be quoted to support. Joining them would force every screen
+ * to split the string apart again by searching for a separator.
  */
 export interface Db2DiagnosticMessage {
   /**
@@ -3075,24 +3046,24 @@ export interface Db2DiagnosticMessage {
 /**
  * Matches the public error-code shape this module will render.
  *
- * WHY the shape is enforced rather than trusted. Assumptions: `code` is a string
- * parameter, so nothing but a check stops a caller passing the raw SQL code, or
- * the `DSNTIAC` text, or a whole exception message through it - which would
- * reinstate the disclosure this module was changed to prevent, through the very
- * field that replaced it. The pattern admits an upper-case context and a numeric
- * sequence and nothing else, so vendor text cannot satisfy it.
+ * Assumptions: the shape is enforced rather than trusted. `code` is a string parameter,
+ * so nothing but a check stops a caller passing the raw SQL code, or the `DSNTIAC`
+ * text, or a whole exception message through it - which would reinstate the disclosure
+ * this module was changed to prevent, through the very field that replaced it. The
+ * pattern admits an upper-case context and a numeric sequence and nothing else, so
+ * vendor text cannot satisfy it.
  */
 const PUBLIC_ERROR_CODE_PATTERN = /^CARDDEMO-[A-Z]{2,12}-\d{4}$/;
 
 /**
  * Matches the correlation-identifier shape this module will render.
  *
- * WHY it is checked too. Assumptions: the same argument as the error code. The
- * pattern is deliberately permissive about WHICH identifier scheme is used - any
- * 8 to 64 character run of unreserved URL characters passes, which covers a UUID,
- * an AWS request id and an X-Ray trace id - and strict about what an identifier is
- * NOT: it admits no space, colon, comma or bracket, so a sentence of diagnostic
- * text cannot pass as one.
+ * Assumptions: the correlation identifier is shape-checked for the same reason the
+ * error code is. The pattern is deliberately permissive about WHICH identifier scheme is
+ * used - any 8 to 64 character
+ * run of unreserved URL characters passes, which covers a UUID, an AWS request id and
+ * an X-Ray trace id - and strict about what an identifier is NOT: it admits no space,
+ * colon, comma or bracket, so a sentence of diagnostic text cannot pass as one.
  */
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._~-]{8,64}$/;
 
@@ -3101,49 +3072,46 @@ const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._~-]{8,64}$/;
  * text, a public error code, and the correlation identifier that locates the
  * withheld diagnostics on the server.
  *
- * WHY this no longer reproduces `CSDB2RPY.cpy`. Refactoring Rationale: this
- * function used to take a `sqlCode` and a `detail` and join them onto the action
- * exactly as the copybook does, which was faithful to a 3270 screen and wrong for
- * a browser. `detail` is the output of the `DSNTIAC` utility, and what that
- * utility produces is the engine's own message text - typically the SQL code, the
- * SQLSTATE, the failing statement's object names and, for a constraint violation,
- * the constraint and index names. Rendering it handed every authenticated user a
- * running description of the data tier: which engine it is, which tables and
- * columns back the screen they are on, which constraints and cursors exist, and
- * on a deadlock which other unit of work it collided with. That is reconnaissance,
- * and it is delivered by the application itself to anyone who can provoke an
- * error - which, for a validation-adjacent failure, is anyone who can submit the
- * form. The raw SQL code went the same way for a weaker version of the same
+ * Assumptions: this deliberately does NOT reproduce `CSDB2RPY.cpy`. The copybook joins
+ * a `sqlCode` and a `detail` onto the action text, which is faithful to a 3270 screen
+ * and wrong for a browser. `detail`
+ * is the output of the `DSNTIAC` utility, and what that utility produces is the
+ * engine's own message text - typically the SQL code, the SQLSTATE, the failing
+ * statement's object names and, for a constraint violation, the constraint and index
+ * names. Rendering it handed every authenticated user a running description of the data
+ * tier: which engine it is, which tables and columns back the screen they are on, which
+ * constraints and cursors exist, and on a deadlock which other unit of work it collided
+ * with. That is reconnaissance, and it is delivered by the application itself to anyone
+ * who can provoke an error - which, for a validation-adjacent failure, is anyone who
+ * can submit the form. The raw SQL code is withheld for a weaker version of the same
  * reason: it is an engine-specific number whose value maps to a known
- * vendor-documented condition, so publishing it fingerprints the engine and
- * narrows what an attacker has to guess.
+ * vendor-documented condition, so publishing it fingerprints the engine and narrows
+ * what an attacker has to guess.
  *
- * WHY the parameter was REMOVED rather than sanitised inside this function
- * Alternatives Considered: filtering the detail here - stripping object names,
- * truncating, allowing a safe subset - was considered and rejected. A filter has
- * to anticipate every shape the engine can emit, it is applied at the last moment
- * before rendering where a mistake is invisible, and it leaves a parameter that a
- * caller can keep filling with diagnostics. Deleting the parameter makes the
- * disclosure unrepresentable: there is no argument through which vendor text can
- * arrive, and the two arguments that remain are shape-checked so neither can be
- * used to smuggle it.
+ * Alternatives Considered: this function accepts no diagnostic-detail parameter at all,
+ * rather than accepting one and sanitising it. Filtering the detail here - stripping
+ * object names, truncating, allowing a safe subset - was rejected: a filter has to
+ * anticipate every shape the engine can emit, it is applied at the last moment before
+ * rendering where a mistake is invisible, and it leaves a parameter a caller can keep
+ * filling with diagnostics. Admitting no such parameter makes the disclosure
+ * unrepresentable - there is no argument through which vendor text can arrive, and the
+ * two arguments that do exist are shape-checked so neither can be used to smuggle it.
  *
- * WHY nothing is lost operationally. Assumptions: the diagnostics are not
- * discarded, they are relocated. The owning service logs the SQL code, the
- * SQLSTATE and the `DSNTIAC`-equivalent text against the same correlation
- * identifier returned here, where access is governed by the log group's IAM policy
- * instead of by having provoked the error. So an operator diagnosing the failure
- * has strictly more than the 3270 screen gave them - the full diagnostic plus the
- * request that produced it - and the user has what they can act on: what failed,
- * and the identifier to quote.
+ * Assumptions: nothing is lost operationally. The diagnostics are not discarded, they
+ * are relocated. The owning service logs the SQL code, the SQLSTATE and the
+ * `DSNTIAC`-equivalent text against the same correlation identifier returned here,
+ * where access is governed by the log group's IAM policy instead of by having provoked
+ * the error. So an operator diagnosing the failure has strictly more than the 3270
+ * screen gave them - the full diagnostic plus the request that produced it - and the
+ * user has what they can act on: what failed, and the identifier to quote.
  *
- * WHY this is registered as an intentional divergence. Assumptions: the project
- * carries user-visible strings across verbatim, and this narrows one. The narrowing
- * is deliberate and belongs in
- * `docs/architecture/cobol-to-service-traceability.md` beside the other documented
- * divergences, under the same heading as the baseline's plaintext password field,
- * which is likewise not carried forward. The action text itself is still verbatim;
- * only the vendor tail is withheld.
+ * Assumptions: this is registered as an intentional divergence. The project carries
+ * user-visible strings across verbatim, and this narrows one. The narrowing is
+ * deliberate and belongs in `docs/architecture/cobol-to-service-traceability.md` beside
+ * the other documented divergences, under the same heading as the baseline's plaintext
+ * password field, which is likewise not carried forward. The action text itself is
+ * still verbatim; only the vendor tail is withheld.
+ *
  * @param {string} action - The action label that was in `WS-DB2-CURRENT-ACTION`, normally an
  *   entry of `PROGRAM_MESSAGES.COTRTLIC`. Rendered verbatim after trimming.
  * @param {object} diagnostic - The public identifiers for this failure. Taken as one object
@@ -3167,11 +3135,13 @@ export function formatDb2Message(
   action: string,
   diagnostic: { readonly code: string; readonly correlationId: string },
 ): Db2DiagnosticMessage {
-  // FUNCTION TRIM removes leading and trailing spaces, which String.prototype.trim
-  // also does; the baseline field holds no other whitespace, so the two agree. The
-  // catalogued literals carry a trailing space precisely because the baseline
-  // appended a code to them, so trimming is what stops that now-unused separator
-  // from showing as a stray space at the end of the sentence.
+  // Assumptions: COBOL's FUNCTION TRIM removes leading and trailing spaces, which
+  // String.prototype.trim also does, and the baseline field holds no other
+  // whitespace, so the two agree byte for byte. A field carrying a tab or a newline
+  // would diverge, and none does. Trimming is not cosmetic here: the catalogued
+  // literals carry a trailing space precisely because the baseline appended a code
+  // to them, so without it that now-unused separator renders as a stray space at
+  // the end of the sentence.
   const text = action.trim();
   if (text.length === 0) {
     throw new RangeError(
@@ -3188,11 +3158,12 @@ export function formatDb2Message(
       `diagnostic.correlationId must be a plain identifier of 8 to 64 unreserved characters; received a value of length ${String(diagnostic.correlationId.length)}.`,
     );
   }
-  // The rejected values are described by LENGTH and never echoed. A caller that
-  // wrongly passed engine text would otherwise have that text placed into an
-  // exception message, which is itself a browser-visible surface as soon as an
-  // error boundary renders it - reinstating the disclosure inside the check that
-  // exists to prevent it.
+  // Trade-offs: the two refusals above describe a rejected value by its LENGTH and
+  // never echo it, which costs a caller the quickest route to seeing what they sent.
+  // Echoing it is the alternative and it is refused: a caller that wrongly passed
+  // engine diagnostic text would have that text placed into an exception message,
+  // which is itself a browser-visible surface the moment an error boundary renders
+  // it - reinstating the very disclosure this check exists to prevent.
   return {
     text,
     code: diagnostic.code,
@@ -3350,22 +3321,23 @@ export function normaliseMessageBandValue(value: string | null | undefined): str
   if (value === null || value === undefined) {
     return '';
   }
-  // Only U+0000 is removed, and only because it is the wire form of LOW-VALUES.
-  // Stripping the wider C0 range was rejected: no baseline message field can hold
-  // any other control character, so a broader filter would silently alter text it
-  // was never meant to touch rather than fail loudly on it.
+  // Alternatives Considered: stripping the wider C0 control range, rather than
+  // U+0000 alone. Rejected because U+0000 is the wire form of LOW-VALUES and no
+  // baseline message field can hold any other control character, so a broader
+  // filter would silently alter text it was never meant to touch instead of failing
+  // loudly on it - and a message this function returns is rendered verbatim.
   return value.replaceAll('\u0000', '').trim();
 }
 
 /**
  * Reports whether a message-band value means "no message is set".
  *
- * WHY an all-spaces value counts as empty as well as a zero-length one
- * Assumptions: the baseline's off-condition is `VALUE LOW-VALUES`, and the
- * programs also clear the field with `MOVE SPACES`. A transport that carries either
- * form arrives as a string that is empty or all spaces, and both mean the band
- * should stay hidden. Testing only for a zero-length string would leave the band
- * rendering a blank alert on every quiet screen.
+ * Assumptions: an all-spaces value counts as empty as well as a zero-length one. The
+ * baseline's off-condition is `VALUE LOW-VALUES`, and the programs also clear the field
+ * with `MOVE SPACES`. A transport that carries either form arrives as a string that is
+ * empty or all spaces, and both mean the band should stay hidden. Testing only for a
+ * zero-length string would leave the band rendering a blank alert on every quiet
+ * screen.
  *
  * Assumptions: the low-values case needs its own handling rather than falling out of
  * the whitespace test, because `String.prototype.trim` removes whitespace and
@@ -3410,11 +3382,12 @@ export const APP_ORGANISATION_TITLE = SCREEN_TITLES.TITLE01.text;
  * The organisation line with the 3270 centring spaces removed, for rendering in a
  * browser where the layout does the centring.
  *
- * WHY a trimmed alias exists at all. Assumptions: character-cell centring only
- * centres in a monospaced 80-column grid. In a proportional-font flex layout the
- * leading spaces centre nothing and instead offset the text, so a renderer needs the
- * trimmed form - and if this module does not provide it, every consumer calls
- * `.trim()` itself and the module stops owning what is displayed.
+ * Assumptions: a trimmed alias is published beside the verbatim one. Character-cell
+ * centring only centres in a
+ * monospaced 80-column grid. In a proportional-font flex layout the leading spaces
+ * centre nothing and instead offset the text, so a renderer needs the trimmed form -
+ * and if this module does not provide it, every consumer calls `.trim()` itself and the
+ * module stops owning what is displayed.
  */
 export const APP_ORGANISATION_TITLE_DISPLAY = APP_ORGANISATION_TITLE.trim();
 
@@ -3451,10 +3424,10 @@ export const INVALID_KEY_PRESSED = COMMON_MESSAGES.INVALID_KEY.text;
 /**
  * Text shown when a non-administrator reaches an administrator-only route.
  *
- * WHY this is aliased at the top level -- Assumptions: the router guards admin
- * routes with it, and a router should not have to know that the string originates
- * in the main-menu program. The trailing space is part of the value - see the note
- * on the underlying entry.
+ * Assumptions: this is aliased at the top level. The router guards admin routes with
+ * it, and a router should not have to know that the string originates in the main-menu
+ * program. The trailing space is part of the value - see the note on the underlying
+ * entry.
  */
 export const ACCESS_DENIED_ADMIN_ONLY = PROGRAM_MESSAGES.COMEN01C.NO_ACCESS_ADMIN_ONLY_OPTION;
 

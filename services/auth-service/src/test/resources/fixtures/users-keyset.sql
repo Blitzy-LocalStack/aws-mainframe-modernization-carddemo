@@ -80,9 +80,22 @@
 --       last=KSET0010     KSET0011..KSET0020 (10)    hit    hasNext TRUE
 --       last=KSET0011     KSET0012..KSET0021 (10)    miss   hasNext FALSE
 --       last=KSET0020     KSET0021 (1)               miss   hasNext FALSE
---       first=KSET0012    KSET0002..KSET0011 (10)    hit    hasPrev TRUE
+--       first=KSET0012    KSET0002..KSET0011 (10)    hit    hasNext TRUE
 --       Row three is the exact boundary, a full page of ten with nothing beyond
 --       it; row four is the short final page; row five reads backward.
+--
+--       Assumptions: row five's flag is TRUE for a reason the other four do not
+--       share. The four forward rows take it from the probe, whereas a backward
+--       walk sets it unconditionally in UserService.page -- a caller that has
+--       just stepped back arrived from the page ahead, so a page ahead
+--       demonstrably exists and no probe is needed to learn it. Row five's probe
+--       column therefore records only that an eleventh row was found below the
+--       position, and that finding is NOT published: whether an EARLIER page
+--       exists is not a member of the four-member envelope at all. The reference
+--       answers that question from the screen ordinal it already holds --
+--       app/cbl/COUSR00C.cbl L247 tests the page-number field and L251 issues the
+--       top-of-list refusal -- so this fixture pins the leading key the page
+--       publishes and never a backward-availability flag.
 --
 --       Refactoring Rationale: the short final page exists in this block because
 --       the baseline leaves its last-key cursor stale, and this row set pins that

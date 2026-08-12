@@ -5,38 +5,40 @@
  * <h2>What this package holds</h2>
  *
  * <p>This package carries the Spring wiring for the reporting context and nothing else:
- * the stateless JWT security chain, the OpenAPI 3.1 document metadata, the read-only
- * datasource with its schema search path, and the AWS Step Functions client through which
- * an on-demand report execution is started. The context root charter one package up, in
- * {@code com.carddemo.reporting}, states the same four concerns for this package at its
- * L125 to L127, and the agreement between the two files is deliberate rather than
- * incidental: a reader who finds them disagreeing has found a defect in one of them.
+ * the stateless JWT security chain and its decoder, the OpenAPI 3.1 document metadata, the
+ * read-only datasource with its schema search path, the AWS Step Functions client through which
+ * an on-demand report execution is started, the object-store client the artifact writers publish
+ * through, and the keyed tokeniser an artifact object key is derived through. The context root
+ * charter one package up, in {@code com.carddemo.reporting}, states the same concerns for this
+ * package in its package charter list, and the agreement between the two files is deliberate rather
+ * than incidental: a reader who finds them disagreeing has found a defect in one of them. The
+ * cross-reference is by file rather than by line, because a line number in another file is the part
+ * of a cross-reference that rots first.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The roster, measured against this directory</h2>
  *
- * <p>Assumptions: the roster below is this package's <b>target contract</b> as the
- * migration plan assigns it. It is now also a measurement of the directory: all five
- * classes have landed, so the two readings coincide and no entry has to be read as an
- * assignment rather than as a description.</p>
+ * <pre>
+ * this directory: 8 java files = 7 classes + 1 charter
+ * </pre>
  *
- * <p>Refactoring Rationale: an earlier revision of this section recorded two of the five --
- * {@code OpenApiConfig} and {@code StepFunctionsConfig} -- as planned and not yet authored,
- * and each bullet said so at its own entry. Both are now present, so those notes have been
- * replaced by what the classes actually do rather than being left standing. A planned marker
- * that outlives the file it describes is worse than no marker at all: it reads as measured,
- * so a reader auditing this roster would conclude that a landed and load-bearing class was
- * still missing and might author a second one beside it.</p>
+ * <p>Refactoring Rationale: this section has now been corrected three times, and the marker line
+ * above is what ends the sequence. It first recorded {@code OpenApiConfig} and
+ * {@code StepFunctionsConfig} as planned and not yet authored; both landed. It then closed the roster
+ * at five classes and stated that no sixth was expected; two more landed --
+ * {@code ObjectStoreConfig}, without which nothing in the module could publish an artifact at all,
+ * and {@code ArtifactIdentityConfig}, which keys the tokeniser an object key is derived through. A
+ * closed-set claim that outlives the directory is the worst of both readings: a reader auditing the
+ * roster concludes a landed and load-bearing file is surplus, and a reader auditing the directory
+ * concludes the charter cannot be trusted. The marker line is the form {@code common-lib}'s
+ * {@code PackageCharterInventoryTest} re-measures against this directory on every build, and the same
+ * test requires each member enumerated below to be a file here.</p>
  *
- * <p><strong>The roster is closed at five classes.</strong> Each owns one concern, and no
- * sixth configuration class is expected here:
+ * <p><strong>The roster is seven classes, each owning one concern.</strong> A configuration concern
+ * that is not one of these seven does not belong here:
  * <ul>
- *   <li>{@code JwtDecoderConfig} -- LANDED. The token decoder, and the reason this roster
- *       is five rather than four. Refactoring Rationale: an earlier revision of this
- *       charter closed the roster at four and omitted this class, which left a landed and
- *       load-bearing type outside the stated contract -- the worst of both readings, since
- *       a reader auditing the roster would have concluded the file was surplus and a
- *       reader auditing the directory would have concluded the charter was stale. It is
- *       assigned here rather than removed because what it does is not optional: one Cognito
+ *   <li>{@code JwtDecoderConfig} -- LANDED. The token decoder. Assumptions: it is a member of this
+ *       roster in its own right rather than an implementation detail of the filter chain, because
+ *       what it does is not optional: one Cognito
  *       user pool issues tokens for every app client registered against it and mints two
  *       token kinds per sign-in, so signature, issuer, audience and time checks alone
  *       accept an identity token and a token minted for an unrelated client. This class
@@ -73,6 +75,30 @@
  *       provider and no endpoint override appear in source, because all three are resolved
  *       from the task environment the deployment supplies, and hard-coding any of them would
  *       make one environment's value compiled into every environment's image.</li>
+ *   <li>{@code ObjectStoreConfig} -- LANDED. The object-store client the artifact writers publish
+ *       through. This context declares an output bucket and two key prefixes in its configuration, so
+ *       without this bean nothing in the module could reach them and the orchestrated
+ *       {@code GenerateStatements} and {@code GenerateReports} states would run to completion having
+ *       stored nothing. Assumptions: no region, credential provider or endpoint is named here, for the
+ *       same reason the execution client names none.</li>
+ *   <li>{@code ArtifactIdentityConfig} -- LANDED. The keyed tokeniser an artifact object key is derived
+ *       through. Assumptions: it is configuration rather than a service because an object key is not a
+ *       private thing -- the store writes it to its own access log, indexes it for listing and reports
+ *       it in a bucket inventory, none of which a content-encryption key reaches -- so the tokeniser
+ *       has to be in place before any writer runs, and it is what keeps an account identifier and every
+ *       part of a card number out of a key.</li>
+ *   <li>{@code ObjectStoreConfig} -- the object-store client the two artifact writers publish
+ *       through. Assumptions: it exists because this context declares an output bucket and two key
+ *       prefixes in its configuration and had no client bean to reach them with, so the orchestrated
+ *       statement and report states would have run this image and stored nothing. Like the Step
+ *       Functions client it declares no region, credential provider or endpoint override in source,
+ *       for the same reason.</li>
+ *   <li>{@code ArtifactIdentityConfig} -- the keyed tokeniser that names a stored statement artifact
+ *       without naming its cardholder. Assumptions: an object key is not a private thing -- the store
+ *       writes it into its own access log for every request that touches the object -- so the key is
+ *       derived through a secret-keyed token rather than from the account or card it belongs to. The
+ *       key arrives as a required property with no default, and the bean refuses to build without it,
+ *       because an unkeyed digest of a short structured input can be confirmed by enumeration.</li>
  * </ul>
  *
  * <p>Alternatives Considered: folding these concerns into the context root package,
@@ -81,9 +107,9 @@
  * concerns arriving from unrelated directions: the resource server from the security
  * and OAuth2 starters at {@code pom.xml} L185 and L190, the datasource from the JPA
  * starter and the driver at L153 and L220, the document metadata from springdoc at L234,
- * and the execution client from the AWS SDK at L280. One class holding all four would take
+ * and the execution client from the AWS SDK at L280. One class holding every concern would take
  * a change for any one of them and would make the blast radius of that change the whole
- * set; four classes in one package keep each concern separately readable and separately
+ * set; separate classes in one package keep each concern separately readable and separately
  * testable while still grouping them where a reader looks for wiring. Keeping them in the
  * context root package was rejected for a second and sharper reason: that package is the
  * entry point, and mixing wiring into it removes the one location that can be read as a

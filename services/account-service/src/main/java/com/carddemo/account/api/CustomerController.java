@@ -1,5 +1,6 @@
 package com.carddemo.account.api;
 
+import com.carddemo.account.dto.CustomerDisplayView;
 import com.carddemo.account.dto.CustomerLookupRequest;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.account.service.AccountViewService;
@@ -127,6 +128,28 @@ public class CustomerController {
      * keyed surface rather than to one operation of it.</p>
      */
     public static final String RECORD_PATH = "/record";
+
+    /**
+     * The sub-path of the nine-field screen display read, beneath {@link #BASE_PATH}.
+     *
+     * <p>Refactoring Rationale: this address is new, and it exists because a neighbouring context's screen
+     * had no operation to read its display fields from. It read them from the response of the EXISTENCE check
+     * at {@value #LOOKUP_PATH}, which carries no body at all by contract, so those fields rendered as absent
+     * on every request and nothing failed while they did. The two available shapes before this address existed
+     * were a status with no body and the whole record, and neither is a screen's field list.</p>
+     *
+     * <p>Assumptions: exposed as a constant for the same reason the two above are -- {@code
+     * InternalApiSecurityConfig} builds its request matcher from this value, so the authority the operation
+     * requires and the operation itself cannot come to disagree by an edit to one of them.</p>
+     *
+     * <p>Alternatives Considered: serving the fields from {@value #RECORD_PATH} instead, which needs no new
+     * address. Rejected on least privilege: that operation answers with the whole record and is therefore
+     * gated on the customer-master authority, which is granted to no context because it reads a national
+     * identifier, a government-issued identifier and a credit score for any customer. A separate address is
+     * what lets nine fields be served under the narrower decision-read authority the consumer already
+     * holds.</p>
+     */
+    public static final String DISPLAY_PATH = "/display";
 
     /**
      * The read path this controller binds requests onto.
@@ -287,6 +310,64 @@ public class CustomerController {
         //   calling CEE3ABD at L158 -- which in the target is an ordinary exception propagating to the
         //   single shared advice, so this handler catches nothing and converts nothing.
         return this.reads.readCustomer(request.customerId());
+    }
+
+    /**
+     * Reads the nine customer fields a neighbouring context's screen renders, and no others.
+     *
+     * <p>Purpose: the pending-authorization detail screen renders a cardholder's name, two address lines and
+     * a telephone number beside the authorization it is showing. Those two rendered address lines are
+     * COMPOSED by that screen out of five stored columns rather than read from two, so nine values are the
+     * whole of this operation's contract, and they come from the customer record this context owns --
+     * {@code CUST-FIRST-NAME PIC X(25)} at L6 of {@code app/cpy/CVCUS01Y.cpy}, the middle name at L7, the
+     * family name at L8, the three address lines at L9, L10 and L11, the state code at L12, the postal code
+     * at L14, and the primary telephone number at L15 and L16 at its stored width of fifteen characters.</p>
+     *
+     * <p>Assumptions: the address components are published as stored and are NOT joined into the two lines the
+     * screen shows, and the postal code is NOT narrowed to the five characters it renders.
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} joins the first two lines at L766 through
+     * L770 and joins the third line, the state code and {@code CUST-ADDR-ZIP(1:5)} at L771 through L777 --
+     * so both the separators and the narrowing are decisions of the display. Taking them here would publish
+     * one consumer's presentation as though it were the layout, and the country code at L13 would then have
+     * to be either included, which no line renders, or explained away.</p>
+     *
+     * <p>Refactoring Rationale: this operation is new because the consumer had nowhere to read those fields
+     * from and was reading them from the wrong place. It issued the existence check at {@value #LOOKUP_PATH}
+     * and deserialised its response, and that operation answers 204 or 404 with NO body -- deliberately, so
+     * that an absence cannot return a customer identifier in a problem document that is itself logged. Its
+     * seam record additionally declared a composed name member that this contract does not publish and no
+     * column exists for. So the screen's display fields were absent on every request, and nothing anywhere
+     * failed while they were: a bodiless 204 deserialises to nothing rather than to an error.</p>
+     *
+     * <p>Assumptions: this address requires the DECISION-read authority and not the customer-master one, and
+     * that is the whole reason it exists rather than the consumer being pointed at {@value #RECORD_PATH}.
+     * The record read answers with all eighteen fields including a national identifier, a government-issued
+     * identifier and a credit score, so it is claimed by an authority this system mints for no context;
+     * granting it to a context that renders nine fields would be the escalation the scope split was
+     * introduced to prevent.</p>
+     *
+     * <p>Trade-offs: this contract now carries a field list belonging to another context's screen, which is
+     * coupling accepted deliberately -- widening that screen later requires a change here. What it buys is
+     * that the exposure is a decision this context takes and can refuse, which is what owning the customer
+     * master means; the alternative left the consumer choosing between no fields and every field.</p>
+     *
+     * <p>Assumptions: no protected value appears in the response at all, so nothing here is masked. The two
+     * encrypted identifiers and the credit score are ABSENT rather than masked, because a masked member is
+     * still a member a future consumer would begin reading.</p>
+     *
+     * @param request the lookup request carrying the customer identifier, the key {@code CUST-ID} declares at
+     *     L5 of {@code app/cpy/CVCUS01Y.cpy}; must satisfy its declared constraints. The record is SHARED with
+     *     the two operations above rather than duplicated, because all three constrain the same nine-digit key
+     *     to the same range
+     * @return the six display fields, never {@code null}
+     * @throws NoSuchElementException if the customer master holds no such row, which the shared advice renders
+     *     as HTTP 404 and which the consumer reads as its own absent-customer outcome
+     */
+    @PostMapping(path = DISPLAY_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public CustomerDisplayView readDisplay(@Valid @RequestBody CustomerLookupRequest request) {
+        return this.reads.readCustomerDisplay(request.customerId());
     }
 
     /**

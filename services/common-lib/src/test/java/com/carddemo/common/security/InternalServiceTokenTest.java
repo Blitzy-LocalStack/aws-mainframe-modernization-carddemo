@@ -220,9 +220,16 @@ class InternalServiceTokenTest {
      * Verifies a caller may not mint a scope its own subject is not permitted to carry.
      *
      * <p>Assumptions: the transaction context is the subject asserted against, because it is the one with a
-     * genuinely narrower entitlement: it reads no customer record, so the customer scope is withheld from it
-     * while the cross-reference and account scopes are not. Asserting the permitted scopes as well as the
-     * refused one is what stops the case passing on a table that permitted nothing at all.</p>
+     * genuinely narrower entitlement: it calls ONE operation family on the account context, the card
+     * cross-reference lookup, so both the account and the customer scopes are withheld from it. Asserting the
+     * one permitted scope as well as the two refused ones is what stops the case passing on a table that
+     * permitted nothing at all.</p>
+     *
+     * <p>Refactoring Rationale: this case asserted two permitted scopes until the transaction context stopped
+     * reading the account master over HTTP -- its bill payment reads and reduces the balance locally now,
+     * under a named cross-schema grant, so nothing in it mints the account scope. The refused half of the case
+     * gained an entry rather than losing one, which is the direction that matters: the account scope is now
+     * asserted to be refused, so a table that quietly restored it fails here.</p>
      */
     @Test
     @DisplayName("a caller cannot mint a scope outside its own permitted set")
@@ -233,15 +240,19 @@ class InternalServiceTokenTest {
 
         assertThat(InternalServiceToken.permittedScopes(
                 InternalServiceToken.SUBJECT_TRANSACTION_SERVICE))
-                .containsExactly(InternalServiceToken.SCOPE_ACCOUNT_READ,
-                        InternalServiceToken.SCOPE_CARD_XREF_READ);
+                .containsExactly(InternalServiceToken.SCOPE_CARD_XREF_READ);
         assertThatThrownBy(() -> transactionMinter.mint(
                 InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
                 InternalServiceToken.SCOPE_CUSTOMER_READ))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(InternalServiceToken.SCOPE_CUSTOMER_READ);
+        assertThatThrownBy(() -> transactionMinter.mint(
+                InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_ACCOUNT_READ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(InternalServiceToken.SCOPE_ACCOUNT_READ);
         assertThat(transactionMinter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                InternalServiceToken.SCOPE_ACCOUNT_READ)).isNotBlank();
+                InternalServiceToken.SCOPE_CARD_XREF_READ)).isNotBlank();
     }
 
     /**

@@ -1,32 +1,14 @@
 package com.carddemo.account.api;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
-import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-
 import com.carddemo.account.config.SecurityConfig;
+import com.carddemo.account.dto.AccountLookupRequest;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
 import com.carddemo.account.dto.AccountViewResponse;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.service.AccountUpdateService;
 import com.carddemo.account.service.AccountViewService;
+import com.carddemo.common.control.OnlineWriteGateExempt;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.GlobalExceptionHandler;
@@ -36,7 +18,10 @@ import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
+import java.security.Principal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -67,7 +52,27 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import tools.jackson.databind.json.JsonMapper;
+
 
 /**
  * Holds the wire contract of the account view and account update surfaces.
@@ -148,9 +153,13 @@ class AccountControllerTest {
     /**
      * The eleven-character key rendering the controller submits to the reference's edits.
      *
-     * <p>Assumptions: the controller renders the bound number left-zero-padded to the declared width
-     * before asking either edit about it, so a stub keyed on anything else is never reached. Stating the
-     * rendered form here once keeps every stub in this class keyed on the same characters.</p>
+     * <p>Assumptions: this value is the same characters {@link #ACCOUNT_ID} renders to, and the two reach
+     * the reference's edits by two different routes. The VIEW renders its bound identifier
+     * left-zero-padded to the declared width before asking the filter edit about it, so the padding
+     * matters there; the UPDATE passes the submitted key through verbatim, because the key it edits is
+     * now the one the caller put in the body. Stating one form here keeps every stub in this class keyed
+     * on the same characters whichever route reaches it, which is only sound because the specimen is
+     * exactly eleven digits and needs no padding.</p>
      */
     private static final String ACCOUNT_KEY = "12345678901";
 
@@ -201,19 +210,27 @@ class AccountControllerTest {
 
     /**
      * The dispatcher path of the account view operation.
+     *
+     * <p>Assumptions: composed from the controller's own constants rather than written as a literal, and
+     * it is a fixed address with no template variable to substitute. Both properties are deliberate: the
+     * account identifier travels in a request body on every operation here, so a template would have
+     * nothing to carry, and composing from the constants means a renamed address cannot leave these cases
+     * asserting against a path no handler serves.</p>
      */
-    private static final String VIEW_PATH = AccountController.BASE_PATH + "/{accountId}/view";
+    private static final String VIEW_PATH =
+            AccountController.BASE_PATH + AccountController.VIEW_PATH;
 
     /**
      * The dispatcher path of the account update operation.
      */
-    private static final String UPDATE_PATH = AccountController.BASE_PATH + "/{accountId}";
+    private static final String UPDATE_PATH =
+            AccountController.BASE_PATH + AccountController.UPDATE_PATH;
 
     /**
      * The dispatcher path of the by-account cross-reference walk.
      */
     private static final String XREF_PATH =
-            AccountController.BASE_PATH + "/{accountId}/card-cross-references";
+            AccountController.BASE_PATH + AccountController.CARD_XREF_SEARCH_PATH;
 
     /**
      * The read path the controller under assertion is built over, substituted.
@@ -263,8 +280,6 @@ class AccountControllerTest {
         guardedContext.register(GuardedSliceWiring.class);
         guardedContext.refresh();
 
-        // WHAT: assembles a servlet context carrying the controller, the shared advice and the deployed
-        //       filter chain, then wraps it in a dispatcher whose requests traverse that chain.
         // WHY : Assumptions: the configurer form is used rather than adding the chain filter by hand,
         //       because the request post-processor that mints an authentication publishes it through the
         //       test context repository this configurer installs. Adding the filter alone would leave
@@ -290,8 +305,6 @@ class AccountControllerTest {
     void buildDispatcher() {
         reset(reads, writes);
 
-        // WHAT: builds a dispatcher over the one controller under assertion, carrying the deployed
-        //       Jackson module and the deployed error advice and no security filtering at all.
         // WHY : Assumptions: the real money module is installed on the converter because the account
         //       view carries five amounts and each has to leave as a JSON STRING. Without it they would
         //       serialise as JSON numbers and the assertions below would pass against a representation a
@@ -340,10 +353,9 @@ class AccountControllerTest {
     @DisplayName("the account view carries all five amounts as quoted JSON strings at scale two")
     void theViewCarriesEveryAmountAsAQuotedString() throws Exception {
         when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
-        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(viewResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
 
-        MvcResult result = this.mockMvc.perform(get(VIEW_PATH, ACCOUNT_ID))
+        MvcResult result = this.mockMvc.perform(readView())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.account.currentBalance").value("-193.00"))
                 .andExpect(jsonPath("$.account.creditLimit").value("1500.00"))
@@ -378,10 +390,9 @@ class AccountControllerTest {
     @DisplayName("no account-view amount is emitted as a bare JSON number")
     void noAmountIsEmittedAsABareJsonNumber() throws Exception {
         when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
-        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(viewResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
 
-        String body = this.mockMvc.perform(get(VIEW_PATH, ACCOUNT_ID))
+        String body = this.mockMvc.perform(readView())
                 .andExpect(status().isOk())
                 .andReturn()
                 .getResponse()
@@ -431,10 +442,9 @@ class AccountControllerTest {
     @DisplayName("the account view masks both protected identifiers and declares no verification value")
     void theViewMasksProtectedIdentifiersAndDeclaresNoVerificationValue() throws Exception {
         when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
-        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(viewResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
 
-        String body = this.mockMvc.perform(get(VIEW_PATH, ACCOUNT_ID))
+        String body = this.mockMvc.perform(readView())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.customer.ssnMasked").value("***-**-6789"))
                 .andExpect(jsonPath("$.customer.governmentIssuedIdMasked").value("****4321"))
@@ -490,10 +500,9 @@ class AccountControllerTest {
     @DisplayName("the account view keeps both channels inside the program-side widths of 40 and 75")
     void theViewKeepsBothChannelsInsideTheProgramSideWidths() throws Exception {
         when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
-        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(viewResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
 
-        this.mockMvc.perform(get(VIEW_PATH, ACCOUNT_ID))
+        this.mockMvc.perform(readView())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.informationMessage")
                         .value("Displaying details of given Account"))
@@ -525,12 +534,88 @@ class AccountControllerTest {
     @DisplayName("the account view publishes the revision as a weak entity tag")
     void theViewPublishesTheRevisionAsAWeakEntityTag() throws Exception {
         when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
-        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(viewResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
 
-        this.mockMvc.perform(get(VIEW_PATH, ACCOUNT_ID))
+        this.mockMvc.perform(readView())
                 .andExpect(status().isOk())
                 .andExpect(header().string(HttpHeaders.ETAG, "W/\"" + REVISION + "\""));
+    }
+
+    /**
+     * The body and the entity tag come from ONE service call on both published routes.
+     *
+     * <p>Purpose: this is the case that keeps the two-transaction pattern from returning. Both routes used
+     * to compose the body from one service operation and then obtain the tag from a SECOND, read-only call
+     * to {@code AccountUpdateService.currentRevision}, which ran in a transaction of its own. At this
+     * datasource's read-committed isolation those are two snapshots, so a concurrent edit committing
+     * between them published a body from before it beside a tag naming the state after it -- and a caller
+     * echoing that tag on {@code If-Match} was then told its precondition was current while holding a body
+     * that was not, which is exactly the silent overwrite the precondition exists to prevent.</p>
+     *
+     * <p>Assumptions: the read route is asserted to leave the WRITE collaborator entirely untouched, which
+     * is the strongest available statement of the property. A weaker assertion naming the removed operation
+     * could not be written at all now that the operation does not exist, and an assertion that merely
+     * checked the tag's value would still pass against a second call that happened to agree.</p>
+     *
+     * <p>Assumptions: the write route is asserted to consult the write collaborator exactly TWICE -- once
+     * for its own key edit and once for the update -- so a third call reintroduced to fetch a tag fails
+     * this case. The count is asserted rather than the absence of a named method for the same reason.</p>
+     *
+     * <p>Assumptions: the structural half asserts that neither service publishes any operation whose name
+     * begins {@code currentRevision}, so the removed shape cannot be restored under its old name and
+     * quietly called again. A reader adding a genuine need for a bare precondition has to change this case
+     * deliberately.</p>
+     *
+     * @throws Exception if either request cannot be performed
+     */
+    @Test
+    @DisplayName("the body and the entity tag come from one service call on both routes")
+    void theBodyAndTheTagComeFromOneServiceCall() throws Exception {
+        when(reads.accountFilterFieldErrors(ACCOUNT_KEY)).thenReturn(List.of());
+        when(reads.readAccountView(ACCOUNT_ID)).thenReturn(revisionedView(REVISION));
+
+        this.mockMvc.perform(readView())
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.ETAG, "W/\"" + REVISION + "\""));
+
+        verifyNoInteractions(writes);
+
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
+                .thenReturn(revisionedUpdate(acceptedResponse(), "8"));
+
+        this.mockMvc.perform(submit(REVISION, submission()))
+                .andExpect(status().isOk())
+                .andExpect(header().string(HttpHeaders.ETAG, "W/\"8\""));
+
+        verify(writes).editAccountKey(ACCOUNT_KEY);
+        verify(writes).update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString());
+        verifyNoMoreInteractions(writes);
+
+        assertThat(publicMethodNamesOf(AccountUpdateService.class))
+                .as("no revision-only read may be published, on either service")
+                .noneMatch(name -> name.startsWith("currentRevision"));
+        assertThat(publicMethodNamesOf(AccountViewService.class))
+                .as("the read service publishes its revision with its body, never on its own")
+                .noneMatch(name -> name.startsWith("currentRevision"));
+    }
+
+    /**
+     * Lists the declared public method names of a type, for a structural assertion.
+     *
+     * <p>Assumptions: only methods DECLARED on the type are listed, so nothing inherited from
+     * {@code Object} or from a framework superclass reaches the assertion and turns a rename somewhere
+     * else into a failure here.</p>
+     *
+     * @param type the type to inspect; must not be {@code null}
+     * @return the declared public method names, never {@code null}
+     */
+    private static List<String> publicMethodNamesOf(Class<?> type) {
+        return Arrays.stream(type.getDeclaredMethods())
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .map(java.lang.reflect.Method::getName)
+                .toList();
     }
 
     /**
@@ -572,7 +657,7 @@ class AccountControllerTest {
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
                 .thenThrow(new RecordConflictException(RecordConflictException.Kind.STALE_VERSION));
 
-        this.mockMvc.perform(submit(REVISION, submission()))
+        this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.status").value(ApiError.CONFLICT_STATUS))
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT))
@@ -601,7 +686,7 @@ class AccountControllerTest {
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
                 .thenThrow(new RecordConflictException(RecordConflictException.Kind.LOCK_UNAVAILABLE));
 
-        String lockSentence = this.mockMvc.perform(submit(REVISION, submission()))
+        String lockSentence = this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isConflict())
                 .andReturn()
                 .getResponse()
@@ -644,7 +729,7 @@ class AccountControllerTest {
                         FieldValidationFlag.NOT_OK,
                         "Account Active Status must be Y or N"));
 
-        this.mockMvc.perform(submit(REVISION, submission()))
+        this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
                 .andExpect(jsonPath("$.fieldErrors.length()").value(3))
@@ -692,7 +777,7 @@ class AccountControllerTest {
                 .thenThrow(new ClientInputException(ApiError.CODE_VALIDATION, "creditLimit",
                         FieldValidationFlag.NOT_OK, "Credit Limit is not valid"));
 
-        AccountUpdateRequest malformed = submission("1,500.OO");
+        String malformed = submissionJson("1,500.OO");
 
         this.mockMvc.perform(submit(REVISION, malformed))
                 .andExpect(status().isBadRequest())
@@ -729,9 +814,9 @@ class AccountControllerTest {
         when(writes.editAccountKey(ACCOUNT_KEY))
                 .thenReturn(AccountUpdateService.EditOutcome.acceptable());
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
-                .thenReturn(acceptedResponse());
+                .thenReturn(revisionedUpdate(acceptedResponse(), REVISION));
 
-        AccountUpdateRequest padded = submission("0000001500.00");
+        String padded = submissionJson("0000001500.00");
 
         this.mockMvc.perform(submit(REVISION, padded)).andExpect(status().isOk());
 
@@ -763,10 +848,9 @@ class AccountControllerTest {
         when(writes.editAccountKey(ACCOUNT_KEY))
                 .thenReturn(AccountUpdateService.EditOutcome.acceptable());
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
-                .thenReturn(acceptedResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn("8");
+                .thenReturn(revisionedUpdate(acceptedResponse(), "8"));
 
-        this.mockMvc.perform(submit(REVISION, submission()))
+        this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.fieldErrors").isArray())
                 .andExpect(jsonPath("$.fieldErrors.length()").value(0))
@@ -806,7 +890,7 @@ class AccountControllerTest {
         when(writes.editAccountKey(ACCOUNT_KEY))
                 .thenReturn(AccountUpdateService.EditOutcome.acceptable());
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
-                .thenReturn(new AccountUpdateResponse(ACCOUNT_KEY, null,
+                .thenReturn(revisionedUpdate(new AccountUpdateResponse(ACCOUNT_KEY, null,
                         "Account Active Status must be Y or N",
                         List.of(new ApiError.FieldError("activeStatus", FieldValidationFlag.NOT_OK,
                                         "Account Active Status must be Y or N"),
@@ -814,10 +898,9 @@ class AccountControllerTest {
                                         "Credit Limit is not valid"),
                                 new ApiError.FieldError("expirationDateYear",
                                         FieldValidationFlag.NOT_OK, "Invalid card expiry year")),
-                        null, null));
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+                        null, null), REVISION));
 
-        this.mockMvc.perform(submit(REVISION, submission()))
+        this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.returnMessage").isString())
                 .andExpect(jsonPath("$.returnMessage")
@@ -872,7 +955,7 @@ class AccountControllerTest {
                 AccountUpdateService.EditOutcome.blank(
                         AccountUpdateService.MESSAGE_ACCOUNT_NOT_PROVIDED));
 
-        this.mockMvc.perform(submit(REVISION, submission()))
+        this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"))
                 .andExpect(jsonPath("$.fieldErrors[0].state")
@@ -897,10 +980,10 @@ class AccountControllerTest {
     @Test
     @DisplayName("an update without the concurrency precondition never reaches the write path")
     void anUpdateWithoutThePreconditionIsRefused() throws Exception {
-        this.mockMvc.perform(put(UPDATE_PATH, ACCOUNT_ID)
+        this.mockMvc.perform(post(UPDATE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.APPLICATION_JSON)
-                        .content(this.jsonMapper.writeValueAsString(submission())))
+                        .content(submissionJson()))
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(writes);
@@ -923,11 +1006,10 @@ class AccountControllerTest {
         when(writes.editAccountKey(ACCOUNT_KEY))
                 .thenReturn(AccountUpdateService.EditOutcome.acceptable());
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
-                .thenReturn(acceptedResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+                .thenReturn(revisionedUpdate(acceptedResponse(), REVISION));
 
         for (String presented : List.of("W/\"" + REVISION + "\"", "\"" + REVISION + "\"", REVISION)) {
-            this.mockMvc.perform(submit(presented, submission())).andExpect(status().isOk());
+            this.mockMvc.perform(submit(presented, submissionJson())).andExpect(status().isOk());
         }
 
         ArgumentCaptor<String> precondition = ArgumentCaptor.forClass(String.class);
@@ -936,6 +1018,55 @@ class AccountControllerTest {
         assertThat(precondition.getAllValues())
                 .as("every accepted rendering must reduce to the same revision")
                 .containsExactly(REVISION, REVISION, REVISION);
+    }
+
+    /**
+     * Every member the wire document names binds to the member of the record that carries it.
+     *
+     * <p>Purpose: the update endpoint is consumed by a caller this repository does not contain, so the
+     * mapping from JSON member name to record component IS the contract. This case sends a body authored as
+     * text -- forty-three literal member names, none of them produced by the record under test -- and
+     * asserts that every one of the forty-three components arrives carrying the value the text placed
+     * against its name. A member renamed in Java stops binding from that text and arrives {@code null}; a
+     * member reordered relative to another of the same type binds the neighbour's value; and either failure
+     * is named here by component.</p>
+     *
+     * <p>Alternatives Considered: asserting only that the request was accepted with status 200. Rejected
+     * because a body binds successfully with every member absent -- the record has no required member and
+     * the endpoint's validation lives behind it -- so a 200 says the document parsed, not that any value
+     * reached the member it was addressed to. Forty-two of the forty-three could be silently dropped and the
+     * status would not move.</p>
+     *
+     * <p>Assumptions: the expected values come from {@code submission()}, which constructs the record
+     * POSITIONALLY. That is deliberate rather than incidental: a reordering of two same-typed components
+     * shifts the values that helper assigns while leaving the hand-authored text pointing at names, so the
+     * two sides disagree exactly where a caller would. Comparing component by component rather than by
+     * record equality is also deliberate -- the record's {@code toString} withholds every value by design,
+     * so an equality failure would report a populated-member count and name nothing.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("each of the forty-three wire members binds to the record component that carries it")
+    void everyWireMemberBindsToItsComponent() throws Exception {
+        when(writes.editAccountKey(ACCOUNT_KEY))
+                .thenReturn(AccountUpdateService.EditOutcome.acceptable());
+        when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
+                .thenReturn(revisionedUpdate(acceptedResponse(), REVISION));
+
+        this.mockMvc.perform(submit(REVISION, submissionJson())).andExpect(status().isOk());
+
+        ArgumentCaptor<AccountUpdateRequest> bound =
+                ArgumentCaptor.forClass(AccountUpdateRequest.class);
+        verify(writes).update(eq(ACCOUNT_ID), bound.capture(), eq(REVISION));
+
+        AccountUpdateRequest arrived = bound.getValue();
+        AccountUpdateRequest expected = submission();
+        for (RecordComponent component : AccountUpdateRequest.class.getRecordComponents()) {
+            assertThat(valueOf(component, arrived))
+                    .as("the wire member %s must bind to the component of that name", component.getName())
+                    .isEqualTo(valueOf(component, expected));
+        }
     }
 
     /**
@@ -951,10 +1082,19 @@ class AccountControllerTest {
      * repair of the reference. This case pins the consequence a caller can observe: extra members and
      * extra query values naming a user type or a role are simply not part of any contract here.</p>
      *
-     * <p>Assumptions: the submitted record declares forty-three members and none of them is a user
-     * identifier, a user type or a role, so this case asserts both that the record declares no such
-     * member and that presenting one over the wire leaves the outcome identical. The token-to-authority
-     * translation itself belongs to the shared kernel and is not re-asserted here.</p>
+     * <p>Assumptions: none of the submitted record's members is a user identifier, a user type or a role, so
+     * this case asserts both that the record declares no such member and that presenting one over the wire
+     * leaves the outcome identical. The token-to-authority translation itself belongs to the shared kernel
+     * and is not re-asserted here.</p>
+     *
+     * <p>Refactoring Rationale: this case formerly ALSO claimed the record's arity and three sampled member
+     * names. That claim was both mis-sited and too weak to carry: a rename, a reordering or a retyping among
+     * the other forty members satisfied a count and three samples while breaking every caller, and a reader
+     * looking for the submitted contract would not have thought to look inside a case about identity. The
+     * whole contract -- the exact ordered forty-three names, the declared type of each, and each one's
+     * baseline screen width held against {@code app/cpy-bms/COACTUP.CPY} -- is now asserted by
+     * {@code com.carddemo.account.dto.AccountUpdateRequestContractTest}, and what remains here is the one
+     * claim this case is actually about.</p>
      *
      * @throws Exception if either request cannot be performed
      */
@@ -962,19 +1102,16 @@ class AccountControllerTest {
     @DisplayName("a caller-supplied user type or role does not change the update outcome")
     void aCallerSuppliedUserTypeChangesNothing() throws Exception {
         assertThat(componentNamesOf(AccountUpdateRequest.class))
-                .as("the submitted record declares forty-three members and no identity among them")
-                .hasSize(43)
+                .as("no member of the submitted record can carry a caller-asserted identity")
                 .noneMatch(name -> name.equals("userType") || name.equals("userId")
-                        || name.equals("role"))
-                .contains("accountId", "creditLimit", "primaryCardHolderIndicator");
+                        || name.equals("role"));
 
         when(writes.editAccountKey(ACCOUNT_KEY))
                 .thenReturn(AccountUpdateService.EditOutcome.acceptable());
         when(writes.update(eq(ACCOUNT_ID), any(AccountUpdateRequest.class), anyString()))
-                .thenReturn(acceptedResponse());
-        when(writes.currentRevision(ACCOUNT_ID)).thenReturn(REVISION);
+                .thenReturn(revisionedUpdate(acceptedResponse(), REVISION));
 
-        String plain = this.mockMvc.perform(submit(REVISION, submission()))
+        String plain = this.mockMvc.perform(submit(REVISION, submissionJson()))
                 .andExpect(status().isOk())
                 .andReturn()
                 .getResponse()
@@ -990,13 +1127,12 @@ class AccountControllerTest {
         //       auto-configuration -- so the case would report on this class's mapper rather than on the
         //       controller's contract. The structural assertion above covers the body instead, and covers
         //       it more strongly: a member the record does not declare cannot bind under any policy.
-        String claimed = this.mockMvc.perform(put(UPDATE_PATH + "?userType=A&role=carddemo-admin",
-                        ACCOUNT_ID)
+        String claimed = this.mockMvc.perform(post(UPDATE_PATH + "?userType=A&role=carddemo-admin")
                         .header(HttpHeaders.IF_MATCH, REVISION)
                         .header("X-Carddemo-Claimed-User-Type", "A")
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.APPLICATION_JSON)
-                        .content(this.jsonMapper.writeValueAsString(submission())))
+                        .content(submissionJson()))
                 .andExpect(status().isOk())
                 .andReturn()
                 .getResponse()
@@ -1032,16 +1168,15 @@ class AccountControllerTest {
         when(reads.listCardCrossReferences(anyLong(), any(), any(), anyString()))
                 .thenReturn(new PageResponse<>(
                         List.of(new CardXrefResponse("************4444", "000000123", ACCOUNT_KEY)),
-                        firstBoundary, lastBoundary, true, false));
+                        firstBoundary, lastBoundary, true));
 
-        this.mockMvc.perform(get(XREF_PATH, ACCOUNT_ID).principal(() -> "carddemo-tester"))
+        this.mockMvc.perform(searchCrossReferences().principal(() -> "carddemo-tester"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
                 .andExpect(jsonPath("$.items[0].cardNumberMasked").value("************4444"))
                 .andExpect(jsonPath("$.firstKey").value(firstBoundary))
                 .andExpect(jsonPath("$.lastKey").value(lastBoundary))
-                .andExpect(jsonPath("$.hasNext").value(true))
-                .andExpect(jsonPath("$.hasPrevious").value(false));
+                .andExpect(jsonPath("$.hasNext").value(true));
 
         assertThat(firstBoundary)
                 .as("a published boundary must disclose no key column, and a card number least of all")
@@ -1062,10 +1197,10 @@ class AccountControllerTest {
     @Test
     @DisplayName("an unauthenticated update is refused and never reaches the write path")
     void anUnauthenticatedUpdateIsRefused() throws Exception {
-        guarded.perform(put(UPDATE_PATH, ACCOUNT_ID)
+        guarded.perform(post(UPDATE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.APPLICATION_JSON)
-                        .content(this.jsonMapper.writeValueAsString(submission())))
+                        .content(submissionJson()))
                 .andExpect(status().isUnauthorized());
 
         verifyNoInteractions(writes);
@@ -1086,7 +1221,7 @@ class AccountControllerTest {
     @Test
     @DisplayName("a token carrying neither group authority is refused on the account subtree")
     void aTokenWithoutEitherGroupAuthorityIsRefused() throws Exception {
-        guarded.perform(get(XREF_PATH, ACCOUNT_ID)
+        guarded.perform(searchCrossReferences()
                         .with(jwt().authorities(new SimpleGrantedAuthority("SCOPE_openid"))))
                 .andExpect(status().isForbidden());
 
@@ -1108,10 +1243,10 @@ class AccountControllerTest {
     @DisplayName("both published group authorities reach the handler on the account subtree")
     void eitherGroupAuthorityReachesTheHandler() throws Exception {
         when(reads.listCardCrossReferences(anyLong(), any(), any(), anyString()))
-                .thenReturn(new PageResponse<>(List.of(), null, null, false, false));
+                .thenReturn(new PageResponse<>(List.of(), null, null, false));
 
         for (String authority : SecurityConfig.BUSINESS_AUTHORITIES) {
-            guarded.perform(get(XREF_PATH, ACCOUNT_ID)
+            guarded.perform(searchCrossReferences()
                             .with(jwt().authorities(new SimpleGrantedAuthority(authority))))
                     .andExpect(status().isOk());
         }
@@ -1120,6 +1255,33 @@ class AccountControllerTest {
                 .as("the admitted set is the reference's two-value user-type domain and no wider")
                 .hasSize(2);
         verify(reads, times(2)).listCardCrossReferences(anyLong(), any(), any(), anyString());
+    }
+
+    /**
+     * Reads one component's value out of a submission through that component's own accessor.
+     *
+     * <p>Assumptions: the value is read reflectively rather than by naming forty-three accessors, so a
+     * component ADDED to the record is compared by the binding case with no edit here. Naming the accessors
+     * would leave a new component silently unchecked, which is the failure the exhaustive comparison exists
+     * to prevent.</p>
+     *
+     * <p>Assumptions: a reflective failure is raised as an {@code AssertionError} naming the component
+     * rather than propagated as a checked cause, because a component whose accessor cannot be read is a
+     * broken record rather than a broken test, and the diagnostic has to say which component.</p>
+     *
+     * @param component the record component whose value to read; must belong to
+     *     {@code AccountUpdateRequest} and must not be {@code null}
+     * @param submission the submission to read it from; must not be {@code null}
+     * @return the characters that component carries, or {@code null} when it carries none
+     * @throws AssertionError if the component's accessor cannot be invoked
+     */
+    private static String valueOf(RecordComponent component, AccountUpdateRequest submission) {
+        try {
+            return (String) component.getAccessor().invoke(submission);
+        } catch (ReflectiveOperationException cause) {
+            throw new AssertionError("the accessor for " + component.getName()
+                    + " could not be read, so the wire binding of that member cannot be judged", cause);
+        }
     }
 
     /**
@@ -1188,6 +1350,36 @@ class AccountControllerTest {
     }
 
     /**
+     * Pairs the stubbed account view with a revision, as the read path now answers.
+     *
+     * <p>⚠️ Refactoring Rationale: the read path used to answer with a bare view and the controller then
+     * obtained the entity tag from a SECOND call, to {@code AccountUpdateService.currentRevision}. Every
+     * case below therefore had to stub two collaborators to exercise one route, and the two stubs could
+     * be given values describing different states without any case failing -- which is the production
+     * defect the pairing removes. Stubbing one carrier is what makes the two values inseparable in the
+     * arrangement as well as in the code.</p>
+     *
+     * @param revision the token to publish beside the view; must not be {@code null}
+     * @return the view and its revision as one carrier, never {@code null}
+     */
+    private static AccountViewService.RevisionedAccountView revisionedView(String revision) {
+        return new AccountViewService.RevisionedAccountView(viewResponse(), revision);
+    }
+
+    /**
+     * Pairs a stubbed update response with the revision its rows now stand at.
+     *
+     * @param response the committed state the write path is stubbed to answer with; must not be
+     *     {@code null}
+     * @param revision the token to publish in the {@code ETag}; must not be {@code null}
+     * @return the response and its revision as one carrier, never {@code null}
+     */
+    private static AccountUpdateService.RevisionedAccountUpdate revisionedUpdate(
+            AccountUpdateResponse response, String revision) {
+        return new AccountUpdateService.RevisionedAccountUpdate(response, revision);
+    }
+
+    /**
      * Builds the account view the read path is stubbed to answer with.
      *
      * <p>Assumptions: the five amounts are chosen so one case pins three renderings at once -- a negative
@@ -1244,6 +1436,91 @@ class AccountControllerTest {
     }
 
     /**
+     * Builds the request body as hand-authored text, naming every member the wire contract declares.
+     *
+     * <p>Purpose: this is the document a caller actually sends, written out here rather than produced by
+     * serialising {@code AccountUpdateRequest}. Every member name below is a literal, so it cannot follow a
+     * rename or a reordering in the record: a member renamed in Java stops binding from this text and the
+     * case that depends on its value fails, which is the failure a caller would experience and the one a
+     * serialise-the-record body cannot produce.</p>
+     *
+     * <p>Assumptions: the values are the same ones {@code submission(String)} constructs, so the two are
+     * interchangeable as subject and oracle for a binding assertion -- one side is authored as text and the
+     * other as a record, and neither is derived from the other. The government-issued identifier is twenty
+     * characters rather than the twenty-one an earlier fixture carried, because
+     * {@code app/cpy-bms/COACTUP.CPY} L282 declares {@code ACSGOVTI PIC X(20)} and a fixture wider than the
+     * field it represents would exercise a value the reference's screen cannot deliver.</p>
+     *
+     * <p>Assumptions: the two second-telephone parts and the second address line are present but empty
+     * rather than omitted, matching the record the reference receives -- the screen sends every field every
+     * turn, unfilled ones as spaces, so an omitted member would be a shape the baseline never produces.</p>
+     *
+     * @param creditLimit the exact characters to place in the credit-limit member; must not be {@code null}
+     *     and must contain no character requiring JSON escaping
+     * @return the complete request body text carrying that credit limit, never {@code null}
+     */
+    private static String submissionJson(String creditLimit) {
+        return """
+                {
+                  "accountId": "%s",
+                  "activeStatus": "Y",
+                  "creditLimit": "%s",
+                  "cashCreditLimit": "500.00",
+                  "currentBalance": "-193.00",
+                  "currentCycleCredit": "250.75",
+                  "currentCycleDebit": "1000.00",
+                  "openDateYear": "2020",
+                  "openDateMonth": "01",
+                  "openDateDay": "15",
+                  "expirationDateYear": "2027",
+                  "expirationDateMonth": "01",
+                  "expirationDateDay": "31",
+                  "reissueDateYear": "2024",
+                  "reissueDateMonth": "01",
+                  "reissueDateDay": "31",
+                  "groupId": "DEFAULT",
+                  "customerId": "000000456",
+                  "ssnPart1": "111",
+                  "ssnPart2": "22",
+                  "ssnPart3": "6789",
+                  "dateOfBirthYear": "1980",
+                  "dateOfBirthMonth": "04",
+                  "dateOfBirthDay": "02",
+                  "ficoCreditScore": "742",
+                  "firstName": "ADA",
+                  "middleName": "M",
+                  "lastName": "LOVELACE",
+                  "addressLine1": "1 SYNTHETIC WAY",
+                  "addressLine2": "SUITE 100",
+                  "city": "TESTVILLE",
+                  "stateCode": "NY",
+                  "countryCode": "USA",
+                  "zipCode": "10001",
+                  "phone1AreaCode": "212",
+                  "phone1Prefix": "555",
+                  "phone1LineNumber": "0100",
+                  "phone2AreaCode": "",
+                  "phone2Prefix": "",
+                  "phone2LineNumber": "",
+                  "governmentIssuedId": "SYNTHETICID000004321",
+                  "eftAccountId": "0000000001",
+                  "primaryCardHolderIndicator": "Y"
+                }""".formatted(ACCOUNT_KEY, creditLimit);
+    }
+
+    /**
+     * Builds the request body as hand-authored text, carrying the credit limit every accepted case uses.
+     *
+     * <p>Assumptions: the delegation mirrors {@code submission()} exactly, so a case that does not care
+     * about the credit limit names neither it nor any other of the forty-three values.</p>
+     *
+     * @return the complete request body text, never {@code null}
+     */
+    private static String submissionJson() {
+        return submissionJson("1500.00");
+    }
+
+    /**
      * Builds a submission with the credit limit set to a caller-chosen character sequence.
      *
      * <p>Assumptions: only the credit limit varies, so a case that is about one member's characters does not
@@ -1252,6 +1529,14 @@ class AccountControllerTest {
      * three, two and four; each telephone number arrives SPLIT three, three and four; and the account's own
      * postal code -- {@code 05  ACCT-ADDR-ZIP  PIC X(10).} at {@code app/cpy/CVACT01Y.cpy} L15 -- is
      * deliberately absent, the only postal code submitted being the customer's.</p>
+     *
+     * <p>Refactoring Rationale: the government-issued identifier is twenty characters. It was twenty-one,
+     * which exceeds {@code ACSGOVTI PIC X(20)} at {@code app/cpy-bms/COACTUP.CPY} L282 -- a value the
+     * reference's screen cannot deliver, and one nothing rejected here because the record declares no width
+     * constraint and defers every length rule to the service. The over-width value went unnoticed while this
+     * helper supplied BOTH the request body and the expected values; it surfaced the moment the body became
+     * hand-authored text carrying the contract's own width, which is the discrepancy that arrangement
+     * exists to expose.</p>
      *
      * @param creditLimit the exact characters to place in the credit-limit member; must not be {@code null}
      * @return a fully populated submission carrying that credit limit, never {@code null}
@@ -1284,7 +1569,7 @@ class AccountControllerTest {
                 "10001",
                 "212", "555", "0100",
                 "", "", "",
-                "SYNTHETICID0000004321",
+                "SYNTHETICID000004321",
                 "0000000001",
                 "Y");
     }
@@ -1304,6 +1589,95 @@ class AccountControllerTest {
     }
 
     /**
+     * The two reads expressed as {@code POST} declare themselves reads to the batch-window gate, and the
+     * one operation that writes does not.
+     *
+     * <p>Purpose: the gate classifies by HTTP METHOD, because a method is known before a handler runs, and
+     * it enumerates the SAFE methods and gates everything else. Moving two reads onto {@code POST} to keep
+     * the account identifier out of the request line therefore put them on the gated side of that
+     * classification, and only the annotation puts them back. Without it the account view and the
+     * cross-reference walk would be refused for the duration of every batch window -- a capability loss the
+     * quiesce this gate migrates never had, since closing a file to WRITERS is what
+     * {@code app/jcl/CLOSEFIL.jcl} does.</p>
+     *
+     * <p>Assumptions: the DIRECTION that matters is asserted as well, and it is the more dangerous one. An
+     * exemption on the update would un-gate the one operation on this controller that writes, so this case
+     * pins its absence rather than only the two presences. The interceptor's own tests establish that an
+     * exemption does not leak from a method to its siblings, so the two facts together are what make the
+     * update gated.</p>
+     *
+     * <p>Trade-offs: this reads the annotations reflectively rather than driving requests through the
+     * interceptor, which would need a window state, a parameter source and a container. What the reflective
+     * form gives up is proof that the interceptor honours the annotation, and that is already proven where
+     * it belongs -- {@code OnlineWriteGateInterceptorTest} in the shared kernel asserts it against doubles.
+     * What it buys is that THIS module's own three operations are pinned to the correct side of the
+     * classification, which no test in the kernel can know.</p>
+     *
+     * @throws NoSuchMethodException if a handler this case names has moved, which is itself the defect
+     */
+    @Test
+    @DisplayName("the read-shaped POSTs declare the batch-window exemption and the write does not")
+    void theReadShapedPostsDeclareTheBatchWindowExemption() throws NoSuchMethodException {
+        Method view = AccountController.class.getMethod("readView", AccountLookupRequest.class);
+        Method walk = AccountController.class.getMethod("listCardCrossReferences",
+                AccountLookupRequest.class, String.class, String.class, Principal.class);
+        Method update = AccountController.class.getMethod("update", String.class,
+                AccountUpdateRequest.class);
+
+        for (Method read : List.of(view, walk)) {
+            OnlineWriteGateExempt exemption = read.getAnnotation(OnlineWriteGateExempt.class);
+            assertThat(exemption)
+                    .as("%s is a read expressed as a POST and must declare itself one", read.getName())
+                    .isNotNull();
+            assertThat(exemption.reason())
+                    .as("%s must state why refusing it during the window would remove a capability",
+                            read.getName())
+                    .isNotBlank();
+        }
+
+        assertThat(update.getAnnotation(OnlineWriteGateExempt.class))
+                .as("the account edit writes, so it must be refused while the batch window is closed")
+                .isNull();
+        assertThat(AccountController.class.getAnnotation(OnlineWriteGateExempt.class))
+                .as("no type-level exemption may cover this controller, because it publishes a write")
+                .isNull();
+    }
+
+    /**
+     * Builds the account-view request, whose selector travels in a body.
+     *
+     * <p>Assumptions: every case that reads the view goes through this helper rather than composing the
+     * request itself, because the operation now has three properties a case could get wrong independently
+     * -- the method, the content type and the body -- where the keyed form had only a path. A case that
+     * omitted the content type would be refused with 415 for a reason it was not written to assert.</p>
+     *
+     * @return a request builder ready to be performed, never {@code null}
+     */
+    private MockHttpServletRequestBuilder readView() {
+        return post(VIEW_PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_ID)));
+    }
+
+    /**
+     * Builds the by-account cross-reference walk request, whose account travels in a body.
+     *
+     * <p>Assumptions: no cursor and no direction are supplied, so every case built on this helper reads
+     * the OPENING page. The two cases that are about a boundary supply their own values on top of it, and
+     * both stay in the query string: a sealed cursor and a two-word direction are not values the
+     * sensitive-data contract prohibits, so only the account had to move into the body.</p>
+     *
+     * @return a request builder ready to be performed, never {@code null}
+     */
+    private MockHttpServletRequestBuilder searchCrossReferences() {
+        return post(XREF_PATH)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content(this.jsonMapper.writeValueAsString(new AccountLookupRequest(ACCOUNT_ID)));
+    }
+
+    /**
      * Builds an update request carrying a concurrency precondition and a submission body.
      *
      * <p>Assumptions: the precondition header is written by this helper rather than by each case, because
@@ -1311,17 +1685,50 @@ class AccountControllerTest {
      * reason it was not written to assert. The one case that IS about the missing header builds its request
      * without this helper, deliberately.</p>
      *
+     * <p>Refactoring Rationale: the body arrives as request TEXT rather than as an
+     * {@code AccountUpdateRequest} this helper serialises. Serialising the production record made that
+     * record both the subject under test and the source of the expected wire document, so a member renamed
+     * or reordered in the record changed the document in the same edit and every case here stayed green
+     * through exactly the breaking change a caller would suffer. Hand-authored text cannot follow a rename,
+     * so a member the wire names and the record no longer declares now arrives absent and the case fails.</p>
+     *
+     * @param ifMatch the exact characters to present as the concurrency precondition; must not be
+     *     {@code null}
+     * @param jsonBody the exact request body text to send, authored independently of the record it binds
+     *     to; must not be {@code null}
+     * @return a request builder ready to be performed, never {@code null}
+     */
+    private MockHttpServletRequestBuilder submit(String ifMatch, String jsonBody) {
+        return post(UPDATE_PATH)
+                .header(HttpHeaders.IF_MATCH, ifMatch)
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .content(jsonBody);
+    }
+
+    /**
+     * Builds an update request whose body is SERIALISED from the production record.
+     *
+     * <p>Assumptions: this overload exists for the cases whose subject is the controller's behaviour
+     * around a well-formed body -- the accepted path, the precondition values, the authority rules -- where
+     * authoring the document by hand would restate a shape those cases do not assert on. The cases whose
+     * subject IS the wire document use the text overload above, and the rationale recorded there is why
+     * that is the default rather than this.</p>
+     *
+     * <p>Assumptions: the address is the deployed one. The submission is a {@code POST} to
+     * {@value AccountController#UPDATE_PATH} beneath the base path, with the account identifier in the
+     * BODY rather than in the path, so a helper that addressed it as a {@code PUT} with a path variable
+     * would exercise a route the controller does not declare.</p>
+     *
      * @param ifMatch the exact characters to present as the concurrency precondition; must not be
      *     {@code null}
      * @param body the submission to serialise into the request body; must not be {@code null}
      * @return a request builder ready to be performed, never {@code null}
+     * @throws com.fasterxml.jackson.core.JsonProcessingException if the submission cannot be serialised
      */
-    private MockHttpServletRequestBuilder submit(String ifMatch, AccountUpdateRequest body) {
-        return put(UPDATE_PATH, ACCOUNT_ID)
-                .header(HttpHeaders.IF_MATCH, ifMatch)
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept(MediaType.APPLICATION_JSON)
-                .content(this.jsonMapper.writeValueAsString(body));
+    private MockHttpServletRequestBuilder submit(String ifMatch, AccountUpdateRequest body)
+            throws com.fasterxml.jackson.core.JsonProcessingException {
+        return submit(ifMatch, this.jsonMapper.writeValueAsString(body));
     }
 
     /**

@@ -186,25 +186,17 @@ variable "kms_key_arn" {
 #       "no secrets committed" holds because the configuration cannot express a
 #       committed secret -- not because each reviewer catches it. A value that
 #       cannot be supplied cannot be committed.
-# WHY : Alternatives Considered: the same reasoning retired a PEM pair
-#       (`service_tls_certificate` and `service_tls_private_key`) that this
-#       module previously accepted so it could copy the values into two Secrets
-#       Manager entries. A private key is credential material, so those inputs
-#       reopened exactly the hole every other input here is shaped to close, and
-#       `sensitive = true` on them changed only how the plan RENDERED the value,
-#       not whether a tfvars file or a state file could hold it. There is now no
-#       material to stop anywhere: each task mints its own listener key pair and
-#       self-signed certificate at startup, so no module and no root holds one.
-#       Refactoring Rationale: this said the material "stops at
-#       aws_acm_certificate in the calling root". That was true of an
-#       intermediate arrangement and is not true now -- both roots' generated
-#       key, self-signed certificate and imported ACM certificate are deleted,
-#       and the imported certificate was in any case unreachable, because
-#       var.alb_certificate_arn is non-nullable with no default so no listener
-#       could ever have selected it.
-#       Rejected alternative: keeping the inputs and relying on both roots
-#       leaving them null -- which is what they in fact did, and which is a
-#       convention rather than a control.
+# WHY : Alternatives Considered: the same reasoning excludes a PEM pair
+#       (`service_tls_certificate` and `service_tls_private_key`) that would let a
+#       caller hand listener material to this module for storage. A private key is
+#       credential material, so such inputs would reopen exactly the hole every
+#       other input here is shaped to close, and `sensitive = true` on them would
+#       change only how a plan RENDERED the value, not whether a tfvars file or a
+#       state file could hold it. Declaring them and relying on both roots passing
+#       null is a convention rather than a control, so they are absent instead.
+#       Assumptions: there is no material for them to carry in any case -- each
+#       task mints its own listener key pair and self-signed certificate at
+#       startup, so no module and no root holds one.
 # WHY : Refactoring Rationale: this replaces a baseline that stored the
 #       credential in cleartext in the record itself:
 #       `05 SEC-USR-PWD PIC X(08).` at app/cpy/CSUSR01Y.cpy:L21, an
@@ -415,13 +407,13 @@ variable "service_credential_names" {
     error_message = "Each service_credential_names element must be lowercase letters, digits and underscores, start with a letter, and be at most 63 characters -- for example \"carddemo_ledger\"."
   }
 
-  # WHY : Refactoring Rationale: this inventory held EIGHT names and now holds
-  #       fifteen. The seven migration roles were added with the schema-ownership
-  #       split in V0 section 1: a schema is now owned by a NOLOGIN role, so Flyway
-  #       can no longer create its objects by connecting as the runtime identity and
-  #       needs an identity of its own that can `SET ROLE` to the owner. Each of
-  #       those identities has LOGIN and therefore needs a credential, and this is
-  #       the module that generates one.
+  # WHY : Assumptions: the inventory holds fifteen names because the
+  #       schema-ownership split in V0 section 1 needs two identities per context.
+  #       A schema is owned by a NOLOGIN role, so Flyway cannot create its objects
+  #       by connecting as the runtime identity and needs an identity of its own
+  #       that can `SET ROLE` to the owner. Each of those seven migration
+  #       identities has LOGIN and therefore needs a credential, and this is the
+  #       module that generates one.
   # WHY : Assumptions: the fifteen role names are a contract with a SQL artifact,
   #       not a naming convention. data-migration/sql/V0__schemas_and_roles.sql
   #       creates exactly these fifteen LOGIN roles, and its own header states that the

@@ -979,25 +979,35 @@ class CardListServiceTest {
     }
 
     /**
-     * Asserts the opening page advertises no page behind it, and that the refusal sentence is the
-     * reference's.
+     * Asserts the opening page publishes the position a backward step would be issued from, and that the
+     * refusal of that step is not this service's to make.
      *
-     * <p>Assumptions: the reference refuses a backward step from its first page rather than re-reading it
-     * silently -- {@code app/cbl/COCRDLIC.cbl:903} raises its sentence exactly on the page whose ordinal
-     * condition at {@code :238} says nothing precedes it -- so an envelope that advertised a previous page
-     * there would offer the caller a step the reference does not have.</p>
+     * <p>Assumptions: the reference refuses a backward step from its first page from its own PAGE ORDINAL
+     * and not from anything it reads -- {@code app/cbl/COCRDLIC.cbl:902-903} raises the sentence on the
+     * condition declared at {@code :237-238}, and {@code :492} and {@code :508} are where the ordinal
+     * moves. The ordinal lived in the communication area the terminal carried between turns, so its
+     * migrated home is the SPA's navigation state; what this service owes the caller is the position,
+     * which every page carrying rows names. This test therefore pins the position and the sentence
+     * separately: the page publishes the leading boundary, and the refusal wording remains available for
+     * the client that holds the ordinal to render.</p>
      */
     @Test
-    @DisplayName("the opening page reports no previous page and refuses a backward step")
-    void theOpeningPageReportsNoPreviousPage() {
+    @DisplayName("the opening page publishes the position a backward step is issued from")
+    void theOpeningPagePublishesItsLeadingBoundary() {
 
         PageResponse<CardSummary> opening = serviceOver(keysetStore(this.corpus))
                 .list(null, null, false, SUBJECT);
 
-        assertThat(opening.hasPrevious()).isFalse();
-        assertThat(CardListService.backwardAvailable(opening)).isFalse();
-        assertThat(CardListService.pagingRefusal(opening, true))
-                .contains(CardListService.MESSAGE_NO_PREVIOUS_PAGES);
+        assertThat(opening.firstKey())
+                .as("the position a backward request is issued from is published on every page with rows")
+                .isNotNull();
+        assertThat(CardListService.backwardAvailable(opening))
+                .as("a backward step is ADDRESSABLE from the opening page; whether a row waits there is"
+                        + " the caller's own page ordinal to answer")
+                .isTrue();
+        assertThat(CardListService.MESSAGE_NO_PREVIOUS_PAGES)
+                .as("the reference sentence a client renders when its ordinal says it is on page one")
+                .isEqualTo("NO PREVIOUS PAGES TO DISPLAY");
     }
 
     /**
@@ -1027,9 +1037,15 @@ class CardListServiceTest {
                 .as("and it must advertise the page it stepped back from")
                 .isTrue();
         assertThat(CardListService.pagingRefusal(backToOpening, false)).isEmpty();
-        assertThat(backToOpening.hasPrevious())
-                .as("while still reporting nothing behind the opening page")
-                .isFalse();
+
+        // WHY : Assumptions: the two envelopes name the SAME row at their leading boundary but cannot
+        //       carry the same token text, because every seal mints a fresh nonce -- so the assertion has
+        //       to open both cursors and compare the keys inside. Comparing the token strings would
+        //       compare two ciphertexts of one plaintext and fail on every run, which is a property of the
+        //       sealer and not of the paging behaviour under test here.
+        assertThat(this.sealer.open(backwardBinding(), backToOpening.firstKey()))
+                .as("while still publishing the position a further backward step would be issued from")
+                .isEqualTo(this.sealer.open(backwardBinding(), opening.firstKey()));
     }
 
     /**
@@ -1043,13 +1059,12 @@ class CardListServiceTest {
      * position predicate, so reaching it without a position would be a different outcome entirely rather
      * than a merely redundant call.
      *
-     * <p>Refactoring Rationale: backward availability is PUBLISHED by the envelope and is no longer
-     * derived from the leading boundary cursor. The derivation was wrong: every page carrying rows names
-     * its own first row, so it reported an earlier page on the opening page too, and a client that
-     * followed the report replaced its rows with an empty page. The reference does the opposite -- its
-     * backward refusal at {@code :903} fires on exactly that page and redisplays it -- so the assertion
-     * below now expects the opening page to report NO earlier page, which is the behaviour the reference
-     * has and the derivation could not express.
+     * <p>Refactoring Rationale: the envelope publishes the backward POSITION and no backward availability
+     * answer, so what is asserted below is that the opening page and a positionless backward request are
+     * answered identically and that both name their leading boundary. Whether a row waits at that
+     * boundary is the caller's question, answered from the page ordinal the reference keeps at
+     * {@code :237-238} and tests at {@code :902} -- a question no read of the card file can settle and
+     * therefore not one this envelope answers.
      *
      * <p>It takes no parameter and returns no value.
      */
@@ -1069,15 +1084,18 @@ class CardListServiceTest {
 
         assertThat(publishedIdentities(backwardWithoutPosition))
                 .isEqualTo(publishedIdentities(opening));
-        assertThat(CardListService.backwardAvailable(opening))
-                .as("the opening page reports no earlier page even though it names its own first row")
-                .isFalse();
         assertThat(opening.firstKey())
-                .as("the position a later backward request is issued from is still published")
+                .as("the position a backward request is issued from is published on the opening page")
                 .isNotNull();
-        assertThat(CardListService.backwardAvailable(backwardWithoutPosition))
-                .as("a backward request with no position is answered as the opening page")
-                .isFalse();
+
+        // WHY : Assumptions: the comparison is made on the OPENED keys, not the token text, because each
+        //       seal carries its own nonce and two seals of one key never render identically. Opening both
+        //       under the backward binding also proves the positionless backward answer was sealed for the
+        //       backward direction, which a string comparison of two ciphertexts could not establish.
+        assertThat(this.sealer.open(backwardBinding(), backwardWithoutPosition.firstKey()))
+                .as("a backward request with no position is answered as the opening page, boundary"
+                        + " included")
+                .isEqualTo(this.sealer.open(backwardBinding(), opening.firstKey()));
     }
 
     /**

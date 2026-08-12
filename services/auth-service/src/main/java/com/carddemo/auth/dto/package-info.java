@@ -31,8 +31,12 @@
  *
  * <p>Assumptions: the inventory below is this package's <b>closed set</b>, and every
  * member of it now has a file, so it is both the contract the plan assigns and a
- * measurement of the directory. Eleven {@code .java} files constitute this package
- * and no more: this descriptor, one sealed interface and nine records.
+ * measurement of the directory. Thirteen {@code .java} files constitute this package
+ * and no more: this descriptor, one sealed interface, one enum and ten records.
+ *
+ * <pre>
+ * this directory: 13 java files = 12 classes + 1 charter
+ * </pre>
  *
  * <ul>
  *   <li>{@code SignOnOutcome} -- the sealed interface naming the two shapes the
@@ -58,7 +62,14 @@
  *       first one row of the {@code COUSR00C} list and the second the whole row
  *       that {@code COUSR02C} and {@code COUSR03C} display;</li>
  *   <li>{@code CreateUserRequest} and {@code UpdateUserRequest} -- the two write
- *       payloads, from {@code COUSR01C} and {@code COUSR02C}.</li>
+ *       payloads, from {@code COUSR01C} and {@code COUSR02C};</li>
+ *   <li>{@code PageDirection} -- the enum naming which side of a supplied cursor the
+ *       browse reads, and the one type here that is neither a record nor the sealed
+ *       interface. Assumptions: it belongs to this package rather than to the shared
+ *       kernel because it is a member of THIS contract's published schema set, and
+ *       its two wire values are lower case because the contract spells them that
+ *       way; the backward direction it expresses is reference behaviour, taken from
+ *       the {@code READPREV} at {@code app/cbl/COUSR00C.cbl} line 343.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: this inventory has been corrected twice and the second
@@ -68,16 +79,22 @@
  * amended by marking the two as planned. Both then landed, and two further request
  * records and the sealed interface were added with the challenge and renewal
  * exchanges, so the qualified wording had become the stale half: it described five
- * of seven files existing in a directory holding eleven. The count and the
+ * of seven files existing in a directory holding eleven. A third revision then
+ * stated eleven files and named ten members, omitting {@code PageDirection}, which
+ * had landed with the cursor-and-direction request parameters. The count and the
  * membership are therefore restated as measured, and the planned-versus-present
  * distinction is withdrawn because nothing in this package is now planned. The
  * closed-set claim is retained, because it is the useful part of this charter -- it
- * tells an author which types belong here and forbids a twelfth.
+ * tells an author which types belong here and forbids a thirteenth.
  *
- * <p>Assumptions: the closed set is enforced by reading, not by a gate. Nothing in
- * the build counts the files in this directory, so a twelfth type added without
- * amending this list would compile; what this paragraph buys is that the amendment
- * is an obvious omission to a reviewer rather than an invisible one.
+ * <p>Refactoring Rationale: the closed set is now enforced by a gate as well as by
+ * reading, which is the change that stops a fourth revision of the paragraph above.
+ * The marker line beside the inventory is the form {@code common-lib}'s
+ * {@code PackageCharterInventoryTest} re-measures against this directory on every
+ * build, and the same test requires every {@code <li>} member named above to be a
+ * file beside this charter. An earlier form of this paragraph said the opposite --
+ * that nothing in the build counts the files in this directory -- and that was true
+ * when it was written and is what let the count drift twice more.
  *
  * <h2>Where the declared widths come from</h2>
  *
@@ -131,9 +148,13 @@
  *
  * <p>No pagination type. The list screen pages, and the envelope it pages with
  * is declared once, in {@code com.carddemo.common.web}, as
- * {@code PageResponse}: four components in this order, being the page items, a
- * first-key cursor, a last-key cursor and a more-pages flag. Both cursors are
- * opaque strings and either may be absent. {@code UserSummary} is only the
+ * {@code PageResponse}: five components in this order, being the page items, a
+ * first-key cursor, a last-key cursor, a further-pages-follow flag and an
+ * earlier-page-exists flag. Both cursors are opaque strings and either may be
+ * absent, and the earlier-page flag is reported by the read rather than derived
+ * from the first-key cursor -- a page that returns rows always names its own
+ * first row, so deriving it would announce an earlier page on the opening page.
+ * {@code UserSummary} is only the
  * element type that envelope carries; the envelope itself is never redeclared
  * here, and no page-number, page-size, total-count or total-page component
  * exists anywhere in this package.

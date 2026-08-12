@@ -11,12 +11,20 @@
  *
  * Paging contract
  * ---------------
- * Assumptions: paging is by KEY and not by page number. PF7 and PF8 are bound to the previous and
- * next availability the service's page envelope reports, which is what the reference itself
- * expresses -- it carries a first-key and last-key pair plus a next-page indicator in the
- * communication area and discovers one more record than fits. antd's own offset pagination is
- * deliberately disabled: under concurrent inserts an offset skips and repeats rows, which a
- * browse-by-key does not, so using it would change observable behaviour the golden masters fix.
+ * Assumptions: the REQUEST is by key and never by page number. PF8 is bound to the further-page
+ * indicator the service's four-member envelope reports, which is what the reference itself expresses --
+ * it carries a first-key and last-key pair plus a next-page indicator in the communication area and
+ * discovers one more record than fits. antd's own offset pagination is deliberately disabled: under
+ * concurrent inserts an offset skips and repeats rows, which a browse-by-key does not, so using it
+ * would change observable behaviour the golden masters fix.
+ *
+ * Assumptions: PF7 is bound to a SCREEN ORDINAL this component holds, not to any member of the
+ * envelope, because that is where the reference holds it too -- `WS-CA-SCREEN-NUM PIC 9(1)` at
+ * `app/cbl/COCRDLIC.cbl` L237 with `88 CA-FIRST-PAGE VALUE 1` at L238, incremented on PF8 at L492,
+ * decremented on PF7 at L508, and tested at L902 to decide the `NO PREVIOUS PAGES TO DISPLAY` refusal
+ * at L903. No backward read is ever issued to answer that question there, and none is here. AAP
+ * section 0.7.1 moves exactly this navigation state client-side, so the ordinal lives in this screen
+ * and the envelope publishes only `firstKey` -- the POSITION a backward request is issued from.
  *
  * Disclosure
  * ----------
@@ -176,6 +184,54 @@ export const CARD_LIST_PAGE_UNAVAILABLE =
 const CARD_NUMBER_LABEL_ID = 'card-list-card-number-label';
 
 /**
+ * Ordinal of the opening page, and the only value at which the backward step is refused.
+ *
+ * Assumptions: the value is one because the reference's condition name says one --
+ * `88 CA-FIRST-PAGE VALUE 1` on `WS-CA-SCREEN-NUM` at `app/cbl/COCRDLIC.cbl` L237 to L238. It is named
+ * here rather than written as a bare literal in the guard so the guard reads as the reference's own
+ * test rather than as an arbitrary comparison against a number.
+ */
+export const CARD_LIST_FIRST_PAGE = 1;
+
+/**
+ * Computes the screen ordinal a delivered page sits at, given the request that produced it.
+ *
+ * Assumptions: a request carrying NO cursor is the opening read -- mount, Enter under a cleared filter,
+ * or the filter being cleared -- and lands on the opening page, which is why it resets rather than
+ * increments. This mirrors the reference, where `WS-CA-SCREEN-NUM` is initialised to one on first entry
+ * and only the two paging arms move it: `ADD +1` on PF8 at `app/cbl/COCRDLIC.cbl` L492 and `SUBTRACT 1`
+ * on PF7 at L508.
+ *
+ * Refactoring Rationale: the ordinal is advanced only once a page has actually been DELIVERED, so a
+ * failed request leaves the operator's position where the rows on screen say it is. Advancing it at
+ * request time would leave the ordinal one page ahead of the rows after any transport failure, and the
+ * backward refusal is computed from it -- so the screen would then permit a step back from the page it
+ * was still displaying. Trade-offs: the reference moves its ordinal before its read and repairs the
+ * mismatch by re-displaying, which a screen holding its own state does not need to do.
+ *
+ * Assumptions: no ceiling is applied. The reference field is `PIC 9(1)`, so its tenth page truncates to
+ * zero, but the ONLY use either side makes of the ordinal is the equality test against one -- and zero
+ * fails that test exactly as ten does, so the truncation is unobservable and is not reproduced.
+ *
+ * Trade-offs: the two paging transitions are written as one signed step rather than as two conditional
+ * returns, so the symmetry the reference states as `ADD +1` and `SUBTRACT 1` is visible in one
+ * expression instead of being spread across two branches a reader has to compare.
+ * @param {number} current - Ordinal of the page currently displayed.
+ * @param {string | undefined} cursor - Sealed cursor the delivered page was requested with, or
+ *   `undefined` for an opening read.
+ * @param {PageDirection} direction - Direction the cursor was replayed in.
+ * @returns {number} The ordinal of the delivered page.
+ */
+export function cardListOrdinalAfter(
+  current: number,
+  cursor: string | undefined,
+  direction: PageDirection,
+): number {
+  const step = direction === 'previous' ? -1 : 1;
+  return cursor === undefined ? CARD_LIST_FIRST_PAGE : current + step;
+}
+
+/**
  * Renders the keyset-paged card browse, per-row navigation, and the card-number entry that reaches one
  * card.
  *
@@ -202,6 +258,13 @@ export function CardListScreen(): ReactElement {
   //       `POPULATE-HEADER-INFO` re-read the clock on each `SEND MAP` rather than on a timer.
   const paintedAt = useServerInstant();
   const [page, setPage] = useState<PageResponse<CardSummary> | null>(null);
+  // WHY : Refactoring Rationale: this is the reference's `WS-CA-SCREEN-NUM` (`app/cbl/COCRDLIC.cbl`
+  //       L237), held here because the four-member envelope publishes no backward-availability member
+  //       and the reference never read one either -- it tests this ordinal at L902 and refuses PF7 at
+  //       L903. An earlier revision of this screen gated the backward control on `firstKey` being
+  //       present, which every page carrying rows satisfies, so the control was live on the opening page
+  //       and following it replaced the rows with an empty page.
+  const [screenNumber, setScreenNumber] = useState(CARD_LIST_FIRST_PAGE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cardNumber, setCardNumber] = useState('');
@@ -238,13 +301,35 @@ export function CardListScreen(): ReactElement {
   function loadPage(cursor?: string, direction: PageDirection = 'next'): void {
     setLoading(true);
     setError(null);
-    listCards({ cursor, direction }).then(
+
+    /*
+     * WHY : Refactoring Rationale: the cursor is SPREAD IN when it exists rather than assigned as
+     *       `{ cursor, direction }`. `ui/tsconfig.json` enables `exactOptionalPropertyTypes`, so
+     *       `CardListQuery.cursor` is `?: string` and not `?: string | undefined` -- an absent member and
+     *       a member holding `undefined` are different types there, and only the first is a state the
+     *       query has. The two reach the service identically, because `JSON.stringify` omits a member
+     *       holding `undefined`, so this is not a behaviour fix; it is the compiler being allowed to
+     *       enforce that the opening read carries NO cursor rather than a cursor whose value is nothing.
+     * WHY : Trade-offs: a conditional spread is more to read than an object literal naming both members.
+     *       It is accepted because the alternative is to widen the contract type to admit `undefined`,
+     *       which would turn the setting off for every consumer of that shape in order to shorten one
+     *       call site.
+     */
+    listCards({ ...(cursor === undefined ? {} : { cursor }), direction }).then(
       /**
        * Publishes the retrieved page, including its sealed cursors.
        * @param {PageResponse<CardSummary>} nextPage - The page the service returned.
        */
       (nextPage) => {
         setPage(nextPage);
+        setScreenNumber(
+          /**
+           * Moves the screen ordinal to the page just delivered.
+           * @param {number} current - Ordinal of the page displayed before this one arrived.
+           * @returns {number} Ordinal of the delivered page.
+           */
+          (current) => cardListOrdinalAfter(current, cursor, direction),
+        );
         setLoading(false);
       },
       /**
@@ -353,18 +438,34 @@ export function CardListScreen(): ReactElement {
    * error field when PF7 arrives on the first page, and the arm at L444-L453 still re-reads the page.
    * PF7 is never refused outright there, so binding it disabled would remove a message an operator
    * reads.
+   *
+   * Assumptions: "nowhere to go" means the screen ordinal is still at the opening page. That ordinal is
+   * this component's own state and is not asked of the service, matching the reference, which decides
+   * the same refusal from `WS-CA-SCREEN-NUM` alone.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function pageBackward(): void {
     /*
-     * WHY : Refactoring Rationale: availability is read from `hasPrevious` rather than from the presence
-     *       of `firstKey`. Every page that returns rows names its own first row, so gating on that
-     *       presence enabled this control on the OPENING page and answered the caller with an empty page
-     *       -- where the source redisplays the page it is on and reports that no earlier record exists
-     *       (`app/cbl/COCRDLIC.cbl` L903, L1301-L1302). `firstKey` is still what the request is issued
-     *       from once the answer is yes.
+     * WHY : Refactoring Rationale: the refusal is decided by the SCREEN ORDINAL and not by any member of
+     *       the page envelope, which is the reference's own arrangement: `app/cbl/COCRDLIC.cbl` L902
+     *       tests `CA-FIRST-PAGE` on `WS-CA-SCREEN-NUM` and L903 moves the refusal sentence in. Two
+     *       earlier arrangements were wrong in opposite directions. Gating on `firstKey` being present
+     *       enabled this control on the opening page, because every page carrying rows names its own
+     *       first row, and following it replaced the rows with an empty page. Gating on a
+     *       service-computed backward flag made the service read backward from a page nobody asked for,
+     *       and published an answer already stale by the time an operator acted on it.
+     * WHY : Assumptions: `firstKey` is still checked, because it is the value the request is ISSUED FROM
+     *       rather than the value the availability is read from. Past the opening page a page carrying
+     *       rows always names it, so the second half of this guard is unreachable in practice and is
+     *       kept because `null` is a legitimate member value the type admits and a request cannot be
+     *       issued without a position.
      */
-    if (page?.hasPrevious !== true || page.firstKey === null || page.firstKey === undefined) {
+    if (
+      screenNumber <= CARD_LIST_FIRST_PAGE ||
+      page === null ||
+      page.firstKey === null ||
+      page.firstKey === undefined
+    ) {
       setError(CARD_LIST_PAGING_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY);
       return;
     }

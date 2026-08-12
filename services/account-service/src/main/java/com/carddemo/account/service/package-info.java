@@ -38,7 +38,22 @@
  *
  * <p>The lengths below are the physical lengths of the reference sources.
  * Those sources are read as the specification for this package and are never
- * modified.
+ * modified. The roster is complete for this directory, and it is held to the
+ * directory mechanically rather than by review:
+ *
+ * <pre>
+ * this directory: 8 java files = 7 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that marker line is not decoration. This roster
+ * previously closed at five classes and omitted {@code CustomerIdentifierCipher},
+ * which sat beside it -- a reader counting the directory against the list found one
+ * more class than the list admitted to, which is the exact failure the list's own
+ * final entry warns about. The line is the form
+ * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures, so both
+ * figures and every enumerated member below are now checked against this directory
+ * on every build, and the next class that lands here fails that check instead of
+ * silently falsifying this paragraph.
  *
  * <ul>
  *   <li>{@code AccountViewService} carries the read path, from
@@ -52,16 +67,41 @@
  *       (1318 lines).</li>
  *   <li>{@code InquiryMessageListener} carries the asynchronous inquiry
  *       path, from {@code app/app-vsam-mq/cbl/COACCT01.cbl} (620 lines).</li>
+ *   <li>{@code CustomerIdentifierCipher} protects the two customer identifiers
+ *       that must not travel or rest in the clear -- the national identifier
+ *       {@code CUST-SSN PIC 9(09)} at {@code app/cpy/CVCUS01Y.cpy} line 18 and the
+ *       government-issued identifier {@code CUST-GOVT-ISSUED-ID PIC X(20)} at line
+ *       20 -- which the baseline stores as plain fields of the 500-byte customer
+ *       record. It has no reference source of its own: the baseline stores both in
+ *       the clear, so the encryption is a documented security correction rather
+ *       than a migrated rule. Assumptions: it is a service and not a mapper because
+ *       it holds key material and performs a cryptographic operation, where a
+ *       mapper is a pure shape conversion; the mapper package calls it rather than
+ *       containing it.</li>
  *   <li>{@code RestReferenceAddressLookup} satisfies the lookup contract the
  *       address validator declares, reaching {@code reference-service} over its
  *       published address API. It has no reference source of its own: in the
  *       baseline the lookup lists are a copybook compiled INTO the program, so
  *       the adapter exists because the target moved that data behind a service
- *       boundary and something has to cross it. Assumptions: it is listed here
- *       even though it carries no migrated program, because a reader counting
- *       this package's classes against this list would otherwise find one more
- *       class than the list admits to.</li>
+ *       boundary and something has to cross it.</li>
+ *   <li>{@code AccountRevision} renders the optimistic concurrency token both
+ *       published routes carry, from the before-image comparison
+ *       {@code app/cbl/COACTUPC.cbl} declares at line 669 and tests at lines 521
+ *       and 522. It carries no reference source of its own because the reference
+ *       compares the whole snapshot rather than a token; what survives is the
+ *       comparison, and this class is where its RENDERING lives so that the read
+ *       path and the write path cannot disagree about the format.</li>
  * </ul>
+ *
+ * <p>⚠️ Refactoring Rationale: the list above is COMPLETE, and it is stated as
+ * complete because a reader counting this package's classes against it must find
+ * the same number. It previously omitted {@code CustomerIdentifierCipher} while
+ * asserting completeness in the entry above it, so the count was already one
+ * short of the directory before {@code AccountRevision} was added. Two of the
+ * three entries that carry no migrated program are listed for the same reason:
+ * a roster that silently drops the classes without a baseline source describes
+ * this package as smaller than it is, and the classes it drops are exactly the
+ * ones a reader is least likely to be able to account for.
  *
  * <h2>No class here holds session state</h2>
  *

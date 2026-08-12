@@ -619,17 +619,34 @@ resource "aws_lb" "this" {
   #       them.
   #       The code was brought up to the contract rather than the sentence softened to
   #       match the code. NO PUBLISHED OPERATION NOW CARRIES AN ACCOUNT OR CUSTOMER
-  #       IDENTIFIER IN A REQUEST LINE. Six operations moved to reach that: the card
-  #       listing and the pending-authorization listing take their account narrowing in
-  #       a request body at /api/v1/cards/search and /api/v1/authorizations/search; the
-  #       account-context read and the customer existence check became
-  #       /api/v1/accounts/lookup and /api/v1/customers/lookup, the latter collapsing a
-  #       HEAD and a GET into one POST; and the account-keyed cross-reference read and
-  #       the bill-payment write moved their identifier into the body each already
-  #       carried. Each is asserted from both sides -- the services' contract tests pin
-  #       the published method and path, and the browser client's contract-agreement
-  #       test compares its own declarations against the same documents.
-  #       Trade-offs: TWO of the four are still retained here in the clear, and they
+  #       IDENTIFIER IN A REQUEST LINE. Nine operations moved to reach that, in two
+  #       rounds. The MACHINE-called six went first: the card listing and the
+  #       pending-authorization listing take their account narrowing in a request body
+  #       at /api/v1/cards/search and /api/v1/authorizations/search; the account-context
+  #       read and the customer existence check became /api/v1/accounts/lookup and
+  #       /api/v1/customers/lookup, the latter collapsing a HEAD and a GET into one
+  #       POST; and the account-keyed cross-reference read and the bill-payment write
+  #       moved their identifier into the body each already carried. The three END-USER
+  #       account operations followed: the human account view became
+  #       POST /api/v1/accounts/view, the account edit POST /api/v1/accounts/update and
+  #       the by-account cross-reference walk
+  #       POST /api/v1/accounts/card-cross-references/search. Each is asserted from both
+  #       sides -- the services' contract tests pin the published method and path, and
+  #       the browser client's contract-agreement test compares its own declarations
+  #       against the same documents.
+  #       Refactoring Rationale: this note claimed the property while those last three
+  #       still published /api/v1/accounts/{accountId}, /{accountId}/view and
+  #       /{accountId}/card-cross-references, and the enumeration of six was what made
+  #       the overstatement checkable. The three were defended elsewhere as migrated
+  #       SCREENS whose identifier the user had just typed, with the keyed address
+  #       "the shape the plan publishes for them" -- a reading that treated a caller
+  #       already holding a value as a licence to persist it, which is not a
+  #       distinction the contract draws. They are moved rather than argued for a
+  #       second time, and account-service's own contract test now fails the build if
+  #       any published path template or declared parameter regains a place to put
+  #       either identifier -- the same standing guarantee card-service already had for
+  #       a card number.
+  #       Trade-offs: TWO identifiers are still retained here in the clear, and they
   #       are named rather than claimed away -- a transaction identifier at
   #       /api/v1/transactions/{transactionId} and a user identifier at
   #       /api/v1/auth/users/{userId}. Neither appears in the prohibition that contract

@@ -142,6 +142,49 @@ class CustomerIdentifierCipherTest {
     }
 
     /**
+     * Pins the framing against LITERALS, because a second tree reproduces it byte for byte.
+     *
+     * <p>⚠️ Refactoring Rationale: the two cases above compare the envelope against this class's own
+     * constants, so they hold whatever the constants say and would still pass if the marker became
+     * {@code CDCX} or the version became {@code 2}. That is exactly the drift that has to fail here,
+     * because this framing has a SECOND implementation outside the reactor:
+     * {@code data-migration/src/carddemo_migration/loaders/protected_columns.py} writes these same bytes
+     * when it bulk-loads {@code account.customers}, and it cannot import a Java constant. Until the
+     * account service published one framing for this column it published two -- a private nested
+     * implementation in {@code com.carddemo.account.config.CustomerIdentifierProtectionConfig} omitted the
+     * marker and the version altogether -- and the ETL reproduced the wrong one. This case is the guard
+     * that makes a change to the format visible on the Java side at the moment it is made.</p>
+     *
+     * <p>Assumptions: a change here is not a test to update. It is a FORMAT REVISION: rows already written
+     * under the previous version are unreadable under the new one, so it needs the version byte
+     * incremented, a reader that accepts both, a matching change in the Python loader, and a re-seal for
+     * existing rows. Failing this case is the prompt for that work rather than an obstacle to it.</p>
+     *
+     * <p>Assumptions: the field ORDER is asserted as well as the header, because the constants alone do
+     * not fix it -- an implementation could carry the same marker, version, widths and tag and still place
+     * the vector before the wrapped key, which no constant comparison would notice and which would make
+     * every value unreadable by the other tree.</p>
+     */
+    @Test
+    void theFramingIsPinnedForTheOtherTreeThatReproducesIt() {
+        byte[] envelope = this.cipher.encrypt(NATIONAL_IDENTIFIER, SSN_COLUMN);
+        byte[] encipheredDataKey = fixedEncipheredDataKey();
+
+        assertThat(Arrays.copyOf(envelope, 4))
+                .as("the ETL writes these four bytes as b\"CDCI\"")
+                .isEqualTo(new byte[] {'C', 'D', 'C', 'I'});
+        assertThat(envelope[4]).as("the ETL writes this byte as b\"\\x01\"").isEqualTo((byte) 1);
+        assertThat(envelope[5]).as("the length prefix is big-endian: high byte first").isEqualTo(
+                (byte) (encipheredDataKey.length >>> Byte.SIZE));
+        assertThat(envelope[6]).isEqualTo((byte) encipheredDataKey.length);
+        assertThat(Arrays.copyOfRange(envelope, 7, 7 + encipheredDataKey.length))
+                .as("the wrapped key follows the header, BEFORE the vector")
+                .isEqualTo(encipheredDataKey);
+        int vectorOffset = 7 + encipheredDataKey.length;
+        assertThat(envelope).hasSize(vectorOffset + 12 + NATIONAL_IDENTIFIER.length() + 16);
+    }
+
+    /**
      * Confirms the clear identifier appears nowhere in the envelope, in any encoding this path could use.
      *
      * <p>Assumptions: BOTH candidate encodings are asserted absent -- the ASCII bytes the method writes

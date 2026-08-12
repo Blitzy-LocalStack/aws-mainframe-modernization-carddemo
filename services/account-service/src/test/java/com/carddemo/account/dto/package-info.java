@@ -1,9 +1,14 @@
 /**
  * Structural tests over the data-transfer contracts of the account bounded context.
  *
- * <p>Purpose: one class executes here. {@code AccountUpdateResponseShapeTest} asserts a property of a
+ * <p>Purpose: two classes execute here, one per direction of the contract.
+ * {@code AccountUpdateRequestContractTest} pins the SUBMITTED shape -- the exact ordered list of all
+ * forty-three component names, the declared type of every one of them, and each one's character width held
+ * against the baseline symbolic map at {@code app/cpy-bms/COACTUP.CPY} -- because those names are wire names
+ * and a rename, a reordering or a retyping is a breaking change to a caller this repository does not
+ * contain. {@code AccountUpdateResponseShapeTest} pins the ANSWERED shape, and asserts a property of a
  * TYPE rather than a behaviour of a method -- that the two detail records
- * {@code PUT /api/v1/accounts/{accountId}} answers with declare no component able to carry a whole
+ * {@code POST /api/v1/accounts/update} answers with declare no component able to carry a whole
  * national identifier or a whole government-issued identifier, that every submitted value is either
  * mirrored, composed or deliberately withheld, and that the response's two row components are typed to
  * the records the committed contract declares. The subject is the SHAPE of a record, so the assertions
@@ -42,6 +47,14 @@
  * no assertion may be written as though one were available. The subjects are records, and a record needs
  * no runtime beyond the class loader that defines it -- which is also why these assertions are cheap
  * enough to be worth making over every component rather than a sampled few.</p>
+ *
+ * <p>Assumptions: reading a file from the working tree is admitted by that ruling and is not an exception to
+ * it. {@code AccountUpdateRequestContractTest} reads the baseline symbolic map because the widths it asserts
+ * have to come from somewhere OTHER than the type under test -- a width taken from the target's own prose
+ * would move with the same edit it is supposed to catch. A file read needs no runtime beyond the file
+ * system, so the cheapness the ruling protects is preserved, and the precedent is
+ * {@code com.carddemo.batch.dto.DisclosureGroupSeedParityTest}, which holds seeded reference rates against
+ * the immutable extract the running system loads.</p>
  *
  * <p>Assumptions: this charter governs a DIRECTORY rather than a compilation unit, because that is what
  * Checkstyle's {@code JavadocPackage} rule audits and this module's documentation gate includes test

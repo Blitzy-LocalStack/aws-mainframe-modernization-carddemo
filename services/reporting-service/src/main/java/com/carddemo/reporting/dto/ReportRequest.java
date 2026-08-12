@@ -190,10 +190,11 @@ import jakarta.validation.constraints.Size;
  * @param endDate the inclusive upper bound on exactly the terms of the lower bound above,
  *     consolidating the three parts declared at L96, L102 and L108, or {@code null} when a preset
  *     supplies the range instead
- * @param confirm the confirmation answer, one character per {@code CONFIRMI PIC X(1)} at L114
- *     restricted to {@code Y} or {@code N} in either case, or {@code null} when no answer was
- *     supplied -- a third state the baseline distinguishes at L464 and answers with a prompt of its
- *     own rather than treating as a refusal
+ * @param confirm the confirmation answer, one character per {@code CONFIRMI PIC X(1)} at L114, whose
+ *     accepted domain is {@code Y} or {@code N} in either case and which is refused BY THE SERVICE
+ *     rather than declaratively here so the reference's own sentence reaches the caller, or
+ *     {@code null} when no answer was supplied -- a third state the baseline distinguishes at L464
+ *     and answers with a prompt of its own rather than treating as a refusal
  * @param errorMessage the message band as the screen received it, at most 78 characters per
  *     {@code ERRMSGI PIC X(78)} at L120; carried so the symbolic map round-trips whole, and never
  *     read on input as authority for whether this request is faulted
@@ -210,7 +211,31 @@ public record ReportRequest(
         @Size(max = SELECTOR_WIDTH) @Pattern(regexp = SELECTOR_MARK) String custom,
         @Size(max = DateEditValidator.MASKED_DATE_LENGTH) @Pattern(regexp = ISO_DATE) String startDate,
         @Size(max = DateEditValidator.MASKED_DATE_LENGTH) @Pattern(regexp = ISO_DATE) String endDate,
-        @Size(max = CONFIRM_WIDTH) @Pattern(regexp = CONFIRM_ANSWER) String confirm,
+        // WHY : Assumptions: the accepted domain is Y and N in EITHER case and nothing else, read
+        //       from the two accepting branches at app/cbl/CORPT00C.cbl L478 and L480 rather than
+        //       from the '(Y/N)' caption at app/bms/CORPT00.bms L213 to L217 -- the caption prompts a
+        //       user while the branches decide the outcome. Both cases are accepted by separate
+        //       literals in those two branches, so folding case in the service and admitting only the
+        //       upper-case forms here would reject input the baseline processes.
+        // WHY : Refactoring Rationale: this member carries NO pattern constraint, where the other
+        //       five constrained members above do, and the asymmetry is deliberate. Both a
+        //       declarative pattern and the service's own branch refuse an out-of-domain answer with
+        //       an HTTP 400, so the constraint changed nothing about the STATUS -- what it changed was
+        //       which component composed the message, and it took that away from the only component
+        //       that knows the reference's words. A constraint violation is rendered by the shared
+        //       advice as its generic aggregate sentence; ReportExecutionService.resolveConfirmation
+        //       raises the reference's own interpolated sentence from L485 to L490 of
+        //       app/cbl/CORPT00C.cbl, which transformation rule T8 requires to reach the caller
+        //       verbatim. The published schema keeps its pattern, and it stays true: a pattern states
+        //       the accepted domain, and the service states, in the reference's words, why a value
+        //       outside it was refused.
+        // WHY : Alternatives Considered: keeping the pattern and giving it a custom message that
+        //       interpolates the offending value through the validated-value expression. Rejected on
+        //       two grounds: the interpolation needs an expression-language implementation on the
+        //       classpath and degrades silently to the literal text without one, and the sentence
+        //       would still arrive as a per-field detail beneath a generic aggregate message rather
+        //       than AS the message the contract names.
+        @Size(max = CONFIRM_WIDTH) String confirm,
         @Size(max = ERROR_MESSAGE_WIDTH) String errorMessage) {
 
     /**
@@ -271,9 +296,10 @@ public record ReportRequest(
      * <p>Assumptions: 1 is read from {@code MONTHLYI PIC X(1)} at L60,
      * {@code YEARLYI PIC X(1)} at L66 and {@code CUSTOMI PIC X(1)} at L72, corroborated by
      * {@code LENGTH=1} at {@code app/bms/CORPT00.bms} L80, L94 and L108. The three share one
-     * constant because they are one mutually exclusive selection expressed as three marks, and
-     * {@code app/cbl/CORPT00C.cbl} reads them as a single decision in one {@code EVALUATE} at L213,
-     * L239 and L256.
+     * constant because they are one selection expressed as three marks, and
+     * {@code app/cbl/CORPT00C.cbl} reads them as a single ORDERED decision in one {@code EVALUATE} at
+     * L213, L239 and L256 -- the first marked one wins and the rest are never evaluated, so marking two
+     * is accepted rather than refused.
      */
     private static final int SELECTOR_WIDTH = 1;
 
@@ -363,24 +389,6 @@ public record ReportRequest(
      * {@code app/jcl/TRANREPT.jcl} L43 and L44 can hold.
      */
     private static final String ISO_DATE = "[0-9]{4}-[0-9]{2}-[0-9]{2}";
-
-    /**
-     * Expression a present confirmation answer has to match in full.
-     *
-     * <p>Assumptions: the domain is {@code Y} and {@code N} in either case and nothing else, read
-     * from the two accepting branches at {@code app/cbl/CORPT00C.cbl} L478 and L480 rather than
-     * from the {@code '(Y/N)'} caption at {@code app/bms/CORPT00.bms} L213 to L217, because the
-     * caption prompts a user while the branches decide the outcome. Anything else falls to the
-     * baseline's own third branch at L484 to L492, which refuses the value by name, so this
-     * expression does real work: a one-character answer of {@code X} passes both the width
-     * constraint and the constructor below, and only this rejects it.
-     *
-     * <p>Alternatives Considered: accepting the upper-case forms alone and folding case in the
-     * service. Rejected because both cases are accepted by separate literals in the baseline's own
-     * branches at L478 and L480, so refusing a lower-case answer here would reject input the
-     * baseline processes.
-     */
-    private static final String CONFIRM_ANSWER = "[YyNn]";
 
     /**
      * Normalises all thirteen components onto this record's absence contract.

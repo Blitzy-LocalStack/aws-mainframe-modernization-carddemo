@@ -75,19 +75,17 @@
 --         psql "$CARDDEMO_DB_URL" -v ON_ERROR_STOP=1 \
 --              -f data-migration/sql/verify/money_totals.sql
 --
---       Refactoring Rationale: this note used to record, correctly, that
---       carddemo_reporting could NOT run this file, and then directed an operator
---       to run it as carddemo_batch instead. That direction was the more serious
---       half of the problem. carddemo_batch is WRITE-CAPABLE: V0 grants it SELECT,
---       INSERT and UPDATE across ledger and account, and V2__runtime_delete_grants
---       .sql grants it DELETE on three tables. Running a verification pass as a
---       principal that can modify the data it is verifying inverts the control the
---       pass exists to provide -- and it made the pass's execution itself a
---       row-level disclosure of every balance and amount in the system, for the
---       sake of nine sums. V3 fixes the cause rather than the documentation, by
---       publishing the nine aggregates as an owner-backed view and granting SELECT
---       on that view alone. carddemo_batch is no longer mentioned as an option,
---       because it should never have been one.
+--       Alternatives Considered: running the pass as carddemo_batch, which holds
+--       direct SELECT on the five underlying tables. Rejected, and deliberately not
+--       offered above as a fallback: carddemo_batch is WRITE-CAPABLE -- V0 grants it
+--       SELECT, INSERT and UPDATE across ledger and account, and
+--       V2__runtime_delete_grants.sql grants it DELETE on three tables -- so running
+--       a verification pass as it would let the principal modify the data it is
+--       verifying, inverting the control the pass exists to provide, and would make
+--       the pass's own execution a row-level disclosure of every balance and amount
+--       in the system for the sake of nine sums. V3 removes the need instead of
+--       documenting a workaround, by publishing the nine aggregates as an
+--       owner-backed view and granting SELECT on that view alone.
 --     - Nothing is written: no row, no object, no session setting. A principal
 --       holding SELECT on one view and nothing else is sufficient -- and, being
 --       unable to write anything anywhere, is incapable of altering the data it is
@@ -116,12 +114,12 @@
 --   - SQLSTATE 42703 undefined_column -- a money column has been renamed in its
 --     migration and the aggregate view was not updated with it. The names in the
 --     descriptor below are transcribed from those migrations for exactly this
---     reason; see WHY (7). A rename now surfaces when the view is created rather
---     than when this file runs, which is earlier and therefore better.
+--     reason. A rename surfaces when the view is created rather than when this file
+--     runs, which is earlier and therefore better.
 --   - SQLSTATE 42501 insufficient_privilege -- the session role lacks USAGE on the
 --     `reporting` schema or SELECT on reporting.v_verification_money_totals, as
---     described under session context. A privilege error can no longer be caused
---     by a base table, because this file names none.
+--     described under session context. No base table can cause a privilege error
+--     here, because this file names none.
 --
 -- Misleads when: a total is read as proof of a correct load. Every case is
 --   enumerated under "What this pass CANNOT prove", and two readings deserve
@@ -148,14 +146,6 @@
 --       (5) Alternatives Considered: a count of negative rows is reported as the
 --       signature of a sign-decode defect. Detail at that column's descriptor
 --       note below; the expression itself is in V3.
---       (11) Refactoring Rationale: the nine aggregate branches that used to
---       stand where the `aggregated` CTE now reads a view named five base tables
---       across three schemas, which is why this file could not be run by the
---       least-privilege verification role -- and why it previously directed an
---       operator to a WRITE-CAPABLE one. The output shape is unchanged
---       deliberately: eight columns, nine rows, the same descriptor and the same
---       exact NUMERIC totals, so the paired harness and any recorded expected
---       output remain valid across the change.
 --       (6) Assumptions: exactly these nine columns over exactly these five
 --       tables, and no others. Detail at the exclusion note below the
 --       descriptor.
@@ -168,23 +158,22 @@
 --       even though a rate is arguably not money. Detail at its descriptor row.
 --       (10) Alternatives Considered: one statement, terminated by one
 --       semicolon, ordered by a non-projected ordinal. Detail at the statement.
---       (11) Refactoring Rationale: this file replaces an earlier draft that
---       opened with a psql ON_ERROR_STOP meta-command and projected three
---       columns. Four things were wrong with it. The meta-command made the file
---       unusable through a driver cursor for no gain, the runbook already
---       passing -v ON_ERROR_STOP=1 on the command line; it named the ledger
---       columns amount and balance without checking them against V1__ledger.sql,
---       which happens to agree and would not have been noticed had it not; it
---       ordered by two text columns, so row order followed the database
---       collation and the byte-identical line-diff was not guaranteed; and it
---       reported neither a row count nor a negative-row count, leaving a bare
---       sum that cannot distinguish a missing row from a wrong amount. It also
---       asserted that curr_cyc_debit "is expected to be NEGATIVE or zero" and
---       that a positive total there is itself evidence of a defect. That claim
---       is withdrawn rather than carried over: measured against the authoritative
---       EBCDIC extract both cycle accumulators are exactly 0.00 across all fifty
---       account records, so the assertion was unfounded and would have sent an
---       operator looking for a defect that the seed data cannot exhibit.
+--       (11) Assumptions: this file carries NO psql meta-command, not even
+--       ON_ERROR_STOP. The runbook passes -v ON_ERROR_STOP=1 on the command line,
+--       so a meta-command here would buy nothing and would make the text unusable
+--       through a driver cursor, which the single-statement contract above exists
+--       to keep possible.
+--       (12) Assumptions: no sign expectation is asserted for either cycle
+--       accumulator. Measured against the authoritative EBCDIC extract,
+--       curr_cyc_credit and curr_cyc_debit are both exactly 0.00 across all fifty
+--       account records, so a rule such as "debit is expected to be negative or
+--       zero" would send an operator hunting a defect the seed data cannot
+--       exhibit. The negative-row count reported beside each total is the only
+--       sign signal this pass makes, and item (5) records which single column it
+--       is live on.
+--       (13) Alternatives Considered: the `aggregated` CTE reads ONE view rather
+--       than the five base tables the nine aggregates are computed over. Detail at
+--       the aggregate source below.
 -- =============================================================================
 
 -- WHY : Alternatives Considered: ONE statement, one terminating semicolon, and a
@@ -304,19 +293,19 @@ WITH money_columns (sort_key, target_table, money_column, cobol_field,
 --       report disagree with itself between two runs over identical data. A SUM
 --       over a numeric column is inherently timestamp-independent, which is
 --       precisely why this pass takes this form and not a windowed one.
--- WHY : Refactoring Rationale: the nine aggregates come from ONE view and this
---       file names no base table at all. It used to name five, across three
---       schemas, with a COUNT, a SUM and a filtered COUNT each -- which is why it
---       could not be run by the least-privilege verification role and why its own
---       session note directed an operator to the write-capable carddemo_batch
---       instead. reporting.v_verification_money_totals, created by
---       V3__verification_surfaces.sql, publishes exactly the (target_table,
---       money_column, row_count, total, negative_rows) tuples those branches
---       produced, computed under the view owner's privileges, and SELECT on it is
---       granted to carddemo_reporting and to nothing else. The aggregates
---       themselves are unchanged: the view's branches are the same nine
---       expressions, moved rather than rewritten, including the exact NUMERIC sum,
---       the scale-2 COALESCE and the strictly-negative row count.
+-- WHY : Alternatives Considered: computing the nine aggregates here, naming the
+--       five base tables across three schemas with a COUNT, a SUM and a filtered
+--       COUNT each. Rejected -- the least-privilege verification role holds no
+--       SELECT on those tables, so that form could be run only by a write-capable
+--       principal, which is precisely what a verification pass must not be.
+--       reporting.v_verification_money_totals, created by
+--       V3__verification_surfaces.sql, publishes the (target_table, money_column,
+--       row_count, total, negative_rows) tuples instead, computed under the view
+--       owner's privileges, with SELECT granted to carddemo_reporting and to
+--       nothing else. The nine expressions live there verbatim -- the exact NUMERIC
+--       sum, the scale-2 COALESCE and the strictly-negative row count -- so this
+--       file names no base table at all and a privilege error cannot originate in
+--       one.
 -- WHY : Assumptions: the view is named schema-qualified rather than left to
 --       search_path. This file runs both under psql and through a driver cursor
 --       whose session search_path is set by the calling role, so an unqualified

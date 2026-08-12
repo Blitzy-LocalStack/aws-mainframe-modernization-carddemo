@@ -3,6 +3,7 @@ package com.carddemo.reference.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -37,6 +38,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -474,7 +476,7 @@ class ReferenceWriteBehaviourTest {
         void applyLaterActionsAfterAnEarlierOneIsRejected() {
             when(types.findByTypeCd("02")).thenReturn(Optional.empty());
             when(types.findByTypeCd("03")).thenReturn(Optional.empty());
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             MaintenanceActionBatchResponse reply = service.apply(
                     new MaintenanceActionBatchRequest(List.of(
@@ -509,7 +511,7 @@ class ReferenceWriteBehaviourTest {
         @DisplayName("aggregate the worst condition code seen")
         void aggregateTheWorstConditionCodeSeen() {
             when(types.findByTypeCd("02")).thenReturn(Optional.empty());
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             MaintenanceActionBatchResponse reply = service.apply(
                     new MaintenanceActionBatchRequest(List.of(
@@ -524,7 +526,7 @@ class ReferenceWriteBehaviourTest {
         @DisplayName("report the clean code when every action applied")
         void reportTheCleanCodeWhenEveryActionApplied() {
             when(types.findByTypeCd("04")).thenReturn(Optional.empty());
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             MaintenanceActionBatchResponse reply = service.apply(
                     new MaintenanceActionBatchRequest(List.of(
@@ -545,7 +547,7 @@ class ReferenceWriteBehaviourTest {
         @Test
         @DisplayName("decode one record to its three fields at offsets zero, one and three")
         void decodeOneRecordToItsThreeFieldsAtOffsetsZeroOneAndThree() {
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.RecordOutcome outcome =
                     service.applyRecord(maintenanceRecord("A", "08", "Fee Assessment"));
@@ -572,7 +574,7 @@ class ReferenceWriteBehaviourTest {
         @Test
         @DisplayName("refuse a stream that is not a whole number of records")
         void refuseAStreamThatIsNotAWholeNumberOfRecords() {
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
             byte[] trailingPartialRecord = new byte[ReferenceBatchUpdateService.RECORD_LENGTH + 2];
 
             assertThatThrownBy(
@@ -597,7 +599,7 @@ class ReferenceWriteBehaviourTest {
                     .thenReturn(Optional.of(new TransactionType("02", "Payment")));
             when(types.findByTypeCd("03"))
                     .thenReturn(Optional.of(new TransactionType("03", "Credit")));
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             assertThat(service.applyRecord(maintenanceRecord("A", "08", "New")).action())
                     .isEqualTo(ReferenceBatchUpdateService.RecordAction.ADD);
@@ -637,7 +639,7 @@ class ReferenceWriteBehaviourTest {
         @DisplayName("apply later records after an earlier one is refused")
         void applyLaterRecordsAfterAnEarlierOneIsRefused() {
             when(types.findByTypeCd("01")).thenReturn(Optional.empty());
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
                     maintenanceStream(
@@ -668,7 +670,7 @@ class ReferenceWriteBehaviourTest {
         @Test
         @DisplayName("report the clean code for a clean run and for an empty stream")
         void reportTheCleanCodeForACleanRunAndForAnEmptyStream() {
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.BatchUpdateResult applied = service.apply(
                     maintenanceStream(maintenanceRecord("A", "08", "Fee Assessment")));
@@ -695,7 +697,7 @@ class ReferenceWriteBehaviourTest {
         @DisplayName("report the not-found text for an update and for a delete")
         void reportTheNotFoundTextForAnUpdateAndForADelete() {
             when(types.findByTypeCd("55")).thenReturn(Optional.empty());
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.RecordOutcome updated =
                     service.applyRecord(maintenanceRecord("U", "55", "No such row"));
@@ -729,7 +731,7 @@ class ReferenceWriteBehaviourTest {
             when(types.findByTypeCd("01"))
                     .thenReturn(Optional.of(new TransactionType("01", "Purchase")));
             Mockito.doThrow(integrityViolation("23503")).when(types).flush();
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.RecordOutcome duplicate =
                     service.applyRecord(maintenanceRecord("A", "01", "Purchase"));
@@ -759,7 +761,7 @@ class ReferenceWriteBehaviourTest {
         void fallBackToTheGeneralReasonForAnUnclassifiedState() {
             when(types.insertType("08", "Fee Assessment"))
                     .thenThrow(integrityViolation("40001"));
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.RecordOutcome outcome =
                     service.applyRecord(maintenanceRecord("A", "08", "Fee Assessment"));
@@ -823,7 +825,7 @@ class ReferenceWriteBehaviourTest {
             byte[] contiguous = new byte[2 * reclen];
             System.arraycopy(stored, 0, contiguous, 0, reclen);
             System.arraycopy(stored, reclen + 1, contiguous, reclen, reclen);
-            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types);
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
 
             ReferenceBatchUpdateService.BatchUpdateResult result =
                     service.apply(new ByteArrayInputStream(contiguous));

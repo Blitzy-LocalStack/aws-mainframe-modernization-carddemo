@@ -386,7 +386,7 @@ output "sqs_key_alias_name" {
 # =============================================================================
 # Application-enciphered values -- deliberately NOT a fifth key's contract
 #
-# WHY (Refactoring Rationale): three outputs stood here - application_key_arn,
+# Refactoring Rationale: three outputs stood here - application_key_arn,
 # application_key_id and application_key_alias_name - publishing a FIFTH
 # customer-managed key that the application drew envelope data keys from. The key
 # has been withdrawn, because the specified model is four keys with rotation, one

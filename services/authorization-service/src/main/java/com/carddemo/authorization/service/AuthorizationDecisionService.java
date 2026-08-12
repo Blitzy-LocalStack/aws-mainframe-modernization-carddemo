@@ -345,6 +345,43 @@ public class AuthorizationDecisionService {
     }
 
     /**
+     * Reports the decline an approval becomes when the headroom it was measured against has been spent.
+     *
+     * <p>Purpose: {@link #decide(AuthRequest, DecisionContext)} measures the requested amount against the
+     * summary's headroom as this transaction READ it. Two requests on two different cards of one account are
+     * delivered concurrently by a queue grouped on card number, so both can measure against the same
+     * headroom and both approve. The write applies the approval through a statement QUALIFIED on that same
+     * credit check, so the engine re-evaluates it against the row as it stands; when the qualification fails,
+     * the approval this service reached is no longer the decision the account can carry, and this method
+     * supplies the one it can.</p>
+     *
+     * <p>Assumptions: the reason is chosen by the SAME selection an ordinary insufficient-funds decline uses,
+     * so the requester cannot tell a superseded approval from a request that never fitted -- and must not be
+     * able to. The reference has no such distinction to report: it decides one message at a time, so the
+     * second request simply reads the first's contribution and declines for want of funds. Reporting a new
+     * reason literal here would publish a code no reference program emits and no requester is written for.</p>
+     *
+     * <p>Assumptions: the selection still tests the three not-found conditions FIRST, because it is
+     * {@link #resolveReason(DecisionContext, DeclineReason)} that is called rather than the ground's own
+     * literal. A request declined for want of funds against an account whose master record is missing
+     * therefore reports {@code '3100'} here exactly as it does on the ordinary path, at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L700 to L717.</p>
+     *
+     * <p>Assumptions: the approved amount is {@link Money#ZERO}, matching every other decline. The baseline
+     * moves literal zero into the reply's approved amount on its decline arm at L694, and a superseded
+     * approval reserves nothing, so carrying the requested amount here would tell the requester an amount was
+     * approved that no balance holds.</p>
+     *
+     * @param context the same lookup outcomes the superseded decision was reached from; must not be
+     *     {@code null}
+     * @return the decline that replaces the approval, never {@code null}
+     */
+    public Decision declineForConsumedHeadroom(DecisionContext context) {
+        return new Decision(false, RESP_CODE_DECLINED,
+                resolveReason(context, DeclineReason.INSUFFICIENT_FUND), Money.ZERO);
+    }
+
+    /**
      * Derives the authorization identification code returned to the requester.
      *
      * <p>Assumptions: the baseline moves the REQUEST'S OWN authorization time into the reply's

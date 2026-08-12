@@ -3,6 +3,7 @@ package com.carddemo.common.error;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -347,6 +348,40 @@ public record ApiError(
     public static final int SERVICE_UNAVAILABLE_STATUS = 503;
 
     /**
+     * The shared machine code for a request whose body exceeds the accepted size.
+     *
+     * <p>Assumptions: the 0413 suffix identifies the HTTP 413 surface, following the same convention as
+     * the five codes above. It is a distinct code rather than a reuse of {@link #CODE_VALIDATION}
+     * because the two refusals differ in what the caller must do about them: a validation refusal names
+     * the offending members in {@link #fieldErrors()} and is corrected member by member, whereas this
+     * one names no member at all -- it is refused before any member has been parsed -- and is corrected
+     * only by submitting less. Collapsing the two would give a client a 400 with an empty field array
+     * and no way to tell that case from a body it had merely mis-spelled.</p>
+     *
+     * <p>Assumptions: it has no reference counterpart, and the absence is worth stating rather than
+     * leaving as a silent gap. A reference screen field cannot overflow its own declared width -- the
+     * terminal refuses the keystroke -- so no reference program, literal or file status corresponds to
+     * this condition. It exists because a target request body is assembled by a caller this system does
+     * not control, which is a exposure the fixed 24-by-80 presentation layer did not have.</p>
+     */
+    public static final String CODE_PAYLOAD_TOO_LARGE = "CARDDEMO-0413";
+
+    /**
+     * The HTTP status an over-large request body carries, 413.
+     *
+     * <p>Assumptions: declared here for the same reason {@link #CONFLICT_STATUS} is --
+     * {@code services/common-lib/pom.xml} marks the web dependency optional, so this record cannot read
+     * the framework's status enumeration and the number has to be stated -- and as a constant so that a
+     * test can assert the code and the status as a pair.</p>
+     *
+     * <p>Assumptions: 413 rather than 400. Both are answerable, and 413 is chosen because it is the one
+     * status whose definition names the size of the body as the reason, which is what lets a caller
+     * distinguish a request it can shrink from one it must correct. A 400 would leave the caller
+     * inspecting the message text to learn which of the two it had.</p>
+     */
+    public static final int PAYLOAD_TOO_LARGE_STATUS = 413;
+
+    /**
      * The CardDemo thank-you source literal from {@code CSMSG01Y}.
      *
      * <p>Assumptions: AE-12 preserves the 49-character literal at line 19 of
@@ -565,9 +600,29 @@ public record ApiError(
         /**
          * Reports whether this entry's shared validation state is an error.
          *
+         * <p>Refactoring Rationale: the annotation is what keeps this predicate off the wire, and it is
+         * required rather than decorative. Jackson treats an {@code isX()} method returning
+         * {@code boolean} as a readable property named {@code x}, so without it every response carried a
+         * fourth {@code error} member alongside the three record components -- and every one of the seven
+         * published contracts declares {@code FieldError} with {@code additionalProperties: false}, so
+         * that fourth member was a response no contract admitted. The predicate itself is retained
+         * because callers inside the JVM use it; it is its PUBLICATION that was wrong, not its existence.
+         *
+         * <p>Alternatives Considered: declaring the member in all seven contracts instead. Rejected
+         * because the value is a pure function of {@code state} and is unconditionally {@code true} --
+         * the compact constructor above refuses {@link FieldValidationFlag#VALID} -- so it would oblige
+         * every generated client to carry an accessor that can only ever answer one way, and would put a
+         * second, redundant statement of the same fact beside {@code state} for a caller to reconcile.
+         *
+         * <p>Assumptions: the sibling {@link #screenMarker()} needs no annotation, because it is neither
+         * a record component nor named with a {@code get} or {@code is} prefix and so is invisible to
+         * Jackson's default property detection. That is a naming coincidence rather than a stated
+         * intent, which is why the emitted property set is pinned by a test rather than left to it.
+         *
          * @return {@code true} for both {@link FieldValidationFlag#NOT_OK} and
          *     {@link FieldValidationFlag#BLANK}; a valid state cannot be constructed
          */
+        @JsonIgnore
         public boolean isError() {
             return state.isError();
         }
@@ -575,9 +630,17 @@ public record ApiError(
         /**
          * Returns the rendering marker derived from the shared validation state.
          *
+         * <p>Assumptions: this member is excluded from the serialised form for the same reason the
+         * predicate above is, and the exclusion is declared rather than relied upon. The name is not
+         * a bean-style getter, so the serialiser does not detect it under the configuration this
+         * kernel ships today; annotating it means a later configuration that enabled fluent
+         * accessor detection could not silently add a fifth member to a contract two consumers have
+         * closed.</p>
+         *
          * @return {@link FieldValidationFlag#BLANK_SCREEN_MARKER} for a blank field, otherwise
          *     {@link FieldValidationFlag#NO_SCREEN_MARKER}
          */
+        @JsonIgnore
         public String screenMarker() {
             return state.screenMarker();
         }

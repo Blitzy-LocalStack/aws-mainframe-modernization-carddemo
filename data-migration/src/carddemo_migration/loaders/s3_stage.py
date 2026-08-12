@@ -97,6 +97,7 @@ __all__ = [
     "delete_generation_prefix",
     "family",
     "family_names",
+    "current_generation",
     "family_prefix",
     "latest_generation",
     "list_generation_prefixes",
@@ -203,10 +204,13 @@ class GenerationDiscoveryError(GenerationRetentionError):
 
     Purpose
     -------
-    Signal that discovery ran but produced no usable answer, which happens only when a
-    family's four-digit generation space is exhausted. Raising is the whole point: silently
-    reusing :data:`MAX_GENERATION` would overwrite the newest good generation with the next
-    run's output.
+    Signal that discovery ran but produced no usable answer. Two cases reach it, and raising is
+    the whole point in both. A family whose four-digit generation space is exhausted has no next
+    number: silently reusing :data:`MAX_GENERATION` would overwrite the newest good generation
+    with the next run's output. And a family holding NO generation has no current one:
+    :func:`current_generation` raises rather than answering with nothing, because a consuming
+    step that received nothing would go on to read an empty dataset and report a successful run
+    over zero records.
     """
 
 
@@ -1223,7 +1227,9 @@ def latest_generation(
     Purpose
     -------
     Answer "which generation would a ``(0)`` reference read?" for one family, so a consuming
-    step reads the same generation the baseline job would have read.
+    step reads the same generation the baseline job would have read. This is the LOW-LEVEL query
+    and it treats an empty family as an answer; :func:`current_generation` is the strict resolver
+    a step that cannot proceed without a generation should call.
 
     Parameters
     ----------
@@ -1259,6 +1265,68 @@ def latest_generation(
         client, settings.bucket, family_prefix(settings, domain, dataset)
     )
     return generations[-1] if generations else None
+
+
+def current_generation(
+    client: S3StagingClient,
+    settings: DatasetStagingSettings,
+    domain: str,
+    dataset: str,
+) -> GenerationPrefix:
+    """Resolve the baseline ``(0)`` reference, refusing a family that holds no generation.
+
+    Purpose
+    -------
+    Answer "which generation does a ``(0)`` reference read?" for a consuming step that cannot
+    proceed without one, so an absent generation is a typed failure rather than an empty read.
+    This is the resolver a batch step calls; :func:`latest_generation` is the lower-level query
+    for a caller that treats absence as a legitimate answer.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for paginated prefix discovery.
+    settings : DatasetStagingSettings
+        Validated bucket settings and the canonical prefix builder.
+    domain : str
+        Bounded-context segment.
+    dataset : str
+        Dataset-family segment.
+
+    Returns
+    -------
+    GenerationPrefix
+        The newest generation in the family. Never ``None``: an empty family raises instead.
+
+    Raises
+    ------
+    GenerationDiscoveryError
+        If the family holds no generation, so no ``(0)`` reference can be resolved.
+    GenerationRetentionError
+        If a discovered prefix carries an invalid business date.
+    ConfigurationError
+        If either path segment is unacceptable to the prefix builder.
+    """
+    # WHY : Alternatives Considered: this is a SECOND function rather than a flag on
+    #   :func:`latest_generation`, and the two are kept apart because they answer different
+    #   questions and their callers need different outcomes. A retention pass asks "is there
+    #   anything here?" and an empty family is a normal answer; a consuming batch step asks "read
+    #   the current generation", and for it an empty family means the producing step did not run.
+    #   A boolean parameter would put both meanings behind one name, so a caller reading the call
+    #   site could not tell which contract was in force -- and the strict contract is the one the
+    #   baseline's own semantics carry: a JCL step referencing ``TRANSACT.BKUP(0)`` against an
+    #   empty generation data group fails the step rather than reading nothing.
+    # WHY : Assumptions: the failure is `GenerationDiscoveryError`, which already exists for the
+    #   other way discovery yields no usable answer -- an exhausted generation space -- so a caller
+    #   handling "the generation I need cannot be determined" catches one class for both. A new
+    #   exception type was rejected because it would split one operator response across two names.
+    resolved = latest_generation(client, settings, domain, dataset)
+    if resolved is None:
+        raise GenerationDiscoveryError(
+            f"no generation exists for {domain}/{dataset}, so a (0) reference cannot be resolved;"
+            " the step that stages this family has not produced a generation yet"
+        )
+    return resolved
 
 
 def next_generation(
@@ -1605,7 +1673,12 @@ def _claim_generation(client: S3StagingClient, bucket: str, key: str, execution_
         #   stays importable without the SDK, and it would make the conflict path unreachable from
         #   a test using this module's own client protocol, which is satisfied by any object with
         #   the right methods. Anything that is not a recognised conflict is re-raised unchanged.
-        if config._error_code(exc) in _CLAIM_CONFLICT_CODES:
+        # WHY : Refactoring Rationale: the reader is called by its PUBLISHED name, where this line
+        #   read `config._error_code`. This function is reached from `reserve_generation`, which
+        #   this module publishes, so a public path here depended on a private name there -- and a
+        #   private name carries no promise of surviving a rename, which would have turned every
+        #   claim conflict into a re-raised failure at the one moment two concurrent runs met.
+        if config.error_code(exc) in _CLAIM_CONFLICT_CODES:
             return False
         raise
     return True

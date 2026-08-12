@@ -18,11 +18,9 @@
  * outside the contract rather than merely new.</p>
  *
  * <p>Alternatives Considered: deriving the roster from the directory instead of from the plan and
- * the published contract. Rejected on two independent grounds. A roster describing whatever happens
- * to be present cannot say what may <em>not</em> be added, and that is the half of a package
- * contract a reader cannot reconstruct from the files beside it. Separately, {@code JavadocPackage}
- * audits a directory rather than one compilation unit, so this charter has to govern the directory
- * as a whole and be readable before any type in it is.</p>
+ * the published contract. Rejected because a roster describing whatever happens to be present cannot
+ * say what may <em>not</em> be added, and that is the half of a package contract a reader cannot
+ * reconstruct from the files beside it.</p>
  *
  * <h2>Roster, and the operations it carries</h2>
  *
@@ -143,8 +141,12 @@
  *       which is what makes each request self-describing and therefore independently
  *       authorizable</li>
  *   <li>The browse cursor of the transaction list travels in the page envelope
- *       {@code com.carddemo.common.web.PageResponse}, through its first-key, last-key and has-next
- *       members, so the list operation positions by key and never by offset. Sealing and opening
+ *       {@code com.carddemo.common.web.PageResponse}, through its first-key and last-key members,
+ *       with its has-next and has-previous members each settled by a surplus row read in that
+ *       direction, so the list operation positions by key and never by offset. Assumptions:
+ *       has-previous is one of the envelope's five components and is not read off the first-key
+ *       member, whose presence answers where a retreat resumes from rather than whether one
+ *       exists. Sealing and opening
  *       that cursor is {@code com.carddemo.common.web.CursorToken}, held by the adapter rather than
  *       by the service beneath it, because the token's key material is infrastructure the service
  *       layer must not reach for. That is binding work rather than a business rule</li>
@@ -222,8 +224,8 @@
  * repository is owned by the ArchUnit rule set named above, and that rule set carries a constraint
  * {@code ImportControl} cannot state at all, the prohibition on binary floating point anywhere in
  * the money path. Configuring both would leave two engines enforcing overlapping halves of one
- * charter, and a reader could then no longer tell which of them owned a given boundary, so
- * whichever is cheaper to silence is the one that gets silenced.</p>
+ * charter, leaving a reader unable to tell which of them owned a given boundary, so whichever is
+ * cheaper to silence is the one that gets silenced.</p>
  *
  * <h2>Shared contracts, consumed and never re-declared</h2>
  *
@@ -304,30 +306,7 @@
  * {@code float} and {@code double} in the money path is rule A3 of the ArchUnit rule set named
  * above, so it is a failing test rather than a convention.</p>
  *
- * <h2>Documentation contract</h2>
- *
- * <p>Assumptions: this file exists because user-specified Rule 1 (Explainability) requires a
- * docstring on every module entry point at its line 15, a Java package declaration is that entry
- * point, and a {@code package-info.java} Javadoc block is the only construct able to carry one.
- * Line 15 is the whole authority for the file. Its Validation Gate at line 43 is cited here for the
- * shape of the gate rather than as that authority, because the gate's subject is a function and a
- * package declaration is not one. The block form used here is what line 22 prescribes for Java, and
- * the written convention this build shares across its languages is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, which names the {@code package-info.java} charter
- * explicitly among the elements requiring Javadoc.</p>
- *
- * <p>Assumptions: two Checkstyle checks act on this file and they are not redundant.
- * {@code JavadocPackage} runs at {@code Checker} level, where it audits the directory and asserts
- * only that a {@code package-info.java} file is present beside the Java sources it processes.
- * {@code MissingJavadocPackage} runs inside the tree walker, where it reads that file and asserts
- * that the file carries Javadoc. A file carrying only an ordinary block comment therefore satisfies
- * the first and fails the second, which is why this file opens on a documentation comment rather
- * than a plain one. Both fire from the execution bound to the Maven {@code validate} phase in
- * {@code services/pom.xml}, which precedes compilation on every build, and neither is escaped by a
- * build that declines to run tests. No suppression covers {@code src/main/java}: the two entries in
- * {@code config/checkstyle/suppressions.xml} reach only generated sources and test fixtures, and
- * the comment and annotation filters that would allow an in-code bypass are deliberately absent
- * from {@code config/checkstyle/checkstyle.xml}.</p>
+ * <h2>Consumers of this boundary</h2>
  *
  * <p>Assumptions: this package's consumers are the sibling {@code dto}, {@code service} and
  * {@code config} packages together with {@code com.carddemo.common}, and beyond the module boundary
@@ -338,36 +317,10 @@
  * which is why the contract is a committed document reviewable line by line rather than something
  * assembled at run time from annotations.</p>
  *
- * <p>Assumptions: the rationale idiom in this package follows
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} rather than the older shell idiom, and the two differ
- * in a way that is easy to get backwards. The paired {@code WHAT:} and {@code WHY :} form -- the
- * first with no space before its colon, the second with one, so that both labels are eight
- * characters wide and their text and continuations align on one left margin -- is the house form for
- * fenced command blocks in prose, established at {@code tests/README.md:267} and {@code :270}. In
- * Java it belongs to a module-level or file-header block, where purpose is stated, and it is
- * forbidden on a statement: a {@code WHAT:} line above a statement restates what the statement
- * already says, which is the first pattern Rule 1 forbids at its line 38. A statement-adjacent
- * comment in this package therefore carries a rationale and nothing else, opening on one of the four
- * labels Rule 1 gives at its lines 31 to 34, written as {@code Alternatives Considered:},
- * {@code Refactoring Rationale:}, {@code Assumptions:} and {@code Trade-offs:} -- plural where the
- * rule writes them plural, with an ASCII hyphen in the last, unparenthesised, colon retained and
- * carrying no emphasis markup.</p>
- *
- * <p>Alternatives Considered: matching the singular parenthesised idiom that predominates in this
- * repository's older prose was weighed and rejected. Rule 1 states these categories at its lines 31
- * to 34 and its Validation Gate at line 43 makes that wording the sentence this tree is audited
- * against, so the audited spelling is the one that has to appear. A reviewer looking for every
- * rationale across the new trees has only a literal string search to work with, because no linter
- * reads prose in a Terraform file or a SQL migration; one spelling makes that search complete,
- * while two make it silently partial. The two forms are never mixed inside one file.</p>
- *
- * <p>Assumptions: this charter carries no parameter, return-value, authorship or version at-clause,
- * and each omission is a fact about the subject rather than an economy. A package declares no
- * parameter, returns no value and raises nothing, so the parameter and return-value elements Rule 1
- * lists at its lines 19 and 20 and the exception element at its line 21 have nothing to describe
- * here, and the purpose element at its line 18 carries the whole obligation; inventing any of those
- * at-clauses would state something untrue of a package. An authorship or version at-clause is
- * required by no check in this build and would record metadata the version-control history already
- * holds more accurately and keeps current without being edited.</p>
+ * <p>Assumptions: the documentation convention this charter and every type beside it follow is
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, which is where the rationale-label spellings, the
+ * scope of the paired command-block idiom and the Checkstyle checks that enforce presence are
+ * stated. They are not restated here, because one written convention with one home is the property
+ * that makes a repository-wide search for a rationale complete rather than silently partial.</p>
  */
 package com.carddemo.transaction.api;

@@ -7,24 +7,23 @@
 /**
  * Root package of the card bounded context, which owns credit-card enquiry and maintenance.
  *
- * <h2>Contract and current membership, and the one member still outstanding</h2>
+ * <h2>Contract and current membership</h2>
  *
  * <p>Assumptions: this charter's inventory is <b>measured against the directory</b>, and all seven
  * subpackages exist -- {@code domain}, {@code repository}, {@code dto}, {@code mapper},
- * {@code service}, {@code api} and {@code config} -- each holding its own charter and, apart from
- * {@code api}, its classes. <b>Exactly one member of the map below has no file: {@code CardController}
- * in {@code api}.</b> None of the five published operations is therefore served yet, and that single
- * outstanding member is marked at its own entry rather than by a blanket qualification over the whole
- * charter.</p>
+ * {@code service}, {@code api} and {@code config} -- each holding its own charter and its classes.
+ * <b>Every member of the map below has a file</b>, so all five published operations are served, and
+ * each subpackage's own charter carries the measured count of its directory.</p>
  *
- * <p>Refactoring Rationale: this section previously declared every name in the charter a target rather
- * than a measurement, on the ground that the directory held this charter and three charter-only
- * subpackages. That was true when written and is now false in almost every particular -- the entity,
- * the repository, the three data-transfer records, the mapper, the cipher and the four configuration
- * classes are all present -- so a blanket "planned, not missing" preamble had become a blanket
- * inaccuracy, and it is the most misleading form the inaccuracy can take: a reader is told nothing in
- * the file can be trusted as an inventory, so the one name that genuinely is outstanding stops standing
- * out. Marking the single exception is what restores that signal.</p>
+ * <p>Refactoring Rationale: this section has been corrected twice. It first declared every name in the
+ * charter a target rather than a measurement, on the ground that the directory held this charter and
+ * three charter-only subpackages; that became a blanket inaccuracy, and a blanket one is the most
+ * misleading form, because a reader told that nothing in the file is an inventory stops noticing the one
+ * name that genuinely is outstanding. It was then corrected to name {@code CardController} as the single
+ * member with no file -- and that class landed, leaving this charter telling a reader that none of the
+ * five operations was served while the controller sat in {@code api} beside its charter. The membership
+ * below is therefore stated without exception, and each subpackage's own charter now carries a
+ * re-measured directory marker so the counting is done by the build rather than by this paragraph.</p>
  *
  * <p>Alternatives Considered: withholding this charter until every class it governs
  * exists. Rejected, because the charter is what the authors of those classes work
@@ -68,23 +67,31 @@
  * <h2>Subpackage map</h2>
  *
  * <ul>
- *   <li>{@code domain}: the {@code Card} JPA entity</li>
+ *   <li>{@code domain}: the {@code Card} JPA entity, together with the {@code EncryptedCvv} value and
+ *       its {@code EncryptedCvvConverter} attribute converter -- three classes, because the enciphered
+ *       verification value is a type of its own rather than a column annotation, so nothing can read it
+ *       as a plain string by accident</li>
  *   <li>{@code repository}: {@code CardRepository}, carrying the keyset queries and the
  *       by-account query</li>
- *   <li>{@code dto}: {@code CardSummary}, {@code CardDetail} and {@code CardUpdateRequest}</li>
+ *   <li>{@code dto}: {@code CardSummary}, {@code CardDetail}, {@code AdminCardDetail},
+ *       {@code CardUpdateRequest}, {@code CardLookupRequest} and {@code CardPageQuery} -- six records,
+ *       the administrative detail being separate from the ordinary one because only it discloses the
+ *       whole card number, and the two request records being separate because a lookup and a page walk
+ *       carry different inputs</li>
  *   <li>{@code mapper}: {@code CardMapper}, the anti-corruption layer between the copybook-shaped
  *       record and the API surface</li>
- *   <li>{@code service}: {@code CardListService}, {@code CardViewService} and
- *       {@code CardUpdateService}</li>
- *   <li>{@code api}: {@code CardController} -- <b>the one member of this map with no file.</b> The
- *       package holds its charter, which carries the five-operation roster the controller is to serve
- *       and the reason the count is five</li>
- *   <li>{@code config}: {@code SecurityConfig}, {@code OpenApiConfig}, {@code DataSourceConfig} and
- *       {@code KmsConfig} -- four classes, the fourth wiring the key-management client the stored card
- *       verification value is enciphered with. Assumptions: four is where this context differs from its
- *       account and transaction siblings, and the difference is a property of the data rather than of
- *       taste: this is the only context that enciphers a stored column, so it is the only one whose
- *       configuration package reaches a cryptographic service</li>
+ *   <li>{@code service}: {@code CardListService}, {@code CardViewService}, {@code CardUpdateService},
+ *       {@code CardAdminViewService} and {@code CardVerificationValueCipher} -- five classes, the
+ *       administrative read held apart from the ordinary one so that the widest disclosure this context
+ *       performs has a single entry point, and the cipher held here because it holds key material</li>
+ *   <li>{@code api}: {@code CardController}, serving the five published operations. Its own charter
+ *       carries the operation roster and the reason the count is five</li>
+ *   <li>{@code config}: {@code SecurityConfig}, {@code OpenApiConfig}, {@code DataSourceConfig},
+ *       {@code KmsConfig} and {@code CardSelectorConfig} -- five classes, two of which have no
+ *       counterpart in the account or transaction contexts. Assumptions: that is a property of the data
+ *       rather than of taste: this is the only context that enciphers a stored column, so it is the only
+ *       one whose configuration package reaches a key-management service, and it is the only one whose
+ *       path selector is a sealed token needing its own signing key</li>
  * </ul>
  *
  * <h2>Shared kernel</h2>

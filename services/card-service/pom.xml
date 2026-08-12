@@ -76,15 +76,14 @@
     Governing rule:   user-specified Rule 1 (Explainability)
     Prose convention: docs/CODE_DOCUMENTATION_STANDARD.md
     Mechanical gate:  config/checkstyle/checkstyle.xml
-    Alternatives Considered: an earlier revision of this header made the linter
-    configuration authoritative wherever it and the prose disagreed, on the
-    ground that the linter is what decides whether the build passes. That is
-    rejected. The rule and the prose standard are AUTHORITATIVE, and the gate
-    implements a subset of them: it checks Javadoc presence and completeness and
-    cannot read a rationale at all, so it passes code the rule fails. Treating
-    the gate as final would let one attribute value silently narrow the
-    obligation, which is how an undocumented member ships behind a green build.
-    Where the two disagree, the gate is what gets corrected.
+    Alternatives Considered: treating the linter configuration as authoritative
+    wherever it and the prose disagree, on the ground that the linter is what
+    decides whether the build passes. Rejected. The rule and the prose standard
+    are AUTHORITATIVE and the gate implements a subset of them: it checks Javadoc
+    presence and completeness and cannot read a rationale at all, so it passes
+    code the rule fails. Treating the gate as final would let one attribute value
+    silently narrow the obligation, which is how an undocumented member ships
+    behind a green build. Where the two disagree, the gate is what gets corrected.
   =============================================================================
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -307,8 +306,8 @@
       table is never created, and the first card query fails on a missing
       relation.
 
-      Refactoring Rationale: flyway-core is no longer declared in its own right.
-      The starter brings it transitively at the version the aggregator's
+      Refactoring Rationale: flyway-core is deliberately NOT declared in its own
+      right. The starter brings it transitively at the version the aggregator's
       flyway.version property pins, so a direct declaration would add a second
       place that version could be edited while adding nothing to the classpath.
 
@@ -324,7 +323,7 @@
     <!--
       Assumptions: Spring Boot 4 broke the single spring-boot-autoconfigure
       artifact into one autoconfiguration module per technology, so
-      FlywayAutoConfiguration no longer travels with the framework core; it ships
+      FlywayAutoConfiguration does not travel with the framework core; it ships
       in org.springframework.boot:spring-boot-flyway, which is what this starter
       contributes together with spring-boot-jdbc. The two org.flywaydb
       coordinates below supply the migration engine and the PostgreSQL dialect

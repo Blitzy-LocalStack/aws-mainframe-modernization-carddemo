@@ -12,36 +12,19 @@
 //      row for a token already loaded.
 //
 // WHY (non-obvious design decisions):
-//  (1) Assumptions: the four rationale labels are written in the PLURAL form
-//      throughout -- Alternatives Considered:, Refactoring Rationale:,
-//      Assumptions: and Trade-offs: -- which is the one written form
-//      docs/CODE_DOCUMENTATION_STANDARD.md permits at its lines 236 to 239, with
-//      the four properties that make that form load-bearing at its lines 245 to
-//      253. The singular spellings mean the same thing and are deliberately never
-//      used, so a reviewer auditing this tree can locate every rationale by
-//      literal search before reading any of them. The equivalence is stated once
-//      here and nowhere restated.
-//  (2) Refactoring Rationale: this class is named for the seeded DOMAIN of
-//      reference.us_state_zip_prefixes and not for a repository interface, and
-//      that departs from a ruling it is therefore obliged to name.
-//      package-info.java rules at its lines 117 to 142 that a class here takes
-//      the name of the interface it covers with IT appended, records the
-//      unprefixed forms as not the names to use, and states this package's set as
-//      eight compilation units. Both halves of that ruling are about classes
-//      named after interfaces; this is a ninth unit that is not one. Every read
-//      below goes through UsStateZipPrefixRepository, and that interface's walk
-//      contracts are covered by UsStateZipPrefixRepositoryIT, which asserts the
-//      cardinality, the ordering and the strictness of both bounds and states
-//      that naming an individual seeded token is the seed's own contract to
-//      state. Naming both of those here restores exactly what the naming rule
-//      buys -- that a reader can derive the subject and its neighbours without
-//      opening the file -- and the two classes share no assertion.
-//  (3) Refactoring Rationale: the discrepancy in (2) is recorded HERE rather than
-//      settled by editing that charter, because that charter sets the convention
-//      for precisely this case at its lines 490 to 500: a correction belongs at
-//      the file it is about, so that a reader arriving at either one finds it
-//      named instead of silently resolved in the other.
-//  (4) Alternatives Considered: a real PostgreSQL engine rather than an in-memory
+//  - Refactoring Rationale: this class is named for the seeded DOMAIN of
+//      reference.us_state_zip_prefixes rather than for a repository interface,
+//      which departs from the naming ruling in package-info.java that a class
+//      here takes the name of the interface it covers with IT appended. That
+//      ruling is about classes named after interfaces, and this is a unit that is
+//      not one: every read below goes through UsStateZipPrefixRepository, whose
+//      walk contracts -- cardinality, ordering and the strictness of both bounds
+//      -- are covered by UsStateZipPrefixRepositoryIT, and the two classes share
+//      no assertion. Naming both here restores what the naming rule buys, that a
+//      reader can derive the subject and its neighbours without opening the file.
+//      The departure is recorded at the file it is about rather than in that
+//      charter, which is the convention the charter itself sets.
+//  - Alternatives Considered: a real PostgreSQL engine rather than an in-memory
 //      substitute. Two properties below are the engine's own and no substitute
 //      can answer them -- the collation a declared-width character column is
 //      ordered under, which is the whole reason a lexical minimum and maximum
@@ -49,17 +32,17 @@
 //      refuses a duplicate. A substitute answers whatever it is configured to
 //      answer, so every assertion here would pass while establishing nothing
 //      about the schema that is actually deployed.
-//  (5) Alternatives Considered: declaring an engine of this class's own rather
+//  - Alternatives Considered: declaring an engine of this class's own rather
 //      than extending the shared base. Rejected: ReferencePersistenceBase is a
 //      second package-private top-level type declared inside the file
 //      TransactionTypeRepositoryIT.java, reached from here by same-package
 //      resolution with no import, and it already starts ONE engine for the whole
 //      package in a static initialiser and already carries the context and
-//      profile selection this class inherits. A second
-//      declaration would start a second engine for the same package and run the
-//      same two migrations over again, and it would leave two answers to the
-//      question of which engine a failure came from.
-//  (6) Trade-offs: starting a database engine costs this class more than any
+//      profile selection this class inherits. A second declaration would start a
+//      second engine for the same package, run the same two migrations over
+//      again, and leave two answers to the question of which engine a failure
+//      came from.
+//  - Trade-offs: starting a database engine costs this class more than any
 //      assertion it makes would cost against a stand-in, and that cost is
 //      accepted rather than reduced. What it buys is that the seed audit here is
 //      a real reading of a migrated table: the migrations run, the rows are the
@@ -68,7 +51,7 @@
 //      report the fixture it was handed, so a seed that had transcribed the
 //      copybook incompletely would still be reported as complete -- which is the
 //      one outcome this class exists to rule out.
-//  (7) Trade-offs: the one case here that writes is transactional, so it rolls
+//  - Trade-offs: the one case here that writes is transactional, so it rolls
 //      back, and what that gives up is commit-visibility realism -- no case here
 //      observes a row as a separate connection would see it after a commit, so a
 //      defect appearing only once a change is durable is not caught at this
@@ -78,10 +61,10 @@
 //      deleted row, so a row left behind here would fail the cross-table seed
 //      audit that TransactionTypeRepositoryIT owns, for a reason belonging to
 //      this file.
-//  (8) Assumptions: every citation beneath app/ is a physical line number that
-//      was read at that address, and everything beneath app/ is the behavioural
-//      oracle of this migration -- read and cited, never modified. Where a
-//      migrated form departs from it deliberately, the departure is registered in
+//  - Assumptions: every citation beneath app/ is a physical line number read at
+//      that address, and everything beneath app/ is the behavioural oracle of
+//      this migration -- read and cited, never modified. Where a migrated form
+//      departs from it deliberately, the departure is registered in
 //      docs/architecture/cobol-to-service-traceability.md, a document this file
 //      references and does not author.
 // =============================================================================
@@ -184,7 +167,7 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
     //       that performs it. This is the provider's own unit-of-work insert rather than a bulk or
     //       derived modifying statement, so package-info.java's ruling at its L332 to L335 that a
     //       write is carried out by the provider and not bypassed is honoured rather than sidestepped.
-    /** The persistence context, used to read the built mapping and to issue one insert. */
+    /** The persistence context, through which the built mapping is read and one insert issued. */
     @PersistenceContext
     private EntityManager entityManager;
 
@@ -242,7 +225,7 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
         //       cardinality. Rejected on arithmetic: a count constrains HOW MANY combinations were
         //       loaded and says nothing about WHICH. A transcription that substituted one literal --
         //       AA43 for AA34, two adjacent characters transposed -- loads 240 rows, all distinct, and
-        //       passes a count assertion while the domain it describes is no longer the copybook's.
+        //       passes a count assertion while describing a domain the copybook does not hold.
         //       The seed statement's ON CONFLICT DO NOTHING at V2__seed_reference.sql L676 does not
         //       help here either: it disposes of a REPEATED literal by landing no row for it, which a
         //       count would catch as a shortfall, and a substituted literal is not repeated. Naming the
@@ -335,7 +318,6 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
                 .isEqualTo(LEXICAL_FIRST_TOKEN)
                 .hasSize(TOKEN_WIDTH);
 
-        // WHAT: the two recombinations, each assembled from halves that the seeded data does contain.
         assertThat(this.prefixes.findByStateZipCd(UNLISTED_RECOMBINATION_LOW))
                 .as("the state half of AA34 with the postal half of WY83 is not a permitted pairing")
                 .isEmpty();
@@ -352,8 +334,8 @@ class StateZipPrefixRepositoryIT extends ReferencePersistenceBase {
      * immediately beneath the condition name this table comes from, and it is parsing scaffolding
      * rather than part of the domain. The mapping the provider actually built is read here and
      * required to declare exactly one attribute, so a second column added for that field -- or for
-     * anything else -- fails at this level instead of surfacing later as a table that no longer
-     * matches the migration.</p>
+     * anything else -- fails at this level instead of surfacing later as a table that disagrees with
+     * the migration.</p>
      *
      * <p>Assumptions: the mapping is read from the provider's own model rather than from the
      * annotations on the source, so what is asserted is what the running context resolved.

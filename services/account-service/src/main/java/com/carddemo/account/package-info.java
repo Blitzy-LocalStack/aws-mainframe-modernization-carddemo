@@ -48,45 +48,36 @@
  * <p>An amount is {@code NUMERIC(12,2)} in the schema, {@code BigDecimal} at scale two with half-up
  * rounding in Java, and a JSON <em>string</em> on the wire, produced through the shared money module.
  * Alternatives Considered: emitting amounts as JSON numbers so clients receive something
- * arithmetic-looking. Rejected, and it is the more tempting mistake because it looks like a convenience
- * rather than a defect: most clients parse a JSON number into an IEEE-754 binary floating-point value by
- * default, reintroducing representation error at exactly the boundary a balance or a credit limit is read
- * at, after the database and the service have both kept the value exact. Binary floating-point types are
- * barred from the money path outright, and the bar is asserted by the shared architecture test rather
- * than left to review.</p>
+ * arithmetic-looking. Rejected because most clients parse a JSON number into an IEEE-754 binary
+ * floating-point value by default, reintroducing representation error at exactly the boundary a balance
+ * or a credit limit is read at, after the database and the service have both kept the value exact. Binary
+ * floating-point types are barred from the money path outright, and the bar is asserted by the shared
+ * architecture test rather than left to review.</p>
  *
- * <p>Assumptions: where an amount is computed, the baseline's order of operations is preserved — a
- * product is taken at full precision first and only then divided, with scale and rounding stated
- * explicitly. Dividing first shifts results by whole cents on ordinary inputs, so re-ordering is a
- * behavioural change and not an optimisation.</p>
- *
- * <p>Assumptions: the source values are zoned decimal with a sign OVERPUNCH, not a printable minus sign,
- * so the sign convention has to be declared rather than defaulted — {@code tests/README.md} records that
- * the ASCII default misreads the overpunch and silently corrupts negative balances. Silently is the
- * operative word: nothing fails and the numbers simply come back wrong, which is why every fixed-width
- * amount is routed through the shared zoned-decimal codec instead of a general-purpose numeric parse.
- * The exemplar is {@code ACCT-CURR-BAL PIC S9(10)V99} at {@code app/cpy/CVACT01Y.cpy} L7.</p>
+ * <p>Assumptions: two hazards in the source representation are silent when got wrong, so both are
+ * settled once. Where an amount is computed the baseline's order of operations is preserved -- a product
+ * is taken at full precision first and only then divided, because dividing first shifts results by whole
+ * cents on ordinary inputs. And the source values are zoned decimal with a sign OVERPUNCH rather than a
+ * printable minus sign, which the ASCII default misreads while corrupting negative balances without
+ * failing, so every fixed-width amount is routed through the shared zoned-decimal codec instead of a
+ * general-purpose numeric parse. The exemplar is {@code ACCT-CURR-BAL PIC S9(10)V99} at
+ * {@code app/cpy/CVACT01Y.cpy} L7.</p>
  *
  * <p>Assumptions: long identifiers and amounts travel as digits-only strings and are validated for
  * digits, because the baseline itself treats them as characters on the wire and as numbers only inside
- * arithmetic — the before-image below holds each numeric as a character field with a numeric
+ * arithmetic -- its before-image holds each numeric as a character field with a numeric
  * {@code REDEFINES} over it, and every money field on both screen maps is alphanumeric.</p>
  *
  * <h2>Optimistic concurrency is inherited, not invented</h2>
  *
  * <p>Refactoring Rationale: the version column on {@code accounts} and {@code customers} is not a new
- * guarantee imposed on a baseline that lacked one — it is the native expression of a before-image
- * comparison {@code app/cbl/COACTUPC.cbl} already performs. That program snapshots the complete pre-edit
- * record into {@code ACUP-OLD-DETAILS} (L669 onward), holding each numeric as a character field with a
- * numeric {@code REDEFINES} laid over it, carries a tri-state outcome flag distinguishing unconfirmed
- * from applied from failed changes, and on a failed rewrite issues an explicit rollback. Recognising the
- * pattern as already present is what makes the JPA version column a replacement rather than an
- * addition.</p>
- *
- * <p>Assumptions: the read-for-update lock was never held across client think-time — that is exactly why
- * the before-image exists — so nothing is lost by expressing the check as a version column. A version
- * conflict surfaces as HTTP 409 through the shared exception advice, which already maps it; this subtree
- * must not re-implement that mapping.</p>
+ * guarantee imposed on a baseline that lacked one -- it is the native expression of a before-image
+ * comparison {@code app/cbl/COACTUPC.cbl} already performs, snapshotting the complete pre-edit record
+ * into {@code ACUP-OLD-DETAILS} at L669 onward and abandoning the rewrite when the comparison fails. The
+ * read-for-update lock was never held across client think-time -- that is exactly why the before-image
+ * exists -- so nothing is lost by expressing the check as a version column. A conflict surfaces as HTTP
+ * 409 through the shared exception advice, which already maps it; this subtree must not re-implement that
+ * mapping.</p>
  *
  * <h2>No transactional outbox, and why this context differs from its siblings</h2>
  *
@@ -116,11 +107,9 @@
  * <h2>Lists page by key</h2>
  *
  * <p>Alternatives Considered: position-based paging. Rejected because the baseline browse state is
- * already a keyset cursor — it persists a last-key pair, a first-key pair and a next-page indicator, and
- * sets that indicator by discovering one more record than fits — and because under concurrent inserts an
- * offset skips and repeats rows, changing observable behaviour that browse-by-key does not. Forward reads
- * are keyed strictly greater than the last key ascending with a limit of size plus one; backward reads are
- * keyed strictly less than the first key descending, which is what read-previous does.</p>
+ * already a keyset cursor -- a last-key pair, a first-key pair and a next-page indicator set by
+ * discovering one more record than fits -- and because under concurrent inserts an offset skips and
+ * repeats rows, changing observable behaviour that browse-by-key does not.</p>
  *
  * <p>Assumptions: the by-account query over {@code card_xref} stands in for the {@code CXACAIX} alternate
  * index, which the baseline surfaces to CICS as a file in its own right. It is an access path, not a
@@ -175,11 +164,10 @@
  * <p>Alternatives Considered: re-declaring shared types per context, and generating accessor and mapping
  * code. Per-context copies are rejected because one former copybook inclusion becomes exactly one import
  * from the single package that owns that contract, which is the Java counterpart of compiling every
- * baseline program against one copybook path. Accessor generation is rejected because generated members
- * cannot carry the docstrings the Explainability rule requires. Mapping generation is rejected because the
- * mapping is not mechanical: it drops filler, masks the primary account number, encrypts two identifiers
- * and renames a misspelled field, and each of those needs a justification written beside it that a
- * generated mapper has nowhere to hold.</p>
+ * baseline program against one copybook path. Generation is rejected because generated members cannot
+ * carry the docstrings the Explainability rule requires, and because this mapping is not mechanical: it
+ * drops filler, masks the primary account number, encrypts two identifiers and renames a misspelled
+ * field, each of which needs a justification written beside it.</p>
  *
  * <p>Assumptions: the web, validation, security and token resource-server starters are declared by this
  * module directly, because the shared module marks them optional and optional dependencies are not

@@ -129,7 +129,7 @@ customer access to the self-managed experience effective **30 June 2026**,
 states that existing customers continue to use the service as normal, and
 states that AWS continues to invest in security and availability but does not
 plan to introduce new features; the managed runtime environment experience is
-likewise no longer open to new customers. A workload that is new to the service
+likewise closed to new customers. A workload that is new to the service
 therefore cannot adopt it, and AWS's own guidance directs new work to
 vendor-direct offerings and to AWS Transform.
 
@@ -246,12 +246,12 @@ the comment block immediately preceding the `<parent>` element, where the two
 candidate libraries are named and rejected — one because its published artifact
 targets the previous framework generation, the other as superseded by the core
 relocation — and where the deliberate absence of a circuit breaker is recorded
-alongside them. That block is cited by position rather than by line number
-deliberately: an earlier revision of this record cited **L125–L150**, the block
-then moved and grew, and the citation silently went stale — whereas its position
-immediately above `<parent>` does not drift. This record states only the
-consequence for the language choice: the framework generation that arrives with
-the chosen parent is what makes the added dependency unnecessary.
+alongside them. Assumptions: that block is cited by POSITION — immediately above the `<parent>`
+element — rather than by line number, because a line range in another file drifts
+silently as that file is edited while "immediately above `<parent>`" does not. This
+record states only the consequence for the language choice: the framework
+generation that arrives with the chosen parent is what makes the added dependency
+unnecessary.
 
 Trade-offs: a language with a lighter runtime footprint would reduce container
 memory and start-up time, and that cost is real and is accepted. It was
@@ -556,8 +556,9 @@ cannot be run end to end without a CICS runtime. For the online tier the
 specification is therefore the program source read directly, and the
 verification is per-service tests plus the field-validation logic the existing
 suite does extract. The alternative would be to stand up a CICS-compatible
-runtime purely to generate online golden masters, which would reintroduce the
-dependency this decision exists to remove in order to prove that it was removed.
+runtime purely to generate online golden masters, which would reintroduce the very
+dependency this decision exists to eliminate, in order to demonstrate its
+elimination.
 The weaker guarantee is accepted and stated rather than glossed.
 
 ### Accepted trade-off — concentrated authoring effort, in exchange for removing the platform dependency

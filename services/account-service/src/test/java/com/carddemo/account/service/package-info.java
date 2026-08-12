@@ -1,20 +1,37 @@
 /**
  * Unit tests for this context's service layer, exercised against mocked collaborators.
  *
- * <p><b>Purpose.</b> Two classes execute here, one per outward-facing entry point of this context's
- * service layer. {@code InquiryMessageListenerTest} covers the asynchronous entry point -- the
- * request/reply exchange transcribed from {@code app/app-vsam-mq/cbl/COACCT01.cbl}, whose fixed reply
- * layout is a wire contract rather than a formatting choice. It asserts that exchange with no database,
- * no container and no queue: every collaborator that reaches outside the process is mocked, so each
- * assertion controls exactly the one decision it is about. {@code RestReferenceAddressLookupTest}
- * covers the outbound synchronous adapter -- the account side of the reference context's published
- * address lookups -- and is the one exception to the mock-everything sentence above.</p>
+ * <p><b>Purpose.</b> EIGHT classes execute here, one per rule or entry point of this context's service
+ * layer, all against substituted collaborators unless a class's own subject forbids it.</p>
  *
- * <p>Refactoring Rationale: this paragraph previously read "One class executes here", which was true
- * when it was written and stopped being true when the second class landed. It is corrected rather than
- * loosened into a countless phrase, because a charter that states a number is the thing that makes an
- * absent class visible; a charter that says "the classes here" would have absorbed the addition
- * silently and would absorb the next one too.</p>
+ * <ul>
+ *   <li>{@code InquiryMessageListenerTest} covers the asynchronous entry point -- the request/reply
+ *       exchange transcribed from {@code app/app-vsam-mq/cbl/COACCT01.cbl}, whose fixed reply layout is a
+ *       wire contract rather than a formatting choice -- with no database, no container and no queue.</li>
+ *   <li>{@code RestReferenceAddressLookupTest} covers the outbound synchronous adapter, the account side
+ *       of the reference context's published address lookups. It is the one exception to the
+ *       mock-everything sentence above, for the reason the trade-off below records.</li>
+ *   <li>{@code AccountUpdatePreservationTest} covers which submitted values the update applies and which
+ *       stored values it preserves, from {@code app/cbl/COACTUPC.cbl}.</li>
+ *   <li>{@code AccountAddressValidationTest} covers the three address edits the same program performs
+ *       against the seeded lookups of {@code app/cpy/CSLKPCDY.cpy}.</li>
+ *   <li>{@code AccountViewRevisionTest} covers the optimistic-concurrency token the read path publishes
+ *       and the single composing read it is derived from.</li>
+ *   <li>{@code CardXrefByAccountReadTest} covers the two migrated forms of the {@code CXACAIX}
+ *       by-account access path, the deterministic single read and the paged walk.</li>
+ *   <li>{@code CustomerMasterReadTest} covers the customer-master read the screen composes with.</li>
+ *   <li>{@code CustomerIdentifierCipherTest} covers the at-rest protection of the two identifiers the
+ *       customer record carries in the clear in the baseline.</li>
+ * </ul>
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph read "Two classes execute here" and named two, while the
+ * directory held seven. It had already been corrected once -- from "One class executes here" -- and the
+ * correction's own stated reason is why it is corrected again with a roster rather than a number alone:
+ * a charter that states a count is what makes a missing class visible, and a count six short of the
+ * directory makes six classes invisible instead. Alternatives Considered: loosening the sentence to "the
+ * classes here", which cannot go stale. Rejected for the reason the earlier correction gives -- it would
+ * absorb every future addition silently -- and because the roster carries what a count cannot: which rule
+ * each class is responsible for, so a reader can tell a rule asserted twice from one asserted nowhere.</p>
  *
  * <p>Trade-offs: {@code RestReferenceAddressLookupTest} binds a real loopback HTTP server on an
  * ephemeral port instead of mocking its transport, so this package is not uniformly mock-only. That is

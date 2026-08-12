@@ -346,16 +346,34 @@ class PendingAuthSummaryRepositoryIT {
     private static final long OFFSET_CASH_BALANCE = 1800L;
 
     /**
+     * The offset owned by the interleaved-contribution case, whose single row is written twice.
+     */
+    // WHY : Assumptions: the case takes an offset of its own even though it writes ONE row, because two
+    //       persistence contexts are open over that row at the same time. A row shared with any other
+    //       case would let this case's second commit be attributed to that case's write, and the whole
+    //       property being asserted is which of two writes reached the row.
+    private static final long OFFSET_INTERLEAVED = 1900L;
+
+    /**
+     * The offset owned by the guarded-reservation case, whose single row has its headroom spent in steps.
+     */
+    // WHY : Assumptions: it takes its own offset rather than sharing the approved-contribution case's row,
+    //       because it reserves against that row FOUR times and leaves the balance equal to the limit.
+    //       Sharing would make the other case's assertions depend on whether this one had already run,
+    //       which is exactly the coupling the per-case offsets exist to remove.
+    private static final long OFFSET_GUARDED_RESERVATION = 1900L;
+
+    /**
      * The offset owned by the checkpoint-walk case, which inserts three consecutive accounts.
      */
     // WHY : Assumptions: this offset sits above every KEYED case and the three rows it produces are
     //       consecutive from it. Every keyed case addresses one row, so a neighbouring row is invisible
     //       to it; an ORDERED walk is the one shape here that would see another case's rows, which is
     //       why the two walks take the top of the identifier space between them.
-    // WHY : Refactoring Rationale: this comment claimed the offset was the highest in the class, and a
-    //       second ordered case -- the key-projected walk -- has since been added above it. Both walks
-    //       therefore bound every read by a LIMIT that stops inside their own three rows, which is what
-    //       keeps each independent of the other whichever order the two run in.
+    // WHY : Assumptions: a second ordered case, the key-projected walk, owns a HIGHER offset than this
+    //       one, so this is not the top of the identifier space. Both walks bound every read by a LIMIT
+    //       that stops inside their own three rows, which is what keeps each independent of the other
+    //       whichever order the two run in.
     private static final long OFFSET_WALK = 5000L;
 
     /**
@@ -1268,16 +1286,6 @@ class PendingAuthSummaryRepositoryIT {
                 .isEmpty();
     }
 
-    // WHY : Refactoring Rationale: a case named aHeldSummaryMakesASecondWriterWait stood here and has
-    //       been WITHDRAWN with the member it exercised. PendingAuthSummaryRepository published a
-    //       findWithLockByAccountId under a pessimistic write lock; that read was withdrawn because the
-    //       reference system holds nothing on this path -- cpy/IMSFUNCS.cpy declares all three get-hold
-    //       function codes and no reference program passes any of them -- so a row lock is concurrency
-    //       machinery the baseline does not have. The lost update it was added for is closed instead by
-    //       reversing the four counters in ONE statement computed in the database, which is asserted by
-    //       the reversal case above. A test that waited on a lock nothing takes would fail for the
-    //       right reason and mean the wrong thing.
-
     /**
      * Runs the key-projected walk once, above a position, capped at a row count.
      *
@@ -1499,12 +1507,11 @@ class PendingAuthSummaryRepositoryIT {
      * what has to be asserted against a real engine is that the three columns move and that the other
      * nine do not.
      *
-     * <p>Refactoring Rationale: this and the five cases below are additions. Every custom declaration on
-     * this repository was previously unexercised against an engine: the class asserted schema shape and
-     * the inherited save and find, so an arithmetic statement could have named the wrong column, moved
-     * the wrong number of them, or matched no row at all, and nothing here would have noticed. A mocked
-     * repository cannot cover them either, because the arithmetic is the statement's and a mock has
-     * none.
+     * Assumptions: this case and the five below exercise the repository's custom declarations
+     * against a real engine, which is the only place they can be checked. An arithmetic statement
+     * can name the wrong column, move the wrong number of them or match no row at all, and neither
+     * a schema-shape assertion nor the inherited save and find would notice; a mocked repository
+     * cannot cover them either, because the arithmetic is the statement's and a mock has none.
      *
      * <p>Assumptions: the row is re-read through a context that never wrote it. A modifying query
      * bypasses the persistence context, so an instance the writing context still holds would answer
@@ -1525,7 +1532,7 @@ class PendingAuthSummaryRepositoryIT {
                 repository -> repository.save(rehydrate(fields, OFFSET_CONTRIBUTION))).getAccountId();
 
         int updated = inTransaction(repository -> repository
-                .addApprovedAuthorization(accountId, new BigDecimal("25.50")));
+                .reserveApprovedAuthorization(accountId, new BigDecimal("25.50")));
 
         assertThat(updated).as("the account had a summary, so exactly one row moved").isEqualTo(1);
         PendingAuthSummary reread = read(accountId).orElseThrow();
@@ -1620,7 +1627,7 @@ class PendingAuthSummaryRepositoryIT {
                 .isEqualByComparingTo(seededCashBalance);
 
         inTransaction(repository -> repository
-                .addApprovedAuthorization(approvedAccount, new BigDecimal("25.50")));
+                .reserveApprovedAuthorization(approvedAccount, new BigDecimal("25.50")));
         inTransaction(repository -> repository
                 .addDeclinedAuthorization(declinedAccount, new BigDecimal("25.50")));
 
@@ -1630,6 +1637,103 @@ class PendingAuthSummaryRepositoryIT {
         assertThat(read(declinedAccount).orElseThrow().getCashBalance())
                 .as("the declined arm at L820 to L821 carries no balance statement, so it is untouched")
                 .isEqualByComparingTo(seededCashBalance);
+    }
+
+    /**
+     * A reservation the account's own limit no longer admits changes nothing and reports that it changed none.
+     *
+     * <p>Purpose: this is the guard that makes an approval safe under concurrency, exercised directly against
+     * the engine. The statement carries the same credit check the decision service makes -- available amount
+     * is the credit limit minus the credit balance, and an amount is admitted when it is not GREATER than that
+     * difference -- and the engine re-evaluates it against the row as it stands, so an amount that no longer
+     * fits is refused rather than applied.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because the statement carried no guard. A queue grouped on
+     * card number delivers two requests for two DIFFERENT cards of one account concurrently, so both read the
+     * same headroom, both approve, and both contributions then landed -- leaving a credit balance above the
+     * credit limit that no reference program can produce, because the reference decides one message at a
+     * time. Nothing in the row recorded that a limit had been breached.</p>
+     *
+     * <p>Assumptions: the SEQUENCE is what proves the property, not a single refused statement. The first
+     * reservation is admitted and consumes the headroom; the second, for an amount that fitted before the
+     * first ran, is then refused. A case that only refused an obviously oversized amount would pass against a
+     * statement that compared the amount against the LIMIT rather than against the remaining headroom.</p>
+     *
+     * <p>Assumptions: every column is re-read after the refusal, not just the count. A statement that
+     * advanced the counters and skipped only the balance would also report one row, and a statement that
+     * reported zero while having written something would be worse than one that wrote nothing.</p>
+     *
+     * <p>Assumptions: the EXACT boundary is asserted as admitted, because the reference declines only when the
+     * requested amount is STRICTLY GREATER than the available amount at L668 and L676 of
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}. A strict predicate in the statement would
+     * refuse a request for exactly the remaining headroom, which the reference approves.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a reservation beyond the remaining headroom moves no row and reports zero")
+    void aReservationBeyondTheRemainingHeadroomReportsZero() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long accountId = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_GUARDED_RESERVATION)))
+                .getAccountId();
+
+        PendingAuthSummary seeded = read(accountId).orElseThrow();
+        BigDecimal headroom = seeded.getCreditLimit().subtract(seeded.getCreditBalance());
+        BigDecimal firstReservation = headroom.subtract(new BigDecimal("10.00"));
+
+        // WHY : Assumptions: every row count is bound to a typed local before it is asserted. AssertJ
+        //       declares both an IntPredicate overload and a generic Predicate overload of assertThat, so a
+        //       lambda whose body returns a boxed integer makes the call ambiguous at compile time. The
+        //       local resolves the type before the assertion sees it.
+        int firstAdmitted = inTransaction(repository -> Integer.valueOf(
+                repository.reserveApprovedAuthorization(accountId, firstReservation)));
+        assertThat(firstAdmitted)
+                .as("the limit admitted the first amount, so exactly one row moved")
+                .isEqualTo(1);
+
+        PendingAuthSummary afterFirst = read(accountId).orElseThrow();
+        assertThat(afterFirst.getCreditLimit().subtract(afterFirst.getCreditBalance()))
+                .as("the first reservation consumed all but ten of the headroom")
+                .isEqualByComparingTo("10.00");
+
+        // WHY : Assumptions: the second amount is the one the FIRST reservation consumed -- it fitted before
+        //       that statement ran and does not fit now. That is exactly the shape of the concurrent pair
+        //       this guard exists for: two decisions measured against one headroom.
+        int refused = inTransaction(repository -> Integer.valueOf(
+                repository.reserveApprovedAuthorization(accountId, firstReservation)));
+        assertThat(refused)
+                .as("the headroom is gone, so the reservation must be refused")
+                .isZero();
+
+        PendingAuthSummary afterRefusal = read(accountId).orElseThrow();
+        assertThat(afterRefusal.getApprovedAuthCount())
+                .as("a refused reservation advances no counter")
+                .isEqualTo(afterFirst.getApprovedAuthCount());
+        assertThat(afterRefusal.getApprovedAuthAmount())
+                .as("a refused reservation accumulates no amount")
+                .isEqualByComparingTo(afterFirst.getApprovedAuthAmount());
+        assertThat(afterRefusal.getCreditBalance())
+                .as("a refused reservation moves no balance, so no limit is breached")
+                .isEqualByComparingTo(afterFirst.getCreditBalance());
+
+        // WHY : Assumptions: the remaining ten is then reserved EXACTLY, which proves the predicate is
+        //       inclusive. A strict comparison would refuse this and would decline a request the reference
+        //       approves at precisely the boundary both are written around.
+        int boundaryAdmitted = inTransaction(repository -> Integer.valueOf(
+                repository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00"))));
+        assertThat(boundaryAdmitted)
+                .as("exactly the remaining headroom is admitted, matching the reference's strict decline")
+                .isEqualTo(1);
+        PendingAuthSummary exhausted = read(accountId).orElseThrow();
+        assertThat(exhausted.getCreditBalance())
+                .as("the balance now equals the limit and has not passed it")
+                .isEqualByComparingTo(exhausted.getCreditLimit());
+        int oneCentOver = inTransaction(repository -> Integer.valueOf(
+                repository.reserveApprovedAuthorization(accountId, new BigDecimal("0.01"))));
+        assertThat(oneCentOver)
+                .as("one cent beyond an exhausted limit is refused")
+                .isZero();
     }
 
     /**
@@ -1651,7 +1755,7 @@ class PendingAuthSummaryRepositoryIT {
         long absent = accountOf(fields, OFFSET_ABSENT_CONTRIBUTION);
 
         int approved = inTransaction(repository -> repository
-                .addApprovedAuthorization(absent, new BigDecimal("10.00")));
+                .reserveApprovedAuthorization(absent, new BigDecimal("10.00")));
         int declined = inTransaction(repository -> repository
                 .addDeclinedAuthorization(absent, new BigDecimal("10.00")));
 
@@ -1660,6 +1764,131 @@ class PendingAuthSummaryRepositoryIT {
         assertThat(read(absent))
                 .as("an accumulation is not an insert, so no summary may appear")
                 .isEmpty();
+    }
+
+    /**
+     * Two interleaved transactions each running the consumer's own refresh-then-increment sequence both
+     * land, and neither displaces the other.
+     *
+     * <p><b>Purpose.</b> This is the regression case for the lost update the consumer used to commit. It
+     * runs the EXACT production sequence twice over one row -- read the summary, refresh the two limits
+     * from the account master, then add one authorization's contribution -- with both transactions
+     * holding their own read of the row BEFORE either writes. Under the previous arrangement the refresh
+     * was a field assignment on the loaded instance followed by the inherited {@code save}, so the
+     * second transaction's flush -- forced by its own additive query, because the provider flushes
+     * before a bulk operation -- rewrote every column from its load-time snapshot and discarded the
+     * first transaction's contribution before adding its own. The expected count below would then have
+     * been one greater than the base rather than two, which is what makes this case discriminating
+     * rather than merely exercising.
+     *
+     * <p>Assumptions: the reads are taken FIRST and deliberately kept, because a snapshot older than the
+     * other party's commit is the whole precondition. A case that read the row after the first commit
+     * would pass against the defective arrangement too, since the snapshot it flushed would already
+     * carry the other contribution.
+     *
+     * <p>Assumptions: the interleaving is expressed as two persistence contexts open at once and
+     * committed in a fixed order, NOT as two threads. Alternatives Considered: two threads with a
+     * latch, which is the shape a reader expects for a concurrency case. Rejected because the property
+     * under test is about which snapshot a write carries rather than about timing, and two threads make
+     * the ordering a matter of scheduling -- so the case could pass on a run that never interleaved and
+     * report nothing. Two contexts committed in a stated order reproduce the same snapshot relationship
+     * on every run, and the engine's own row serialisation is not being tested here.
+     *
+     * <p>Assumptions: the second transaction's own loaded instance is asserted to be STALE, which is the
+     * mechanism rather than a side observation. It shows that a whole-row write from that instance would
+     * have carried the pre-update counters, so the case names the exact defect it guards against instead
+     * of only its symptom.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("two interleaved refresh-then-increment sequences both land on the same summary")
+    void twoInterleavedContributionsBothLand() {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        long accountId = inTransaction(
+                repository -> repository.save(rehydrate(fields, OFFSET_INTERLEAVED))).getAccountId();
+        short baseCount = read(accountId).orElseThrow().getApprovedAuthCount();
+
+        EntityManager first = entityManagerFactory.createEntityManager();
+        EntityManager second = entityManagerFactory.createEntityManager();
+        PendingAuthSummary secondSnapshot;
+        try {
+            PendingAuthSummaryRepository firstRepository =
+                    new JpaRepositoryFactory(first).getRepository(PendingAuthSummaryRepository.class);
+            PendingAuthSummaryRepository secondRepository =
+                    new JpaRepositoryFactory(second).getRepository(PendingAuthSummaryRepository.class);
+
+            first.getTransaction().begin();
+            second.getTransaction().begin();
+            PendingAuthSummary firstSnapshot =
+                    firstRepository.findByAccountId(accountId).orElseThrow();
+            secondSnapshot = secondRepository.findByAccountId(accountId).orElseThrow();
+            assertThat(firstSnapshot.getApprovedAuthCount())
+                    .as("both transactions start from the same stored count")
+                    .isEqualTo(baseCount)
+                    .isEqualTo(secondSnapshot.getApprovedAuthCount());
+
+            assertThat(firstRepository.refreshStoredLimits(accountId,
+                    new BigDecimal("7000.00"), new BigDecimal("700.00")))
+                    .as("the first transaction's limit refresh reaches the row")
+                    .isEqualTo(1);
+            assertThat(firstRepository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00")))
+                    .as("the first transaction's contribution reaches the row")
+                    .isEqualTo(1);
+            first.flush();
+            first.getTransaction().commit();
+
+            assertThat(secondSnapshot.getApprovedAuthCount())
+                    .as("the second transaction's instance is now STALE: a whole-row write from it"
+                            + " would carry the pre-update counters, which is the defect this case"
+                            + " guards against")
+                    .isEqualTo(baseCount);
+
+            assertThat(secondRepository.refreshStoredLimits(accountId,
+                    new BigDecimal("8000.00"), new BigDecimal("800.00")))
+                    .as("the second transaction's limit refresh reaches the row")
+                    .isEqualTo(1);
+            assertThat(secondRepository.reserveApprovedAuthorization(accountId, new BigDecimal("20.00")))
+                    .as("the second transaction's contribution reaches the row")
+                    .isEqualTo(1);
+            second.flush();
+            second.getTransaction().commit();
+        } finally {
+            // WHY : Assumptions: both contexts are closed whatever happened, and an active transaction
+            //       is rolled back first. A failed assertion between the two commits would otherwise
+            //       leave a transaction holding the row's lock for the rest of the class, and every
+            //       later case addressing any row would then fail on a pool timeout rather than on its
+            //       own subject.
+            rollbackAndClose(second);
+            rollbackAndClose(first);
+        }
+
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getApprovedAuthCount())
+                .as("BOTH contributions land: the count advances by two, not by one")
+                .isEqualTo((short) (baseCount + 2));
+        assertThat(reread.getApprovedAuthAmount())
+                .as("both amounts accumulate, so neither transaction's total was displaced")
+                .isEqualByComparingTo("4230.00");
+        assertThat(reread.getCreditLimit())
+                .as("the limits are ASSIGNED, so the last writer wins and nothing is lost by that")
+                .isEqualByComparingTo("8000.00");
+        assertThat(reread.getCashLimit()).isEqualByComparingTo("800.00");
+    }
+
+    /**
+     * Rolls back an entity manager's transaction if one is still active, then closes it.
+     *
+     * @param entityManager the context to release; must not be {@code null}
+     */
+    private static void rollbackAndClose(EntityManager entityManager) {
+        try {
+            if (entityManager.getTransaction().isActive()) {
+                entityManager.getTransaction().rollback();
+            }
+        } finally {
+            entityManager.close();
+        }
     }
 
     /**

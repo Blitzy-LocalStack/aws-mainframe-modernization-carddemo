@@ -15,59 +15,45 @@ import org.springframework.stereotype.Component;
  * area-code edit turns on, and that evidence is recorded at the line which publishes it rather than
  * gathered into this header.</p>
  *
- * <p>Assumptions: every class in this package is written by hand and no code generator is introduced
- * anywhere in it. The package-scope rulings this class applies are settled once in this package's own
- * {@code package-info.java} -- the hand-written charter, the rejection of MapStruct and, on a separate
- * ground, of Lombok, the trim boundary that follows the column type at its L319 to L334, and the
- * items-only boundary at its L473 to L478 -- and they are cited here rather than argued again. What
- * this file adds is the evidence specific to this one record.</p>
+ * <p>Assumptions: the package-scope rulings this class applies are settled once in this package's own
+ * {@code package-info.java} -- hand-written conversions with no code generator, the trim boundary that
+ * follows the column type, and the items-only boundary -- and are cited by name here rather than
+ * argued again or quoted by line, because a quoted window drifts as the file it points into grows.
+ * What this file adds is the evidence specific to this one record.</p>
  *
- * <p>Alternatives Considered: this class is a Spring {@code @Component} with instance members and is
- * deliberately not declared {@code final}, rather than the {@code final} class with a private
- * constructor and static members that the charter fixes for the four entity conversions at its own
- * L213 to L239. The static shape was the alternative and was not taken here. The charter already
- * admits this second shape for {@code DateInquiryReplyMapper} at its L161 to L164, and records at its
- * L238 to L239 that the component is left non-final precisely so that it remains proxyable; both of
- * those properties are wanted here. This conversion is reached by constructor injection, which is the
- * dependency-injection pattern the Agent Action Plan fixes for this migration in place of the
- * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
- * member cannot.</p>
+ * <p>Alternatives Considered: the {@code final} class with a private constructor and static members
+ * that the charter fixes for the four entity conversions. Not taken here: this conversion is reached by
+ * constructor injection, which is the dependency-injection pattern the Agent Action Plan fixes for this
+ * migration in place of the baseline's static linkage, and an injected bean can be substituted in a
+ * slice test where a static member cannot. The class is left non-final so that it stays proxyable, and
+ * the charter already admits this second shape for {@code DateInquiryReplyMapper}.</p>
  *
- * <p>Trade-offs: the cost of that choice is that this class does not read identically to its four
- * static siblings, so a reader moving between them meets two shapes inside one package. It is
- * accepted because the alternative forecloses both properties above, and because the charter's own
- * exception shows the package already carries the two shapes deliberately rather than by accident.</p>
+ * <p>Trade-offs: the cost is that this class does not read identically to its four static siblings, so
+ * a reader moving between them meets two shapes inside one package. It is accepted because the static
+ * shape forecloses both properties above, and because the charter's own exception shows the package
+ * carries the two shapes deliberately rather than by accident.</p>
  *
  * <p>Assumptions: one naming asymmetry is called out because it reads as a mistake and is not. This
- * class is named for the entity {@code UsPhoneAreaCode}, while the type it produces is
- * {@code PhoneAreaCodeResponse} with no geographic prefix, and the charter settles at its L552 to
- * L558 that the DTO package owns that name and this package follows it rather than renaming either
- * side to make the pair look uniform.</p>
+ * class is named for the entity {@code UsPhoneAreaCode} while the type it produces is
+ * {@code PhoneAreaCodeResponse} with no geographic prefix, because the DTO package owns that name and
+ * this package follows it rather than renaming either side to make the pair look uniform.</p>
  *
- * <p>Assumptions: there is no inbound member here, and the absence is a decision rather than
- * something outstanding. The charter records at its L513 to L516 that the three seeded lookup tables
- * carry none: these rows are seeded reference data, loaded by
- * {@code services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql}, so the
- * DTO package publishes no create and no update shape for them and there would be nothing for an
- * inbound member to accept. A reader comparing this class against {@code TransactionTypeMapper},
- * which does carry one, finds the reason here instead of inferring an omission.</p>
+ * <p>Assumptions: there is no inbound member here, and the absence is a decision rather than something
+ * outstanding. These rows are seeded reference data, loaded by
+ * {@code services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql}, so the DTO
+ * package publishes no create and no update shape for them and an inbound member would have nothing to
+ * accept. A reader comparing this class against {@code TransactionTypeMapper}, which does carry one,
+ * finds the reason here instead of inferring an omission.</p>
  *
- * <p>Assumptions: the caller that depends on this data reaches it across a service boundary over
- * HTTP and not by importing anything. The baseline's only user of these codes is an account-side
- * address edit, and the migration places the equivalent address validation in account-service while
- * this bounded context owns the table, so the classification has to travel with the code in the
- * response body rather than being resolved locally by the consumer. Nothing in this file imports any
- * type from the account context, and nothing may be added that does: a cross-context domain import is
- * forbidden in both directions, and the layering test published by {@code common-lib} is what makes
- * that enforceable rather than merely intended. Naming the consumer is what invites the mistake,
- * which is why the prohibition is restated beside it -- and the account context's own package name is
- * deliberately not written anywhere in this file, so that a search for it returns nothing at all.</p>
- *
- * <p>Assumptions: the four rationale labels used below are written in the one plural,
- * unparenthesised, unemphasised form that {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes at its
- * L217 to L245, and no other spelling of any of them appears in this file. A label is found by
- * literal search before it is read by a person, so a second spelling of one category would leave that
- * search silently partial.</p>
+ * <p>Assumptions: the caller that depends on this data reaches it across a service boundary over HTTP
+ * and not by importing anything. The baseline's only user of these codes is an account-side address
+ * edit, and the migration places that address validation in another context while this one owns the
+ * table, so the classification has to travel with the code in the response body rather than being
+ * resolved locally by the consumer. Nothing here imports a type from that context and nothing may be
+ * added that does: a cross-context domain import is forbidden in both directions and the layering test
+ * published by {@code common-lib} makes that enforceable rather than merely intended. The consumer's
+ * package name is deliberately not written anywhere in this file, so that a search for it returns
+ * nothing at all.</p>
  */
 @Component
 public class UsPhoneAreaCodeMapper {
@@ -95,13 +81,10 @@ public class UsPhoneAreaCodeMapper {
     public PhoneAreaCodeResponse toResponse(UsPhoneAreaCode entity) {
         // WHY : Assumptions: the code is published exactly as stored and untrimmed, because its width
         //       is part of the contract rather than presentation. app/cpy/CSLKPCDY.cpy L24 declares
-        //       01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX -- written as three literal X characters,
-        //       which is the same picture as a three-character alphanumeric item -- and every literal
-        //       on the lists carried over that field is quoted and compared as characters. The stored
-        //       column is CHAR(3), so a code fills its whole declared width and there is no padding
-        //       to remove; the charter's trim boundary at its L325 to L330 holds that a code of
-        //       declared width is never trimmed in a way that could change its value, in either
-        //       direction.
+        //       01 WS-US-PHONE-AREA-CODE-TO-EDIT PIC XXX -- three literal X characters, the same
+        //       picture as a three-character alphanumeric item -- and every literal on the lists
+        //       carried over that field is quoted and compared as characters. The stored column is
+        //       CHAR(3), so a code fills its whole declared width and there is no padding to remove.
         // WHY : Alternatives Considered: a numeric type for the code, rejected outright. The value is
         //       compared as text everywhere the baseline uses it, and rendered numerically a code
         //       carrying a leading zero would lose it -- yielding a key that locates no row and that a
@@ -112,53 +95,41 @@ public class UsPhoneAreaCodeMapper {
         // WHY : Assumptions: the classification is carried BECAUSE the baseline's one real area-code
         //       edit turns on it, which is what makes it a discriminator rather than descriptive
         //       metadata. app/cpy/CSLKPCDY.cpy hangs three condition names off the single field at its
-        //       L24: the master list VALID-PHONE-AREA-CODE at L30, the general-purpose sub-list
-        //       VALID-GENERAL-PURP-CODE at L521, and the easily-recognisable sub-list
-        //       VALID-EASY-RECOG-AREA-CODE at L931. Exactly one of those three is ever tested anywhere
-        //       in the baseline: app/cbl/COACTUPC.cbl is the only program that copies the book at all,
-        //       at its L602, and it moves a trimmed candidate into that field at L2296 to L2297 and
-        //       then tests VALID-GENERAL-PURP-CODE at L2298 and nothing else. The master list and the
-        //       easily-recognisable sub-list are declared and never tested.
-        // WHY : Assumptions: the failure path is what settles that the narrowing is observable rather
-        //       than incidental. COACTUPC.cbl L2301 to L2302 raise the input-error and the field-level
-        //       error flags, and L2304 to L2308 build a message whose literal names the general-purpose
-        //       class explicitly. Because that text reaches a user, widening or narrowing the filter
-        //       would change observable behaviour, so a consumer reproducing the edit has to know
-        //       which sub-list a code came from -- and it cannot recover that from the digits of the
-        //       code. Publishing the classification is what lets it reproduce the narrower test.
+        //       L24 -- the master list, the general-purpose sub-list and the easily-recognisable
+        //       sub-list -- and exactly one of the three is ever tested anywhere in the baseline:
+        //       app/cbl/COACTUPC.cbl is the only program that copies the book at all, at its L602, and
+        //       it moves a trimmed candidate into that field and tests the general-purpose sub-list at
+        //       L2298 and nothing else. The other two lists are declared and never tested.
+        // WHY : Assumptions: the failure path settles that the narrowing is observable rather than
+        //       incidental. COACTUPC.cbl raises the input-error and field-level error flags and builds a
+        //       message whose literal names the general-purpose class explicitly. Because that text
+        //       reaches a user, widening or narrowing the filter would change observable behaviour, so a
+        //       consumer reproducing the edit has to know which sub-list a code came from -- and it
+        //       cannot recover that from the digits of the code.
         // WHY : Alternatives Considered: filtering here, so that only general-purpose codes were ever
         //       emitted. Rejected on three counts. It would leave the lookup surface unable to serve
         //       any other consumer of the seeded rows; it would hide from the caller that a narrowing
         //       had occurred, because a filtered page and a complete one are indistinguishable in the
         //       response; and it would place a validation policy decision in the anti-corruption
         //       layer, whose charter is representation and not policy. Filtering belongs to the query
-        //       or to the caller, and the query already offers it -- UsPhoneAreaCodeRepository declares
-        //       the class-restricted browse findByCodeClassOrderByAreaCodeAsc at its L58 -- so a filter
-        //       here would duplicate a capability that already exists at the layer entitled to hold it.
+        //       or to the caller, and UsPhoneAreaCodeRepository already declares the class-restricted
+        //       browse findByCodeClassOrderByAreaCodeAsc, so a filter here would duplicate a capability
+        //       that already exists at the layer entitled to hold it.
         // WHY : Alternatives Considered: reading the stored character here and selecting the named
-        //       state for it, by comparing against UsPhoneAreaCode.CODE_CLASS_GENERAL_PURPOSE and
-        //       CODE_CLASS_EASILY_RECOGNISABLE. Rejected because the response type reserves that
-        //       conversion to itself: PhoneAreaCodeResponse records at its L78 to L83 that its
-        //       string-accepting constructor exists so that the one place a stored character becomes a
-        //       named state is that boundary, rather than each mapping step reading the character and
-        //       choosing a state for itself. Deciding it again here would be a second decode site,
-        //       free to disagree with the first about an unrecognised value. The stored character is
-        //       therefore handed over as it stands, and no classification literal is re-declared in
-        //       this file; where a value has to be named, the entity's own constants are the names.
-        // WHY : Assumptions: the two representations are settled in two different places and this
-        //       method only bridges them. The entity holds the classification as a String with named
-        //       constants, which UsPhoneAreaCode records at its L176 to L181 as chosen over a boolean
-        //       and over a persisted enumeration that would bind the stored letter to a Java constant
-        //       name; the published contract names the two states instead, which PhoneAreaCodeResponse
-        //       argues for at its L101 to L116. Neither of those rulings is re-decided here.
+        //       state for it. Rejected because PhoneAreaCodeResponse reserves that conversion to
+        //       itself: its string-accepting constructor exists so that the one place a stored
+        //       character becomes a named state is that boundary, rather than each mapping step reading
+        //       the character and choosing a state for itself. Deciding it again here would be a second
+        //       decode site, free to disagree with the first about an unrecognised value. No
+        //       classification literal is re-declared in this file; where a value has to be named, the
+        //       entity's own constants are the names.
         String storedClassification = entity.getCodeClass();
 
-        // WHY : Assumptions: this call resolves to the string-accepting constructor the response type
-        //       declares at its L90 to L92 rather than to its canonical one, because both arguments
-        //       are character data, and that selection is the point of the paragraph above rather than
-        //       an accident of overload resolution. Both constructors take the code first and the
-        //       classification second, which is the component order the charter records at its L544 to
-        //       L545 as being invoked positionally throughout this package; reversing the two
+        // WHY : Assumptions: this call resolves to the response type's STRING-accepting constructor
+        //       rather than its canonical one, because both arguments are character data, and that
+        //       selection is the point of the paragraph above rather than an accident of overload
+        //       resolution. Both constructors take the code first and the classification second, which
+        //       is the component order invoked positionally throughout this package; reversing the two
         //       arguments here would still compile and would be wrong.
         return new PhoneAreaCodeResponse(publishedCode, storedClassification);
     }
@@ -168,12 +139,11 @@ public class UsPhoneAreaCodeMapper {
      *
      * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
      * indicator of {@code com.carddemo.common.web.PageResponse} are assembled by
-     * {@code com.carddemo.reference.service}, which the charter fixes at its L473 to L478 as the only
-     * layer holding the keyset cursor and therefore the only one able to say whether a further page
-     * exists; a mapper is handed rows and knows nothing about the query that produced them. That
-     * envelope is also narrower than a caller may reach for -- it carries no previous-page flag and no
-     * page-size member -- so neither can be obtained from this method by any route, and this file
-     * deliberately does not import it.</p>
+     * {@code com.carddemo.reference.service}, the only layer holding the keyset cursor and therefore
+     * the only one able to say whether a further page exists; a mapper is handed rows and knows nothing
+     * about the query that produced them. That envelope is also narrower than a caller may reach for --
+     * it carries no previous-page flag and no page-size member -- so neither can be obtained from this
+     * method by any route, and this file deliberately does not import it.</p>
      *
      * <p>Trade-offs: an empty input yields an empty list, while a {@code null} input propagates a
      * {@code NullPointerException} rather than being folded into one. Folding it would make a
@@ -193,11 +163,10 @@ public class UsPhoneAreaCodeMapper {
      */
     public List<PhoneAreaCodeResponse> toResponseList(List<UsPhoneAreaCode> entities) {
         // WHY : Assumptions: the caller's order is preserved and nothing is sorted here. A backward
-        //       browse is read in descending key order -- UsPhoneAreaCodeRepository declares
-        //       findByAreaCodeLessThanOrderByAreaCodeDesc at its L49 -- and is reversed by its caller
-        //       before it is rendered, at AddressLookupController L170 and L178, so a sort applied at
-        //       this point would undo that reversal silently and hand a backward page back in the
-        //       wrong direction.
+        //       browse is read in descending key order, through the repository's
+        //       findByAreaCodeLessThanOrderByAreaCodeDesc, and is reversed by its caller before it is
+        //       rendered, so a sort applied at this point would undo that reversal silently and hand a
+        //       backward page back in the wrong direction.
         // WHY : Assumptions: the name and shape of this member match the transaction-type mapper's
         //       list member deliberately rather than by coincidence, so that the conversions in this
         //       package present one list idiom to a reader. The per-row conversion is delegated to the

@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import org.springframework.stereotype.Component;
 
 /**
  * The anti-corruption layer between the persistent authorization rows and the HTTP bodies this context
@@ -54,20 +55,45 @@ import java.util.Objects;
  * cursor boundaries before calling {@link #toListView}; what it buys is that every conversion here is a
  * pure function of its arguments and is therefore testable without a database.
  *
- * <h2>Why this is not a component</h2>
+ * <h2>Why this is a component</h2>
  *
- * <p>Refactoring Rationale: this class carries no stereotype annotation and is constructed by whichever
- * component owns the cursor sealer, which is the opposite of the module's {@code AuthorizationMessageMapper}
- * and is deliberate. That mapper depends on the validation engine, which the framework supplies to every
- * application unconditionally; this one depends on {@link CursorToken}, which holds signing key material and
- * is therefore not a bean anywhere in this migration -- no service publishes one, and none may, because a
- * default signing key in a configuration file is a committed secret. Annotating this class would make an
- * application context fail to start on a missing dependency, which is a strictly worse state than the one
- * this fix set out to leave. Alternatives Considered: publishing a sealer bean here alongside the mapper.
- * Rejected because the key must then be resolved from configuration in every profile, and the decision about
- * where a signing key comes from belongs with the component that first needs one rather than with a
- * converter.</p>
+ * <p>Refactoring Rationale: this class carried NO stereotype annotation and now carries {@link Component},
+ * and the change is a defect fix rather than a preference. Three {@code @Service} classes in this module --
+ * {@code PendingAuthSummaryService}, {@code PendingAuthDetailService} and {@code FraudMarkingService} --
+ * declare this type as a constructor parameter, so with nothing publishing it the application context could
+ * not refresh at all: {@code java -jar} on this module's jar failed with
+ * {@code NoSuchBeanDefinitionException} naming this type, reached through {@code fraudMarkingService} and
+ * {@code fraudController}, and every documented run command was therefore unusable. The five
+ * {@code @SpringBootTest} classes in this module did not catch it because each defines its own narrow
+ * configuration -- one of them publishes this mapper as a local {@code @Bean} keyed with fixed test material
+ * -- so the missing production wiring was invisible to the suite.</p>
+ *
+ * <p>Refactoring Rationale: the reason recorded here for NOT annotating it was that {@link CursorToken}
+ * "is not a bean anywhere in this migration -- no service publishes one, and none may, because a default
+ * signing key in a configuration file is a committed secret". The first half of that is no longer true and
+ * the second half was never in tension with it: {@code CardDemoCommonAutoConfiguration} publishes exactly
+ * one {@code CursorToken} bean and publishes it ONLY when a deployment names
+ * {@code carddemo.pagination.cursor.signing-key}, so the key stays out of source and the bean exists
+ * wherever an operator supplies one. That conditional publication is what removes the objection: there is a
+ * sealer to inject, and no committed secret behind it.</p>
+ *
+ * <p>Trade-offs: an application given no signing key now fails to start naming {@code CursorToken} instead
+ * of starting without a cursor sealer. That is the intended posture rather than a regression, and it is the
+ * posture two sibling contexts already have -- {@code reference-service} and {@code reporting-service}
+ * inject the sealer straight into a controller and fail the same way -- so this module now behaves like its
+ * peers. A context that starts while unable to seal a cursor would serve the list operation and fail on its
+ * first page boundary, which is the failure an operator sees last rather than first. This module's
+ * {@code application.yml} documents the property and its environment-variable spelling at the point a
+ * reader looks for it.</p>
+ *
+ * <p>Alternatives Considered: publishing the mapper from a {@code @Bean} method in {@code .config} instead
+ * of annotating the class. Rejected because the method would take the sealer and return {@code new} -- it
+ * would add a class and a file for zero decision, since there is nothing to choose between at construction
+ * time. Also considered: publishing a sealer bean in this module. Rejected for the reason the superseded
+ * paragraph gave, which still holds -- the key would then be resolved from configuration in this module in
+ * every profile, duplicating a decision the shared kernel already owns for every context.</p>
  */
+@Component
 public class PendingAuthViewMapper {
 
     /**
@@ -368,9 +394,6 @@ public class PendingAuthViewMapper {
      *     {@code null} and never containing {@code null}
      * @param hasNext whether a further page follows this one, as the query that produced {@code rows}
      *     established
-     * @param hasPrevious whether a page precedes the one being rendered, established by the caller
-     *     that ran the read; it is not derived from the leading boundary token, which every page carrying
-     *     rows supplies
      * @param screenMessage the navigation-boundary sentence for this request, or {@code null} when the
      *     request was not a paging move that had already reached a boundary
      * @param subject the authenticated principal this page and every selector on it are issued to, which
@@ -386,7 +409,7 @@ public class PendingAuthViewMapper {
      *     the page envelope refuses the second and the body refuses the third
      */
     public PendingAuthListView toListView(PendingAuthSummary summary,
-            List<PendingAuthDetail> rows, boolean hasNext, boolean hasPrevious, String screenMessage,
+            List<PendingAuthDetail> rows, boolean hasNext, String screenMessage,
             String subject, AccountContextClient.CustomerDisplay customer) {
         Objects.requireNonNull(summary, "summary must not be null");
         Objects.requireNonNull(rows, "rows must not be null");
@@ -407,13 +430,18 @@ public class PendingAuthViewMapper {
         //       envelope's own contract refuses a boundary without rows for exactly that reason.
         String firstKey = items.isEmpty() ? null : items.get(0).key();
         String lastKey = items.isEmpty() ? null : items.get(items.size() - 1).key();
-        // WHY : Refactoring Rationale: backward availability is carried through rather than inferred from
-        //       the leading boundary token, which every page carrying rows supplies. Only the caller that
-        //       ran the read knows whether a row lies before the page, and the reference distinguishes the
-        //       two cases explicitly -- its top-of-page sentence at L381 fires when nothing precedes.
+        // WHY : Refactoring Rationale: this page publishes the backward POSITION and no backward
+        //       availability answer, because the reference answers that question from the TERMINAL's own
+        //       page ordinal rather than from a read. cbl/COPAUS0C.cbl declares CDEMO-CPVS-PAGE-NUM at
+        //       L122 inside the communication area the screen carries between turns, tests it for greater
+        //       than one at L365 and raises 'You are already at the top of the page...' at L381 when it is
+        //       not -- with no read at all on that arm. The ordinal's migrated home is the client's
+        //       navigation state, so a fifth envelope component would answer from the service what the
+        //       reference answers from the client, and would put this page out of agreement with the four
+        //       members the shared envelope declares.
         PageResponse<PendingAuthRowView> page = items.isEmpty()
                 ? PageResponse.empty()
-                : PageResponse.ofRows(items, firstKey, lastKey, hasNext, hasPrevious);
+                : PageResponse.ofRows(items, firstKey, lastKey, hasNext);
         return new PendingAuthListView(toSummaryView(summary, customer), page, screenMessage);
     }
 

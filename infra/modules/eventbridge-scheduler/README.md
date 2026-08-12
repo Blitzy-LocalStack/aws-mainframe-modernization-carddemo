@@ -287,8 +287,8 @@ notice. Naming it makes the daylight-saving behaviour a recorded decision rather
 than an accidental hour shift; a caller who needs the run pinned to a local wall
 clock overrides it and accepts the shift knowingly.
 
-**A named schedule group, not the account's `default` group.** *Alternatives
-Considered:* omitting the group is legal and places the schedule in `default`, and
+**A named schedule group, not the account's `default` group.** Alternatives
+Considered: omitting the group is legal and places the schedule in `default`, and
 two consequences follow that cannot be recovered afterwards. `default` is not a
 resource this module would manage, so nothing would carry the caller's tags and
 the schedule would be unattributable in cost reporting; and, decisively, **the
@@ -325,8 +325,8 @@ service-managed encryption mints no key grant at all; granting unconditionally
 would be one line shorter and would leave the role holding KMS permissions against
 a null resource.
 
-**The permissions policy is a standalone role-policy resource.** *Alternatives
-Considered:* the role's `inline_policy` block is shorter, but the pinned provider
+**The permissions policy is a standalone role-policy resource.** Alternatives
+Considered: the role's `inline_policy` block is shorter, but the pinned provider
 marks it deprecated and it manages the role's complete inline-policy set. Mixing
 that block with a separately attached policy lets one representation remove what
 the other created. A standalone `aws_iam_role_policy` keeps this one policy
@@ -370,8 +370,8 @@ preserved by tagging the group, to which every schedule belongs exactly once.
   equivalent of the retired definitions. Trade-offs: a self-managed scheduler is
   the only option that could reproduce their syntax, and it costs a component to
   patch, monitor and make highly available in order to fire one nightly trigger.
-- **No Lambda shim between the schedule and the state machine.** *Alternatives
-  Considered:* the shim is the habitual shape and buys nothing, because the
+- **No Lambda shim between the schedule and the state machine.** Alternatives
+  Considered: the shim is the habitual shape and buys nothing, because the
   scheduler calls `StartExecution` itself. It would add a second execution role, a
   second failure mode and a second place for the payload to be rewritten.
 - **No second schedule for the weekly or monthly cadences.** Assumptions: the

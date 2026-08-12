@@ -63,9 +63,12 @@
  *
  * <h2>Journal lines</h2>
  *
- * <p>Assumptions: each task logs exactly one line on success, carrying the range it covered and the
+ * <p>Assumptions: each task logs exactly one line on success, carrying the range it covered, the
+ * orchestrator's identity for the run and the exact locator of the artifact it wrote, together with the
  * counts the generator returned, so an execution can be reconciled against its artifact without reading
- * the artifact. Counts are safe to publish and identifiers are not, so no line here carries an account
+ * the artifact. The identity and the locator are what make that reconciliation possible in both
+ * directions -- from a state machine history entry to an object, and from an object back to the run that
+ * produced it -- and an earlier revision carried neither. Counts are safe to publish and identifiers are not, so no line here carries an account
  * identifier, a customer identifier, a card number or a monetary amount. A caller-supplied string that
  * reaches a journal line is sanitised first, because a value carrying a line terminator forges a log
  * entry.</p>

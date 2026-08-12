@@ -7,6 +7,8 @@ import com.carddemo.common.money.Money;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.TransactionAddOutcome;
+import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
 import com.carddemo.transaction.mapper.TransactionMapper;
@@ -58,8 +60,29 @@ import org.springframework.transaction.support.TransactionTemplate;
  *       {@link #readCardXrefByCardNumber(String)}.</li>
  *   <li>{@code WRITE-TRANSACT-FILE} at line 711 becomes
  *       {@link #writeTransactRecord(Transaction)}.</li>
- *   <li>{@code INITIALIZE-ALL-FIELDS} at line 762 becomes {@link #initialiseAllFields()}.</li>
+ *   <li>{@code INITIALIZE-ALL-FIELDS} at line 762 has no method, and neither does the data-field
+ *       clearing at lines 237 to 249. Both are reproduced STRUCTURALLY by the answer shape rather
+ *       than by a statement, and the detail is in the section below.</li>
  * </ul>
+ *
+ * <h2>Two paragraphs are reproduced by the answer shape and not by a method</h2>
+ *
+ * <p>Trade-offs: the clearing at lines 237 to 249 blanks all eleven data fields when the error flag is
+ * already on, and {@code INITIALIZE-ALL-FIELDS} at lines 762 to 779 blanks all fifteen input fields --
+ * the two keys, the eleven data fields and the confirmation -- plus the message work field, positioning
+ * the cursor on the account identifier at line 764. Neither is expressed as a method here, because the
+ * fields they clear do not exist on this side of the boundary: the session structure they lived in does
+ * not travel. What reproduces them is the ANSWER: every rejection on this path raises with one field
+ * entry and one sentence and echoes nothing back, and the success answer declares three components --
+ * identifier, amount and sentence -- so a client re-rendering the form from either answer has no field
+ * values to restore. That is the same empty form both paragraphs produce. The compromise accepted is
+ * that the cursor position has no target here, and it is recorded in this paragraph rather than lost.</p>
+ *
+ * <p>Assumptions: the clearing block's own guard is UNREACHABLE in the reference, which is why nothing
+ * tests it. Every path that sets the flag performs the shared exit in its next statement and the exit
+ * terminates the task, so the flag is never observed still on when line 237 is reached. That is measured
+ * from the paths themselves -- lines 198 and 202, 212 and 216, 225 and 229 -- and not assumed from the
+ * flag's declaration at line 44.</p>
  *
  * <h2>Why exactly one message reaches the caller</h2>
  *
@@ -86,13 +109,13 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <p>Refactoring Rationale: the key fields are validated first, the data fields second and the
  * confirmation last, which is the order {@code PROCESS-ENTER-KEY} performs them in -- line 166, then
- * line 167, then the evaluation opening at line 169. An earlier revision of this class tested the
- * confirmation FIRST, on the ground that resolving the cross-reference before knowing whether the
- * operator confirmed spends a cross-context read on a turn that writes nothing. That reordering is
- * observable and therefore wrong: a submission carrying neither key and a refused confirmation answers
- * with the key complaint at line 226 in the reference and answered with the confirmation prompt at line
- * 178 under the reordering. The read the reordering saved is one the reference performs on every turn,
- * so the saving was never parity-neutral.</p>
+ * line 167, then the evaluation opening at line 169. Alternatives Considered: testing the confirmation
+ * FIRST, on the ground that resolving the cross-reference before knowing whether the operator confirmed
+ * spends a cross-context read on a turn that writes nothing. Rejected because the reordering is
+ * OBSERVABLE: a submission carrying neither key and a refused confirmation answers with the key
+ * complaint at line 226 in the reference, and would answer with the confirmation prompt at line 178
+ * under the reordering. The read the saving avoids is one the reference performs on every turn, so the
+ * saving is not parity-neutral.</p>
  *
  * <h2>The confirmation field has three branches here, not four</h2>
  *
@@ -269,30 +292,68 @@ public class TransactionAddService {
     public static final int CARD_NUMBER_WIDTH = TransactionAddRequest.CARD_NUMBER_WIDTH;
 
     /**
-     * The identifier the reference derives for the first row of an empty table.
-     *
-     * <p>Assumptions: an exhausted backward read moves zeros into the key at line 689 and the increment
-     * at line 449 then makes it one, so the first identifier this screen ever writes is one and not
-     * zero.</p>
-     */
-    public static final long FIRST_TRANSACTION_ID = 1L;
-
-    /**
      * The number of characters the reference's edited amount field holds.
      *
-     * <p>Assumptions: twelve is measured from three agreeing declarations rather than assumed. The four
-     * positional tests at lines 340 to 343 address a sign at one, eight digits from two, a point at ten
-     * and two digits from eleven, which sums to twelve; {@code WS-TRAN-AMT-E PIC +99999999.99} at line
-     * 59 is twelve characters; and {@code TRNAMTI PIC X(12)} at {@code app/cpy-bms/COTRN02.CPY} line 96
-     * declares twelve.</p>
+     * <p>Assumptions: sixteen digit characters hold at most {@code 9999999999999999}, and
+     * {@code V2__ledger_transaction_id_allocator.sql} declares exactly that as the sequence's
+     * {@code MAXVALUE} so an allocation that would not fit the column fails at the allocator. This
+     * constant states the same bound on the rendering side, because a value that did not fit would be
+     * truncated into an identifier that collides with a stored one rather than failing.</p>
      */
-    public static final int EDITED_AMOUNT_LENGTH = 12;
+    public static final long MAX_TRANSACTION_ID = 9_999_999_999_999_999L;
 
-    /** The number of integer digits the edited amount picture at line 59 holds. */
-    public static final int EDITED_AMOUNT_INTEGER_DIGITS = 8;
-
-    /** The number of decimal digits the edited amount picture at line 59 holds. */
+    /**
+     * The number of decimal digits every amount picture in this flow holds.
+     *
+     * <p>Assumptions: two is not in dispute between the two widths this class had to reconcile. The
+     * reference's edited picture {@code WS-TRAN-AMT-E PIC +99999999.99} at line 59 of
+     * {@code app/cbl/COTRN02C.cbl}, its parsed field {@code WS-TRAN-AMT-N PIC S9(9)V99} at line 58 and
+     * the record's {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} all declare
+     * two, and the shared money type fixes scale two at the wire boundary, so this is the one part of the
+     * shape that needs no adjudication.</p>
+     */
     public static final int EDITED_AMOUNT_FRACTION_DIGITS = 2;
+
+    /**
+     * The number of integer digits the transaction RECORD holds, which is the domain this service admits.
+     *
+     * <p>Assumptions: {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} declares
+     * nine, where the screen's edited picture at line 59 of {@code app/cbl/COTRN02C.cbl} declares eight.
+     * The two differ in the baseline itself -- the reference parses the submitted characters into
+     * {@code WS-TRAN-AMT-N PIC S9(9)V99} at line 58, nine digits, and only its ECHO is narrower -- and
+     * {@code app/cbl/COBIL00C.cbl} pairs the same eight-digit transaction edit at line 55 with a
+     * ten-digit balance edit at line 56, so no screen width is a general rule.</p>
+     *
+     * <p>Refactoring Rationale: this class measured the eight-digit SCREEN shape while
+     * {@code TransactionAddRequest} and the published contract both admit the record's nine, under
+     * divergence D-AMOUNT-RECORD-WIDTH registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. Two authorities disagreed on one field
+     * and the narrower one ran second, so a nine-digit amount cleared the boundary and was then refused
+     * here with a format sentence: input the contract published as valid, rejected after deserialization,
+     * and a divergence the register described as delivered that was not. The record's width is now the
+     * single authority for what this service accepts; how many digits a client CHOOSES to render belongs
+     * to that client, and a 3270-faithful one still renders the reference's twelve characters.</p>
+     *
+     * <p>Alternatives Considered: narrowing the boundary to eight digits instead would have made the two
+     * authorities agree just as well, and was rejected on two grounds. It would withdraw a published
+     * contract domain that {@code TransactionApiContractTest} asserts and the register publishes, which
+     * is a breaking change to settle an internal inconsistency; and it would refuse amounts the RECORD
+     * can hold, so a value loadable by the ETL from a baseline extract would be unaddable through the
+     * API -- a narrower domain than the data it stores.</p>
+     */
+    public static final int RECORD_AMOUNT_INTEGER_DIGITS = 9;
+
+    /**
+     * The number of characters an amount rendered at the record's width occupies.
+     *
+     * <p>Assumptions: a sign, nine integer digits, a point and two decimals is thirteen, one more than
+     * the reference screen's twelve. The positional test below measures this form, so the test stays
+     * positional -- as the reference's is, rather than becoming an arithmetic range comparison -- while
+     * measuring the record's domain rather than the screen's. The expression is written out from its
+     * parts instead of spelled as a literal so the two cannot drift.</p>
+     */
+    public static final int RECORD_AMOUNT_LENGTH =
+            1 + RECORD_AMOUNT_INTEGER_DIGITS + 1 + EDITED_AMOUNT_FRACTION_DIGITS;
 
     /** The sign the reference's edited amount picture renders a negative value with. */
     public static final char EDITED_AMOUNT_NEGATIVE_SIGN = '-';
@@ -412,9 +473,10 @@ public class TransactionAddService {
      *
      * @param request the submitted capture, whose shape the API layer has already constrained; must not
      *     be {@code null}
-     * @return the acknowledgement carrying the generated identifier, the normalised amount and the
-     *     composed sentence when the capture was confirmed and appended; otherwise the prompt shape
-     *     carrying no identifier; never {@code null}
+     * @return {@link TransactionAddResponse} carrying the generated identifier, the normalised amount
+     *     and the composed sentence when the capture was confirmed and appended; otherwise
+     *     {@link TransactionAddPreview} carrying the normalised amount, the discriminator fixed false
+     *     and the prompt; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if a key field, a data field or the confirmation carries a value the
      *     reference refuses, each carrying that program's own sentence and naming one field
@@ -425,7 +487,7 @@ public class TransactionAddService {
      * @throws IllegalStateException if a read or the append failed for a reason the caller cannot
      *     correct, carrying the sentence the reference emits for that operation
      */
-    public TransactionAddResponse addTransaction(TransactionAddRequest request) {
+    public TransactionAddOutcome addTransaction(TransactionAddRequest request) {
         Objects.requireNonNull(request, "request must not be null");
 
         String resolvedCardNumber = validateInputKeyFields(request);
@@ -446,7 +508,15 @@ public class TransactionAddService {
                 //       component is therefore absent, and the amount echoed is the CANONICAL one the
                 //       sixth block derived, which is what line 386 moves back onto the screen field
                 //       before the confirmation is ever evaluated at line 169.
-                return new TransactionAddResponse(null, canonicalAmount, MESSAGE_CONFIRM_ADD);
+                // WHY : ⚠️ Refactoring Rationale: the PREVIEW shape is returned here, where the capture
+                //       shape used to be returned with its identifier left null. The published
+                //       TransactionAddPreview schema declares no transactionId and closes its object, so
+                //       the old body was invalid against its own contract and a strict client rejected
+                //       it; that schema also marks `written` required, and the capture record carries no
+                //       such member, so a client reading the body alone had to infer a prompt from a
+                //       missing identifier. This shape carries both, and its discriminator is fixed at
+                //       its own factory.
+                return TransactionAddPreview.prompting(canonicalAmount, MESSAGE_CONFIRM_ADD);
             }
             throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_CONFIRMATION,
                     FieldValidationFlag.NOT_OK, MESSAGE_INVALID_CONFIRMATION);
@@ -478,8 +548,9 @@ public class TransactionAddService {
      *
      * @param request the submission whose key fields select the account or card and whose confirmation
      *     decides whether the copied capture is appended; must not be {@code null}
-     * @return the same acknowledgement shape {@link #addTransaction(TransactionAddRequest)} returns for
-     *     the copied capture, never {@code null}
+     * @return the same outcome {@link #addTransaction(TransactionAddRequest)} returns for the copied
+     *     capture, being {@link TransactionAddResponse} when it was confirmed and appended and
+     *     {@link TransactionAddPreview} when it was not; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if a key field, a copied data field or the confirmation carries a
      *     value the reference refuses
@@ -489,7 +560,7 @@ public class TransactionAddService {
      * @throws IllegalStateException if a read or the append failed for a reason the caller cannot
      *     correct
      */
-    public TransactionAddResponse copyLastTransactionData(TransactionAddRequest request) {
+    public TransactionAddOutcome copyLastTransactionData(TransactionAddRequest request) {
         Objects.requireNonNull(request, "request must not be null");
         validateInputKeyFields(request);
 
@@ -722,7 +793,6 @@ public class TransactionAddService {
      *     one field and carrying that one sentence
      */
     private static Money validateInputDataFields(TransactionAddRequest request) {
-        clearDataFieldsWhenAlreadyRejected();
         requireEveryMandatoryDataField(request);
         requireNumericCodeFields(request);
         requireEditedAmountShape(request);
@@ -732,33 +802,6 @@ public class TransactionAddService {
         requireNumericMerchantId(request);
 
         return canonicalAmount;
-    }
-
-    /**
-     * Records how the first block's clearing of the eleven data fields is preserved.
-     *
-     * <p>This transcribes the block at lines 237 to 249 of {@code app/cbl/COTRN02C.cbl}, which blanks
-     * all eleven data fields when the error flag is already on. The operator loses everything typed into
-     * them, which is observable, so it is reproduced rather than tidied away.</p>
-     *
-     * <p>Trade-offs: the clearing is reproduced STRUCTURALLY, by the error answer carrying no data
-     * fields at all, rather than by mutating a submission. Every rejection on this path raises with one
-     * field entry and one sentence and echoes nothing back, so a client re-rendering the form from the
-     * answer has nothing to re-render -- which is the same loss the blanking causes. The compromise
-     * accepted is that this method has no statements to execute; the alternative of clearing a copy of
-     * the request would produce a value no caller reads, and the alternative of omitting the method
-     * would leave the block with no citation and invite a later reader to conclude it was missed.</p>
-     *
-     * <p>Assumptions: the block's own guard is UNREACHABLE in the reference, which is why nothing here
-     * tests it. Every path that sets the flag performs the shared exit in its next statement and the
-     * exit terminates the task, so the flag is never observed still on when line 237 is reached. That
-     * is measured from the paths themselves -- lines 198 and 202, 212 and 216, 225 and 229 -- and not
-     * assumed from the flag's declaration at line 44.</p>
-     */
-    private static void clearDataFieldsWhenAlreadyRejected() {
-        // WHY : Assumptions: this body is deliberately empty and the emptiness is the transcription.
-        //       See the block note above: the reference's clearing is expressed by the answer shape
-        //       rather than by a statement here, and its guard cannot be reached in the reference.
     }
 
     /**
@@ -882,42 +925,56 @@ public class TransactionAddService {
     }
 
     /**
-     * Requires the amount to occupy the reference's twelve-character edited shape, position by position.
+     * Requires the amount to occupy the record's edited shape, position by position.
      *
      * <p>This transcribes the block at lines 339 to 351 of {@code app/cbl/COTRN02C.cbl}, whose four
      * alternatives are POSITIONAL rather than arithmetic: the first character must be a minus or a plus
-     * at line 340, eight characters from the second must be numeric at line 341, the tenth must be a
-     * decimal point at line 342 and two characters from the eleventh must be numeric at line 343. All
-     * four share one action block, so however many of them hold the reference emits the single sentence
-     * at line 345.</p>
+     * at line 340, the integer digits from the second must be numeric at line 341, the character after
+     * them must be a decimal point at line 342 and two characters from the one after that must be numeric
+     * at line 343. All four share one action block, so however many of them hold the reference emits the
+     * single sentence at line 345.</p>
      *
      * <p>Assumptions: the test is applied to the edited RENDERING of the amount rather than to the
      * characters the client sent, because by the time a request reaches this class those characters have
      * already been parsed into the shared money type at the wire boundary. Rendering the value back
-     * through the reference's own edited picture and testing the four positions on that string is what
-     * keeps the test positional; the alternative of replacing it with a numeric range comparison was
-     * rejected because a range test states a conclusion the reference reaches by inspecting bytes, and it
-     * would silently accept a scale the twelve-character shape cannot hold.</p>
+     * through an edited picture and testing the four positions on that string is what keeps the test
+     * positional; the alternative of replacing it with a numeric range comparison was rejected because a
+     * range test states a conclusion the reference reaches by inspecting bytes, and it would silently
+     * accept a scale the fixed-width shape cannot hold.</p>
      *
-     * <p>Assumptions: the shape test is what bounds the magnitude, exactly as it does in the reference. A
-     * value needing more than the picture's eight integer digits renders wider, which pushes the decimal
-     * point past the tenth character and fails the third alternative -- so no separate range constant is
-     * declared and none is needed.</p>
+     * <p>Refactoring Rationale: the width the positions are measured against is the RECORD's, from
+     * {@link #RECORD_AMOUNT_INTEGER_DIGITS}, and not the eight-digit SCREEN picture at line 59 that the
+     * four alternatives literally address. Registered divergence D-AMOUNT-RECORD-WIDTH in
+     * {@code docs/architecture/cobol-to-service-traceability.md} admits the record's nine integer digits
+     * at the boundary and {@link TransactionAddRequest#AMOUNT_MAGNITUDE_LIMIT_CENTS} enforces exactly
+     * that; measuring the screen's eight here made the two authorities disagree, so a nine-digit amount
+     * cleared the boundary and was then refused by this method with a format sentence. Two widths cannot
+     * both be authoritative on one field, and the record's is the one the divergence register publishes,
+     * so this test now measures it. The screen's own width is not declared here at all, because nothing
+     * in this service needs it: it is a rendering width for whichever client draws the field, and stating
+     * it as a constant beside the one that governs acceptance is what let the two diverge.</p>
+     *
+     * <p>Assumptions: the shape test is still what bounds the scale, exactly as it does in the reference.
+     * A value carrying more than two decimals cannot reach this method -- the shared money type fixes
+     * scale two at the wire boundary -- and a value needing more than nine integer digits renders wider,
+     * which pushes the decimal point past its position and fails the third alternative. The magnitude
+     * bound is therefore asserted twice, once declaratively at the boundary and once positionally here,
+     * and the two now agree.</p>
      *
      * @param request the submitted capture, whose amount is rendered and inspected; must not be
      *     {@code null}
-     * @throws ClientInputException if the rendering does not occupy the twelve-character shape, carrying
+     * @throws ClientInputException if the rendering does not occupy the record's edited shape, carrying
      *     the format sentence the reference emits
      */
     private static void requireEditedAmountShape(TransactionAddRequest request) {
         String edited = editedAmount(request.amount());
 
-        boolean malformed = edited.length() != EDITED_AMOUNT_LENGTH
+        boolean malformed = edited.length() != RECORD_AMOUNT_LENGTH
                 || (edited.charAt(0) != EDITED_AMOUNT_NEGATIVE_SIGN
                         && edited.charAt(0) != EDITED_AMOUNT_POSITIVE_SIGN)
-                || !isAllDigits(edited.substring(1, 1 + EDITED_AMOUNT_INTEGER_DIGITS))
-                || edited.charAt(1 + EDITED_AMOUNT_INTEGER_DIGITS) != EDITED_AMOUNT_DECIMAL_POINT
-                || !isAllDigits(edited.substring(EDITED_AMOUNT_LENGTH - EDITED_AMOUNT_FRACTION_DIGITS));
+                || !isAllDigits(edited.substring(1, 1 + RECORD_AMOUNT_INTEGER_DIGITS))
+                || edited.charAt(1 + RECORD_AMOUNT_INTEGER_DIGITS) != EDITED_AMOUNT_DECIMAL_POINT
+                || !isAllDigits(edited.substring(RECORD_AMOUNT_LENGTH - EDITED_AMOUNT_FRACTION_DIGITS));
 
         if (malformed) {
             throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_AMOUNT,
@@ -965,24 +1022,32 @@ public class TransactionAddService {
     }
 
     /**
-     * Renders one amount into the twelve-character form the reference's edited picture produces.
+     * Renders one amount into the edited form the record's width produces.
      *
-     * <p>Assumptions: the picture at line 59 of {@code app/cbl/COTRN02C.cbl} is
-     * {@code +99999999.99}, so the sign is always written -- a plus for a non-negative value and a minus
-     * for a negative one -- the integer part is left-padded with zeros to eight digits, and two decimal
-     * digits always follow the point. A value too large for eight integer digits is rendered at its own
-     * width rather than truncated, so the positional test that consumes this rendering sees the same
-     * failure the reference sees rather than a value quietly cut to fit.</p>
+     * <p>Assumptions: the shape follows the reference's picture at line 59 of
+     * {@code app/cbl/COTRN02C.cbl}, {@code +99999999.99}, in every respect except the count of integer
+     * digits: the sign is always written -- a plus for a non-negative value and a minus for a negative
+     * one -- the integer part is left-padded with zeros, and two decimal digits always follow the point.
+     * The padding target is {@link #RECORD_AMOUNT_INTEGER_DIGITS} rather than the picture's eight,
+     * because the positional test that consumes this rendering measures the record's domain under
+     * registered divergence D-AMOUNT-RECORD-WIDTH; padding to eight and then measuring nine would refuse
+     * every value narrower than a hundred million on the first alternative instead of the third.</p>
+     *
+     * <p>Assumptions: a value too large for nine integer digits is rendered at its own width rather than
+     * truncated, so the positional test sees the same failure the reference sees rather than a value
+     * quietly cut to fit. The rendering is internal to this class -- {@link #canonicaliseAmount} reads
+     * the value back out of it and the answer carries a money value, never this string -- so widening it
+     * changes no published payload.</p>
      *
      * @param amount the amount to render, already known to be present; must not be {@code null}
-     * @return the edited rendering, twelve characters for every value the picture can hold and wider for
-     *     one it cannot, never {@code null}
+     * @return the edited rendering, {@link #RECORD_AMOUNT_LENGTH} characters for every value the record
+     *     can hold and wider for one it cannot, never {@code null}
      */
     private static String editedAmount(Money amount) {
         BigDecimal magnitude = amount.amount().abs();
         String digits = magnitude.movePointRight(EDITED_AMOUNT_FRACTION_DIGITS).toBigInteger()
                 .toString();
-        int minimumDigits = EDITED_AMOUNT_INTEGER_DIGITS + EDITED_AMOUNT_FRACTION_DIGITS;
+        int minimumDigits = RECORD_AMOUNT_INTEGER_DIGITS + EDITED_AMOUNT_FRACTION_DIGITS;
         String padded = digits.length() >= minimumDigits
                 ? digits
                 : "0".repeat(minimumDigits - digits.length()) + digits;
@@ -1159,12 +1224,6 @@ public class TransactionAddService {
                     this.transactionMapper.toEntity(request, derivedId, resolvedCardNumber));
         });
 
-        // WHY : Assumptions: the form reset runs BEFORE the sentence is composed, which is the order of
-        //       lines 725 and 728. The order is recorded rather than merely followed because the reset
-        //       clears the very message work field that line 726 then blanks and line 733 writes into, so
-        //       composing first and clearing afterwards would discard the sentence.
-        initialiseAllFields();
-
         return this.transactionMapper.toAddResponse(stored,
                 acknowledgement(requireStoredIdentifier(stored)));
     }
@@ -1185,94 +1244,88 @@ public class TransactionAddService {
     }
 
     /**
-     * Derives the next transaction identifier as the reference derives it, from the stored maximum.
+     * Allocates the next transaction identifier from the database's own allocator.
      *
-     * <p>This transcribes the five-statement derivation at lines 444 to 449 of
-     * {@code app/cbl/COTRN02C.cbl}: high values are moved into the key at line 444, a browse is started
-     * at line 445, ONE record is read backwards at line 446, the browse is ended at line 447, the key
-     * that was found is moved into a numeric work field at line 448 and one is added to it at line 449.
-     * Reading backwards from past the end of a keyed file yields the highest key, which is what
-     * {@link TransactionRepository#findMaxTranId()} reads relationally.</p>
+     * <p>This stands where the five-statement derivation at lines 444 to 449 of
+     * {@code app/cbl/COTRN02C.cbl} stands: high values are moved into the key at line 444, a browse is
+     * started at line 445, ONE record is read backwards at line 446, the browse is ended at line 447, the
+     * key that was found is moved into a numeric work field at line 448 and one is added to it at line
+     * 449. Reading backwards from past the end of a keyed file yields the highest key, so the reference's
+     * derivation is a read-then-add over the whole table.</p>
      *
-     * <p>Refactoring Rationale: the INCREMENT is performed here and not in the repository, and the split
-     * follows the reference's own. In the reference the addition sits in a program paragraph at line 449
-     * and operates on a numeric work field declared at line 57, not in any file verb, and transformation
-     * rule T5 turns file verbs into repository members. Reading the maximum is therefore data access and
-     * deriving the next value from it is a business rule, so the repository publishes the maximum alone
-     * and this layer owns the arithmetic.</p>
+     * <p>⚠️ Refactoring Rationale: this method used to perform that read-then-add literally, through
+     * {@link TransactionRepository#findMaxTranId()}, and its own note argued for doing so and against the
+     * allocator that {@link TransactionRepository#allocateTransactionId()} already publishes. That
+     * argument is withdrawn, and both of the reasons it gave are answered here rather than left standing.
+     * The first was that the allocator "removes the maximum-read whose failure the published contract
+     * promises to report with the reference's own read sentence" -- but the contract promises a sentence
+     * for a failed IDENTIFIER DERIVATION, not for one particular SQL statement, and this method still
+     * reports exactly that sentence when the allocation cannot be performed, so nothing a caller can
+     * observe was lost. The second was that "a sequence is not rolled back with its transaction, so an
+     * abandoned turn would consume an identifier the reference would have left available" -- true, and
+     * immaterial: nothing in the reference tree reads an identifier gap as meaningful, the report job at
+     * {@code app/jcl/TRANREPT.jcl} lines 41 and 42 ordering by processing timestamp and card number
+     * rather than by identifier arithmetic.</p>
      *
-     * <p>Refactoring Rationale: the derivation is STRING-typed from end to end because the column is,
-     * and the padding is not cosmetic. {@code app/cpy/CVTRA05Y.cpy} line 5 declares
-     * {@code TRAN-ID PIC X(16)}, an alphanumeric picture, and the target column is {@code CHAR(16)}, so
-     * leading zeros are part of the value -- the seeded extract carries identifiers such as
-     * {@code 0000000000683580} that a shortest-form rendering would not match and that would order
-     * differently under the lexical comparison the browse queries use. The maximum is therefore parsed,
-     * incremented and re-padded to the same sixteen characters.</p>
+     * <p>What the read-then-add cost is measurable rather than theoretical. Under CICS the region
+     * serialised this program and the payment program, so read-then-add was indivisible in effect. Two
+     * Fargate tasks behind a load balancer are not serialised: both read the same maximum, both add one,
+     * and both attempt the same primary key. One commits and the other is refused on a constraint
+     * violation. The old note treated that as acceptable because the reference has a duplicate branch at
+     * lines 735 and 736 -- but that branch answers an operator who keyed an identifier that was already
+     * taken, which cannot happen on a screen that derives the identifier itself, so relying on it turned
+     * a server-side race into a refusal the caller did nothing to cause and can only answer by
+     * resubmitting. Allocating in the database makes the increment indivisible, so two concurrent callers
+     * receive different values without either waiting on the other.</p>
      *
-     * <p>Assumptions: an empty table yields ONE. The reference's backward read reports the file
-     * exhausted and moves zeros into the key at line 689, and the increment at line 449 then makes it
-     * one, so the first identifier this screen writes is one and never zero.</p>
+     * <p>Assumptions: the padding stays HERE and is not moved into the repository. The allocator returns
+     * a number and this method renders it as sixteen zero-padded digit characters, because
+     * {@code app/cpy/CVTRA05Y.cpy} line 5 declares {@code TRAN-ID PIC X(16)} and the target column is
+     * {@code CHAR(16)}, so leading zeros are part of the value -- the seeded extract carries identifiers
+     * such as {@code 0000000000683580} that a shortest-form rendering would neither match nor order
+     * beside. Rule T5 turns file verbs into repository members, and formatting is not one.</p>
      *
-     * <p>Trade-offs: reading the maximum and adding one is NOT atomic across concurrent writers, and the
-     * exposure is accepted rather than designed away. Under CICS the region serialised the add and
-     * payment transactions, so read-then-add was indivisible in effect; two tasks behind a load balancer
-     * are not serialised, so both can read the same maximum and attempt the same key. The reference
-     * already has the answer for that collision and it is the duplicate condition at lines 735 and 736,
-     * which this class maps to a conflict the caller can retry -- so the same mechanism is relied on
-     * rather than replaced. Allocating from a database sequence would remove the collision, and it was
-     * rejected here because it also removes the maximum-read whose failure the published contract
-     * promises to report with the reference's own read sentence, and because a sequence is not rolled
-     * back with its transaction, so an abandoned turn would consume an identifier the reference would
-     * have left available.</p>
+     * <p>Assumptions: the allocator's own migration positions the sequence past the loaded data, so the
+     * first value it issues on a seeded database is above every identifier the extract carries and the
+     * empty-table case the reference reaches at lines 688 and 689 needs no separate arm here. That is
+     * why no zero-origin fallback survives in this method.</p>
+     *
+     * <p>Trade-offs: the width guard is kept even though the sequence is declared without a maximum this
+     * side can rely on. Exhausting sixteen digits is unreachable at any realistic volume, and the guard
+     * is one comparison that turns an identifier the column cannot hold into the reference's own read
+     * sentence rather than into a truncated key or a database-level error naming no field.</p>
      *
      * @return the next identifier as exactly sixteen digit characters, never {@code null}
-     * @throws IllegalStateException if the maximum could not be read, or if the stored maximum is not the
-     *     sixteen-digit form this screen writes, each carrying the reference's own read sentence
+     * @throws IllegalStateException if the allocation could not be performed or reported no value, or if
+     *     the allocated value needs more than the sixteen digits the column holds, each carrying the
+     *     reference's own read sentence
      */
     private String nextTransactionId() {
-        Optional<String> maximum;
+        Long allocated;
         try {
-            maximum = this.transactions.findMaxTranId();
-        } catch (RuntimeException readFailure) {
+            allocated = this.transactions.allocateTransactionId();
+        } catch (RuntimeException allocationFailure) {
             // WHY : Assumptions: the sentence is the reference's failed-read one from lines 664 and 693,
-            //       because those are the two conditions this derivation can fail under -- a browse that
-            //       could not be started and a backward read that could not be performed. The published
-            //       contract for this operation names that sentence for exactly this case.
-            throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED, readFailure);
+            //       which are the two conditions its own derivation can fail under. The published
+            //       contract for this operation names that sentence for a derivation that could not be
+            //       completed, and an allocation that could not be performed is that same condition
+            //       reached by a different mechanism.
+            throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED, allocationFailure);
         }
 
-        // WHY : Assumptions: the empty optional is the file-exhausted arm at line 688, whose action at
-        //       line 689 moves zeros into the key. Starting from zero and letting the shared increment
-        //       below produce one keeps the two arms of the reference's own branch expressed as one
-        //       statement rather than duplicating the addition.
-        long previous = maximum.map(TransactionAddService::storedIdentifierValue)
-                .orElse(FIRST_TRANSACTION_ID - 1L);
-
-        return zeroPadded(previous + 1L, TRANSACTION_ID_WIDTH);
-    }
-
-    /**
-     * Reads one stored identifier as the number the reference's numeric work field holds.
-     *
-     * <p>Assumptions: line 448 moves an alphanumeric key into {@code WS-TRAN-ID-N PIC 9(16)} declared at
-     * line 57, and that move has no defined result for characters that are not digits. The reference
-     * relies on every stored key being digits because it writes them all itself; this method states the
-     * reliance instead of inheriting it, and reports a stored key that is not the sixteen-digit form as
-     * the failed read the derivation could not complete. That is a documented divergence from a
-     * behaviour the reference leaves undefined, chosen because the alternative is to compute a wrong
-     * identifier and then report the duplicate it collides with.</p>
-     *
-     * @param stored the highest identifier the table holds; must not be {@code null}
-     * @return the identifier as a number
-     * @throws IllegalStateException if the stored identifier is not composed of digits, or is wider than
-     *     the declared width
-     */
-    private static long storedIdentifierValue(String stored) {
-        String trimmed = stored.trim();
-        if (trimmed.isEmpty() || trimmed.length() > TRANSACTION_ID_WIDTH || !isAllDigits(trimmed)) {
+        // WHY : Assumptions: a null return is treated as a failed allocation rather than as zero. The
+        //       statement selects one row from a sequence and cannot legitimately answer with nothing, so
+        //       a null here means the query did not do what it says; defaulting to zero would then write
+        //       identifier one over a populated table and collide on the first attempt.
+        if (allocated == null) {
             throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED);
         }
-        return Long.parseLong(trimmed);
+
+        if (Long.toString(allocated).length() > TRANSACTION_ID_WIDTH) {
+            throw new IllegalStateException(MESSAGE_TRANSACTION_LOOKUP_FAILED);
+        }
+
+        return zeroPadded(allocated, TRANSACTION_ID_WIDTH);
     }
 
     /**
@@ -1369,29 +1422,6 @@ public class TransactionAddService {
      */
     private static String acknowledgement(String transactionId) {
         return MESSAGE_ADDED_PREFIX + MESSAGE_ADDED_INFIX + transactionId + MESSAGE_ADDED_SUFFIX;
-    }
-
-    /**
-     * Records how the form reset the success arm performs is preserved.
-     *
-     * <p>This transcribes {@code INITIALIZE-ALL-FIELDS} at lines 762 to 779 of
-     * {@code app/cbl/COTRN02C.cbl}, which blanks all fifteen input fields -- the two keys, the eleven
-     * data fields and the confirmation -- and the message work field, and positions the cursor on the
-     * account identifier at line 764.</p>
-     *
-     * <p>Trade-offs: the reset is reproduced STRUCTURALLY, by the acknowledgement carrying none of the
-     * fifteen fields back, rather than by mutating anything. The answer declares three components --
-     * identifier, amount and sentence -- so a client re-rendering the form from it has no field values to
-     * restore, which is the same empty form the reset produces. The compromise accepted is that this
-     * method has no statements: the fields it would clear do not exist on this side of the boundary,
-     * because the session structure they lived in does not travel. It is kept as a named method so the
-     * paragraph has a citation and the cursor position and the cleared confirmation are recorded
-     * somewhere a reader will find them.</p>
-     */
-    private static void initialiseAllFields() {
-        // WHY : Assumptions: this body is deliberately empty and the emptiness is the transcription.
-        //       See the note above: there is no screen buffer to blank, and the answer shape already
-        //       carries the reset's whole observable effect.
     }
 
     /**

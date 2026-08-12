@@ -1,27 +1,22 @@
 /**
  * REST adapter surface of the pending credit-card authorization bounded context.
  *
- * <h2>Target contract, and the tree state that realises it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, and that contract is now fully
- * realised: this directory holds {@code PendingAuthController}, {@code FraudController} and this
- * charter, and nothing else.</p>
+ * <p>Three compilation units sit in this directory and no fourth: this charter,
+ * {@code PendingAuthController} and {@code FraudController}. Every inventory, file name, class name
+ * and count here is a measurement of that directory, and the marker line is re-measured on every
+ * build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a third adapter arriving without an entry here fails the build:</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this section declared the two controllers
- * <b>planned</b> rather than present, and stated that at the checkpoint that authored it the
- * directory held this charter alone. Both sentences were true when written and are false now, so
- * they are replaced rather than left standing: a charter that describes its package as empty tells a
- * reader auditing the two classes beside it that they should not exist. The original reason for
- * authoring the charter first is kept below, because it explains why the file is older than what it
- * governs.</p>
+ * <pre>
+ * this directory: 3 java files = 2 classes + 1 charter
+ * </pre>
  *
- * <p>Alternatives Considered: withholding this charter until the two controllers it governs existed.
- * Rejected, because the charter is what the authors of those classes work from -- which type
- * belongs here, which may not, and which dependency is refused outright -- so writing it last
- * would leave the package with no stated contract during exactly the interval in which one is
- * needed. The cost accepted was that its inventory read as present tense before it was true, which
- * is a cost that ends when the classes land.</p>
+ * <p>Assumptions: the closed set is what this charter is for -- which type belongs here, which may
+ * not, and which dependency is refused outright -- so it is stated for the package rather than argued
+ * again in each adapter.</p>
  *
  * <p>Purpose: this package is the stateless HTTP boundary of authorization-service. It binds a
  * request, validates its fields, delegates to the service layer, and renders the result as a

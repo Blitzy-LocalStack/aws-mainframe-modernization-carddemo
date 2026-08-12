@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.mapper.CustomerMapper.CustomerIdentifierProtection;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
@@ -55,10 +56,35 @@ class CustomerIdentifierProtectionConfigTest {
     /** The data key material the substituted client returns, at the length the key spec declares. */
     private static final byte[] KEY_MATERIAL = new byte[32];
 
+    /**
+     * The four bytes every customer envelope begins with.
+     *
+     * <p>⚠️ Refactoring Rationale: these five header bytes -- the marker and the version -- were absent
+     * from this case, because the bean under test used to construct a private nested implementation that
+     * framed from the length prefix at offset zero while
+     * {@code com.carddemo.account.service.CustomerIdentifierCipher} framed
+     * {@code ["CDCI"][version]} first. One column with two writers and two formats. The bean now
+     * delegates to that one cipher, so this case asserts the surviving framing.</p>
+     *
+     * <p>Assumptions: restated here rather than read from the cipher's own constant, because that
+     * constant is package-private to {@code com.carddemo.account.service} and this case sits in the
+     * configuration package. The constant-for-constant comparison belongs to -- and is made by --
+     * {@code CustomerIdentifierCipherTest}, which is in the cipher's own package; what this case adds is
+     * that the bean this CONFIGURATION publishes produces that same framing, which is the property the
+     * two-writer defect broke.</p>
+     */
+    private static final byte[] ENVELOPE_MAGIC = {'C', 'D', 'C', 'I'};
+
+    /** The envelope format version the framing carries immediately after the marker. */
+    private static final byte FORMAT_VERSION = 1;
+
     /** The framing's two-byte length prefix. */
     private static final int LENGTH_PREFIX_BYTES = 2;
 
-    /** The initialisation vector length the framing carries, matching the configuration's constant. */
+    /** The offset the two-byte length prefix begins at, after the marker and the version byte. */
+    private static final int LENGTH_PREFIX_OFFSET = ENVELOPE_MAGIC.length + 1;
+
+    /** The initialisation vector length the framing carries, matching the cipher's constant. */
     private static final int VECTOR_BYTES = 12;
 
     /** The authentication tag length in bytes that Galois/Counter Mode appends to the ciphertext. */
@@ -85,12 +111,21 @@ class CustomerIdentifierProtectionConfigTest {
     }
 
     /**
-     * Confirms the published envelope is self-framing and carries no plaintext.
+     * Confirms the published envelope is marked, versioned, self-framing and carries no plaintext.
      *
      * <p>Assumptions: the framing is asserted by ARITHMETIC over the parts rather than against a recorded
      * byte length, so the case states the format rather than a measurement of it. The two-byte prefix is
-     * then read back and required to equal the wrapped key's own length, which is what proves the prefix
-     * describes the field that follows it and not a constant the reader assumed.</p>
+     * then read back from the offset the marker and version put it at, and required to equal the wrapped
+     * key's own length, which is what proves the prefix describes the field that follows it and not a
+     * constant the reader assumed.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the marker and the version byte are asserted FIRST, and their assertion
+     * is the point of this case now. Before the bean delegated to
+     * {@code com.carddemo.account.service.CustomerIdentifierCipher} it built a private implementation that
+     * omitted both, so this case passed against a five-byte-shorter envelope than the one the cipher
+     * writes -- and the arithmetic below passed too, because it was arithmetic over the wrong format. A
+     * length check alone cannot tell a correct framing from a consistently wrong one; naming the first
+     * five bytes can.</p>
      *
      * <p>Assumptions: the envelope is additionally required to contain the clear identifier NOWHERE, as a
      * byte subsequence. That is the one assertion that fails if a future change ever framed the plaintext
@@ -99,7 +134,7 @@ class CustomerIdentifierProtectionConfigTest {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the envelope is self-framing, length-prefixed and contains no plaintext")
+    @DisplayName("the envelope is marked, versioned, length-prefixed and contains no plaintext")
     void theEnvelopeIsSelfFramingAndCarriesNoPlaintext() {
         runner().run(context -> {
             CustomerIdentifierProtection protection =
@@ -108,10 +143,18 @@ class CustomerIdentifierProtectionConfigTest {
 
             byte[] envelope = protection.encrypt(clear, "ssn_encrypted");
 
-            int expected = LENGTH_PREFIX_BYTES + WRAPPED_KEY.length + VECTOR_BYTES
+            assertThat(Arrays.copyOf(envelope, ENVELOPE_MAGIC.length))
+                    .as("the envelope must begin with the customer marker, not the card one and not a"
+                            + " length prefix")
+                    .isEqualTo(ENVELOPE_MAGIC);
+            assertThat(envelope[ENVELOPE_MAGIC.length])
+                    .as("the format version must be written, so a second framing can be told apart")
+                    .isEqualTo(FORMAT_VERSION);
+            int expected = LENGTH_PREFIX_OFFSET + LENGTH_PREFIX_BYTES + WRAPPED_KEY.length + VECTOR_BYTES
                     + clear.length() + TAG_BYTES;
             assertThat(envelope).hasSize(expected);
-            int declaredKeyLength = ((envelope[0] & 0xFF) << 8) | (envelope[1] & 0xFF);
+            int declaredKeyLength = ((envelope[LENGTH_PREFIX_OFFSET] & 0xFF) << 8)
+                    | (envelope[LENGTH_PREFIX_OFFSET + 1] & 0xFF);
             assertThat(declaredKeyLength).isEqualTo(WRAPPED_KEY.length);
             assertThat(new String(envelope, StandardCharsets.ISO_8859_1))
                     .as("the envelope must not carry the clear identifier anywhere")

@@ -133,17 +133,15 @@ import tools.jackson.databind.module.SimpleModule;
  *
  * <h2>How a consumer registers this module</h2>
  *
- * <p>Refactoring Rationale: no consumer registers this module explicitly, and none has to. This
- * module publishes a provider-configuration file for the platform service-provider mechanism, named
- * for the Jackson module interface and holding this class's binary name; the file lives under this
- * module's own resource tree at {@code src/main/resources} and carries its own commentary. Jackson
- * resolves modules through the platform service loader, so a mapper built with its
- * find-and-add-modules step discovers this one and registers both handlers with no wiring at the call
- * site, and the framework's own Jackson configuration performs that step by default. The earlier
- * shape of this module relied on one line of explicit wiring per consumer and, measurably, got none:
- * the failure described immediately above -- three sign predicates rendered and the amount absent
- * altogether -- is what a forgotten registration produces, and it is silent in every build and
- * startup log. Discovery removes the per-consumer step that was the single point of failure.</p>
+ * <p>Alternatives Considered: requiring one line of explicit wiring per consumer. Rejected because a
+ * forgotten registration produces exactly the silent failure described immediately above -- three sign
+ * predicates rendered and the amount absent altogether -- with nothing in any build or startup log to
+ * report it. This module instead publishes a provider-configuration file for the platform
+ * service-provider mechanism, named for the Jackson module interface and holding this class's binary
+ * name, under its own resource tree at {@code src/main/resources}. Jackson resolves modules through the
+ * platform service loader, so a mapper built with its find-and-add-modules step discovers this one and
+ * registers both handlers with no wiring at the call site, and the framework's own Jackson
+ * configuration performs that step by default.</p>
  *
  * <p>Trade-offs: the compromise accepted is that registration is no longer visible in the Java source
  * of a consumer, so a reader of a controller cannot see why an amount is quoted. What is bought is
@@ -482,19 +480,16 @@ public final class MoneyModule extends SimpleModule {
                 // WHY : Assumptions: the two failure modes of the factory are caught separately
                 //       because they mean different things to whoever sent the payload. This one is
                 //       a syntax failure: the characters are not a decimal number at all.
-                // WHY : Refactoring Rationale: neither the submitted value nor the factory's own
-                //       message reaches this diagnostic, where an earlier revision quoted both. The
-                //       value is a monetary amount, so quoting it wrote the very content the money
-                //       path exists to carry exactly into a message that travels to a mapper caller
-                //       and from there into whatever that caller logs -- the one destination the
-                //       masking applied at the API edge does not reach. The nested message added a
-                //       second disclosure of its own: the platform's decimal parser reports the
-                //       offending character sequence, so forwarding it re-quoted a fragment of the
-                //       value even where the value itself had been withheld. What replaces both is a
-                //       stable reason code plus the expected form. The document location the context
-                //       attaches already names WHERE the value was, and the field being deserialised
-                //       names WHICH value it was, so a producer has everything needed to find it in
-                //       its own payload without this message carrying a copy of it.
+                // WHY : Assumptions: neither the submitted value nor the factory's own message reaches
+                //       this diagnostic. The value is a monetary amount, so quoting it would write the
+                //       content the money path exists to carry exactly into a message that travels to a
+                //       mapper caller and from there into whatever that caller logs -- the one
+                //       destination the masking applied at the API edge does not reach. Forwarding the
+                //       nested message would disclose a fragment of it too, because the platform's
+                //       decimal parser reports the offending character sequence. A stable reason code
+                //       plus the expected form carries neither: the document location the context
+                //       attaches already names WHERE the value was and the field being deserialised
+                //       names WHICH value it was, so a producer can find it in its own payload.
                 //       Trade-offs: a reader of the log can no longer see the offending characters,
                 //       which is a real loss of immediacy when the defect is a stray currency symbol.
                 //       It is accepted because the alternative is a monetary value in a log line, and

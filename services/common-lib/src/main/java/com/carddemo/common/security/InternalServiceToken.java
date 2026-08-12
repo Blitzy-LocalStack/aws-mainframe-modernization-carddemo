@@ -263,11 +263,17 @@ public final class InternalServiceToken {
      * would appear as an intermittent refusal on one operation rather than as a mismatch anybody could
      * see.</p>
      *
-     * <p>Assumptions: the transaction context is granted the cross-reference and account families and NOT
-     * the customer family, and that asymmetry is the point of the table. Its client reaches the
-     * cross-reference and the account balance; nothing in it reads a customer record. The authorization
-     * context is granted all three because its decision path resolves a cross-reference, an account and
-     * the customer identifier the fraud row carries.</p>
+     * <p>Assumptions: the transaction context is granted the cross-reference family and NOTHING ELSE, and
+     * that asymmetry is the point of the table. The authorization context is granted all three families
+     * because its decision path resolves a cross-reference, an account and the customer identifier the
+     * fraud row carries.</p>
+     *
+     * <p>Refactoring Rationale: the transaction row also held {@link #SCOPE_ACCOUNT_READ} until its client
+     * stopped reading the account master over HTTP. Bill payment now reads and reduces the balance on its
+     * own connection under a named cross-schema grant, so the account context is not called for it at all,
+     * and a scope nothing mints is a standing permission with no operation behind it. The entry was removed
+     * rather than left dormant, because the whole purpose of a per-caller table is that a captured token
+     * authorises only what its holder actually performs.</p>
      *
      * <p>Assumptions: {@link #SCOPE_CUSTOMER_MASTER_READ} appears in NO row, deliberately. The two
      * operations that disclose a whole customer record are gated on it and nothing in this deployment
@@ -278,7 +284,7 @@ public final class InternalServiceToken {
             SUBJECT_AUTHORIZATION_SERVICE,
             Set.of(SCOPE_CARD_XREF_READ, SCOPE_ACCOUNT_READ, SCOPE_CUSTOMER_READ),
             SUBJECT_TRANSACTION_SERVICE,
-            Set.of(SCOPE_CARD_XREF_READ, SCOPE_ACCOUNT_READ));
+            Set.of(SCOPE_CARD_XREF_READ));
 
     /**
      * The longest lifetime this class will mint.

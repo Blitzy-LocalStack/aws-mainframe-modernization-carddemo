@@ -1,7 +1,9 @@
 package com.carddemo.reference.config;
 
 import com.carddemo.common.messaging.QueueClientBudget;
+import com.carddemo.common.messaging.RethrowingDigestErrorHandler;
 import io.awspring.cloud.autoconfigure.core.AwsClientBuilderConfigurer;
+import io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler;
 import java.time.Duration;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -35,9 +37,64 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * region, credentials and any endpoint override resolve exactly as they do for the auto-configured client.
  * Setting them here would create a second place the two clients could disagree about which account and region
  * they address, and a publisher pointed at a different endpoint from the consumer fails only at run time.</p>
+ *
+ * <p>Assumptions: one bean here DOES concern the consuming side after all, and the paragraph above is about
+ * the CONTAINER rather than about its collaborators. The starter's factory method takes an error handler from
+ * the context and installs it on the factory it builds, so publishing that handler as a bean tunes the
+ * auto-configured container without replacing it -- which is the distinction that paragraph draws.</p>
  */
 @Configuration(proxyBeanMethods = false)
 public class SqsConfig {
+
+    /**
+     * Names this service's listener in every failure record the shared handler writes.
+     *
+     * <p>Assumptions: the value matches the prefix this listener's own event names already use, so a query
+     * that selects {@code date.inquiry} records finds its failures alongside its outcomes rather than in a
+     * separate vocabulary.</p>
+     */
+    public static final String LISTENER_SOURCE = "date.inquiry";
+
+    /**
+     * Publishes the shared listener error handler so a failed delivery is recorded without its message text.
+     *
+     * <p>Purpose: the starter's own failure record is switched off in
+     * {@code carddemo-common-defaults.yml}, because it logs the throwable as a trailing argument and the
+     * logging facade then renders every message in the cause chain. Those messages come from a JDBC driver,
+     * a codec or a validation library and can carry a request value verbatim. This bean is the replacement
+     * record: the chain of TYPES and the frames, with no message text, and the failure rethrown unchanged.</p>
+     *
+     * <p>Refactoring Rationale: the handler is published as a BEAN rather than applied through a
+     * bean post-processor on the factory. The starter's own factory method already takes an
+     * {@code ErrorHandler} from the context and installs it, so a bean is the supported extension point and
+     * it needs no reference to the factory at all -- which matters here because this class deliberately
+     * declares no factory, for the reason given in the class comment above.</p>
+     *
+     * <p>Assumptions: the handler rethrows, and that is load-bearing rather than tidy. The starter installs
+     * its error-handler stage as a RECOVERY step, so a handler that returned normally would leave the
+     * pipeline result successful and the acknowledgement stage that runs after it would DELETE the message
+     * -- no visibility-timeout redelivery and no dead-letter at the fifth receive. The shared handler's own
+     * test scope covers that case; nothing here needs to restate it.</p>
+     *
+     * <p>Alternatives Considered: catching the failure inside the listener and returning normally, so no
+     * handler were needed. Rejected because it is the same defect in another place: a request whose answer
+     * could not be produced would be acknowledged as though it had been answered, and the requester would
+     * wait for a reply that no longer exists anywhere.</p>
+     *
+     * <p>Trade-offs: this bean carries no {@code @ConditionalOnMissingBean}, unlike the client below it. A
+     * condition would let the handler be absent whenever something else happened to publish an error
+     * handler first, and an absent handler is not a missing log line -- it is the framework's own
+     * full-throwable record coming back in its place, since that record is switched off by name and not by
+     * the presence of a replacement. A control that must not be conditionally absent is declared
+     * unconditionally; a test that needs a different handler overrides the definition by name.</p>
+     *
+     * @return the shared handler, typed as the starter's context-supplied error handler so its factory
+     *     method finds it, never {@code null}
+     */
+    @Bean
+    public ErrorHandler<Object> dateInquiryListenerErrorHandler() {
+        return new RethrowingDigestErrorHandler<>(LISTENER_SOURCE);
+    }
 
     /**
      * Supplies the synchronous queue client the date-conversion consumer publishes with.

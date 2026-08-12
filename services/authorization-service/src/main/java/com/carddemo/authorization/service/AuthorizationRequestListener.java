@@ -79,13 +79,12 @@ import org.springframework.transaction.annotation.Transactional;
  * divergence is registered as {@code D-5} in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
- * <p>Refactoring Rationale: the card was previously resolved to an account by reading the account
- * recorded on that card's OWN PREVIOUS authorizations, because this context owns no cross-reference
- * table. That substitute could not resolve the first authorization a card ever presents -- the case that
- * matters most -- and resolved a reissued card to its former account, and each failure declined a request
- * the baseline approves. The three reads now go through {@link AccountContextClient}, which is the seam
- * to the context that owns those records, and the substitute query has been removed so nothing can prefer
- * it again.</p>
+ * <p>Assumptions: the card is resolved to an account through {@link AccountContextClient}, the seam to
+ * the context that owns the cross-reference, and never from the account recorded on that card's own
+ * previous authorizations. Alternatives Considered: exactly that substitute, since this context
+ * owns no cross-reference table. Rejected because it cannot resolve the first authorization a card
+ * ever presents -- the case that matters most -- and resolves a reissued card to its former
+ * account, each failure declining a request the baseline approves.</p>
  *
  * <p>Refactoring Rationale: a WRITE failure inside the unit of work rolls this message's whole
  * transaction back, and the baseline's equivalent path lets its partial write stand. Both of the
@@ -124,7 +123,11 @@ import org.springframework.transaction.annotation.Transactional;
  * delivered in order and requests for different cards are delivered in parallel. Requests for two
  * DIFFERENT cards of one account are therefore concurrent, which is why
  * {@link #insertFirstSummary(long, AccountContextClient.CardXref, Optional, AuthRequest,
- * AuthorizationDecisionService.Decision)} tolerates a summary that appeared after its own read.</p>
+ * AuthorizationDecisionService.Decision)} tolerates a summary that appeared after its own read, and why
+ * {@link #contributeToStoredSummary(long, Optional, AuthRequest,
+ * AuthorizationDecisionService.Decision)} reaches the stored row through statements ONLY and mutates no
+ * loaded instance: a whole-row write from a load-time snapshot would silently discard the concurrent
+ * card's contribution.</p>
  *
  * <p><b>Retry.</b> Refactoring Rationale: NO in-process retry is applied to this handler, and the reason
  * is a property of where the retry would sit rather than a preference. The handler's whole body runs
@@ -268,16 +271,12 @@ public class AuthorizationRequestListener {
      * limit, and the number of requests one window admits is that limit plus
      * {@link #BASELINE_COMPARISON_OFFSET} -- see that constant for why the two differ.</p>
      *
-     * <p>Refactoring Rationale: the window enforced 500 admissions and now enforces 501, which is the
-     * number the reference program actually processes. Its counter is incremented after the get at line
-     * 332 and then tested with {@code >} rather than {@code >=} at line 339, so counts one through 500
-     * all take the {@code ELSE} and read another request at line 342, and only count 501 sets the
-     * loop-end flag at line 340. The earlier revision enforced the declared figure on the grounds that
-     * the off-by-one was an artifact of the comparison rather than a stated rule, and registered the
-     * difference as a divergence. That trade is withdrawn: functional parity with observable behaviour is
-     * a stated constraint of this migration, the observable behaviour is 501 requests per run, and a
-     * divergence registered against a difference that can simply be removed is a difference that should
-     * have been removed. The register entry is withdrawn with it.</p>
+     * <p>Assumptions: the window admits 501 requests, which is the number the reference program actually
+     * processes rather than the 500 it declares. Its counter is incremented after the get at line 332 and
+     * then tested with {@code >} rather than {@code >=} at line 339, so counts one through 500 all take
+     * the {@code ELSE} and read another request at line 342, and only count 501 sets the loop-end flag at
+     * line 340. Functional parity is measured against observable behaviour, so the observable 501 is the
+     * figure enforced here and no divergence is registered for the declared one.</p>
      *
      * <p>Refactoring Rationale: it is a default rather than a fixed value, overridable by
      * {@code carddemo.messaging.request-process-limit}, so later performance work can change the window
@@ -349,9 +348,10 @@ public class AuthorizationRequestListener {
      * SUBSTITUTES for propagation, and that is the property being preserved rather than the absence of
      * warnings. Each statement either precedes a normal return, because the condition it names is the
      * outcome, or it precedes a throw and names the reason the request was refused -- so the
-     * transaction still rolls back, the queue still redelivers, and
-     * {@code GlobalExceptionHandler} in the shared kernel is still the single place the failure ITSELF
-     * becomes a record. Nothing here is logged and then swallowed. The alternative was to log at each
+     * transaction still rolls back, the queue still redelivers, and the failure ITSELF is recorded once,
+     * where the transport hands it to
+     * {@code com.carddemo.authorization.config.SqsConfig.RecordAndPropagateErrorHandler}. Nothing here
+     * is logged and then swallowed. The alternative was to log at each
      * failing site and continue, and the reference program is what makes
      * that alternative look sanctioned: it has FOURTEEN {@code PERFORM 9500-LOG-ERROR} sites, at
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L282, L316, L429, L500, L512, L547,
@@ -370,6 +370,15 @@ public class AuthorizationRequestListener {
      * fourteen exactly; the arithmetic and the severity domain are recorded on
      * {@code AuthorizationMessageMapper.ErrorLogEntry}, which owns the record's shape.</p>
      *
+     * <p>Assumptions: the place a propagated failure lands is the transport's error handler and NOT the
+     * shared kernel's {@code GlobalExceptionHandler}. An earlier revision of this block named that
+     * handler, and the claim was impossible rather than merely imprecise: it is a
+     * {@code @RestControllerAdvice} bound to the web dispatcher, and a queue delivery never enters one,
+     * so on this path it observes nothing. Naming the wrong destination had a concrete cost -- it made
+     * an absent record look accounted for, and until the handler named above was published a request
+     * that exhausted its redelivery allowance and dead-lettered left nothing behind at a level any
+     * deployment collects.</p>
+     *
      * <p>Assumptions: each statement is written as space-separated {@code key=value} pairs led by an
      * {@code event=} name, so the stream is parseable without a per-message format rule, and no
      * statement interpolates a primary account number, an account identifier or a customer identifier.
@@ -381,7 +390,7 @@ public class AuthorizationRequestListener {
     private static final Logger LOG = LoggerFactory.getLogger(AuthorizationRequestListener.class);
 
     /**
-     * The summary repository, read under a row lock and updated in place.
+     * The summary repository, whose accumulation statements do the arithmetic in the database.
      */
     private final PendingAuthSummaryRepository summaries;
 
@@ -403,14 +412,12 @@ public class AuthorizationRequestListener {
     /**
      * The validated crossing from the decoded wire record to the structured payload.
      *
-     * <p>Refactoring Rationale: this collaborator is what makes the DECLARED contract the LIVE one. The
-     * decoder establishes that a message splits into eighteen fields of admissible widths; it does not
-     * establish that those fields satisfy the payload's own domains, because those constraints are
-     * declared on the payload and there was nothing to apply them to. This consumer previously worked
-     * straight from the decoded record, so every constraint the payload declared -- requiredness, the
-     * digits-only expressions on the two numeric-picture fields, the amount domain -- was asserted only
-     * by tests and by the never-invoked structured path, and the live queue path enforced none of
-     * them.</p>
+     * <p>Assumptions: this collaborator is what makes the DECLARED contract the LIVE one. The decoder
+     * establishes that a message splits into eighteen fields of admissible widths; it does not establish
+     * that those fields satisfy the payload's own domains. Working straight from the decoded record would
+     * leave every constraint the payload declares -- requiredness, the digits-only expressions on the two
+     * numeric-picture fields, the amount domain -- asserted only by tests, with the live queue path
+     * enforcing none of them.</p>
      */
     private final AuthorizationMessageMapper payloads;
 
@@ -476,7 +483,7 @@ public class AuthorizationRequestListener {
      * for.</p>
      */
     private final AtomicReference<WindowState> window =
-            new AtomicReference<>(new WindowState(0L, 0));
+            new AtomicReference<>(new WindowState(0L, 0, false));
 
     /**
      * Creates the consumer.
@@ -510,12 +517,11 @@ public class AuthorizationRequestListener {
      * @throws NullPointerException if {@code windowBoundary} is {@code null}, because a consumer with no
      *     window boundary would admit requests without ever closing a window
      */
-    // WHY : Refactoring Rationale: this constructor took a keyed tokeniser, and the parameter is
-    //       withdrawn along with the field it assigned. Both queue identities are now the literal values
-    //       the technical specification freezes, taken from the reply itself, so no collaborator derives
-    //       them; leaving an unused parameter in place would keep a bean qualifier and a startup
-    //       dependency alive for a derivation nothing performs, and would suggest to a reader that the
-    //       identities are still derived somewhere.
+    // WHY : Assumptions: this constructor takes NO keyed tokeniser. Both queue identities are
+    // the literal values the technical specification freezes, taken from the reply itself, so
+    // no collaborator derives them. Declaring a tokeniser parameter would keep a bean
+    // qualifier and a startup dependency alive for a derivation nothing performs, and would
+    // suggest to a reader that the identities are derived somewhere.
     public AuthorizationRequestListener(PendingAuthSummaryRepository summaries,
             PendingAuthDetailRepository details, OutboxRepository outbox,
             AuthorizationDecisionService decisions, AuthorizationMessageMapper payloads,
@@ -600,6 +606,9 @@ public class AuthorizationRequestListener {
      * @throws IllegalStateException if this decision's contribution reached no summary row, propagated
      *     from {@link #handleNewRequest(String, AuthRequest, String, LocalDateTime)}; the unit of work
      *     rolls back so that no reply row survives a decision the summary does not account for
+     * @throws WindowClosedException if this instance's processing window has reached its allowance and its
+     *     container has not finished cycling, propagated from {@link #reserveWindowSlot()}; the request is
+     *     redelivered into the next window rather than handled inside a run that has already ended
      */
     // WHY : Assumptions: this method deliberately does NOT consult
     //       com.carddemo.common.control.OnlineWriteGate, even though it writes and even though this
@@ -631,6 +640,11 @@ public class AuthorizationRequestListener {
         //       counter advances on the get itself and not on the outcome. A message dropped as stale, one
         //       answered from a recorded decision, and one whose handling throws all consumed a get there
         //       and all consume an admission here.
+        // WHY : Assumptions: it is also the one statement able to REFUSE this message, and it being first is
+        //       what makes the refusal free of consequence. A window closed for its container cycle throws
+        //       from here, before the correlation identifier is read, before any attribute is examined and
+        //       before the transaction holds anything -- so the rollback withdraws nothing and the message
+        //       returns to the queue exactly as it arrived.
         reserveWindowSlot();
         String correlationId = conformingCorrelationId(message);
 
@@ -713,14 +727,15 @@ public class AuthorizationRequestListener {
      * a request it could not act on still consumed one. A message dropped as stale, one answered from a
      * recorded decision, and one whose handling throws each consume one here for the same reason.</p>
      *
-     * <p>Refactoring Rationale: the reservation was taken on COMPLETION, in the handler's {@code finally}
-     * block, and that bounded the wrong quantity. The container polls continuously and delivers on several
-     * threads, so between the first admission and the quota-th COMPLETION it can hand over an unbounded
-     * number of further messages; the bound only took effect once completions caught up with admissions,
-     * which under sustained load they do not. Worse, because the counter reset in the same step that fired
-     * the boundary, those extra completions landed in the RESET window and closed it early. Reserving on
-     * admission bounds what the container is permitted to hand out, which is the quantity the reference
-     * program's test-before-next-get bounds, and a completion no longer touches the window at all.</p>
+     * <p>Alternatives Considered: taking the reservation on COMPLETION, in the handler's {@code
+     * finally} block. Rejected because it bounds the wrong quantity: the container polls
+     * continuously and delivers on several threads, so between the first admission and the quota-th
+     * completion it can hand over an unbounded number of further messages, and the bound would only
+     * take effect once completions caught up with admissions -- which under sustained load they do
+     * not. Those extra completions would also land in the reset window and close it early.
+     * Reserving on admission bounds what the container is permitted to hand out, which is the
+     * quantity the reference program's test-before-next-get bounds, and a completion therefore
+     * never touches the window.</p>
      *
      * <p>Assumptions: the update is one atomic transition on a value carrying both the generation and the
      * places granted, so exactly one thread can observe the admission that fills a window and the boundary
@@ -734,20 +749,112 @@ public class AuthorizationRequestListener {
      * -- each already holding its place -- and the boundary stops further INTAKE rather than interrupting
      * them. That is the reference program's discipline too: its counter bounds the gets it issues, and the
      * message it holds when the count is reached is processed to completion before the loop exits.</p>
+     *
+     * <p>Refactoring Rationale: the window now CLOSES when the allowance is reached and stays closed until
+     * the container cycle reports it has finished, where the generation used to advance in the same atomic
+     * step that fired the boundary. That step opened the next window while the container was still being
+     * stopped, so every message the container had already dispatched -- up to its configured concurrency --
+     * was admitted into the new generation and handled inside the physical run that was supposed to have
+     * ended. One run could therefore exceed the allowance by that concurrency, and nothing in the accounting
+     * or the log recorded that it had.</p>
+     *
+     * @throws WindowClosedException if the allowance has been reached and the container cycle has not yet
+     *     finished, so this request must be redelivered into the next window rather than handled inside a
+     *     run that has already ended; nothing has been done when it is thrown, because this is the handler's
+     *     first statement
      */
     private void reserveWindowSlot() {
-        WindowState before = this.window.getAndUpdate(state ->
-                state.granted() + 1 >= this.windowAdmissionLimit
-                        ? new WindowState(state.generation() + 1, 0)
-                        : new WindowState(state.generation(), state.granted() + 1));
+        WindowState before = this.window.getAndUpdate(state -> {
+            if (state.closed()) {
+                // WHY : Assumptions: a closed window grants NOTHING and the state is returned unchanged, so
+                //       the count cannot creep past the allowance while the container is being cycled and
+                //       the generation cannot advance from here. The reopen action is the only thing that
+                //       moves a closed window on, which is what makes "one physical run admits at most the
+                //       allowance" a property of this transition rather than of timing.
+                return state;
+            }
+            int granted = state.granted() + 1;
+            return new WindowState(state.generation(), granted,
+                    granted >= this.windowAdmissionLimit);
+        });
+        if (before.closed()) {
+            // WHY : Assumptions: the refusal is a THROW and not a silent return, because returning would
+            //       let the acknowledgement mode delete a request nobody answered. Throwing before any work
+            //       has been done rolls back a transaction that holds nothing, and the message becomes
+            //       visible again after its timeout.
+            //       Trade-offs: each refusal costs one receive against the queue's redrive count. That is
+            //       accepted because the interval is one container stop-and-start and the population is at
+            //       most the container's configured concurrency, so a message would have to be unlucky in
+            //       five separate windows to dead-letter. Alternatives Considered: BLOCKING the thread until
+            //       the cycle finished, which costs no receive at all; rejected because it deadlocks --
+            //       stopping a container waits for its in-flight invocations and those invocations would be
+            //       waiting for the stop.
+            LOG.warn("event=auth.request.deferred reason=window-closing generation={}",
+                    before.generation());
+            throw new WindowClosedException(before.generation());
+        }
         if (before.granted() + 1 >= this.windowAdmissionLimit) {
             // WHY : Assumptions: the figures reported are the CLOSING window's generation and the
             //       allowance itself, not a re-read of the state. The thread that took the last place is by
-            //       construction the allowance-th admission of that generation, and a re-read would report
-            //       the next window, the advance having already happened inside the atomic update above.
+            //       construction the allowance-th admission of that generation, and a re-read could report
+            //       the next window if the cycle had already completed.
             LOG.info("event=auth.window.filled generation={} admitted={}",
                     before.generation(), this.windowAdmissionLimit);
-            this.windowBoundary.onWindowComplete(before.generation(), this.windowAdmissionLimit);
+            this.windowBoundary.onWindowComplete(before.generation(), this.windowAdmissionLimit,
+                    this::openNextWindow);
+        }
+    }
+
+    /**
+     * Opens the next window once the container cycle that closed this one has finished.
+     *
+     * <p>Purpose: this is the other half of the closing gate. Admission is closed from the instant the
+     * allowance is reached, and this is the only thing that reopens it -- which is why the boundary contract
+     * requires it to be run whether the cycle succeeded or failed. A window that is never reopened halts
+     * every authorization this instance would handle.</p>
+     *
+     * <p>Assumptions: it is IDEMPOTENT with respect to the count and not with respect to the generation. Two
+     * runs would open two windows rather than corrupting one, so a boundary implementation that ran it twice
+     * costs one skipped generation number and nothing else; the alternative -- refusing a second run -- would
+     * need the closing generation threaded back through the callback to tell a duplicate from the next
+     * closure, for a fault that no implementation in this repository can produce.</p>
+     *
+     * <p>Assumptions: the generation advances HERE rather than at the close, so a generation number counts
+     * completed cycles. That is what makes the closing log line and the opening log line a matched pair a
+     * reader can align, and it is why {@code event=auth.window.filled} and {@code event=auth.window.reopened}
+     * carry the same number.</p>
+     */
+    private void openNextWindow() {
+        WindowState opened = this.window.updateAndGet(
+                state -> new WindowState(state.generation() + 1, 0, false));
+        LOG.info("event=auth.window.reopened generation={}", opened.generation());
+    }
+
+    /**
+     * Reports that a request arrived while the processing window was closed for its container cycle.
+     *
+     * <p>Purpose: it is thrown so the request is REDELIVERED rather than handled inside a physical run that
+     * has already reached its allowance, and so the outcome is distinguishable in a log and in a test from
+     * every other refusal on this path. A shared exception type would make a deferral read as a fault.</p>
+     *
+     * <p>Assumptions: it carries the generation and NOT the request. The message has not been decoded when
+     * this is thrown -- the admission gate is the handler's first statement -- so there is nothing about the
+     * request to carry, and the generation is what ties the deferral to the window that caused it.</p>
+     */
+    public static final class WindowClosedException extends RuntimeException {
+
+        /** Serialisation identity, fixed because the type crosses no serialisation boundary. */
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Creates the deferral.
+         *
+         * @param generation the window that was closing when the request arrived
+         */
+        WindowClosedException(long generation) {
+            super("the request processing window " + generation + " has reached its admission allowance"
+                    + " and its container is being cycled; this request is deferred to the next window"
+                    + " rather than handled inside a run that has already ended");
         }
     }
 
@@ -807,12 +914,21 @@ public class AuthorizationRequestListener {
      * billion windows, which at this allowance is not reachable in practice -- the type is chosen because
      * a monotonic identity that provably never repeats needs no argument about reachability.</p>
      *
+     * <p>Refactoring Rationale: the CLOSED flag is new, and the generation used to advance in the same
+     * atomic step that fired the boundary. That opened the next window while the container was still being
+     * stopped, so every message the container had already dispatched -- up to its configured concurrency --
+     * was admitted into the new generation and handled inside the physical run that was supposed to have
+     * ended. One run could therefore exceed the allowance by that concurrency, silently. The flag holds the
+     * window closed for the whole of the cycle instead, and the generation advances only when the cycle
+     * reports it has finished.</p>
+     *
      * @param generation which window this is, counting from zero and increasing by one each time a window
-     *     fills; monotonic
-     * @param granted how many admissions this window has granted so far, always between zero and one less
-     *     than the admission allowance
+     *     fills and its container has been cycled; monotonic
+     * @param granted how many admissions this window has granted so far, at most the admission allowance
+     * @param closed whether the allowance has been reached and the container cycle has not yet finished,
+     *     during which no admission is granted at all
      */
-    private record WindowState(long generation, int granted) {
+    private record WindowState(long generation, int granted, boolean closed) {
     }
 
     /**
@@ -838,8 +954,9 @@ public class AuthorizationRequestListener {
      * @param correlationId the requester's correlation identifier; may be {@code null}
      * @param now the current instant in coordinated universal time; must not be {@code null}
      * @throws IllegalStateException if this decision's contribution reached no summary row, propagated
-     *     from {@link #persist(AccountContextClient.CardXref, Optional, Optional, AuthRequest,
-     *     AuthorizationDecisionService.Decision, AuthReply, LocalDateTime)}; it is documented here rather
+     *     from {@link #contribute(AccountContextClient.CardXref, Optional, Optional, AuthRequest,
+     *     AuthorizationDecisionService.Decision, AuthorizationDecisionService.DecisionContext)}; it is
+     *     documented here rather
      *     than left to the caller to discover because it is the one way this method can leave without
      *     having enqueued a reply, and the transaction rolling back is what keeps that from being a
      *     decision no answer accounts for
@@ -859,24 +976,48 @@ public class AuthorizationRequestListener {
             //       row for the rest of the transaction. It no longer holds anything. The lock was a
             //       target-side addition -- the reference system passes only non-hold retrieval codes -- and
             //       what it protected, the accumulation of four incremented members, is now performed by
-            //       atomic statements in persist(...). Trade-offs: the decision below is therefore made
+            //       atomic statements in contribute(...). Trade-offs: the decision below is therefore made
             //       against counters a concurrent contribution may already have moved. That is closer to the
             //       reference behaviour rather than further from it: the reference reads its root without a
             //       hold and decides on what it read.
+            //       Assumptions: reading without a hold is safe for the DECISION because the decision is not
+            //       final here. The approval this read leads to is applied by a statement qualified on the
+            //       same credit check, so a headroom this read saw and a concurrent authorization then spent
+            //       supersedes the approval at the write rather than committing an over-limit balance. The
+            //       stale read is therefore tolerated by design and not merely accepted.
             summary = this.summaries.findByAccountId(accountId);
         }
         AuthorizationDecisionService.DecisionContext context =
                 new AuthorizationDecisionService.DecisionContext(xref.isPresent(), account,
                         customerFound, summary);
-        AuthorizationDecisionService.Decision decision = this.decisions.decide(request, context);
+        AuthorizationDecisionService.Decision proposed = this.decisions.decide(request, context);
 
-        // WHY : Refactoring Rationale: the reply wire record is built HERE, before the write, where it
-        //       used to be built after it. The detail row and the reply carry the same five decision
-        //       values -- the identification code, the response code, the response reason, the approved
-        //       amount and the card and transaction identity -- and building the reply first lets the row
-        //       be PROJECTED from it rather than assembled a second time from the decision. That is what
-        //       keeps the persisted state and the answer sent to the requester two renderings of one
-        //       decision instead of two independent ones that could drift.
+        // WHY : Refactoring Rationale: the summary contribution now runs BEFORE the reply is built, and the
+        //       decision the reply carries is the one the contribution CONFIRMED rather than the one the
+        //       decision service proposed. The two used to be the same value and could not be: the credit
+        //       check above is measured against the summary as this transaction read it, and a queue grouped
+        //       on card number delivers two requests for two DIFFERENT cards of one account concurrently, so
+        //       both measure against the same headroom, both propose an approval, and both contributions then
+        //       land atomically -- leaving the account's credit balance above its own credit limit with
+        //       nothing in the row to record that a limit was breached. The reference cannot reach that state
+        //       because it decides one message at a time.
+        // WHY : Assumptions: the reservation is what decides, so the reply cannot be built until it has run.
+        //       The approval is applied by a statement qualified on the same credit check, evaluated by the
+        //       engine against the row as it stands; when the qualification fails the proposal is superseded
+        //       by the decline the account can carry. Building the reply first -- which is what the ordering
+        //       below used to do -- would have answered the requester with an approval the store refused.
+        AuthorizationDecisionService.Decision decision = proposed;
+        if (xref.isPresent()) {
+            decision = contribute(xref.get(), account, summary, request, proposed, context);
+        }
+
+        // WHY : Refactoring Rationale: the reply wire record is built before the DETAIL ROW, where it used to
+        //       be built after it. The detail row and the reply carry the same five decision values -- the
+        //       identification code, the response code, the response reason, the approved amount and the card
+        //       and transaction identity -- and building the reply first lets the row be PROJECTED from it
+        //       rather than assembled a second time from the decision. That is what keeps the persisted state
+        //       and the answer sent to the requester two renderings of one decision instead of two
+        //       independent ones that could drift.
         // WHY : Alternatives Considered: leaving the reply where it was and passing the decision into the
         //       write. Rejected because the projection the mapper publishes takes the reply, and it is
         //       that projection which refuses a reply naming a different card or transaction than the
@@ -887,7 +1028,7 @@ public class AuthorizationRequestListener {
                 decision.responseReason(), decision.approvedAmount());
 
         if (xref.isPresent()) {
-            persist(xref.get(), account, summary, request, decision, reply, now);
+            this.details.save(record(xref.get().accountId(), request, decision, reply, now));
         } else {
             // WHY : Assumptions: with no cross-reference row there is no account to hang a summary or a
             // detail row from, so the decline is answered without being recorded. That is the baseline's
@@ -897,23 +1038,35 @@ public class AuthorizationRequestListener {
                     decision.responseReason());
         }
         enqueueReply(replyQueueUrl, reply, correlationId, now);
-        LOG.info("event=auth.request.decided approved={} respCode={} respReason={}",
-                decision.approved(), decision.responseCode(), decision.responseReason());
+        // WHY : Assumptions: the log records whether the CONFIRMED decision was an approval and, separately,
+        //       whether a proposal was superseded by the reservation. The second dimension is what makes a
+        //       contended account visible in operation: without it a superseded approval is indistinguishable
+        //       from a request that never fitted, and the two have different causes.
+        LOG.info("event=auth.request.decided approved={} respCode={} respReason={} superseded={}",
+                decision.approved(), decision.responseCode(), decision.responseReason(),
+                proposed.approved() && !decision.approved());
     }
 
     /**
-     * Writes the decision to the summary and the detail rows, creating the summary when the account has
-     * none yet.
+     * Applies the proposed decision to the account's summary and reports the decision the store confirmed.
+     *
+     * <p>Purpose: this is the write half of {@code 8400-UPDATE-SUMMARY}, and it is also where an APPROVAL
+     * becomes final. The credit check the decision service made was measured against the summary as this
+     * transaction read it, and the approval is applied by a statement qualified on that same check -- so this
+     * method returns the proposal when the store admitted it and a decline when it did not. The caller builds
+     * the reply from what this returns, which is why the summary contribution precedes the reply rather than
+     * following it.</p>
      *
      * <p>Assumptions: the summary is written BEFORE the detail row, matching {@code 8000-WRITE-AUTH-TO-DB}
      * at lines 790 and 791. Within one transaction the order is not observable, but keeping it means the
-     * two paragraphs and the two statements here can be read side by side.</p>
+     * two paragraphs and the two statements here can be read side by side. The detail row is written by the
+     * caller, after the reply it is projected from has been built from this method's answer.</p>
      *
      * <p>Assumptions: a missing summary is CREATED rather than skipped, because the baseline inserts the
      * root segment on the first authorization for an account, at lines 801 to 806 and 830 to 834. Skipping
-     * it -- which an earlier revision did, having no account identifier to create it with -- lost the
-     * account's approved and declined counters entirely until an authorization happened to find a row the
-     * extract load had provided.</p>
+     * the create -- the only option open to a caller with no account identifier to create it with
+     * -- would lose the account's approved and declined counters entirely until an authorization
+     * happened to find a row the extract load had provided.</p>
      *
      * <p>Refactoring Rationale: the stored limits are refreshed from the account master only when the
      * account was actually read, whereas the baseline moves the account master's limit and cash limit
@@ -930,34 +1083,55 @@ public class AuthorizationRequestListener {
      * @param summary the summary as this transaction read it, empty when the account had none; must not
      *     be {@code null}
      * @param request the decoded request; must not be {@code null}
-     * @param decision the decision reached; must not be {@code null}
-     * @param reply the reply wire record this decision answers with, which the detail row is
-     *     projected from so the persisted state and the answer sent cannot drift apart
-     * @param now the current instant in coordinated universal time; must not be {@code null}
-     * @throws IllegalStateException if the account's summary is neither present, insertable nor
-     *     readable after an insert reported it already existed, propagated from
-     *     {@link #contributeToStoredSummary(PendingAuthSummary, long, Optional, AuthRequest,
-     *     AuthorizationDecisionService.Decision)}; the message's whole unit of work rolls back rather
-     *     than committing a decision whose contribution reached no summary
+     * @param proposed the decision the decision service reached from what this transaction read; must not be
+     *     {@code null}
+     * @param context the same lookup outcomes that proposal was reached from, needed to select the reason a
+     *     superseded approval reports; must not be {@code null}
+     * @return the decision the store confirmed -- the proposal itself, or the decline that supersedes an
+     *     approval the account's limit no longer admits; never {@code null}
+     * @throws IllegalStateException if a statement applying this decision's contribution reached no
+     *     summary row, propagated from {@link #contributeToStoredSummary(long, Optional, AuthRequest,
+     *     AuthorizationDecisionService.Decision, AuthorizationDecisionService.DecisionContext)}; the
+     *     message's whole unit of work rolls back rather than committing a decision whose contribution
+     *     reached no summary
      */
-    private void persist(AccountContextClient.CardXref xref,
+    private AuthorizationDecisionService.Decision contribute(AccountContextClient.CardXref xref,
             Optional<AccountContextClient.Account> account, Optional<PendingAuthSummary> summary,
-            AuthRequest request, AuthorizationDecisionService.Decision decision, AuthReply reply,
-            LocalDateTime now) {
-        // WHY : Refactoring Rationale: the accumulation is applied by an ATOMIC statement and no longer by
-        //       reading an entity, mutating it and saving it back. The read that fed that sequence used to
-        //       hold a PESSIMISTIC_WRITE lock on the summary row, which is concurrency machinery the
-        //       reference system does not have -- cpy/IMSFUNCS.cpy declares three get-hold function codes
-        //       at L19, L21 and L23 and no reference program passes any of them. The lock existed to stop
-        //       two interleaved read-modify-write sequences losing a contribution, because these members
-        //       are INCREMENTED and not assigned (cbl/COPAUA0C.cbl L814/L815 approved, L820/L821
-        //       declined). Performing the arithmetic in the database removes the read-modify-write
-        //       entirely, so there is no lost update to lock against: two concurrent contributions each
-        //       add to whatever the row holds when their statement runs, and both land.
+            AuthRequest request, AuthorizationDecisionService.Decision proposed,
+            AuthorizationDecisionService.DecisionContext context) {
+        // WHY : Assumptions: the accumulation is applied by an ATOMIC statement rather than
+        // by reading an entity, mutating it and saving it back. These members are INCREMENTED
+        // and not assigned (cbl/COPAUA0C.cbl L814/L815 approved, L820/L821 declined), so two
+        // interleaved read-modify-write sequences would lose a contribution. Alternatives
+        // Considered: taking a PESSIMISTIC_WRITE lock over such a sequence. Rejected as
+        // concurrency machinery the reference system does not have -- cpy/IMSFUNCS.cpy
+        // declares three get-hold function codes at L19, L21 and L23 and no reference program
+        // passes any of them. Performing the arithmetic in the database removes the read-
+        // modify-write entirely, so there is no lost update to lock against: two concurrent
+        // contributions each add to whatever the row holds when their statement runs, and
+        // both land.
+        // WHY : Refactoring Rationale: making both contributions land was NOT the whole remedy, and the
+        //       paragraph above used to stop there. Two concurrent requests on two different cards of one
+        //       account read the same headroom, both approve, and both contributions then land -- which is a
+        //       correct accumulation of an incorrect pair of decisions, and the credit balance ends above the
+        //       credit limit. The approval statement is therefore QUALIFIED on the same credit check the
+        //       decision made, and this method now RETURNS the decision the store confirmed so the caller
+        //       answers the requester with it. Nothing here holds a row, so the reference's absence of any
+        //       hold is preserved.
         long accountId = xref.accountId();
         if (summary.isPresent()) {
-            contributeToStoredSummary(summary.get(), accountId, account, request, decision);
-        } else if (insertFirstSummary(accountId, xref, account, request, decision) == 0) {
+            return contributeToStoredSummary(accountId, account, request, proposed, context);
+        }
+        if (insertFirstSummary(accountId, xref, account, request, proposed) == 1) {
+            // WHY : Assumptions: the INSERT arm needs no credit guard and is the one approval path that
+            //       cannot double-count. It runs only when this transaction found no summary at all, the
+            //       statement inserts the row rather than updating one, and exactly one of two concurrent
+            //       inserts can succeed -- the other is reported a conflict and falls through below, where
+            //       the guarded contribution measures it against the row the winner committed. The seeded
+            //       row already carries this decision's own contribution, so the proposal stands as made.
+            return proposed;
+        }
+        {
             // WHY : Refactoring Rationale: a reported conflict now falls through to the ADDITIVE arm,
             //       where the create arm used to end with the inherited save and nothing else. That save
             //       was a merge rather than an insert -- the account identifier is an assigned key, so the
@@ -966,19 +1140,19 @@ public class AuthorizationRequestListener {
             //       every column, discarding that party's counters, totals and held balance without a
             //       failure anywhere. Re-reading and contributing additively is what makes the two
             //       outcomes of the race the same outcome: both contributions land.
-            //       Assumptions: the read succeeds because the insert reported a conflict, and a
+            //       Assumptions: the additive arm succeeds because the insert reported a conflict, and a
             //       conflict is reported only once the conflicting row is committed -- an in-flight
             //       insert makes this statement wait rather than reporting anything -- so the row is
             //       visible to the next statement's snapshot under this deployment's read-committed
             //       isolation.
-            PendingAuthSummary appeared = this.summaries.findByAccountId(accountId)
-                    .orElseThrow(() -> new IllegalStateException("account " + accountId
-                            + " reported an existing pending-authorization summary on insert and then"
-                            + " held none on the following read, so this decision's contribution has"
-                            + " nowhere to land"));
-            contributeToStoredSummary(appeared, accountId, account, request, decision);
+            // WHY : Refactoring Rationale: the fall-through no longer RE-READS the row it is about to
+            //       contribute to. That read existed only to hand a managed instance to the method below,
+            //       and the method no longer takes one: every write it issues is a statement addressed by
+            //       account identifier, so a loaded instance would be an unused object whose presence
+            //       invited exactly the whole-row flush the statements exist to avoid. Its assertion is not
+            //       lost -- each statement's row count is checked, and a zero raises the same refusal.
+            return contributeToStoredSummary(accountId, account, request, proposed, context);
         }
-        this.details.save(record(accountId, request, decision, reply, now));
     }
 
     /**
@@ -1035,7 +1209,7 @@ public class AuthorizationRequestListener {
     }
 
     /**
-     * Applies one decision's contribution to a summary the store already holds.
+     * Applies one decision's contribution to a summary the store already holds, and confirms it.
      *
      * <p>Assumptions: this is {@code 8400-UPDATE-SUMMARY}'s replace arm at
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} lines 824 to 828, reached when that
@@ -1045,34 +1219,87 @@ public class AuthorizationRequestListener {
      * balance are INCREMENTED at its lines 813 to 821 and are the only members with a lost-update
      * exposure.</p>
      *
-     * <p>Assumptions: the entity write and the atomic statement in that order are safe within one
-     * transaction. The provider flushes the pending limit change before it runs the statement, so the
-     * statement reads a row already carrying the refreshed limits and the commit does not afterwards
-     * rewrite the incremented members from the values the entity was loaded with. A repository
-     * integration case pins that ordering, because it is a property of the provider rather than of this
-     * method and a silent change to it would restore a lost update.</p>
+     * <p>⚠️ Refactoring Rationale: BOTH halves are now statements, and NEITHER touches a loaded
+     * instance. This method used to assign the two limits onto the managed summary and call the
+     * inherited {@code save}, and that combination lost concurrent contributions. The mapping declares
+     * no version member and no dynamic-update marker, so the pending assignment flushed as a
+     * whole-row update carrying every column from the instance's load-time snapshot -- the four
+     * accumulators included -- and the flush was triggered by the additive query on the very next line,
+     * because the provider flushes before running a bulk operation. A contribution another transaction
+     * had committed after this transaction's read was therefore overwritten with the older counters,
+     * and this decision's own contribution was then added on top of them, so the other party's
+     * authorization disappeared from the account's totals with nothing reporting it. Two disjoint
+     * statements cannot do that: the refresh writes only the two limits and the additive query writes
+     * only the accumulators, so whichever order the engine serialises them in, neither carries a stale
+     * value for a column the other owns.</p>
      *
-     * @param stored the summary as the store holds it, managed by this transaction; must not be
-     *     {@code null}
+     * <p>Assumptions: the exposure this closes is reachable rather than theoretical, and the transport
+     * does not rule it out. The request queue orders by MESSAGE GROUP and the group is the CARD NUMBER
+     * -- {@link #enqueueReply(String, AuthReply, String, LocalDateTime)} records why the two queue
+     * identities are the literal card and transaction values -- so two cards belonging to ONE account
+     * are two groups and are delivered in parallel. Two authorizations for one account are an ordinary
+     * concurrent case.</p>
+     *
+     * <p>Assumptions: the summary instance this transaction read earlier is deliberately NOT passed in
+     * and is deliberately not refreshed afterwards. Nothing downstream reads it -- the decision was
+     * already taken from it before this write, and the detail row that follows is projected from the
+     * reply -- and leaving it untouched is what guarantees there is no dirty state for the commit to
+     * flush. A statement's effect is invisible to an instance the persistence context already holds, so
+     * a method that both wrote by statement and went on reading the instance would be reading values
+     * the row no longer carries.</p>
+     *
      * @param accountId the account whose summary receives the contribution
      * @param account the account master record, empty when it was not found; must not be {@code null}
      * @param request the decoded request, whose amount a decline accumulates; must not be {@code null}
-     * @param decision the decision reached; must not be {@code null}
-     * @throws IllegalStateException if the statement reports that it changed no row, which is the
+     * @param proposed the decision the decision service reached; must not be {@code null}
+     * @param context the lookup outcomes that proposal was reached from, needed to select the reason a
+     *     superseded approval reports; must not be {@code null}
+     * @return the decision the store confirmed -- the proposal itself, or the decline that supersedes an
+     *     approval whose reservation the account's own limit refused; never {@code null}
+     * @throws IllegalStateException if the DECLINE statement reports that it changed no row, which is the
      *     condition the repository documents as "no summary for this account"; the message's unit of
      *     work rolls back rather than committing a decision whose contribution reached no summary
      */
-    private void contributeToStoredSummary(PendingAuthSummary stored, long accountId,
+    private AuthorizationDecisionService.Decision contributeToStoredSummary(long accountId,
             Optional<AccountContextClient.Account> account, AuthRequest request,
-            AuthorizationDecisionService.Decision decision) {
-        account.ifPresent(read -> stored.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
-        this.summaries.save(stored);
+            AuthorizationDecisionService.Decision proposed,
+            AuthorizationDecisionService.DecisionContext context) {
+        // WHY : Assumptions: the refresh is conditional on the account master having been READ, which is
+        //       the divergence persist(...) records as D-SUMMARY-LIMIT-REFRESH. Its row count is checked
+        //       on the same terms as the additive statement's below, because a refresh that reached no
+        //       row means the summary this decision was decided against is gone, and continuing would
+        //       add a contribution to a row that no longer exists.
+        if (account.isPresent()) {
+            AccountContextClient.Account read = account.get();
+            requireSummaryChanged(this.summaries.refreshStoredLimits(accountId,
+                    read.creditLimit(), read.cashCreditLimit()));
+        }
 
-        int contributed;
-        if (decision.approved()) {
-            contributed = this.summaries.addApprovedAuthorization(accountId,
-                    decision.approvedAmount().amount());
-        } else {
+        AuthorizationDecisionService.Decision confirmed = proposed;
+        if (proposed.approved()
+                && this.summaries.reserveApprovedAuthorization(accountId,
+                        proposed.approvedAmount().amount()) == 0) {
+            // WHY : Refactoring Rationale: an approval is applied by a statement QUALIFIED on the same credit
+            //       check the decision made, and a zero row count SUPERSEDES the approval rather than being
+            //       treated as a missing row. The unguarded statement that stood here made the accumulation
+            //       safe and left the DECISION unsafe: a queue grouped on card number delivers two requests
+            //       for two different cards of one account concurrently, so both read the same headroom, both
+            //       approved, and both contributions then landed -- leaving a credit balance above the credit
+            //       limit that no reference program can produce, because the reference decides one message at
+            //       a time.
+            //       Assumptions: the row EXISTS whenever this branch is reached, so a zero can only mean the
+            //       headroom went. The caller enters this method either with a summary it read in this
+            //       transaction or with one it re-read after an insert reported a conflict, and a conflict is
+            //       reported only once the conflicting row is committed. That is what lets the two outcomes
+            //       the repository cannot distinguish be distinguished here.
+            //       Alternatives Considered: raising and letting the message redeliver, which is what every
+            //       other fault on this path does. Rejected because this is not a fault: the account's limit
+            //       genuinely no longer accommodates the request, so a redelivery would re-decide it and
+            //       reach the same refusal, and after five receives would dead-letter a request the reference
+            //       system answers with an ordinary decline.
+            confirmed = this.decisions.declineForConsumedHeadroom(context);
+        }
+        if (!confirmed.approved()) {
             // WHY : Refactoring Rationale: the amount added here is THIS request's, whereas the baseline
             // adds PA-TRANSACTION-AMT at its line 821 -- a detail-segment field its line 885 does not
             // populate until the following paragraph, so the total it accumulates is the previous
@@ -1080,24 +1307,64 @@ public class AuthorizationRequestListener {
             // amounts that is off by one message describes nothing, so the current request's amount is
             // used and the divergence is registered as D-DECLINED-AMT-CURRENT in
             // docs/architecture/cobol-to-service-traceability.md.
-            contributed = this.summaries.addDeclinedAuthorization(accountId,
-                    request.transactionAmount().amount());
+            // WHY : Assumptions: a SUPERSEDED approval accumulates here as an ordinary decline, because that
+            // is what it now is. The requested amount is added to the declined total and the declined count
+            // advances, which is exactly the row the reference would hold had it decided the two requests in
+            // sequence -- the second reads the first's contribution and declines for want of funds.
+            requireSummaryChanged(this.summaries.addDeclinedAuthorization(accountId,
+                    request.transactionAmount().amount()));
         }
-        if (contributed != 1) {
-            // WHY : Refactoring Rationale: the statement's row count is now READ, where both calls
-            //       previously discarded it. The repository states the contract explicitly -- a zero is
-            //       the condition its withdrawn read reported as an empty result, moved to the write --
-            //       and discarding it meant a decision could commit with its detail row, its reply row
-            //       and no contribution to the account's counters at all, which is a silent loss of
-            //       exactly the kind the outbox exists to remove one queue hop later.
-            //       Assumptions: raising rolls this message's unit of work back and leaves the request on
-            //       the queue, so the redelivery re-reads the summary and either finds it or creates it.
-            //       That is the treatment every other permanent fault on this path already receives.
-            throw new IllegalStateException("the pending-authorization summary for account " + accountId
-                    + " changed no row when this decision's contribution was applied, so the account's"
-                    + " counters would not account for a decision this transaction would otherwise"
-                    + " commit");
+        return confirmed;
+    }
+
+    /**
+     * Refuses a write whose statement reached no summary row.
+     *
+     * <p>Refactoring Rationale: the check is a named method because TWO statements now report a row
+     * count and are held to one contract -- the limits refresh and the additive contribution -- where
+     * the comparison was previously written inline at the single call site that existed. Two copies of
+     * one refusal drift, and the sentence is the only thing an operator reading the failure works
+     * from.</p>
+     *
+     * <p>Assumptions: the account identifier is NOT a parameter, and the sentence this raises names
+     * none, for the reason {@link #rowCountFailureSentence()} records: the message reaches durable
+     * diagnostics, where the migration's logging contract keeps account identifiers out, and the
+     * correlation identifier the shared filter carries is what ties a failure back to one request.</p>
+     *
+     * @param rowsChanged the number of rows the statement reported changing
+     * @throws IllegalStateException if {@code rowsChanged} is not exactly one, which rolls this
+     *     message's unit of work back and leaves the request on the queue for redelivery
+     */
+    private static void requireSummaryChanged(int rowsChanged) {
+        if (rowsChanged != 1) {
+            throw new IllegalStateException(rowCountFailureSentence());
         }
+    }
+
+    /**
+     * Builds the sentence raised when a contribution statement reports that it changed no row.
+     *
+     * <p>Refactoring Rationale: the statement's row count is READ, where the calls that preceded this
+     * correction discarded it. The repository states the contract explicitly -- a zero is the condition its
+     * withdrawn read reported as an empty result, moved to the write -- and discarding it meant a decision
+     * could commit with its detail row, its reply row and no contribution to the account's counters at all,
+     * which is a silent loss of exactly the kind the outbox exists to remove one queue hop later.</p>
+     *
+     * <p>Assumptions: raising rolls this message's unit of work back and leaves the request on the queue, so
+     * the redelivery re-reads the summary and either finds it or creates it. That is the treatment every
+     * other permanent fault on this path already receives.</p>
+     *
+     * <p>Assumptions: the sentence names NO account identifier. It reaches a log at every level that records
+     * the cause, and the migration's sensitive-data logging contract keeps account identifiers out of durable
+     * diagnostics; the correlation identifier the shared filter carries is what ties the failure back to one
+     * request.</p>
+     *
+     * @return the diagnostic sentence, never {@code null}
+     */
+    private static String rowCountFailureSentence() {
+        return "a pending-authorization summary changed no row when this decision's contribution was"
+                + " applied, so the account's counters would not account for a decision this transaction"
+                + " would otherwise commit";
     }
 
     /**
@@ -1107,10 +1374,10 @@ public class AuthorizationRequestListener {
      * request. The baseline asks the platform for the current ordinal date and time in
      * {@code 8500-INSERT-AUTH} at lines 858 to 875 and keys the segment with those values; the request's
      * own date and time are moved separately into the two originating fields at its lines 877 and 878,
-     * which this row also carries. Keying by the request's values -- which an earlier revision did --
-     * let a requester choose its own primary key, so two requests naming one instant collided and a
-     * requester could place a row wherever it liked in the account's history, including ahead of rows
-     * this service had already answered.</p>
+     * which this row also carries. Keying by the request's values instead would let a requester
+     * choose its own primary key, so two requests naming one instant would collide and a requester
+     * could place a row wherever it liked in the account's history, including ahead of rows this
+     * service had already answered.</p>
      *
      * <p>Assumptions: the key is a five-digit ordinal date and a nine-digit time to the millisecond, in
      * that order and NOT the nines complement the segment stores. The complement exists only to make a
@@ -1123,9 +1390,9 @@ public class AuthorizationRequestListener {
      * nothing on the retry, because the failed insert never committed, and the retry lands on a later
      * millisecond.</p>
      *
-     * <p>Refactoring Rationale: the MATCH STATUS is derived from the decision here and passed in,
-     * where an earlier revision let the entity fix it to pending. The reference insert selects between
-     * two values on exactly this condition -- {@code cbl/COPAUA0C.cbl} L902 tests
+     * <p>Assumptions: the MATCH STATUS is derived from the decision here and passed in rather than
+     * fixed to pending by the entity. The reference insert selects between two values on exactly
+     * this condition -- {@code cbl/COPAUA0C.cbl} L902 tests
      * {@code IF AUTH-RESP-APPROVED}, L903 sets the pending value on that branch and L905 the declined
      * value on the other -- so a fixed value recorded every decline as an authorization still awaiting
      * a match. Deriving it from {@link AuthorizationDecisionService.Decision#approved()} is what keeps
@@ -1206,22 +1473,22 @@ public class AuthorizationRequestListener {
     /**
      * Refuses a decoded request that does not satisfy the payload contract this context publishes.
      *
-     * <p>Refactoring Rationale: this is the LIVE validation boundary, and it did not exist. The consumer
-     * previously applied exactly one hand-written check here -- the amount domain -- and worked from the
-     * decoded wire record for everything else, so every other constraint
-     * {@link AuthorizationRequestPayload} declares was enforced only on the structured path that no
-     * message travels. The consequences were concrete rather than theoretical: an absent field passed,
-     * because the decoder only splits and does not require; and a processing code or entry mode holding
-     * letters passed and was then silently rewritten by digit-stripping into a plausible number, so a
-     * malformed value was persisted as a well-formed different one. Routing the decoded record through
-     * {@link AuthorizationMessageMapper#toPayload(AuthRequest)} makes the declared contract the enforced
-     * contract, and the amount domain arrives with it rather than being restated.</p>
+     * <p>Assumptions: this is the LIVE validation boundary, and routing the decoded record through
+     * {@link AuthorizationMessageMapper#toPayload(AuthRequest)} is what makes the declared contract
+     * the enforced one. Working from the decoded wire record and hand-writing one check here -- the
+     * amount domain -- would leave every other constraint {@link AuthorizationRequestPayload}
+     * declares enforced only on the structured path that no message travels, with concrete
+     * consequences: an absent field would pass, because the decoder only splits and does not
+     * require, and a processing code or entry mode holding letters would pass and then be silently
+     * rewritten by digit-stripping into a plausible number, persisting a malformed value as a well-
+     * formed different one.</p>
      *
      * <p>Assumptions: the crossing runs BEFORE the idempotency seek and before every lookup and every
      * transformation, so a nonconforming request touches neither the account context nor a row and no
      * value is normalised on the way to being refused. Ordering it after the seek would let a malformed
-     * message take a row lock; ordering it after the transformations is what allowed a stripped value to
-     * be stored.</p>
+     * message reach the account context and the summary reservation, spending a remote call and a write
+     * on a request that was never going to be answered; ordering it after the transformations is what
+     * allowed a stripped value to be stored.</p>
      *
      * <p>Trade-offs: the request is refused rather than declined. Declining would record an
      * authorization and consume the account's declined counter for a message that never conformed to the
@@ -1423,17 +1690,15 @@ public class AuthorizationRequestListener {
     /**
      * Reads the correlation attribute and returns it unaltered when it satisfies the MESSAGING rule.
      *
-     * <p>Refactoring Rationale: the rule applied here is
-     * {@link MessagingCorrelationId#isCanonical(String)} and not the servlet one, and two consequences
-     * of earlier revisions of this class are withdrawn together. First, this attribute once went
-     * straight from the message into the logging context and into a persisted row with no check at all,
-     * so a requester could write a line terminator into a log record. Second, the check introduced for
-     * that borrowed the SERVLET predicate, which bounds an identity at twenty-four characters drawn from
-     * a short alphabet -- appropriate for a value this system mints for a response header, and wrong for
-     * one a requester renders from a twenty-four BYTE queue field. Forty-eight hexadecimal characters,
-     * thirty-two base64 characters and a hyphenated identifier are all legitimate renderings of that
-     * field and all three failed the borrowed rule, so the consumer discarded identities its requesters
-     * were waiting on and answered with a reply carrying no correlation attribute at all.</p>
+     * <p>Assumptions: the rule applied here is {@link MessagingCorrelationId#isCanonical(String)} and
+     * NOT the servlet one, and both halves of that matter. Passing the attribute unchecked into the
+     * logging context and into a persisted row would let a requester write a line terminator into a
+     * log record. Borrowing the SERVLET predicate instead would bound an identity at twenty-four
+     * characters drawn from a short alphabet -- appropriate for a value this system mints for a
+     * response header, and wrong for one a requester renders from a twenty-four BYTE queue field,
+     * since forty-eight hexadecimal characters, thirty-two base64 characters and a hyphenated
+     * identifier are all legitimate renderings of that field and none of them satisfies the servlet
+     * rule.</p>
      *
      * <p>Assumptions: a conforming value is returned VERBATIM -- not trimmed, not case-folded, not
      * re-encoded -- because the requester pairs the answer to the question on the exact opaque value it
@@ -1442,14 +1707,14 @@ public class AuthorizationRequestListener {
      * reaches the reply are allowed to differ, which is what lets the echo be exact without making the
      * log forgeable.</p>
      *
-     * <p>Trade-offs: a value that is PRESENT and non-canonical now REFUSES the message, where an earlier
-     * revision dropped the attribute and decided the request anyway. The reversal follows from the rule
-     * having widened: under the borrowed servlet rule a failing value was usually a legitimate identity
-     * in an unexpected shape, and destroying a payment authorization over that would have been wrong;
-     * under this rule a failing value carries a control character or exceeds the width the store can
-     * hold, and neither is something a legitimate requester expresses. Refusing lets the queue redeliver
-     * and then dead-letter the message, which leaves evidence, whereas dropping the attribute left the
-     * requester holding a correlation value that never came back and nothing to explain why.</p>
+     * <p>Trade-offs: a value that is PRESENT and non-canonical REFUSES the message rather than being
+     * dropped so the request can be decided anyway. That follows from the width of this rule: a
+     * value failing it carries a control character or exceeds the width the store can hold, and
+     * neither is something a legitimate requester expresses -- whereas under the narrower servlet
+     * rule a failing value was usually a legitimate identity in an unexpected shape, which would
+     * make refusal the wrong answer. Refusing lets the queue redeliver and then dead-letter the
+     * message, which leaves evidence, where dropping the attribute would leave the requester
+     * holding a correlation value that never comes back and nothing to explain why.</p>
      *
      * <p>Assumptions: an ABSENT attribute is not a malformed one and is not refused. The baseline sets
      * its own correlation field to a no-match constant before the read at {@code cbl/COPAUA0C.cbl} L396,
@@ -1538,16 +1803,12 @@ public class AuthorizationRequestListener {
         return value == null ? null : value.toString();
     }
 
-    // WHY : Refactoring Rationale: a pair of fixed-width numeric-field parsers stood here and is
-    //   withdrawn. They were the last remnant of the period when this class assembled the detail row
-    //   field by field; since record(...) began PROJECTING that row through
-    //   AuthorizationMessageMapper.toPendingAuthDetail, neither had a caller -- one was reachable only
-    //   from the other, and that other from nothing at all. Keeping them would state a second,
-    //   independent rule for how a numeric-picture field crosses from text, competing with the
-    //   mapper's; the reason the projection was introduced was that two copies of a crossing drift on
-    //   the first change made to one of them, and an uncalled copy drifts without even the compiler
-    //   noticing. Alternatives Considered: keeping them as the mapper's delegates, which would have
-    //   given the rule one home while leaving it expressed here. Rejected because the mapper already
-    //   refuses a non-digit at the intake boundary through the digits-only expressions the payload
-    //   declares, so the delegation would add a hop and no guarantee.
+    // WHY : Assumptions: this class holds NO fixed-width numeric parser of its own. record(...) projects
+    //   the detail row through AuthorizationMessageMapper.toPendingAuthDetail, so the rule for how a
+    //   numeric-picture field crosses from text has exactly one home. Alternatives Considered: keeping a
+    //   local pair of parsers as the mapper's delegates, which would give the rule one home while
+    //   expressing it in two places. Rejected because two copies of a crossing drift on the first change
+    //   made to one of them, and because the mapper already refuses a non-digit at the intake boundary
+    //   through the digits-only expressions the payload declares -- so a delegate would add a hop and no
+    //   guarantee.
 }

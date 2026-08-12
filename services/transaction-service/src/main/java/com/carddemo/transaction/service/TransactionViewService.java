@@ -431,11 +431,11 @@ public class TransactionViewService {
             //       leaves on its first matching branch and the read that follows is guarded on the
             //       error flag being off.
             // WHY : Refactoring Rationale: the never-supplied STATE is passed as well as the field and
-            //       the message, where an earlier arrangement passed only the latter two and left the
-            //       shared advice to assume the rejected-value state. The two states draw different
-            //       markers -- app/cpy/CSSETATY.cpy moves an asterisk into a blank field and only the
-            //       colour attribute into a rejected one -- so a form told this control held a
-            //       rejected value drew no asterisk where the reference draws one.
+            //       the message, rather than leaving the shared advice to assume the rejected-value
+            //       state. The two states draw different markers -- app/cpy/CSSETATY.cpy moves an
+            //       asterisk into a blank field and only the colour attribute into a rejected one --
+            //       so a form told this control held a rejected value would draw no asterisk where the
+            //       reference draws one.
             throw new ClientInputException(ApiError.CODE_VALIDATION, blankIdentifier.field(),
                     blankIdentifier.state(), blankIdentifier.message());
         }

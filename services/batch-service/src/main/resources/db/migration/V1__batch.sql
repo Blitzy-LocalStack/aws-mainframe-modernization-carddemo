@@ -243,7 +243,8 @@
 -- already terminal for this run can then return immediately instead of doing
 -- its work twice. AAP section 0.4.1.3 fixes the column list as
 -- (run_id, step_name, status, started_at, finished_at, return_code); the
--- surrogate key below is in addition to those six, not one of them.
+-- surrogate key below is in addition to those six, not one of them, and so is
+-- the attempt counter, whose rationale is recorded at the column.
 --
 -- WHY : Assumptions: every column type here is one half of a two-way contract
 --       with the entity mapping, because the persistence provider runs in
@@ -371,12 +372,50 @@ CREATE TABLE batch.batch_run (
     --       is named above rather than left to inference.
     return_code   SMALLINT,
 
+    -- WHY : Refactoring Rationale: this column exists because a redrive has to
+    --       be able to re-open a step that FAILED, and the uniqueness
+    --       constraint below forbids a second row for the same run and step. The
+    --       earlier design said a redrive would insert a new row and that "the
+    --       previous attempt's row is deleted before the new one is written",
+    --       with the deletion attributed to a caller. No caller deletes it, and
+    --       none can: the orchestrator redrives an execution, it does not issue
+    --       SQL. So a failed step could never be re-run at all -- the second
+    --       insert violated uq_batch_run_run_step -- which is the opposite of
+    --       what a restart ledger is for. Re-opening the existing row and
+    --       counting the attempt keeps one row per run and step, keeps the
+    --       uniqueness rule intact, and records how many times the step was
+    --       tried, which is the fact an operator reading a recovered night
+    --       actually wants.
+    -- WHY : Alternatives Considered: dropping uq_batch_run_run_step so that
+    --       every attempt becomes its own row and the history is a row set
+    --       rather than a counter. Rejected because that constraint is what
+    --       makes the redrive no-op decision a single-row read: without it the
+    --       ledger would have to find the LATEST row per pair and adjudicate
+    --       ties, and two concurrent openers of one step -- which the constraint
+    --       currently makes impossible -- would both proceed. The counter gives
+    --       up the per-attempt start and end times in exchange for keeping that
+    --       guarantee, and the framework's own job-execution history already
+    --       records per-attempt timing for anything that needs it.
+    -- WHY : Assumptions: DEFAULT 1 rather than 0, because the column counts
+    --       attempts and a row exists only once an attempt has begun. A default
+    --       is declared so a fixture or a recovery script that omits the column
+    --       still produces a row the check below admits.
+    attempt       INTEGER      NOT NULL DEFAULT 1,
+
     -- WHY : Assumptions: constraints are named rather than left to the server
     --       to name, because a violated constraint reports its own name and
     --       nothing else. A generated name tells an operator reading a failed
     --       nightly run which table and column were involved but not which rule
-    --       was broken, and these six rules mean six different things.
+    --       was broken, and these seven rules mean seven different things.
     CONSTRAINT pk_batch_run PRIMARY KEY (id),
+
+    -- WHY : Assumptions: an attempt count below one describes a row that exists
+    --       without anything having been attempted, which is unrepresentable in
+    --       reality and is made unrepresentable here. There is deliberately no
+    --       upper bound: a redrive is an operator action and capping the count
+    --       would refuse the write rather than the redrive, so the ledger would
+    --       lose the record of the very attempt that mattered most.
+    CONSTRAINT ck_batch_run_attempt CHECK (attempt >= 1),
 
     -- WHY : Refactoring Rationale: this constraint is the redrive-idempotency
     --       mechanism, and it replaces NOTHING -- there is no baseline

@@ -266,9 +266,12 @@
  *
  * <p><b>Six. Paging is by key, and no window size travels.</b>
  * {@code com.carddemo.common.web.PageResponse} is exactly {@code items}, {@code firstKey},
- * {@code lastKey} and {@code hasNext} -- no previous-page flag, no page size, no page number and no
- * total count -- so a list request shape carries the paging position and the direction and nothing
- * further. Assumptions: the document declares no page-size, page-number, offset or total-pages
+ * {@code lastKey} and {@code hasNext} -- no page size, no page number, no total count and no
+ * backward availability flag -- so a list request shape carries the paging position and the direction
+ * and nothing further. Assumptions: {@code hasNext} is a RESPONSE component and not a request one,
+ * and what the envelope publishes for a retreat is the POSITION rather than an availability answer:
+ * {@code firstKey} says where a retreat would resume from, and whether a row waits there is settled
+ * by the caller's own page ordinal, which is where the reference settles it too. Assumptions: the document declares no page-size, page-number, offset or total-pages
  * parameter and states that none may be added, so the window is the service's to decide and a size
  * member on a request shape here would publish a parameter the contract does not.
  *

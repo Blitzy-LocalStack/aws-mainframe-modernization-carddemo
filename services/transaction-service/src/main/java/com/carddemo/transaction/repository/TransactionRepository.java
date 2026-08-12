@@ -334,25 +334,34 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
             @Param("toInclusive") LocalDateTime toInclusive, Limit limit);
 
     /**
-     * Reads the highest transaction identifier currently stored.
+     * Reads the highest transaction identifier currently stored, for the COPY path only.
      *
-     * <p>This is the relational form of the two maximum-key derivations in the reference tree, each
-     * of which seeks past the end of the file and reads one record backwards to obtain it:
-     * {@code app/cbl/COTRN02C.cbl} moves high values into the key at line 444, starts the browse at
-     * line 445, reads backwards at line 446 and ends the browse at line 447, while
-     * {@code app/cbl/COBIL00C.cbl} performs the identical four steps at lines 212 to 215.
+     * <p>This is the relational form of the backward read at lines 475 to 478 of
+     * {@code app/cbl/COTRN02C.cbl}, which positions past the end of the file and reads one record
+     * backwards in order to populate the form with the LAST STORED TRANSACTION so an operator can
+     * amend a copy of it. Its caller is {@code TransactionAddService.readLatestTransaction}, which
+     * follows this identifier with a keyed read because that program keeps the whole record and not
+     * only its key.
+     *
+     * <p>Refactoring Rationale: this member is NOT the identifier allocator and must never be used as
+     * one, which is a narrowing of what it previously documented. Its earlier description presented it
+     * as "the relational form of the two maximum-key derivations in the reference tree" and explained
+     * how the reference handles an empty table "so that the identifier their subsequent increment
+     * derives is 1" -- a description of the ALLOCATION use, which read the maximum and had a caller add
+     * one to it. Two Fargate tasks behind a load balancer are not serialised the way one CICS region
+     * serialised those two transactions, so read-then-add produced the same key twice and one caller
+     * received a constraint violation as an internal error. {@link #allocateTransactionId()} took that
+     * use over, and this member kept only the one it is still correct for. The description is narrowed
+     * rather than the member removed, because the copy path genuinely needs the last stored record and
+     * a sequence's next value is not it: the sequence names a row that does not exist yet.
+     *
+     * <p>Assumptions: the identifier is returned rather than the row, and the caller performs the keyed
+     * read. Returning the whole row would put a second projection of the transaction table in this
+     * interface for one caller's convenience, and the keyed read it saves is an index lookup.
      *
      * @return the highest stored identifier as an {@code Optional<String>}, or an EMPTY optional when
-     *     the table holds no rows at all -- which is the case the two reference programs handle by
-     *     moving zeros into the key, at line 689 and line 488 respectively, so that the identifier
-     *     their subsequent increment derives is 1
+     *     the table holds no rows at all, which the copy path answers by leaving the form empty
      */
-    // Refactoring Rationale: the increment does NOT live here, and the split is deliberate
-    //     rather than an omission. In the reference tree the addition sits in a program paragraph
-    //     -- line 449 of app/cbl/COTRN02C.cbl and line 217 of app/cbl/COBIL00C.cbl, each adding
-    //     one to a numeric work field declared at line 57 of its own program -- and not in any
-    //     file verb, and rule T5 turns file verbs into repository members. Deriving the next
-    //     identifier is the service layer's work; reading the maximum is this one's.
     @Query("select max(t.tranId) from Transaction t")
     Optional<String> findMaxTranId();
 
@@ -366,7 +375,8 @@ public interface TransactionRepository extends JpaRepository<Transaction, String
      * region, so read-then-add was safe there.</p>
      *
      * <p>Refactoring Rationale: this method exists because read-then-add is NOT safe here, and
-     * {@link #findMaxTranId()} was being used for it. Two Fargate tasks behind a load balancer are not
+     * {@link #findMaxTranId()} was being used for it -- that member now documents itself as the copy
+     * path's read alone, so the two uses cannot be confused again. Two Fargate tasks behind a load balancer are not
      * serialised: both read the same maximum, both add one, and both attempt the same primary key. One
      * succeeds and the other fails on a constraint violation that reaches the caller as an internal
      * error rather than as anything it can act on. Allocating in the database makes the increment

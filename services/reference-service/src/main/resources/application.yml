@@ -563,12 +563,19 @@ spring:
       #   remember the parameter, and the second of those fails silently
       #   when forgotten. Pool initialisation SQL keeps the pin in the file
       #   that asserts it.
-      # Assumptions: com.carddemo.reference.config.DataSourceConfig in
-      #   the sibling java tree pins the same search path programmatically,
-      #   and the two must agree on the literal schema name "reference". A
-      #   change to one is a change to both or to neither; changing this
-      #   string alone leaves the two pins disagreeing, and the one that wins
-      #   depends on bean ordering rather than on intent.
+      # Assumptions: this statement is the ONLY pin. com.carddemo.reference
+      #   .config.DataSourceConfig in the sibling java tree sets no search
+      #   path of its own -- it binds this pool and then asks the server
+      #   SELECT current_schema() once, at startup, comparing the answer with
+      #   spring.flyway.default-schema below. So the schema name here has to
+      #   agree with that key rather than with a second pin: changing this
+      #   string alone makes the startup comparison fail and names both
+      #   values, which is the intended outcome and not a race. Refactoring
+      #   Rationale: this note previously described that class as pinning the
+      #   same path programmatically and warned that "the one that wins
+      #   depends on bean ordering". No second pin exists to win, and
+      #   describing one would send a reader looking for a setting to keep in
+      #   step with this line.
       # Assumptions: this statement is safe before the schema's tables
       #   exist, because PostgreSQL does not validate schema names when the
       #   search path is set and resolves them lazily instead. It does NOT

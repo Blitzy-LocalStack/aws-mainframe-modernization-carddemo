@@ -3,23 +3,16 @@
  * authorities, and so replaces the one-character user type the CardDemo
  * baseline carried between screen turns.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
- *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <p>Nine compilation units sit in this directory: this charter and the eight production classes
+ * {@code CardNumberMasker}, {@code CognitoAccessTokenValidator}, {@code HtmlTextEncoder},
+ * {@code InternalServiceToken}, {@code JwtRoleConverter}, {@code MaskedCardNumber},
+ * {@code OpaqueIdentifier} and {@code SealedSelector}. Every inventory, file name, class name and
+ * count in this charter is a measurement of that directory, and the labelled census further down is
+ * re-derived from it on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java},
+ * so a ninth class arriving here fails the build rather than quietly falsifying this file.</p>
  *
  * <p><b>Purpose.</b> This package is the shared-kernel home for exactly one
  * decision: given a token the resource server has already validated, which
@@ -193,7 +186,7 @@
  *
  * <h2>What this package contains, and which way the arrow points</h2>
  *
- * <p>Nine compilation units live in this directory:
+ * <p>Ten compilation units live in this directory:
  *
  * <ul>
  *   <li>{@code JwtRoleConverter} -- reading the
@@ -222,6 +215,14 @@
  *       reversible by the holder of the key and by nobody else, where
  *       {@code OpaqueIdentifier} is reversible by no one and the keyset cursor is
  *       encoded rather than encrypted.</li>
+ *   <li>{@code ApprovedOriginPolicy} -- refusing a configured service-to-service base
+ *       address that is not an approved absolute HTTPS origin, before the client that
+ *       would attach a credential to it is built. It belongs beside the minter above
+ *       because the two are halves of one guarantee: the minter decides what a token may
+ *       authorise, and this decides where a token may be sent. Two service modules held a
+ *       structurally identical private copy of the check and a third had none, which is the
+ *       failure a shared kernel exists to prevent -- a check duplicated three times is one
+ *       that gets strengthened in a single copy.</li>
  *   <li>{@code HtmlTextEncoder} -- encoding a value so that placing it inside a
  *       markup document cannot change that document's structure. The migrated
  *       statement generator assembles a markup artifact by concatenation, and three
@@ -231,14 +232,11 @@
  *       itself.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: this list previously named three production classes and declared that there
- * would be no fifth compilation unit. Both were measurably wrong at the time they were read:
- * {@code CardNumberMasker} was already present and unlisted, so the directory already held five files
- * while the charter forbade a fifth. The list is now a measurement of the directory. Assumptions: the
- * closed-set language is dropped rather than restated with a larger number, because what actually
- * governs admission here is the prohibition below on any controller, service, repository, domain,
- * transfer-object, mapper or configuration type -- a rule about KIND, which a reader can apply -- and not
- * a file count, which only tells a reader that something is missing without saying what.</p>
+ * <p>Assumptions: this list is a measurement of the directory and carries no closed-set language, and
+ * the omission is deliberate. What governs admission here is the prohibition below on any controller,
+ * service, repository, domain, transfer-object, mapper or configuration type -- a rule about KIND, which
+ * a reader can apply to a proposed class -- and not a file count, which can only report that the
+ * directory differs from a number without saying which class was wrong to be there.</p>
  *
  * <p>Assumptions: the last two entries are a PAIR and are separate types deliberately. One produces a
  * masked rendering and the other decides whether a value is one, and the second existed nowhere before:
@@ -280,47 +278,31 @@
  *
  * <h2>What this package contributes, and why no kernel-wide total is restated here</h2>
  *
- * <p>This directory holds eight production classes and this charter. That is a measurement of the
- * directory, and the eight are the eight listed above:
+ * <p>This directory holds nine production classes and this charter. That is a measurement of the
+ * directory, and the nine are the nine listed above:
  *
  * <pre>
- * this package: security 8 production + 1 charter = 9 compilation units
+ * this package: security 9 production + 1 charter = 10 compilation units
  * </pre>
  *
- * <p>Refactoring Rationale: that sentence read "five ... and the five", then "six ... and the six", and
- * both were behind the directory by the time they were read -- the sealed selector and the markup
- * encoder had landed unlisted, so the census under-reported this package by two and the charter's own
- * list omitted the two classes a reader is most likely to be looking for. A figure this charter CAN
- * verify is worth keeping accurate, because it describes the one directory this file can see, and the
- * figure is now re-derived from that directory by
+ * <p>Assumptions: this census counts one directory -- the one this file can see -- and it is re-derived
+ * from that directory by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java}
- * on every build rather than maintained by hand. The entry itself survived one earlier change without
- * moving: a bespoke workload-assertion credential occupied it first and was withdrawn in favour of the
- * signed token above, so one file replaced one file. Two mechanisms for one hop is one too many, and
- * the surviving one delegates its verification to audited framework code instead of re-implementing
- * expiry and message-authentication checking here.</p>
+ * on every build rather than maintained by hand. One of the eight entries is worth a note on its
+ * membership: {@code InternalServiceToken} occupies the place a bespoke workload-assertion credential
+ * once held, and the bespoke mechanism was withdrawn in favour of the signed token, so one file replaced
+ * one file. Two mechanisms for one hop is one too many, and the surviving one delegates its verification
+ * to audited framework code instead of re-implementing expiry and message-authentication checking
+ * here.</p>
  *
- * <p>Refactoring Rationale: a kernel-wide "count canon" stood here -- a total of 21 production classes
- * with a per-package breakdown re-deriving it -- and it is not restated in this file, because every one
- * of its figures for this package and several for others had stopped matching the tree: this package
- * held four production classes where the breakdown said three, and the kernel held 27 where the total
- * said 21. Assumptions: a total no build gate re-derives is worse than no total, because it is read as
- * a closed inventory and drifts the moment any package gains a class. That is what happened: the
- * kernel-wide figures went stale twice more after this paragraph was written, reaching 35 classes in 45
- * compilation units across 10 charters; the measured figures are now 39, 50 and 11, and they are stated
- * in the sibling charters that carry a labelled sum rather than restated again here.</p>
- *
- * <p>Alternatives Considered: recomputing the canon here by hand. Rejected, because it reproduces the
- * same failure one measurement later. What was adopted instead is the third option this paragraph did
- * not consider -- deriving it. The sibling charters that DO restate the canon now label every addend by
- * package, and
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/SharedKernelInventoryTest.java}
- * re-derives every labelled addend, both totals, each charter's own share and the kernel root's
- * inventory table from this directory tree on every build. So the figures those charters carry are
- * checked rather than trusted, and this file states only what it can see for itself. An earlier revision
- * of this paragraph reported the sibling drift as "a known inaccuracy rather than edited from here" and
- * left it standing; that is withdrawn, because reporting a false claim is not a substitute for closing
- * it, and every one of those charters has now been corrected against the measured tree.</p>
+ * <p>Alternatives Considered: restating a kernel-wide total here -- every production class in every
+ * shared-kernel package, summed. Rejected, because a total no build gate re-derives is worse than no
+ * total: it is read as a closed inventory and goes stale the moment any package gains a class, and this
+ * file cannot see the directories it would be summing. What is adopted instead is derivation. The
+ * sibling charters that DO carry a labelled sum label every addend by package, and
+ * {@code SharedKernelInventoryTest} re-derives every labelled addend, both totals, each charter's own
+ * share and the kernel root's inventory table from this directory tree on every build. So those figures
+ * are checked rather than trusted, and this file states only what it can measure for itself.</p>
  *
  * <p>Assumptions: what governs admission to this directory is the prohibition above on any controller,
  * service, repository, domain, transfer-object, mapper or configuration type, together with the

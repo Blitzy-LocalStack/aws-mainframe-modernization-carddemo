@@ -913,6 +913,149 @@ is nothing left for a delay to wait for. The retirement register lives in
 `docs/architecture/cobol-to-service-traceability.md`.
 
 
+## The export/import pair is on demand, in a third state machine
+
+`app/jcl/CBEXPORT.jcl` and `app/jcl/CBIMPORT.jcl` are the two batch drivers that
+are **not** part of the nightly stream. Neither job name appears in
+[`app/scheduler/CardDemo.ca7`](../../app/scheduler/CardDemo.ca7) or in
+[`app/scheduler/CardDemo.controlm`](../../app/scheduler/CardDemo.controlm), and
+neither carries a `COND=` that would place it after a predecessor in the chain:
+they are submitted by an operator when an extract is wanted.
+
+Refactoring Rationale: this section is **new**, and its absence was a real gap
+rather than an editorial one. `BatchApplication` accepts `--job=export` and
+`--job=import`, `ExportJob` and `ImportJob` register beans under exactly those
+tokens, and until now no state machine, schedule or API in this repository could
+pass either token — so both jobs could be built, tested and deployed while
+remaining impossible to run in a provisioned environment. The target for them is
+`carddemo-<env>-dataset-roundtrip`, a third STANDARD state machine in
+[`infra/modules/step-functions-batch`](../../infra/modules/step-functions-batch),
+alongside the nightly chain and the ad-hoc report machine.
+
+| State | Type | Replaces | Notes |
+|---|---|---|---|
+| 1 | `Choice` | — | `ValidateDatasetRequest`: refuses an absent or misshapen `businessDate` before any task starts |
+| 2 | `Pass` | — | `InvalidDatasetRequest`: the refusal payload, routed to the notification path |
+| 3 | `Task` | [`app/jcl/CBEXPORT.jcl`](../../app/jcl/CBEXPORT.jcl) L43 | `ExportDataset`: batch task with `--job=export` |
+| 4 | `Choice` | — | `CheckExportExitCode`: a non-zero container exit is not an API error, so it is gated explicitly |
+| 5 | `Task` | [`app/jcl/CBIMPORT.jcl`](../../app/jcl/CBIMPORT.jcl) L22 | `ImportDataset`: same task definition, `--job=import` |
+| 6 | `Choice` | — | `CheckImportExitCode` |
+| 7 | `Task` | — | `NotifyDatasetFailure`: publishes to the shared notification topic |
+| 8/9 | `Succeed` / `Fail` | — | Terminal states |
+
+Alternatives Considered: adding two states to the nightly chain, which is where
+every other batch job lives. Rejected because it changes **when** the pair runs:
+the baseline submits both by hand, and a nightly export would produce a full
+five-master extract every night whether or not anyone asked for one. Adding them
+to the ad-hoc report machine was also rejected — that machine's input contract is
+a report request (`startDate`, `endDate`, `reportType`) while the round trip needs
+only a business date, so a shared validator would have had to accept the union of
+both shapes and would therefore have validated neither. A bare `runTask` from an
+operator's shell was rejected last: the export must succeed before the import
+runs, and a shell sequence has no retry, no per-step ceiling, no exit-code gate
+and no execution history, so an import over a half-written dataset would be
+indistinguishable from a clean round trip.
+
+Assumptions: the two states run **sequentially and the import is gated on the
+export's exit code**, because the import reads exactly the object the export
+writes — `export/<yyyymmdd00>/export.dat`, composed identically by both jobs from
+the same business date.
+
+Assumptions: idempotency is layered, and it matters more here than for any other
+job in the module. Each task receives `CARDDEMO_BATCH_RUN_ID` bound to
+`$$.Execution.Name`, and `BatchStepLedger` keys on `(runId, stepName)` over
+`batch.batch_run` — so a re-invocation carrying the same execution name replays a
+recorded outcome instead of running the body twice. A second import body run
+would append a second copy of every record to all six artefacts, and those
+artefacts carry no marker that would let a consumer notice. Step Functions
+independently refuses a duplicate execution name on a STANDARD machine. The
+operator convention that makes the name repeatable is in
+[the batch operations runbook](../runbooks/batch-operations.md).
+
+Assumptions: the shared execution role is reused rather than a third one created.
+Its `ecs:RunTask` grant already covers the batch task definition, and the round
+trip runs no other, so a third role would duplicate every statement with no
+narrowing.
+
+
+## The pending-authorization segment export is operator-invoked too
+
+[`app/app-authorization-ims-db2-mq/jcl/UNLDPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDPADB.JCL)
+and
+[`app/app-authorization-ims-db2-mq/jcl/UNLDGSAM.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDGSAM.JCL)
+are the two drivers of the segment unloads, and neither appears in
+[`app/scheduler/CardDemo.ca7`](../../app/scheduler/CardDemo.ca7) or
+[`app/scheduler/CardDemo.controlm`](../../app/scheduler/CardDemo.controlm): like
+the export/import pair above, they are submitted when an extract is wanted.
+
+Refactoring Rationale: this section is **new**, and it records a gap of exactly
+the same shape as the one above and one degree worse. `UnloadService` transcribes
+both `PAUDBUNL.CBL` and `DBUNLDGS.CBL` in full and is covered by 38 unit cases,
+and until now it had no caller of ANY kind — where the export/import pair at least
+had `--job=` tokens a state machine could someday pass, the segment export had no
+task bean, so there was no token to pass. The target is
+`carddemo-<env>-authorization-extract`, a **fourth** STANDARD state machine in
+[`infra/modules/step-functions-batch`](../../infra/modules/step-functions-batch),
+and it runs the **authorization** task definition rather than the batch one —
+which is why that module now takes four task-definition inputs and eight
+pass-role entries rather than three and six.
+
+| State | Type | Replaces | Notes |
+|---|---|---|---|
+| 1 | `Choice` | — | `ValidateAuthorizationExtractRequest`: routes on `mode` and refuses a request whose own arguments are absent |
+| 2 | `Pass` | — | `InvalidAuthorizationExtractRequest`: the refusal payload, naming both accepted shapes |
+| 3 | `Task` | [`UNLDPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDPADB.JCL) L38, [`UNLDGSAM.JCL`](../../app/app-authorization-ims-db2-mq/jcl/UNLDGSAM.JCL) L26 | `UnloadAuthorizations`: authorization task with `--job=unload-authorizations`; the record form selects which of the two drivers it stands in for |
+| 4 | `Choice` | — | `CheckUnloadExitCode` |
+| 5 | `Task` | [`LOADPADB.JCL`](../../app/app-authorization-ims-db2-mq/jcl/LOADPADB.JCL) L36, L38 | `LoadAuthorizations`: same task definition, `--job=load-authorizations`, over operator-named sources |
+| 6 | `Choice` | — | `CheckLoadExitCode` |
+| 7 | `Task` | — | `NotifyAuthorizationExtractFailure`: publishes to the shared notification topic |
+| 8/9 | `Succeed` / `Fail` | — | Terminal states |
+
+Assumptions: the two work states are **alternatives selected by `mode`, never a
+sequence**, and this is the one structural way this machine departs from the
+round trip above. That machine chains its export into its import because
+verifying an export by importing it writes only dataset artefacts. The equivalent
+here would load an extract back into the live `authorization` schema, and because
+`--job=purge-authorizations` deletes expired rows a load run after a purge would
+**resurrect exactly the rows the purge removed**. A verification that can undo a
+retention decision is worse than none. The consequence for the machine's own
+ceiling is recorded on `authorization_extract_timeout_seconds`, whose floor is
+the LARGER of the two per-state ceilings rather than their sum — the opposite of
+the round trip's, and for this reason.
+
+Assumptions: the export's two destination keys are **composed by the graph**, from
+the dataset bucket, the business date and `$$.Execution.Name`, as
+`authorization/extract/dt=<date>/run=<execution>/{roots,children}.dat`. An export
+therefore cannot be aimed at an unrelated key and two executions cannot collide.
+The load's two sources are the opposite — taken from the request — because the
+extract being loaded need not have come from this machine: the reference
+programs' own output is a legitimate input and carries no run identifier a graph
+could reconstruct a key from.
+
+Assumptions: the execution name is **unique per export rather than
+deterministic**, which is again the reverse of the round trip's convention. That
+machine derives a repeatable name because its jobs are ledger-idempotent and a
+repeat must replay; this machine's export writes to keys that contain the
+execution name, so a unique name is what keeps an earlier export readable after a
+later one has run.
+
+Assumptions: the privilege the export needs is on the **task** role, not the
+execution role. `com.carddemo.authorization.task.ExtractStore` is the access path
+and the container authenticates as the task role, so the object-store grants are
+written beside the rest of that role's policy in each environment root —
+`s3:PutObject` and `s3:GetObject` under the extract prefix, an `s3:ListBucket`
+bounded by an `s3:prefix` condition, and the S3 customer-managed key. Granting
+them to the state machine's execution role instead would grant them to the wrong
+identity and would not work.
+
+Assumptions: neither extract becomes visible at its destination until the export
+has **returned**. Both are staged and published together, because a child record
+is attributed to its parent by a key only the root file explains — so a complete
+`roots.dat` beside a truncated `children.dat` is not a partial export but a
+misleading one. The operator commands are in
+[the batch operations runbook](../runbooks/batch-operations.md).
+
+
 ## Index building is retired, and the index is not
 
 [`app/jcl/TRANIDX.jcl`](../../app/jcl/TRANIDX.jcl) has three ungated steps:

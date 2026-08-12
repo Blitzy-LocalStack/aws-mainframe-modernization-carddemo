@@ -1173,10 +1173,19 @@ public class TransactionReportService {
             rendered.add(renderLine(row));
         }
         if (rendered.isEmpty()) {
-            return PageResponse.ofFilteredEmpty(page.firstKey(), page.lastKey(), page.hasNext());
+            // WHY : Assumptions: the two positions are handed over CROSSED, and the crossing is
+            //       load-bearing rather than a slip. ofFilteredEmpty names its parameters after the
+            //       DIRECTION each one continues -- forward first -- while the envelope's components are
+            //       named after the boundary each one is, so the leading boundary of the page read here
+            //       is the position a further backward step continues from. The only page that reaches
+            //       this arm is the repository's backward-exhausted one, whose single position is sealed
+            //       for backward replay, and the crossing is what publishes it as this page's LEADING
+            //       boundary where a client will replay it backward. Passing the two straight through
+            //       would publish a backward-bound token as the trailing boundary, which the cursor's
+            //       own direction binding then refuses on the forward request a client would make of it.
+            return PageResponse.ofFilteredEmpty(page.firstKey(), page.lastKey());
         }
-        return PageResponse.ofRows(rendered, page.firstKey(), page.lastKey(),
-                page.hasNext(), page.hasPrevious());
+        return PageResponse.ofRows(rendered, page.firstKey(), page.lastKey(), page.hasNext());
     }
 
     /**

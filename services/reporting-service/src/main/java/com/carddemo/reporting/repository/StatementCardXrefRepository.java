@@ -279,15 +279,12 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * declares the read-only transaction at its L242 and consumes the sibling cursor inside
      * try-with-resources at its L290 through L292. </p>
      *
-     * <p>Refactoring Rationale: two keyset-continuation methods returning bounded lists stood here
-     * and are replaced by this one cursor. They were reached by nothing -- the only production call
-     * into this interface anywhere in the module is the keyed read at L261 of
-     * {@code StatementService}, so neither had a caller or an assertion -- and they expressed a
-     * whole-relation walk as successive bounded requests, which for a driving traversal means the
-     * ordering guarantee at L53 of {@code app/jcl/CREASTMT.JCL} has to be re-established on every
-     * request rather than held open once. A single cursor states that guarantee once, and the
-     * removal is recorded rather than left silent because the shape they carried is a reasonable one
-     * for a caller-driven browse and is simply not what this traversal is. </p>
+     * <p>Alternatives Considered: keyset-continuation methods returning bounded lists, which is the
+     * right shape for a caller-driven browse and is not what this traversal is. Rejected because a
+     * whole-relation walk expressed as successive bounded requests has to re-establish the ordering
+     * guarantee at L53 of {@code app/jcl/CREASTMT.JCL} on every request rather than holding it open
+     * once, and because the driving traversal has no caller to hold a cursor position on its behalf. A
+     * single cursor states that guarantee once. </p>
      *
      * @return an open, forward-only cursor over every row of the projection, ordered by the narrowed
      *     card number ascending and then by the per-card fingerprint ascending, which together make a
@@ -316,16 +313,16 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
     /**
      * Resolves one WHOLE card number to its cross-reference row, exactly.
      *
-     * <p>Refactoring Rationale: this method replaces {@code findByCardNum(String)}, which took the
-     * NARROWED rendering and is withdrawn. The narrowed rendering is twelve constant asterisks
-     * followed by four digits, so a predicate on it names a tail rather than a card, and the two
-     * outcomes that produced were both wrong and neither was visible. Where the requested card and a
-     * different cardholder's card shared a tail and both existed, the read matched two rows and raised
-     * -- refusing a legitimate request. Where the requested card did NOT exist but another card with
-     * the same tail did, the read matched exactly one row and returned it, so the caller received
-     * somebody else's customer, somebody else's account and, downstream, somebody else's statement,
-     * with nothing anywhere recording that a substitution had happened. That second case is the
-     * serious one: it is a broken-object-selection defect and not a collision-handling nicety. </p>
+     * <p>Assumptions: resolution takes the WHOLE card number, and a predicate on the NARROWED
+     * rendering is forbidden here rather than merely discouraged. That rendering is twelve constant
+     * asterisks followed by four digits, so a predicate on it names a tail rather than a card, and both
+     * outcomes it can produce are wrong while neither is visible. Where the requested card and a
+     * different cardholder's card share a tail and both exist, the read matches two rows and raises,
+     * refusing a legitimate request. Where the requested card does NOT exist but another card with the
+     * same tail does, the read matches exactly one row and returns it, so the caller receives somebody
+     * else's customer, somebody else's account and, downstream, somebody else's statement, with nothing
+     * recording that a substitution happened -- a broken-object-selection defect rather than a
+     * collision-handling nicety. </p>
      *
      * <p>Assumptions: the resolution is delegated to {@code reporting.resolve_card}, declared in
      * {@code data-migration/sql/V1__reporting_views.sql}, rather than expressed as a predicate here.
@@ -342,14 +339,13 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      *
      * <p>Alternatives Considered: adding a plain {@code card_fingerprint_for(text)} helper so that the
      * service could compute the token for a card and then use the ordinary keyed read. Rejected in the
-     * migration itself and the reason is recorded there: the masked column is published beside the
-     * token, so a caller who knows an issuer prefix and reads a mask has about a million middle-digit
-     * candidates left, and a forward oracle turns that into a feasible search that recovers the whole
-     * number. This function answers nothing for a card that does not exist, so it discloses a
+     * migration itself and the reason is recorded there: exposing a forward oracle over a value that is
+     * published only in masked form makes recovering the whole number a feasible search rather than a
+     * guess. This function answers nothing for a card that does not exist, so it discloses a
      * fingerprint only to a caller that already held the number it belongs to. </p>
      *
      * <p>Alternatives Considered: withdrawing single-card resolution altogether so that the cursor
-     * above is the only surface. Declined for the reason it was declined before: the on-demand caller
+     * above is the only surface. Declined because the on-demand caller
      * would walk every row ahead of the card it was asked for, and bounding that walk would report a
      * statement with no activity that a reader cannot tell apart from a genuinely empty one. A
      * single-card request is a lookup, and expressing it as a traversal would make the answer depend
@@ -358,11 +354,10 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * {@code 1500-A-LOOKUP-XREF} L484 through L492, which register entry <b>R3</b> records as the
      * second of the two access shapes this one relation is reached through. </p>
      *
-     * <p>Trade-offs: the return is an optional over at most one row, and now that is a guarantee
-     * rather than a hope. The function's predicate is an equality on the whole trimmed number against
-     * a relation whose own primary key is that number, so two rows are unrepresentable and the
-     * previous method's documented {@code IncorrectResultSizeDataAccessException} can no longer
-     * arise. </p>
+     * <p>Assumptions: the return is an optional over at most one row, and that is a guarantee rather
+     * than a hope. The function's predicate is an equality on the whole trimmed number against a
+     * relation whose own primary key is that number, so two matching rows are unrepresentable and no
+     * incorrect-result-size condition can arise. </p>
      *
      * @param cardNumber the WHOLE primary account number to resolve, trimmed or padded either way
      *     because the function trims both sides of its comparison; must not be {@code null}

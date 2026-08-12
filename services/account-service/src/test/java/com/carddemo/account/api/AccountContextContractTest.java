@@ -13,9 +13,11 @@ import com.carddemo.account.dto.AccountLookupRequest;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountUpdateResponse;
 import com.carddemo.account.dto.AccountViewResponse;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
+import com.carddemo.account.dto.CustomerDisplayView;
 import com.carddemo.account.dto.CustomerLookupRequest;
 import com.carddemo.account.mapper.AccountContextMapper;
 import com.carddemo.account.mapper.AccountMapper;
@@ -34,6 +36,7 @@ import java.lang.reflect.RecordComponent;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -54,6 +57,7 @@ import org.springframework.util.AntPathMatcher;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.yaml.snakeyaml.Yaml;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -103,14 +107,18 @@ class AccountContextContractTest {
     private static final String XREF_SEARCH_BY_ACCOUNT_PATH = "/api/v1/card-xrefs/search-by-account";
 
     /**
-     * The end-user account edit path template, written as a literal on purpose.
+     * The end-user account edit path, written as a literal on purpose.
      *
-     * <p>Refactoring Rationale: this template named the address of BOTH the machine read and the end-user
-     * edit while the machine read was a keyed {@code GET}. The read moved to
-     * {@link #ACCOUNT_LOOKUP_PATH} with its identifier in a body, so this template now names one operation
-     * only, and the constant is described for what remains at it rather than for what used to share it.</p>
+     * <p>Refactoring Rationale: this was the TEMPLATE {@code /api/v1/accounts/{accountId}}, which named the
+     * address of both the machine read and the end-user edit while the machine read was a keyed {@code GET}.
+     * The read moved to {@link #ACCOUNT_LOOKUP_PATH} first; the edit has now moved here, to a fixed address
+     * with its key in the body it already carried, so no template remains on the account prefix at all.</p>
+     *
+     * <p>Assumptions: a literal and not a template, for the reason {@link #ACCOUNT_LOOKUP_PATH} records --
+     * the identifier no longer appears in the address, and a future edit that reintroduced a path variable
+     * would have to change this literal, which the closed-set assertion below would report.</p>
      */
-    private static final String ACCOUNT_PATH_TEMPLATE = "/api/v1/accounts/{accountId}";
+    private static final String ACCOUNT_UPDATE_PATH = "/api/v1/accounts/update";
 
     /**
      * The internal account context lookup path, written as a literal on purpose.
@@ -131,8 +139,15 @@ class AccountContextContractTest {
      */
     private static final String CUSTOMER_LOOKUP_PATH = "/api/v1/customers/lookup";
 
-    /** The end-user account-view path template. */
-    private static final String ACCOUNT_VIEW_PATH_TEMPLATE = "/api/v1/accounts/{accountId}/view";
+    /**
+     * The end-user account-view path, written as a literal on purpose.
+     *
+     * <p>Refactoring Rationale: this was the template {@code /api/v1/accounts/{accountId}/view}. The key
+     * moved into a request body carrying the same schema the internal read uses, for the reason recorded on
+     * {@code AccountLookupRequest}: a load balancer composes its access record from the request line before
+     * any application code runs, so the only place the identifier can be withheld from it is the body.</p>
+     */
+    private static final String ACCOUNT_VIEW_PATH = "/api/v1/accounts/view";
 
     /**
      * The customer scan path, written as a literal on purpose.
@@ -154,9 +169,28 @@ class AccountContextContractTest {
      */
     private static final String CUSTOMER_RECORD_PATH = "/api/v1/customers/record";
 
-    /** The end-user by-account cross-reference listing path template. */
-    private static final String ACCOUNT_XREF_PATH_TEMPLATE =
-            "/api/v1/accounts/{accountId}/card-cross-references";
+    /**
+     * The dispatcher path of the body-bearing customer display lookup.
+     *
+     * <p>Assumptions: the address is written out rather than composed from the controller's constants,
+     * exactly as its three siblings above are, so that a renamed constant is caught by a failing
+     * assertion here rather than silently agreeing with itself.</p>
+     */
+    private static final String CUSTOMER_DISPLAY_PATH = "/api/v1/customers/display";
+
+    /**
+     * The end-user by-account cross-reference walk path, written as a literal on purpose.
+     *
+     * <p>Refactoring Rationale: this was the template
+     * {@code /api/v1/accounts/{accountId}/card-cross-references}. The account moved into a request body for
+     * the reason above and the address gained {@code /search}, which is how this document spells a bounded
+     * {@code POST} read everywhere it has one -- the internal twin of this same walk is at
+     * {@link #XREF_SEARCH_BY_ACCOUNT_PATH}. The {@code cursor} and {@code direction} parameters stay in the
+     * query string: a sealed cursor is confidential by construction and a direction is one of two published
+     * words, so neither is a value the sensitive-data contract prohibits.</p>
+     */
+    private static final String ACCOUNT_XREF_SEARCH_PATH =
+            "/api/v1/accounts/card-cross-references/search";
 
     /**
      * The adapters whose mapping annotations make up the mounted set.
@@ -176,13 +210,20 @@ class AccountContextContractTest {
      * the document and the server rejects at binding -- the same class of caller-versus-server disagreement
      * the whole move was made to close, so the records are enrolled rather than left to the path assertions
      * alone.</p>
+     *
+     * <p>Refactoring Rationale: {@code CardXrefByAccountView} joined the list when the account-keyed lookup
+     * stopped sharing the card-keyed response shape. The shape it left behind withholds the card number, and
+     * withholding it is exactly what made the account-keyed consumer unable to write a ledger row -- so the
+     * record that replaced it is enrolled here, which is what makes its third component and the document's
+     * third property fail together if either moves without the other.</p>
      */
     private static final List<Class<?>> DOCUMENTED_RECORDS = List.of(
-            AccountContextView.class, CardXrefView.class, CardXrefLookupRequest.class,
+            AccountContextView.class, CardXrefView.class, CardXrefByAccountView.class,
+            CardXrefLookupRequest.class,
             AccountLookupRequest.class, CustomerLookupRequest.class,
             AccountViewResponse.class, AccountViewResponse.AccountDetail.class,
             AccountViewResponse.CustomerDetail.class, AccountUpdateRequest.class,
-            AccountUpdateResponse.class, CardXrefResponse.class);
+            AccountUpdateResponse.class, CardXrefResponse.class, CustomerDisplayView.class);
 
     /** The HTTP methods a path item may declare an operation under. */
     private static final List<String> HTTP_METHODS =
@@ -239,6 +280,24 @@ class AccountContextContractTest {
      * shape assertion while producing the wrong wire form.</p>
      */
     private final JsonMapper json = JsonMapper.builder().addModule(new MoneyModule()).build();
+
+    /**
+     * The target type both member-set reads in this class deserialise into.
+     *
+     * <p>Refactoring Rationale: both reads formerly passed {@code Map.class}, which yields a RAW
+     * {@code Map}. A raw actual erases the assertion library's own type parameters, so the key matcher called
+     * on it becomes an unchecked call: the compiler stops checking the very key arguments that ARE the
+     * assertion. These two cases exist to pin a published member set exactly, so an assertion the compiler
+     * declines to check is the wrong instrument for them. Naming the parameterisation once restores the check
+     * and removes three {@code javac -Xlint:unchecked} warnings per site.</p>
+     *
+     * <p>Assumptions: the value type is {@code Object} rather than {@code String} even though every
+     * member asserted here renders as a JSON string. The monetary members are strings by rule T3 and the
+     * identifiers are numbers, so a {@code String} value type would fail to bind the account-context body
+     * that the sibling case reads -- the binding would fail for a reason that has nothing to do with the
+     * member set under test.</p>
+     */
+    private static final TypeReference<Map<String, Object>> JSON_OBJECT = new TypeReference<>() { };
 
     /**
      * The projection under test, in its real form rather than a substitute.
@@ -369,10 +428,17 @@ class AccountContextContractTest {
     void theContractDocumentDeclaresEveryServedOperation() throws Exception {
         Map<String, Object> paths = contractPaths();
 
+        // WHY : ⚠️ Refactoring Rationale: the closed set carries ELEVEN addresses and the display read is
+        //   the eleventh. It is not a widening of this context's surface but the operation a screen in
+        //   another context was already relying on and could not name: the pending-authorization detail
+        //   screen renders a cardholder's name and address, and with no read for those fields it rendered
+        //   them from an existence check that answers no body at all. Leaving it out of this assertion
+        //   would have let the address exist while the one test that polices the document's completeness
+        //   passed, which is the exact failure mode a closed-set check exists to prevent.
         assertThat(paths).containsOnlyKeys(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
-                XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH, ACCOUNT_PATH_TEMPLATE,
-                ACCOUNT_VIEW_PATH_TEMPLATE, ACCOUNT_XREF_PATH_TEMPLATE, CUSTOMER_LOOKUP_PATH,
-                CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH);
+                XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH, ACCOUNT_UPDATE_PATH,
+                ACCOUNT_VIEW_PATH, ACCOUNT_XREF_SEARCH_PATH, CUSTOMER_LOOKUP_PATH,
+                CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH, CUSTOMER_DISPLAY_PATH);
         assertThat(operation(paths, XREF_LOOKUP_PATH)).containsOnlyKeys("post");
 
         // WHY : Assumptions: all three cross-reference addresses declare a post and nothing else, and the
@@ -384,16 +450,19 @@ class AccountContextContractTest {
         assertThat(operation(paths, XREF_LOOKUP_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
         assertThat(operation(paths, XREF_SEARCH_BY_ACCOUNT_PATH)).containsOnlyKeys("post");
 
-        // WHY : Refactoring Rationale: the keyed account address carries a put and NOTHING else, where it
-        //   previously carried a get beside it. The get was the neighbouring context's machine read and it
-        //   moved to ACCOUNT_LOOKUP_PATH as a post, taking its identifier out of the request line. The two
-        //   are still separated by filter chain rather than by prefix, which SecurityConfig
-        //   .ACCOUNT_PATH_PATTERN records in full -- what changed is that they no longer share an address,
-        //   so the internal chain's matcher no longer has to distinguish them by method.
+        // WHY : Refactoring Rationale: every operation on the account prefix declares a post and nothing
+        //   else, and the four are the same verb for one reason rather than four. Each takes an account
+        //   identifier, a request line is composed into the load balancer's access record before any
+        //   application code runs, and a body is not -- so a get or a put on any of these would publish
+        //   the shape that puts the key back in a target. The machine read moved first and the three
+        //   end-user operations followed; what a reader should NOT conclude is that the two surfaces are
+        //   now separated by verb, because they are not separated by verb at all. They are separated by
+        //   filter CHAIN, which SecurityConfig.ACCOUNT_PATH_PATTERN records in full, and by sub-path,
+        //   which is what makes each address claimable by exactly one of the two chains.
         assertThat(operation(paths, ACCOUNT_LOOKUP_PATH)).containsOnlyKeys("post");
-        assertThat(operation(paths, ACCOUNT_PATH_TEMPLATE)).containsOnlyKeys("put");
-        assertThat(operation(paths, ACCOUNT_VIEW_PATH_TEMPLATE)).containsOnlyKeys("get");
-        assertThat(operation(paths, ACCOUNT_XREF_PATH_TEMPLATE)).containsOnlyKeys("get");
+        assertThat(operation(paths, ACCOUNT_UPDATE_PATH)).containsOnlyKeys("post");
+        assertThat(operation(paths, ACCOUNT_VIEW_PATH)).containsOnlyKeys("post");
+        assertThat(operation(paths, ACCOUNT_XREF_SEARCH_PATH)).containsOnlyKeys("post");
 
         // WHY : Refactoring Rationale: the presence check declares ONE method where the document
         //   previously declared a head and a get at a keyed address. Both were served by one handler, so
@@ -401,6 +470,11 @@ class AccountContextContractTest {
         //   post removed the duplicate description rather than a capability, and the answer was never in a
         //   body so a caller wanting only presence still transfers none.
         assertThat(operation(paths, CUSTOMER_LOOKUP_PATH)).containsOnlyKeys("post");
+
+        // WHY : Assumptions: the display read declares a post and nothing else, for the reason every other
+        //   address keyed by a customer or account identifier does -- the key travels in a body because a
+        //   request line reaches the load balancer's access record before any application code runs.
+        assertThat(operation(paths, CUSTOMER_DISPLAY_PATH)).containsOnlyKeys("post");
 
         // WHY : Assumptions: the scan declares a get and the record read a post, and the asymmetry follows
         //   from what each carries. The scan is positioned by an opaque cursor and bounded by a size, so it
@@ -548,7 +622,8 @@ class AccountContextContractTest {
                         + " from")
                 .containsExactlyInAnyOrder(XREF_LOOKUP_PATH, XREF_LOOKUP_BY_ACCOUNT_PATH,
                         XREF_SEARCH_BY_ACCOUNT_PATH, ACCOUNT_LOOKUP_PATH,
-                        CUSTOMER_LOOKUP_PATH, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH);
+                        CUSTOMER_LOOKUP_PATH, CUSTOMER_SCAN_PATH, CUSTOMER_RECORD_PATH,
+                        CUSTOMER_DISPLAY_PATH);
         internal.forEach((name, operation) ->
                 assertThat(securitySchemesOf(operation))
                         .as("%s must require the internal token", name)
@@ -603,15 +678,20 @@ class AccountContextContractTest {
     }
 
     /**
-     * Verifies the cross-reference response carries exactly the two identifiers and never the card number.
+     * Verifies the CARD-keyed cross-reference response carries exactly the two identifiers.
      *
      * <p>Assumptions: the absence of the card number is asserted as well as the presence of the two
      * identifiers. The consumer supplied the card, so echoing it back would add nothing and would place a
      * primary account number in a second response body, a second access log and a second client's memory.</p>
+     *
+     * <p>Assumptions: this case is now explicitly about the CARD-keyed operation, and its account-keyed
+     * counterpart below asserts the opposite. The pair is what stops either shape drifting into the other:
+     * this operation must not gain the card number and that one must not lose it, and a single case covering
+     * "the cross-reference response" could only ever have pinned one of the two.</p>
      */
     @Test
-    @DisplayName("the cross-reference response carries the two identifiers and no card number")
-    void theCrossReferenceResponseCarriesNoCardNumber() {
+    @DisplayName("the card-keyed cross-reference response carries the two identifiers and no card number")
+    void theCardKeyedCrossReferenceResponseCarriesNoCardNumber() {
         CardXrefRepository crossReferences = mock(CardXrefRepository.class);
         when(crossReferences.findByCardNum(CARD_NUMBER))
                 .thenReturn(Optional.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
@@ -624,8 +704,48 @@ class AccountContextContractTest {
         assertThat(view.customerId()).isEqualTo(CUSTOMER_ID);
 
         String body = this.json.writeValueAsString(view);
-        assertThat(this.json.readValue(body, Map.class)).containsOnlyKeys("accountId", "customerId");
+        assertThat(this.json.readValue(body, JSON_OBJECT)).containsOnlyKeys("accountId", "customerId");
         assertThat(body).doesNotContain(CARD_NUMBER).doesNotContain(CARD_NUMBER.substring(0, 6));
+    }
+
+    /**
+     * Verifies the ACCOUNT-keyed cross-reference response carries the selected card number in full.
+     *
+     * <p>Refactoring Rationale: this operation answered with the two-identifier shape above, which withholds
+     * the card number, and the consumer's own seam record declared a {@code cardNumber} member that no
+     * response could populate. It is not a cosmetic gap: the consumer transcribes
+     * {@code READ-CXACAIX-FILE} at lines 576 to 604 of {@code app/cbl/COTRN02C.cbl} and the same read at line
+     * 414 of {@code app/cbl/COBIL00C.cbl}, both of which take {@code XREF-CARD-NUM} from the record and write
+     * the row they produce UNDER it, so a transaction and a bill payment could not be written at all.</p>
+     *
+     * <p>Assumptions: the value is asserted present, whole and unmasked, and the three are asserted together
+     * because a masked value would satisfy presence while being a DIFFERENT key -- the consumer writes it into
+     * a ledger row, so masking it would write the row against a card that does not exist. A case that
+     * asserted only that the property existed would pass on exactly that failure.</p>
+     */
+    @Test
+    @DisplayName("the account-keyed cross-reference response carries the selected card number in full")
+    void theAccountKeyedCrossReferenceResponseCarriesTheCardNumber() {
+        CardXrefRepository crossReferences = mock(CardXrefRepository.class);
+        when(crossReferences.findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
+                .thenReturn(Optional.of(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID)));
+
+        CardXrefByAccountView view = new CardXrefController(
+                reads(crossReferences, mock(AccountRepository.class), mock(CustomerRepository.class)))
+                .lookupByAccount(new AccountLookupRequest(ACCOUNT_ID));
+
+        assertThat(view.accountId()).isEqualTo(ACCOUNT_ID);
+        assertThat(view.customerId()).isEqualTo(CUSTOMER_ID);
+        assertThat(view.cardNumber())
+                .as("the consumer writes its ledger row under this value, so a masked form is a wrong key")
+                .isEqualTo(CARD_NUMBER);
+
+        String body = this.json.writeValueAsString(view);
+        assertThat(this.json.readValue(body, Map.class))
+                .containsOnlyKeys("accountId", "customerId", "cardNumber");
+        assertThat(body)
+                .as("the whole sixteen digits must survive serialisation, unmasked and unabbreviated")
+                .contains(CARD_NUMBER);
     }
 
     /**
@@ -648,7 +768,7 @@ class AccountContextContractTest {
                 .lookup(new AccountLookupRequest(ACCOUNT_ID));
 
         String body = this.json.writeValueAsString(view);
-        assertThat(this.json.readValue(body, Map.class))
+        assertThat(this.json.readValue(body, JSON_OBJECT))
                 .containsOnlyKeys("creditLimit", "cashCreditLimit", "currentBalance");
         assertThat(body)
                 .contains("\"creditLimit\":\"5000.00\"")
@@ -788,6 +908,26 @@ class AccountContextContractTest {
     }
 
     /**
+     * Reads the PACKAGED contract document.
+     *
+     * <p>Assumptions: it is read from the classpath and not from a source path, so what every case here
+     * asserts is the copy that is packaged and served rather than a file that merely exists in the tree.</p>
+     *
+     * @return the whole document as a mapping, never {@code null}
+     * @throws Exception if the document is absent from the classpath or is not readable as a mapping, either
+     *     of which would mean the packaged contract is not the one under test
+     */
+    private Map<String, Object> contractDocument() throws Exception {
+        try (InputStream document =
+                     getClass().getResourceAsStream("/openapi/account-api.yaml")) {
+            assertThat(document).as("/openapi/account-api.yaml must be on the classpath").isNotNull();
+            Map<String, Object> root = new Yaml().load(document);
+            assertThat(root).containsKeys("paths", "components");
+            return root;
+        }
+    }
+
+    /**
      * Reads the paths block of the packaged contract document.
      *
      * @return the declared paths keyed by path template, never {@code null}
@@ -796,13 +936,7 @@ class AccountContextContractTest {
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> contractPaths() throws Exception {
-        try (InputStream document =
-                     getClass().getResourceAsStream("/openapi/account-api.yaml")) {
-            assertThat(document).as("/openapi/account-api.yaml must be on the classpath").isNotNull();
-            Map<String, Object> root = new Yaml().load(document);
-            assertThat(root).containsKey("paths");
-            return (Map<String, Object>) root.get("paths");
-        }
+        return (Map<String, Object>) contractDocument().get("paths");
     }
 
     /**
@@ -987,6 +1121,101 @@ class AccountContextContractTest {
      */
     private static String concretePath(String pathTemplate) {
         return pathTemplate.replaceAll("\\{[^}]+}", SAMPLE_SEGMENT);
+    }
+
+    /**
+     * Verifies that no published path template and no declared path or query parameter can carry an account
+     * or a customer identifier.
+     *
+     * <p>Purpose: this is the standing guarantee behind a statement made outside this module.
+     * {@code infra/modules/alb/main.tf} enables access logging unconditionally -- the policy scan gates it
+     * at HIGH severity -- and an ELB access record has no field allow-list: the request line is always
+     * written, in full, composed by the load balancer itself before any application code runs. Neither
+     * {@code LogSafeText}, nor {@code CardNumberMasker}, nor {@code GlobalExceptionHandler} can reach it.
+     * The only available control is therefore that the value never enters a target, which is a property of
+     * this contract and not of any logging configuration, and that property is what this case pins.</p>
+     *
+     * <p>Assumptions: the test is STRUCTURAL -- it asks whether a target with a place to put an identifier
+     * exists -- rather than behavioural. A behavioural version would build a concrete URL and require a
+     * masker to redact it, which is the same category error that resource's own note records being made
+     * twice: masking bounds what a service writes and cannot bound what the load balancer already
+     * wrote.</p>
+     *
+     * <p>Assumptions: the prohibited names are the ones the migration's sensitive-data contract enumerates
+     * for this context -- an account identifier and a customer identifier -- and the sweep is over both
+     * path templates and declared parameters, because a query string is part of the request line exactly
+     * as a path segment is. Trade-offs: a cursor and a direction remain declared query parameters and are
+     * deliberately not caught, because a sealed cursor is confidential by construction and a direction is
+     * one of two published words, so neither is a value the contract prohibits.</p>
+     *
+     * @throws Exception if the packaged document is absent or unreadable, which is itself the defect
+     */
+    @Test
+    @DisplayName("no path template and no declared parameter can carry an account or customer identifier")
+    void noRequestLineCanCarryAnAccountOrCustomerIdentifier() throws Exception {
+        List<String> prohibited = List.of("accountid", "acctid", "customerid", "custid", "cardnumber");
+        List<String> offending = new ArrayList<>();
+
+        for (String template : contractPaths().keySet()) {
+            String lowered = template.toLowerCase(Locale.ROOT);
+            if (prohibited.stream().anyMatch(lowered::contains)) {
+                offending.add("path " + template);
+            }
+        }
+        declaredParameters().forEach((name, declared) -> {
+            String in = String.valueOf(declared.get("in"));
+            if (!"path".equals(in) && !"query".equals(in)) {
+                return;
+            }
+            String parameter = String.valueOf(declared.get("name")).toLowerCase(Locale.ROOT);
+            if (prohibited.contains(parameter)) {
+                offending.add(in + " parameter " + name);
+            }
+        });
+
+        assertThat(offending)
+                .as("a path segment and a query string are both persisted verbatim by the load balancer's"
+                        + " mandatory access log, which no downstream masking can redact")
+                .isEmpty();
+
+        // WHY : Assumptions: the sweep is proved capable of failing, because a sweep over an empty
+        //       collection is indistinguishable from a sweep that finds nothing. Both halves are exercised
+        //       against a fabricated input: a template naming the identifier is caught, and one naming the
+        //       walk's own address is not.
+        assertThat(prohibited.stream()
+                        .anyMatch("/api/v1/accounts/{accountid}"::contains))
+                .as("the sweep must be able to recognise an identifier-bearing template")
+                .isTrue();
+        assertThat(prohibited.stream()
+                        .anyMatch(ACCOUNT_XREF_SEARCH_PATH::contains))
+                .as("the sweep must not report an address that carries no identifier")
+                .isFalse();
+    }
+
+    /**
+     * Reads every parameter component the packaged contract declares.
+     *
+     * <p>Assumptions: the COMPONENTS are read rather than the inline parameter lists, and the two are
+     * different populations. This document declares its reusable parameters as components and its two
+     * one-off query parameters inline, so the sweep above walks the components for a declared identifier
+     * and the path templates for an embedded one; an inline parameter naming an identifier would be a
+     * third shape, and the operations that could declare one all take their selector in a body.</p>
+     *
+     * @return each parameter component keyed by its component name, never {@code null}
+     * @throws Exception if the packaged document is absent or unreadable
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Map<String, Object>> declaredParameters() throws Exception {
+        Map<String, Object> components =
+                (Map<String, Object>) contractDocument().get("components");
+        Object parameters = components.get("parameters");
+        if (parameters == null) {
+            return Map.of();
+        }
+        Map<String, Map<String, Object>> declared = new LinkedHashMap<>();
+        ((Map<String, Object>) parameters).forEach((name, value) ->
+                declared.put(name, (Map<String, Object>) value));
+        return declared;
     }
 
     /**

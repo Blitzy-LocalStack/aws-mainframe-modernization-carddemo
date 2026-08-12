@@ -625,6 +625,77 @@ class TransactionRepositoryIT {
     }
 
     /**
+     * Confirms the allocator advances by exactly one per call and ignores what the table holds.
+     *
+     * <p>This pins the migrated identifier claim that replaces the highest-key derivation of
+     * {@code app/cbl/COBIL00C.cbl} lines 212 to 217 and {@code app/cbl/COTRN02C.cbl} lines 444 to 449.
+     * The reference read the highest stored key and added one, which was indivisible only because CICS
+     * serialised the region; two Fargate tasks behind a load balancer both read the same maximum and both
+     * claim the same key. {@code ledger.transaction_id_seq}, created by
+     * {@code V2__ledger_transaction_id_allocator.sql}, makes the claim indivisible.
+     *
+     * <p>Assumptions: this case belongs in an integration test and could not be written as a unit test
+     * at all, because the property under test is the ENGINE's and not the service's -- a mocked repository
+     * answers whatever it is arranged to answer. What is asserted here is that the native statement
+     * resolves against a real sequence, that two consecutive calls differ by exactly one, and that a
+     * stored row carrying a far higher identifier does not move the allocator at all.
+     *
+     * <p>Assumptions: the assertions are RELATIVE rather than absolute. A sequence is not transactional,
+     * so the per-test row deletion in {@code @BeforeEach} does not rewind it and every case in this class
+     * that allocates leaves it advanced. Asserting an absolute first value would therefore pass only when
+     * this case ran first, which is an ordering no test may depend on.
+     */
+    @Test
+    void theAllocatorAdvancesByOneAndIsIndependentOfTheStoredMaximum() {
+        Long first = this.transactions.allocateTransactionId();
+        Long second = this.transactions.allocateTransactionId();
+
+        assertThat(first).isNotNull().isPositive();
+        assertThat(second).isEqualTo(first + 1L);
+
+        this.persistAndDetach(
+                this.posted(TRAN_ID_FOURTH, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START));
+
+        Long afterAHighRowWasStored = this.transactions.allocateTransactionId();
+
+        assertThat(afterAHighRowWasStored)
+                .as("the allocator reads no stored key, so a high row cannot pull it forward")
+                .isEqualTo(second + 1L);
+        assertThat(afterAHighRowWasStored)
+                .as("and it is far below the stored maximum, which a max()+1 derivation could not be")
+                .isLessThan(Long.parseLong(TRAN_ID_FOURTH));
+    }
+
+    /**
+     * Confirms the allocator's migration was applied and its declared bound fits the key column.
+     *
+     * <p>Assumptions: the history row is read for version 2 specifically, by the same reasoning the
+     * version 1 case above records -- a history row naming the script is the narrowest evidence that the
+     * migration ran, whereas observing that an allocation worked would also pass against a sequence some
+     * other artifact happened to create.
+     *
+     * <p>Assumptions: the maximum is asserted to be sixteen nines because that is the largest value the
+     * {@code CHAR(16)} key column can hold, derived from {@code TRAN-ID PIC X(16)} at line 5 of
+     * {@code app/cpy/CVTRA05Y.cpy}. A wider bound would let the engine answer a value the column
+     * truncates, and the truncated key would overwrite an existing row rather than fail.
+     */
+    @Test
+    void theAllocatorsMigrationIsAppliedAndItsBoundFitsTheKeyColumn() {
+        Object script = this.singleNativeResult(
+                "select script from flyway_schema_history"
+                        + " where success = true and version = '2'");
+
+        assertThat(script).isEqualTo("V2__ledger_transaction_id_allocator.sql");
+
+        Object maximum = this.singleNativeResult(
+                "select maximum_value from information_schema.sequences"
+                        + " where sequence_schema = 'ledger'"
+                        + " and sequence_name = 'transaction_id_seq'");
+
+        assertThat(maximum).hasToString("9999999999999999");
+    }
+
+    /**
      * Confirms the card-ordered path returns only that card's rows and preserves a leading zero.
      *
      * <p>This pins the card-ordered sequence the baseline obtained by physically sorting an extract:

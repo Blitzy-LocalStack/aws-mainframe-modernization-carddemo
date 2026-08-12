@@ -12,14 +12,16 @@ placeholder.
 The two framings, and why there are two
 ---------------------------------------
 Both are AES-256/GCM envelope encryption under one AWS KMS customer-managed key, with a
-per-value data key. They differ in their header and in their encryption context, and the
-difference is not cosmetic: each is the exact byte layout one Java class parses, so a value
-written under the wrong one is unreadable by the service that owns the column.
+per-value data key. Both carry the SAME header shape -- a four-byte marker, a version byte and a
+two-byte big-endian wrapped-key length -- and differ only in which marker they carry and in their
+encryption context. Each is the exact byte layout one Java class parses, so a value written under
+the wrong one is unreadable by the service that owns the column.
 
-*Customer identifiers* -- read by
-``com.carddemo.account.config.CustomerIdentifierProtectionConfig``::
+*Customer identifiers* -- written and read by
+``com.carddemo.account.service.CustomerIdentifierCipher``::
 
-    [2-byte big-endian wrapped-key length][wrapped data key][12-byte IV][ciphertext || 16-byte tag]
+    ["CDCI"][version byte 1][2-byte big-endian wrapped-key length][wrapped data key]
+    [12-byte IV][ciphertext || 16-byte tag]
 
 with encryption context ``{"carddemo:purpose": "customer-identifier", "carddemo:column": <column>}``
 where ``<column>`` is the literal target column name, and plaintext taken as UTF-8 exactly as
@@ -32,6 +34,34 @@ given -- no trimming, no numeric conversion, so a leading zero is preserved.
 
 with encryption context ``{"carddemo:purpose": "card-cvv"}`` -- purpose only, no column key --
 and plaintext taken as US-ASCII from exactly three digits.
+
+⚠️ Refactoring Rationale:
+    This module previously wrote the customer envelope with NO marker and NO version byte, so its
+    wrapped-key length prefix sat at offset zero, and this docstring recorded that asymmetry as
+    deliberate. It was not deliberate; it was a transcription of the WRONG Java writer. Two Java
+    classes framed this one column at the time: a private nested implementation inside
+    ``com.carddemo.account.config.CustomerIdentifierProtectionConfig`` wrote the unmarked layout,
+    while the component-scanned ``CustomerIdentifierCipher`` -- which supersedes it under
+    ``@ConditionalOnMissingBean`` in any context that scans the service package -- wrote
+    ``["CDCI"][version]`` first. Whichever bean a context happened to register decided the format,
+    and because the account service publishes no decipher path for these two columns nothing read
+    the bytes back to notice. The account service now has exactly ONE writer -- the cipher -- and
+    this module reproduces its framing, marker and version byte included.
+Trade-offs:
+    Any envelope written into ``account.customers`` before that alignment is five bytes short of
+    what the account service parses, and a re-run of the loader does NOT repair it: no role this
+    package uses holds ``DELETE`` or ``TRUNCATE``, so an already-populated table is refused rather
+    than replaced -- see :mod:`carddemo_migration.loaders.aurora`. Repairing pre-alignment rows is
+    an operator action on the cluster, and ``docs/runbooks/data-migration.md`` states it as a
+    cutover-gate condition rather than leaving a reader to infer that a reload suffices. Accepting
+    that cost, rather than teaching a reader here to tolerate both framings, is deliberate: a load
+    that accepted the old layout would keep two formats alive in one column permanently, which is
+    the state this change exists to end.
+Assumptions:
+    The two markers stay DISTINCT rather than being unified into one. A byte array recovered from
+    ``card.cards.cvv_encrypted`` must not read as a customer identifier envelope and vice versa,
+    because the encryption contexts differ and a cross-column read would otherwise get as far as
+    a key-unwrap refusal instead of failing on the four bytes that say which framing it is.
 
 Design decisions (WHY)
 ----------------------
@@ -94,7 +124,10 @@ from typing import Any, Final, Protocol
 
 __all__ = [
     "CARD_VERIFICATION_VALUE_DIGITS",
+    "CARD_VERIFICATION_VALUE_PURPOSE",
+    "CONTEXT_PURPOSE_KEY",
     "CUSTOMER_IDENTIFIER_COLUMNS",
+    "CUSTOMER_IDENTIFIER_PURPOSE",
     "CardVerificationValueCipher",
     "CustomerIdentifierCipher",
     "DataKey",
@@ -106,9 +139,9 @@ __all__ = [
 # Assumptions: 256-bit AES, 12-byte initialisation vector and a 128-bit authentication tag,
 #   each transcribed from the Java class it has to interoperate with rather than chosen here.
 #   `DataKeySpec.AES_256` fixes the key length, `EncryptedCvv.INITIALISATION_VECTOR_LENGTH` and
-#   `CustomerIdentifierProtectionConfig.INITIALISATION_VECTOR_LENGTH` both declare 12, and both
-#   classes pass `TAG_LENGTH_BITS = 128` to their GCM parameter spec. A different value on this
-#   side would produce bytes that parse and then fail authentication.
+#   `CustomerIdentifierCipher.INITIALISATION_VECTOR_LENGTH` both declare 12, and both classes pass
+#   `TAG_LENGTH_BITS = 128` to their GCM parameter spec. A different value on this side would
+#   produce bytes that parse and then fail authentication.
 _KEY_SPEC: Final[str] = "AES_256"
 _VECTOR_LENGTH: Final[int] = 12
 _TAG_LENGTH_BITS: Final[int] = 128
@@ -124,16 +157,36 @@ _MAX_WRAPPED_KEY_LENGTH: Final[int] = 0xFFFF
 # Assumptions: the encryption-context keys are the literal strings both Java classes use.
 #   Encryption context is AUTHENTICATED additional data, so it is part of the ciphertext's
 #   integrity check: a single character's difference here yields envelopes that decrypt nowhere.
-_CONTEXT_PURPOSE_KEY: Final[str] = "carddemo:purpose"
+# Refactoring Rationale: the purpose key and its two values are PUBLISHED, where all three were
+#   private. They are not internal details: each environment root conditions the migration task's
+#   `kms:GenerateDataKey*` grant on `kms:EncryptionContext:carddemo:purpose` matching these exact
+#   values, so the strings are a contract between this module and the infrastructure. Held
+#   privately they could be renamed here with the grant left behind, and a condition that no
+#   longer matches fails exactly as a missing grant does -- an access denial on the first sealed
+#   record -- but is harder to diagnose because the policy still looks present. Publishing them
+#   lets that agreement be asserted rather than assumed; the column key stays private because no
+#   policy conditions on it.
+CONTEXT_PURPOSE_KEY: Final[str] = "carddemo:purpose"
 _CONTEXT_COLUMN_KEY: Final[str] = "carddemo:column"
-_CUSTOMER_IDENTIFIER_PURPOSE: Final[str] = "customer-identifier"
-_CARD_VERIFICATION_VALUE_PURPOSE: Final[str] = "card-cvv"
+CUSTOMER_IDENTIFIER_PURPOSE: Final[str] = "customer-identifier"
+CARD_VERIFICATION_VALUE_PURPOSE: Final[str] = "card-cvv"
 
-# Assumptions: the card envelope's marker and version byte, from `EncryptedCvv.MAGIC` and
-#   `EncryptedCvv.FORMAT_VERSION`. The customer framing carries NEITHER, and the asymmetry is
-#   reproduced rather than smoothed over: adding a marker to the customer envelope would shift
-#   its wrapped-key length prefix by five bytes and make every value unreadable by the account
-#   service, which parses from offset zero.
+# Assumptions: each family's marker and version byte, transcribed from the Java constant that
+#   writes it -- `EncryptedCvv.MAGIC` / `EncryptedCvv.FORMAT_VERSION` for the card column and
+#   `CustomerIdentifierCipher.ENVELOPE_MAGIC` / `CustomerIdentifierCipher.FORMAT_VERSION` for the
+#   two customer columns. BOTH framings carry a marker and a version, and the markers differ so a
+#   value recovered from one column cannot be parsed as an envelope of the other kind.
+# WHY : ⚠️ Refactoring Rationale: only the card pair stood here, with a comment stating that the
+#   customer framing deliberately carried neither and that adding a marker would shift its length
+#   prefix by five bytes and make every value unreadable. That was transcribed from a Java writer
+#   that has since been deleted -- see this module's docstring -- and the surviving writer,
+#   `CustomerIdentifierCipher`, has always framed `["CDCI"][version]` first. The five-byte shift
+#   the old comment warned about is what CORRECTS the framing rather than what breaks it.
+# Assumptions: the version byte is written even though nothing reads it yet, for the reason the
+#   Java constant gives: a format that does not record its own version cannot gain a second one
+#   without a reader having to guess which it is holding.
+_CUSTOMER_ENVELOPE_MAGIC: Final[bytes] = b"CDCI"
+_CUSTOMER_ENVELOPE_VERSION: Final[bytes] = b"\x01"
 _CARD_ENVELOPE_MAGIC: Final[bytes] = b"CDCV"
 _CARD_ENVELOPE_VERSION: Final[bytes] = b"\x01"
 
@@ -454,11 +507,14 @@ def _length_prefix(wrapped: bytes) -> bytes:
     ------
     None
     """
-    # Assumptions: big-endian, because both Java classes write the high byte first --
-    #   `envelope[0] = (byte) (length >>> 8)` in the customer framing and the same shift in
-    #   `EncryptedCvv.wrap`. `int.to_bytes` states the order explicitly rather than inheriting a
-    #   platform default, which is the difference between a portable framing and one that works
-    #   on the machine it was written on.
+    # Assumptions: big-endian, because both Java classes write the high byte first -- the
+    #   `(byte) (encipheredDataKey.length >>> Byte.SIZE)` store in `CustomerIdentifierCipher.frame`
+    #   and the same shift in `EncryptedCvv.wrap`. `int.to_bytes` states the order explicitly rather
+    #   than inheriting a platform default, which is the difference between a portable framing and
+    #   one that works on the machine it was written on.
+    # Assumptions: the prefix is the same two bytes in both framings and sits at the same offset in
+    #   both -- five, after a four-byte marker and a version byte -- so this helper is shared by
+    #   both ciphers and neither owns it.
     return len(wrapped).to_bytes(_LENGTH_PREFIX_BYTES, "big")
 
 
@@ -505,8 +561,8 @@ class CustomerIdentifierCipher:
         Returns
         -------
         bytes
-            The framed envelope: a two-byte length, the wrapped key, the vector, then the
-            ciphertext and its tag.
+            The framed envelope: the four-byte ``CDCI`` marker, the version byte, a two-byte
+            length, the wrapped key, the vector, then the ciphertext and its tag.
 
         Raises
         ------
@@ -538,7 +594,7 @@ class CustomerIdentifierCipher:
 
         context = MappingProxyType(
             {
-                _CONTEXT_PURPOSE_KEY: _CUSTOMER_IDENTIFIER_PURPOSE,
+                CONTEXT_PURPOSE_KEY: CUSTOMER_IDENTIFIER_PURPOSE,
                 _CONTEXT_COLUMN_KEY: column,
             }
         )
@@ -548,7 +604,24 @@ class CustomerIdentifierCipher:
         #   shipped data -- but they would diverge on a non-ASCII value, and matching the reader
         #   rather than the corpus is what keeps that divergence from being introduced later.
         vector, sealed = _encipher(key, value.encode("utf-8"))
-        return _length_prefix(key.wrapped) + key.wrapped + vector + sealed
+        # Assumptions: the marker and the version byte lead, matching `CustomerIdentifierCipher`
+        #   `frame`, which copies `ENVELOPE_MAGIC` at offset zero, writes `FORMAT_VERSION` at
+        #   offset four, and only then writes the high and low bytes of the wrapped-key length.
+        #   The account service parses the marker and the version BEFORE anything else, so these
+        #   five bytes are what decide whether it will attempt to read a stored value at all.
+        # WHY : ⚠️ Refactoring Rationale: this expression previously began at `_length_prefix`,
+        #   reproducing a second, marker-less Java writer that no longer exists. The two framings
+        #   now agree byte for byte, and `data-migration/tests/test_protected_columns.py` asserts
+        #   the marker, the version and every offset against the constants the surviving Java
+        #   class declares, so the two cannot drift apart again without a red test.
+        return (
+            _CUSTOMER_ENVELOPE_MAGIC
+            + _CUSTOMER_ENVELOPE_VERSION
+            + _length_prefix(key.wrapped)
+            + key.wrapped
+            + vector
+            + sealed
+        )
 
 
 @dataclass(frozen=True)
@@ -612,7 +685,7 @@ class CardVerificationValueCipher:
                 " refused here rather than enciphered into a column whose reader would refuse it"
             )
 
-        context = MappingProxyType({_CONTEXT_PURPOSE_KEY: _CARD_VERIFICATION_VALUE_PURPOSE})
+        context = MappingProxyType({CONTEXT_PURPOSE_KEY: CARD_VERIFICATION_VALUE_PURPOSE})
         key = self.keys.data_key(key_id=self.key_id, encryption_context=context)
         # Assumptions: US-ASCII, matching `verificationValue.getBytes(US_ASCII)` on the Java
         #   side rather than the UTF-8 the customer framing uses. The two agree for three digits,

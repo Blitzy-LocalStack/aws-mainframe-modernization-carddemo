@@ -111,6 +111,16 @@ public final class S3ArtifactWriter implements AutoCloseable {
     /** Whether {@link #close()} has already run, so that a second call is a no-op. */
     private boolean closed;
 
+    // Assumptions: the version is captured from whichever of the two publication calls completed the
+    //     artifact, because BOTH of them return one and a caller cannot know which path a run took.
+    //     Capturing it here rather than reading it back with a head call is what makes the identifier
+    //     the one the write produced rather than whatever is current by the time a reader asks.
+    /**
+     * The object version the completed artifact was stored as, {@code null} until it is published and
+     * {@code null} afterwards when the bucket carries no versioning.
+     */
+    private String publishedVersionId;
+
     /**
      * Creates a writer for one artifact.
      *
@@ -187,12 +197,13 @@ public final class S3ArtifactWriter implements AutoCloseable {
             if (buffer.size() > 0) {
                 uploadPart();
             }
-            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+            publishedVersionId = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket)
                     .key(key)
                     .uploadId(uploadId)
                     .multipartUpload(CompletedMultipartUpload.builder().parts(uploaded).build())
-                    .build());
+                    .build())
+                    .versionId();
         } catch (SdkException failure) {
             abortQuietly(failure);
             throw new IOException("the artifact could not be published to object storage", failure);
@@ -206,8 +217,10 @@ public final class S3ArtifactWriter implements AutoCloseable {
      */
     private void putWholeObject() throws IOException {
         try {
-            s3.putObject(PutObjectRequest.builder().bucket(bucket).key(key).build(),
-                    RequestBody.fromBytes(buffer.toByteArray()));
+            publishedVersionId = s3.putObject(
+                    PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                    RequestBody.fromBytes(buffer.toByteArray()))
+                    .versionId();
         } catch (SdkException failure) {
             throw new IOException("the artifact could not be published to object storage", failure);
         } finally {
@@ -274,6 +287,28 @@ public final class S3ArtifactWriter implements AutoCloseable {
             //       greater.
             original.addSuppressed(abortFailure);
         }
+    }
+
+    /**
+     * Reports the object version the completed artifact was stored as.
+     *
+     * <p>Assumptions: the value is captured from the publication call itself rather than read back
+     * afterwards, so it names the version THIS writer produced. A later write to the same key produces
+     * another version and does not change what this returns, which is the property a caller recording a
+     * locator needs -- a locator that named "whatever is current" would stop identifying the artifact
+     * the run wrote as soon as the next run wrote one.</p>
+     *
+     * <p>Assumptions: {@code null} means one of two things and both are legitimate: the writer has not
+     * been closed yet, so nothing has been published; or the destination bucket carries no versioning,
+     * in which case the store returns no version and the key alone identifies the object. A caller
+     * therefore treats the version as an OPTIONAL refinement of the locator rather than as a required
+     * part of it. The production bucket is versioned -- that is the generation-retention analogue the
+     * plan fixes -- so the absence is a local-and-test condition.</p>
+     *
+     * @return the stored object's version identifier, or {@code null} when there is none
+     */
+    public String publishedVersionId() {
+        return publishedVersionId;
     }
 
     /**

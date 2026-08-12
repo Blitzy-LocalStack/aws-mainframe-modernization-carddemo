@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import com.carddemo.batch.BatchApplication;
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.Transaction;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
@@ -122,8 +123,8 @@ class GenerationStagingJobsTest {
         this.jobRepository = new ResourcelessJobRepository();
         this.validator = new BatchConfig().carddemoJobParametersValidator();
 
-        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any())).thenAnswer(call -> {
-            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(2).get();
+        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any(BatchJobName.class), any())).thenAnswer(call -> {
+            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(3).get();
             return new BatchStepLedger.StepOutcome(outcome, false);
         });
 

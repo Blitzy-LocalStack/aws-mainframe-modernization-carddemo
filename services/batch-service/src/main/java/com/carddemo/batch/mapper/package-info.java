@@ -190,13 +190,26 @@
  * {@code CardRecordMapper} in this package, and neither is missing.</b> A reader who knows the
  * baseline will look for them, because the customer and card shapes plainly exist -- the customer
  * shape at {@code app/cpy/CVEXPORT.cpy:24-42} and the card shape at
- * {@code app/cpy/CVEXPORT.cpy:93-100}. What matters is that in this module they exist <em>only</em>
- * as views inside the export record, and {@code com.carddemo.batch.domain} declares no
- * {@code Customer} entity and no {@code Card} entity, so a mapper for either would have a source
- * shape and no target to map it to. The two views therefore yield ordered field maps inside
- * {@code ExportRecordMapper}, which is where the bytes are actually reached. Adding either file
- * would mean inventing a batch-side entity that no job in this module reads or writes, which is how
- * a bounded context acquires a table it does not own.</p>
+ * {@code app/cpy/CVEXPORT.cpy:93-100}. In this module both shapes exist <em>only</em> as views
+ * inside the export record, and the single-file argument above covers all five views alike: the
+ * discriminator at {@code app/cpy/CVEXPORT.cpy:10} has to be read before any of the five is valid,
+ * and a file per view would put five copies of that one decision in the tree.
+ * {@code ExportRecordMapper} reads it once and dispatches, which is why the customer and card views
+ * are handled there rather than in files of their own.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously rested on a second ground that no longer
+ * holds, and the correction is recorded rather than quietly dropped. It argued that
+ * {@code com.carddemo.batch.domain} declared no {@code Customer} and no {@code Card} entity, so a
+ * mapper for either would have a source shape and no target. <b>Both entities now exist</b> --
+ * {@code com.carddemo.batch.domain.Customer} and {@code com.carddemo.batch.domain.Card} -- added as
+ * read-only projections so the export could emit all five of the reference's record types rather
+ * than three, each under a {@code SELECT} grant this module already held and each declining to map
+ * the columns the target stores enciphered. The conclusion is unchanged and now rests on the
+ * single-file dispatch argument alone. What the entities did add to {@code ExportRecordMapper} is
+ * two entity-taking factories for the ENCODE direction; the DECODE direction still yields ordered
+ * field maps for those two views, because a decoded foreign file legitimately carries the very
+ * identifiers those projections cannot hold, and mapping a decode onto them would discard them
+ * silently.</p>
  *
  * <h2>What is imported here, and never re-declared here</h2>
  *

@@ -30,39 +30,34 @@ Declaring the mapping is what makes this module the anti-corruption layer for th
 direction, and it is where the baseline's three misspellings are corrected.
 
 Refactoring Rationale:
-:data:`TARGETS` declared FIVE records and now declares ELEVEN, and the six that were missing were
-not edge cases: they were ``card.cards``, ``account.customers``, ``ledger.daily_transactions``,
-``ledger.transaction_category_balances``, ``auth.users`` and ``ledger.transactions`` -- the card
-master, the customer master, the daily-transaction feed, the category balances the posting run
-updates, every user of the system, and the transaction master itself. A migration missing those
-has migrated the account master and its cross-reference and nothing else, so
-``sql/verify/row_counts.sql`` listed eleven baselines against a loader that could satisfy four
-of them.
+:data:`TARGETS` declares ELEVEN records, which is every base master. The change made HERE was
+10 -> 11: the transaction master, ``ledger.transactions``, was the one registered baseline in
+``sql/verify/row_counts.sql`` that no target could fill. Its absence rested on a different
+ground from the earlier gaps -- not that loading it was refused, but that the SEED CORPUS ships
+no extract for it. That conflated the test corpus with the cutover.
+``app/jcl/TRANFILE.jcl`` is a REPRO job like its nine siblings and is named as a source of this
+module for that reason; the corpus merely primes the cluster with a single record instead of
+shipping a full extract. Reading "no seed dataset" as "no load target" left the largest table in
+the system with no migration path at all, which ``docs/runbooks/data-migration.md`` needs and
+AAP 0.9.2's read-then-verify-then-switch cutover cannot do without. An absent or empty extract
+is a normal state and loads zero rows successfully instead of failing.
 
-The transaction master was the last to be declared and was withheld on a different ground from
-the other five: not that loading it was refused, but that the SEED CORPUS ships no extract for
-it. That conflated the test corpus with the cutover. ``app/jcl/TRANFILE.jcl`` is a REPRO job like
-its nine siblings and is named as a source of this module for that reason; the corpus merely
-primes the cluster with a single record instead of shipping a full extract. Reading "no seed
-dataset" as "no load target" left the largest table in the system with no migration path at all,
-which ``docs/runbooks/data-migration.md`` needs and AAP 0.9.2's read-then-verify-then-switch
-cutover cannot do without. An absent or empty extract is a normal state and now loads zero rows
-successfully instead of failing.
+Older history, stated as older so the figures above cannot be read as this change: the registry
+began at FIVE records and reached TEN before the transaction master was added. Two of those five
+additions -- ``card.cards`` and ``account.customers`` -- had been refused by name, on the stated
+grounds that their tables declare protected ``BYTEA`` columns holding "ciphertext produced by the
+owning service's own cipher, under a key this package has no access to and should not have". That
+was a boundary drawn in the wrong place. The key is an AWS KMS customer-managed key reached by
+ALIAS, so "no access" describes an IAM grant rather than a capability, and the batch task that
+runs this ETL is exactly the principal such a grant is written for -- the same alias is already
+published to the account and card workloads as a runtime parameter.
+:mod:`carddemo_migration.loaders.protected_columns` reproduces both envelope framings exactly and
+records why reproducing them is lower-risk than either of the two alternatives. The other three
+of those five -- ``ledger.daily_transactions``, ``ledger.transaction_category_balances`` and
+``auth.users`` -- needed no cipher at all. They were simply absent.
 
-Two of the five were refused by name, on the stated grounds that their tables declare protected
-``BYTEA`` columns holding "ciphertext produced by the owning service's own cipher, under a key
-this package has no access to and should not have". That was a boundary drawn in the wrong
-place. The key is an AWS KMS customer-managed key reached by ALIAS, so "no access" describes an
-IAM grant rather than a capability, and the batch task that runs this ETL is exactly the
-principal such a grant is written for -- the same alias is already published to the account and
-card workloads as a runtime parameter. :mod:`carddemo_migration.loaders.protected_columns`
-reproduces both envelope framings exactly and records why reproducing them is lower-risk than
-either of the two alternatives.
-
-The remaining three needed no cipher at all. They were simply absent.
-
-WHY (Assumptions)
------------------
+Assumptions:
+------------
 A field's value reaches its column through a declared PROJECTION rather than verbatim, and the
 default is verbatim so that a target declares only its exceptions. Four exceptions exist and
 each one is a property of the target column rather than of the reader: a descriptive
@@ -73,20 +68,41 @@ declarations beside the column mapping keeps the transformation reviewable in on
 it in each reader instead would push target-column knowledge into eleven modules that have no
 business holding it.
 
-WHY (Trade-offs)
-----------------
-Only the targets whose table has a SECOND WRITER declare a conflict key and load through a
-stage-and-merge; the single-writer masters deliberately do not. Four tables qualify.
+Trade-offs:
+-----------
+EVERY one of the eleven targets loads through a stage-and-merge, so re-running any dataset adds
+the rows the table does not hold, leaves the rest alone, and raises nothing. There is no
+second, plain-COPY path: one path is what makes "the load is idempotent" a property of the
+module rather than of whichever target a reader happens to look at.
+
+An earlier revision reserved the merge for the four tables with a SECOND WRITER --
 ``reference.transaction_types``, ``reference.transaction_categories`` and
-``reference.disclosure_groups`` are also seeded by ``V2__seed_reference.sql``, so those three
-must compose with a migration that may already have run, and their descriptive columns are
-trimmed here precisely so that the two writers produce byte-identical rows rather than merely
-equal counts. ``ledger.transactions`` is the fourth, and its second writer is the posting job
-rather than a migration: ``app/cbl/CBTRN02C.cbl`` inserts into that master from the daily feed,
-so a cutover load and the first posting run can both have written before a re-run reaches it.
-A master with exactly one writer is different, and a plain COPY that fails on a second run is
-the more useful behaviour there: it reports that the table was not empty, which is information
-a silent no-op would destroy.
+``reference.disclosure_groups``, which ``V2__seed_reference.sql`` also seeds, and
+``ledger.transactions``, which ``app/cbl/CBTRN02C.cbl`` posts into -- and argued that for a
+single-writer master a COPY failing on the second run was the more useful behaviour, because it
+reported that the table was not empty. That argument was wrong twice over, and both halves are
+concrete.
+
+First, it breaks redrive. AAP 0.4.1.7 drives this load from a Step Functions state that
+re-enters a failed state FROM THE BEGINNING, so a retry is a normal event rather than an
+operator error, and seven of the eleven datasets would have failed on it with a duplicate key.
+The information the failure carried is not lost: :class:`LoadOutcome` reports rows staged
+separately from rows the table gained, so a re-run against a full table reports every row
+skipped -- which says "the table already held these" more precisely than a duplicate-key abort,
+and says it without failing a state machine.
+
+Second, one of those seven would not even have failed. ``ledger.daily_transactions`` is keyed on
+``ingest_seq``, an identity column no extract supplies, and ``V1__ledger.sql`` deliberately
+leaves ``transaction_id`` NON-unique because a sequential feed may carry a value twice. A plain
+COPY re-run into it therefore SUCCEEDS and doubles the feed, which is the one outcome worse than
+an abort: a silent duplication of financial records that only a money-total comparison would
+notice. That table is the reason :class:`LoadStrategy` has two members rather than one -- it has
+no unique index to conflict on, so it merges by whole-row anti-join instead.
+
+The accepted cost of one merge path for all eleven is a second write per row: rows land in a
+session-temporary table and the merge moves them across. On a cutover-sized extract that is
+roughly twice the write volume of a direct COPY, and it buys exactly-once rerun semantics for
+every dataset, which the alternative did not offer for any of the seven.
 
 Alternatives Considered:
 ------------------------
@@ -112,6 +128,40 @@ it: ``app/jcl/ACCTFILE.jcl`` L27 follows its delete with ``IF MAXCC LE 08 THEN S
 and ``app/jcl/DEFGDGB.jcl`` carries ``IF LASTCC=12 THEN SET MAXCC=0`` after every one of its six
 defines at L29, L35, L41, L47, L53 and L59. Re-running was a deliberate no-op in the original
 design too.
+
+Assumptions:
+------------
+A target's conflict columns are DERIVED from the record descriptor and cannot be declared. Each
+target names the record it loads, :class:`TableTarget` resolves that name in
+:mod:`carddemo_migration.copybook.layouts`, and the key columns are the ones the descriptor's
+``key_offset``/``key_length`` window covers, translated through the target's own column mapping.
+Those two numbers are the ``KEYS(len off)`` clause of the record's own ``DEFINE CLUSTER``:
+``app/jcl/TRANFILE.jcl`` declares ``KEYS(16 0)`` and ``LAYOUTS["TRAN"]`` carries exactly that --
+so deriving them keeps ONE copy of the VSAM key geometry in the tree. An earlier revision passed
+the columns to the constructor instead, which read as explicit and was in fact a second copy that
+nothing compared with the first: a key edited here and not in the descriptor, or the reverse,
+would still produce a syntactically valid merge, against the wrong columns, and the load would
+report success. The derivation validates the window against the field boundaries rather than
+trusting it, so a key that begins or ends mid-field is refused at import rather than silently
+narrowed to whichever fields happened to fall inside it.
+
+Trade-offs:
+-----------
+A failure this module reports carries ALLOW-LISTED metadata only -- the operation, the
+schema-qualified table, the number of rows staged, the driver exception's class name, its
+SQLSTATE, and the schema, table, column and constraint names its diagnostic supplies. The
+driver's own message text is deliberately NOT carried, and the chained cause is suppressed. The
+reason is specific rather than precautionary: PostgreSQL's error response carries DETAIL and
+CONTEXT fields alongside the primary message, a unique-violation DETAIL names the conflicting
+key VALUES verbatim, and psycopg exposes all of them on the exception. Every record these
+targets carry holds a primary account number, a national identifier or a cardholder name, and
+``cli.py`` writes the message this module raises straight into a container log that outlives the
+load. So the routine failures -- a duplicate key on a re-run, a NOT NULL violation on an
+incomplete delivery -- are exactly the paths that would have disclosed row content. The accepted
+cost is real: an operator diagnosing an unexpected failure gets the fault's class, its SQLSTATE
+and the constraint it violated, and must reach the database's own log for the values. That is
+the trade this package makes everywhere else too, and it is why the field-level refusals above
+name fields rather than values.
 
 Refactoring Rationale:
 ----------------------
@@ -148,9 +198,10 @@ from typing import Any, Final, Protocol
 from carddemo_migration.config import (
     AuroraConnectionSettings,
     ConfigurationError,
+    owner_role_for_schema,
     quote_identifier,
 )
-from carddemo_migration.copybook import timestamp
+from carddemo_migration.copybook import layouts, timestamp
 from carddemo_migration.loaders.protected_columns import (
     CardVerificationValueCipher,
     CustomerIdentifierCipher,
@@ -158,14 +209,19 @@ from carddemo_migration.loaders.protected_columns import (
 
 __all__ = [
     "TARGETS",
+    "TRANSACTION_ID_SEQUENCE",
     "AuroraLoadError",
     "LoadContext",
     "LoadOutcome",
+    "LoadStrategy",
     "Projection",
+    "SequenceReconciliation",
     "TableTarget",
     "connect",
+    "key_columns_of",
     "load_records",
     "prepare_record",
+    "reconcile_transaction_id_sequence",
     "target_names",
     "target_for",
 ]
@@ -336,20 +392,61 @@ class Projection(enum.Enum):
     them, so a verbatim column would load every record the posting program wrote and reject
     every record the interest calculation wrote.
     :mod:`carddemo_migration.copybook.timestamp` owns both the recognition and the rendering.
+
+    Declared only where the target column is NULLABLE. ``ledger.daily_transactions.proc_ts`` is
+    the case that matters: the feed is written before posting, so an unwritten stamp there is
+    the normal state of a row rather than a defect in the delivery.
+    """
+
+    TIMESTAMP_REQUIRED = "timestamp_required"
+    """Render the stamp the same way, and REFUSE the record when nothing has been written into it.
+
+    The only difference from :attr:`TIMESTAMP_OR_NULL` is what an unwritten span means, and that
+    is a property of the column rather than of the stamp. ``ledger.transactions.proc_ts`` is
+    declared ``NOT NULL`` -- ``V1__ledger.sql`` states the evidence at the column: every baseline
+    writer of that master sets the processing stamp, ``app/cbl/CBTRN02C.cbl`` minting it at
+    posting time at L437-L438 and ``app/cbl/COBIL00C.cbl`` at L230-L232 -- so a row without one is
+    a row no baseline path can produce.
+
+    Assumptions: the refusal happens HERE, in the projection, rather than at the server. Passing
+    ``None`` into the COPY would reach the same conclusion by way of a NOT NULL violation raised
+    after the whole dataset had been streamed, in a diagnostic this module then has to strip of
+    the row it quotes. Refusing on the record instead names the record, the field and the column
+    and quotes nothing.
+
+    Alternatives Considered: deriving the missing stamp -- from the originating stamp, the
+    business date, or the load's own clock. Rejected: the processing stamp is the record of WHEN
+    A POSTING RUN HANDLED the transaction, so a derived value is a fabricated fact about a
+    financial record, indistinguishable afterwards from one the posting job wrote. It would also
+    break the parity comparison the migration is verified by, which normalises stamps rather than
+    inventing them (AAP 0.7.7).
     """
 
     SEALED_IDENTIFIER = "sealed_identifier"
-    """Encipher the value into the envelope ``account.customers`` stores.
+    """Encipher the value into the self-describing envelope ``account.customers`` stores.
 
-    The envelope is bound to the target column through its KMS encryption context, so the
-    column name this target declares is authenticated data rather than a label.
+    The envelope carries the ``CDCI`` marker and a version byte ahead of its wrapped data key,
+    and is additionally bound to the target column through its KMS encryption context -- so the
+    column name this target declares is authenticated data rather than a label, and a value
+    recovered from one protected column cannot be deciphered as the other.
+
+    ⚠️ Refactoring Rationale:
+        This docstring recorded the framing as marker-less, and
+        :mod:`carddemo_migration.loaders.protected_columns` wrote it that way. Both reproduced a
+        Java writer that has since been deleted: ``account-service`` framed this one column from
+        two places, a private nested implementation inside
+        ``CustomerIdentifierProtectionConfig`` that omitted the header and the component-scanned
+        ``CustomerIdentifierCipher`` that writes it. The surviving writer is the cipher, and the
+        two framings now differ ONLY in their marker and their encryption context.
     """
 
     SEALED_VERIFICATION_VALUE = "sealed_verification_value"
     """Encipher the value into the self-describing envelope ``card.cards.cvv_encrypted`` stores.
 
-    A different framing from :attr:`SEALED_IDENTIFIER` -- it carries a marker and a version byte
-    -- because a different service parses it.
+    The same header shape as :attr:`SEALED_IDENTIFIER` under a DIFFERENT marker -- ``CDCV`` --
+    and under a purpose-only encryption context with no column entry, because a different
+    service parses it and presents a different context on decrypt. The markers are what keep a
+    value recovered from either column from being read as an envelope of the other kind.
     """
 
     SUBJECT_FOR_USER_ID = "subject_for_user_id"
@@ -361,6 +458,58 @@ class Projection(enum.Enum):
     so the value is looked up by ``SEC-USR-ID`` in the document
     ``infra/modules/cognito`` publishes. The declared field name is therefore the COLUMN's, not
     a copybook field's, and :attr:`TableTarget.derived_fields` records that.
+    """
+
+
+class LoadStrategy(enum.Enum):
+    """How a re-run of one dataset avoids adding a row the target table already holds.
+
+    Purpose
+    -------
+    Name the two shapes a rerun-safe merge can take, so a target declares which one its TABLE
+    supports rather than the module inferring it. Both stage the dataset in a session-temporary
+    table first; they differ only in the predicate that decides whether a staged row is new.
+
+    Assumptions: the choice is a property of the target table's indexes, not of the record. Ten
+    of the eleven tables declare a primary key over exactly the columns the record's own key
+    window produces, so those ten can conflict on a real unique index. The eleventh cannot, and
+    that is a deliberate decision recorded in its own migration rather than an oversight to work
+    around.
+    """
+
+    KEYED_MERGE = "keyed_merge"
+    """Insert every staged row, letting a unique-index conflict on the derived key do nothing.
+
+    Correct wherever the target declares a unique constraint over exactly
+    :attr:`TableTarget.key_columns`. All ten keyed masters do: ``pk_accounts(account_id)``,
+    ``pk_customers(customer_id)``, ``pk_card_xref(card_num)``, ``pk_cards(card_num)``,
+    ``auth.users(user_id)``, ``pk_transaction_types(type_cd)``,
+    ``pk_transaction_categories(type_cd, cat_cd)``, the disclosure-group triple,
+    ``pk_transactions(transaction_id)`` and the category-balance triple.
+    """
+
+    WHOLE_ROW_MERGE = "whole_row_merge"
+    """Insert only staged rows whose complete column tuple the target does not already hold.
+
+    Declared for exactly one target, ``ledger.daily_transactions``, and the reason is in that
+    table's own DDL: its primary key is ``ingest_seq``, an identity column no extract supplies,
+    and ``transaction_id`` is deliberately left NON-unique because the sequential feed
+    ``app/cbl/CBTRN02C.cbl`` reads may carry a value twice. There is therefore no unique index to
+    name in an ``ON CONFLICT`` clause -- naming one anyway raises "there is no unique or exclusion
+    constraint matching the ON CONFLICT specification" at run time -- and a plain COPY re-run
+    would succeed and double the feed.
+
+    Assumptions: comparing the WHOLE tuple is what keeps a legitimate duplicate representable. Two
+    identical rows in one delivery both load, because the anti-join is evaluated against the
+    table as the statement found it and neither row is visible to the other; a re-run of the same
+    delivery then matches both and inserts nothing. Comparing on ``transaction_id`` alone would
+    instead discard the second occurrence on the FIRST load, which is the property
+    ``V1__ledger.sql`` refuses to lose.
+
+    Trade-offs: the predicate is an anti-join over every copied column rather than an index
+    probe, so it costs a hash of the target table per load instead of one lookup per row. That is
+    accepted because the alternative is not a cheaper correct answer, it is the absence of one:
+    without a unique index there is nothing to probe.
     """
 
 
@@ -403,18 +552,20 @@ class LoadOutcome:
 
     Purpose
     -------
-    Report both numbers, because on the stage-and-merge path they differ and the difference is
-    the whole point: a merge that staged 7 rows and inserted 0 means the seed migration had
-    already run, which is a success, while a plain COPY reporting 7 means the table gained 7.
-    Collapsing them into one number would make those two outcomes indistinguishable.
+    Report both numbers, because they differ on a re-run and the difference is the whole point: a
+    load that staged 7 rows and inserted 0 means every one of them was already present -- an
+    earlier attempt, or the owning service's own seed migration, had got there first -- which is a
+    success, while a load reporting 7 inserted means the table gained 7. Collapsing them into one
+    number would make those two outcomes indistinguishable, and an operator re-running a failed
+    staging branch needs to tell them apart.
 
     Parameters
     ----------
     staged : int
         Rows the reader produced and this module accepted.
     inserted : int
-        Rows the target table gained. Equal to :attr:`staged` on the plain COPY path, because
-        every staged row goes straight into the table there.
+        Rows the target table gained, read from the merge's own affected-row count. Equal to
+        :attr:`staged` only when the table held none of the staged rows beforehand.
 
     Raises
     ------
@@ -431,7 +582,8 @@ class LoadOutcome:
         Returns
         -------
         int
-            The difference between the two counts, which is zero on the plain COPY path.
+            The difference between the two counts, which is zero for a load into a table that
+            held none of the staged rows.
         """
         return self.staged - self.inserted
 
@@ -442,18 +594,106 @@ class LoadOutcome:
         -------
         str
             A sentence naming both counts, and the skipped count only when it is non-zero so
-            that the plain COPY path's line does not carry a number that is always zero.
+            that a first load's line does not carry a number that is always zero.
 
         Raises
         ------
         None
         """
+        # WHY : Refactoring Rationale: there is no longer a DECLINED rendering, and there was one.
+        #   Two independently authored resolutions of the same restart-safety defect met here. One
+        #   kept a direct-COPY path and guarded it with a row count, reporting a populated target as
+        #   a load that declined to run; the other withdrew the direct path so that every one of the
+        #   eleven targets stages and then merges. The second subsumes the first: a re-run of a
+        #   completed load now stages every row and inserts none, which is the skipped line below,
+        #   and it is safe for the identity-keyed daily feed as well -- the case a count-based
+        #   precondition could only decline, never de-duplicate.
         if self.skipped:
             return (
                 f"{self.staged} row(s) read, {self.inserted} inserted,"
                 f" {self.skipped} already present"
             )
         return f"{self.staged} row(s) read, {self.inserted} inserted"
+
+
+def key_columns_of(record: str, columns: Mapping[str, str]) -> tuple[str, ...]:
+    """Derive the target columns a record's primary key occupies, from its descriptor alone.
+
+    Purpose
+    -------
+    Translate the ``key_offset``/``key_length`` window
+    :mod:`carddemo_migration.copybook.layouts` carries for a record into the target column names
+    that window covers, so a merge conflicts on the record's real key and no key geometry is
+    written down a second time.
+
+    Parameters
+    ----------
+    record : str
+        A registered record name, as the layout registry spells it -- ``ACCOUNT``, ``SECUSER``
+        and so on. The comparison is exact and case-sensitive.
+    columns : Mapping[str, str]
+        A target's copybook-field-to-column mapping, used to translate each key field into the
+        column it becomes and to prove that every key field is loaded at all.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The target column names of the fields the key window covers, in the descriptor's own
+        field order. Never empty: a record whose key resolves to no column is refused instead.
+
+    Raises
+    ------
+    ValueError
+        If the record is not registered, if the key window does not begin and end exactly on a
+        field boundary, or if a field inside the window is not mapped to a column.
+    """
+    # WHY : Assumptions: an UNREGISTERED record is refused rather than answered with an empty
+    #   tuple, because an empty tuple is what a keyless target looks like and the two must not be
+    #   confused. `layouts.layout` raises `LayoutError`, which is a `ValueError` subclass; it is
+    #   re-raised as a plain `ValueError` naming this derivation so that a target declaration
+    #   failing at import says which of its own fields was wrong rather than only which registry
+    #   lookup missed.
+    try:
+        spec = layouts.layout(record)
+    except layouts.LayoutError as exc:
+        raise ValueError(
+            f"record {record!r} is not a registered layout, so no key geometry can be derived"
+            f" for it: {exc}"
+        ) from exc
+
+    window_end = spec.key_offset + spec.key_length
+    covered = tuple(
+        field
+        for field in spec.fields
+        if field.start >= spec.key_offset and field.start + field.length <= window_end
+    )
+    # WHY : Assumptions: the window is validated against the FIELD BOUNDARIES rather than
+    #   trusted, and containment is tested rather than overlap. The two differ exactly where a key
+    #   ends mid-field, and that difference is the whole point: overlap would quietly return the
+    #   straddling field's whole column, so a key declared one byte short would produce a
+    #   syntactically valid merge over a wider column set than the index it names. Containment
+    #   plus the three checks below turn the same mistake into a refusal at import. All eleven
+    #   registered masters key on whole leading fields -- `KEYS(11 0)`, `KEYS(16 0)`, `KEYS(17 0)`
+    #   and their siblings in the ten REPRO jobs -- so the strict form costs nothing today and is
+    #   the reason a future record with a partial-field key cannot be loaded by accident.
+    if not covered or covered[0].start != spec.key_offset:
+        raise ValueError(
+            f"record {record} declares a key at offset {spec.key_offset}, which is not the start"
+            f" of a declared field, so the columns it covers cannot be derived"
+        )
+    if covered[-1].start + covered[-1].length != window_end:
+        raise ValueError(
+            f"record {record} declares a {spec.key_length}-byte key at offset"
+            f" {spec.key_offset}, which ends at {window_end} rather than on a field boundary, so"
+            f" the columns it covers cannot be derived"
+        )
+    unmapped = [field.name for field in covered if field.name not in columns]
+    if unmapped:
+        raise ValueError(
+            f"record {record} keys on {', '.join(unmapped)}, which the target does not map to a"
+            " column, so a merge could not name the key it conflicts on"
+        )
+    return tuple(columns[field.name] for field in covered)
 
 
 @dataclass(frozen=True)
@@ -470,47 +710,63 @@ class TableTarget:
         Ordered mapping of copybook field name to target column name. Iteration order is the
         COPY column order, so it is the order rows are written in. A field absent from this
         mapping is deliberately not loaded.
+    record : str
+        The registered record name this target loads, which binds it to the descriptor its key
+        geometry is derived from. Empty ONLY for a target constructed to exercise a projection or
+        an identifier rendering rather than to load a dataset; such a target has no key columns
+        and refuses to compose a merge statement, so the absence cannot pass for a key.
     projections : Mapping[str, Projection]
         How each named field's value becomes its column's value. A field absent from this
         mapping projects :attr:`Projection.VERBATIM`, so only the exceptions are declared.
-    conflict_key : tuple[str, ...]
-        The TARGET COLUMN names forming the conflict target of a stage-and-merge load. Empty for
-        a target with exactly one writer, which loads through a plain COPY.
+    strategy : LoadStrategy
+        Which rerun-safe merge the target's own indexes support. Defaults to
+        :attr:`LoadStrategy.KEYED_MERGE`, which every target whose table declares a unique
+        constraint over :attr:`key_columns` uses.
     derived_fields : frozenset[str]
         Keys of ``columns`` that no reader publishes because the value is derived rather than
         decoded. Declared so that the missing-field check does not demand them of a record and
         so a test can assert the set rather than infer it.
+    key_columns : tuple[str, ...]
+        DERIVED, never passed: the target column names the record's primary-key window covers, as
+        :func:`key_columns_of` computes them. Empty only for an unbound target.
 
     Raises
     ------
     ValueError
         If the schema, table or mapping is empty, if a projection or a derived field names a
-        field the mapping does not carry, or if a conflict key names a column the mapping does
-        not produce.
+        field the mapping does not carry, if the bound record is unregistered, or if the record's
+        key window does not resolve to mapped columns on field boundaries.
     """
 
     schema: str
     table: str
     columns: Mapping[str, str]
+    record: str = ""
     projections: Mapping[str, Projection] = field(default_factory=lambda: MappingProxyType({}))
-    conflict_key: tuple[str, ...] = ()
+    strategy: LoadStrategy = LoadStrategy.KEYED_MERGE
     derived_fields: frozenset[str] = frozenset()
+    # WHY : Assumptions: the key columns are `init=False`, so no caller can pass them and every
+    #   target's key is the descriptor's. A default of `()` is required for the field to be
+    #   declarable at all, and it is overwritten in `__post_init__` for every bound target; the
+    #   only target it survives on is an unbound one, which has no merge path to use it.
+    key_columns: tuple[str, ...] = field(init=False, default=())
 
     def __post_init__(self) -> None:
-        """Refuse a target whose declarations disagree with each other.
+        """Refuse a target whose declarations disagree with each other, and derive its key.
 
         Returns
         -------
         None
-            Nothing. A dataclass initialiser hook is called for its validation effect,
-            and returning normally is what signals that this target is usable; the only
+            Nothing. A dataclass initialiser hook is called for its validation and derivation
+            effect, and returning normally is what signals that this target is usable; the only
             other outcome is the exception below.
 
         Raises
         ------
         ValueError
-            If any component is empty, or a projection, derived field or conflict key names
-            something the column mapping does not.
+            If any component is empty, if a projection or derived field names something the
+            column mapping does not, if the bound record is unregistered, or if its key window
+            does not resolve to mapped columns on field boundaries.
         """
         if not self.schema.strip() or not self.table.strip():
             raise ValueError("a table target must name both a schema and a table")
@@ -520,13 +776,16 @@ class TableTarget:
                 " nothing; a target with no mapping is a declaration error rather than an"
                 " empty load"
             )
-        # Assumptions: the three supplementary declarations are checked against the column
-        #   mapping HERE, at import time, rather than at the point each is used. Every one of them
-        #   fails silently otherwise: a projection keyed on a misspelled field name would simply
-        #   never apply, so a money column would load padded text or a protected column would load
-        #   PLAINTEXT; a derived field not in the mapping would exempt nothing; and a conflict key
-        #   naming a column the COPY does not supply would produce an insert PostgreSQL rejects at
-        #   run time, after the whole dataset had been staged.
+        # Assumptions: the two supplementary declarations are checked against the column
+        #   mapping HERE, at import time, rather than at the point each is used. Both fail
+        #   silently otherwise: a projection keyed on a misspelled field name would simply never
+        #   apply, so a money column would load padded text or a protected column would load
+        #   PLAINTEXT; and a derived field not in the mapping would exempt nothing.
+        # WHY : Assumptions: these two checks run BEFORE the key derivation below, and the order
+        #   is load-bearing for the diagnostic rather than for correctness. A target whose
+        #   projection names a misspelled field is usually a partial declaration, which the key
+        #   derivation would also reject -- for its own, unrelated reason -- so deriving first
+        #   would answer a misspelling with a message about a key.
         unmapped = sorted(set(self.projections) - set(self.columns))
         if unmapped:
             raise ValueError(
@@ -540,13 +799,14 @@ class TableTarget:
                 f"target {self.schema}.{self.table} declares {', '.join(undeclared)} derived"
                 " without mapping it to a column"
             )
-        produced = set(self.columns.values())
-        missing = sorted(set(self.conflict_key) - produced)
-        if missing:
-            raise ValueError(
-                f"target {self.schema}.{self.table} declares a conflict key naming"
-                f" {', '.join(missing)}, which its column mapping does not produce"
-            )
+        if self.record:
+            # WHY : Assumptions: the derivation runs at CONSTRUCTION, so a target bound to a
+            #   record whose key window it does not map fails at import rather than on the merge
+            #   statement of a load that has already streamed the whole dataset into a staging
+            #   table. `object.__setattr__` is the documented way to complete a frozen dataclass's
+            #   derived state from its own initialiser hook; the field is `init=False`, so this is
+            #   the only place it is ever written.
+            object.__setattr__(self, "key_columns", key_columns_of(self.record, self.columns))
 
     @property
     def qualified_name(self) -> str:
@@ -574,30 +834,6 @@ class TableTarget:
         #   target for it later cannot introduce the fault. Quoting the table half costs nothing
         #   and removes the same class of error for any future table name.
         return f"{quote_identifier(self.schema)}.{quote_identifier(self.table)}"
-
-    def copy_statement(self) -> str:
-        """Compose the COPY statement this target loads through.
-
-        Purpose
-        -------
-        Name every column explicitly rather than relying on the table's declaration order.
-
-        Returns
-        -------
-        str
-            A ``COPY <table> (<columns>) FROM STDIN`` statement in binary-safe text form.
-
-        Raises
-        ------
-        None
-        """
-        # WHY : Assumptions: the columns are named explicitly and never left implicit. A COPY
-        #   without a column list loads into the table's declared order, so adding a column to
-        #   the table -- a version column, say -- silently shifts every value by one position
-        #   and the load either fails on a type mismatch or, where the adjacent types agree,
-        #   succeeds with the values in the wrong columns.
-        names = ", ".join(quote_identifier(column) for column in self.columns.values())
-        return f"COPY {self.qualified_name} ({names}) FROM STDIN"
 
     # WHY : Refactoring Rationale: the value union admits `int` as well as `str`, `Decimal` and
     #   `bytes`, and the addition is one field rather than a widening for its own sake. The customer
@@ -726,6 +962,41 @@ class TableTarget:
         """
         return quote_identifier(f"{_STAGE_PREFIX}{self.table}")
 
+    def count_statement(self) -> str:
+        """Compose the statement that counts the rows this target's table already holds.
+
+        Purpose
+        -------
+        Give the direct-COPY path a precondition it can evaluate before it writes anything, so a
+        load into an already-populated single-writer master reports what is there instead of
+        appending to it or failing on a key it cannot explain.
+
+        Returns
+        -------
+        str
+            A ``SELECT count(*) FROM <table>`` statement against the schema-qualified name.
+
+        Raises
+        ------
+        None
+        """
+        # WHY : Alternatives Considered: `SELECT 1 FROM <table> LIMIT 1`, which answers the
+        #   emptiness question at a fraction of the cost because it stops at the first row.
+        #   Rejected because the COUNT is the number an operator needs: the decision a declined
+        #   load hands back is whether what is already there is the extract they meant to load,
+        #   and that decision is made by comparing the count against the extract's -- which is
+        #   exactly what `sql/verify/row_counts.sql` compares. A bare "not empty" would send them
+        #   to run that pass by hand to learn the number this statement already has.
+        # WHY : Trade-offs: on a large master this is a sequential scan, which is the cost paid
+        #   once per load attempt and is negligible beside the COPY it guards -- and it is not paid
+        #   at all on the path that matters for throughput, since a first load of an empty table
+        #   scans nothing.
+        # WHY : Assumptions: the name goes through `qualified_name`, so the schema is explicit and
+        #   both halves are quoted, for the reasons recorded there. A count against an
+        #   unqualified name could count a different schema's table and would then decline a load
+        #   that should have run.
+        return f"SELECT count(*) FROM {self.qualified_name}"
+
     def stage_statement(self) -> str:
         """Compose the statement that creates this target's staging table.
 
@@ -778,47 +1049,78 @@ class TableTarget:
         ------
         None
         """
-        # Assumptions: the column list comes from the same mapping the direct COPY uses, so the
-        #   staging table, this COPY and the merge below cannot disagree about either the set of
-        #   columns or their order. Writing the list out three times would be three chances to
-        #   reorder one of them, and a reordered COPY loads plausible values into wrong columns.
+        # Assumptions: the column list comes from the same mapping the staging table and the merge
+        #   read, so the three statements cannot disagree about either the set of columns or their
+        #   order. Writing the list out three times would be three chances to reorder one of them,
+        #   and a reordered COPY loads plausible values into wrong columns.
         names = ", ".join(quote_identifier(column) for column in self.columns.values())
         return f"COPY {self.stage_name} ({names}) FROM STDIN"
 
     def merge_statement(self) -> str:
-        """Compose the statement that moves staged rows into the target on the declared key.
+        """Compose the statement that moves staged rows into the target without duplicating one.
 
         Purpose
         -------
-        Insert every staged row the target does not already hold, with explicit conflict
-        semantics, so that a load composing with a second writer neither fails nor overwrites.
+        Insert every staged row the target does not already hold, so that a load composing with a
+        second writer -- or with an earlier attempt at itself -- neither fails nor duplicates.
 
         Returns
         -------
         str
-            An ``INSERT ... SELECT ... ON CONFLICT (<key>) DO NOTHING`` statement.
+            An ``INSERT ... SELECT`` statement, closed by ``ON CONFLICT (<key>) DO NOTHING`` under
+            :attr:`LoadStrategy.KEYED_MERGE` and by a ``WHERE NOT EXISTS`` anti-join under
+            :attr:`LoadStrategy.WHOLE_ROW_MERGE`.
 
         Raises
         ------
         AuroraLoadError
-            If the target declares no conflict key, which means this path was reached for a
-            target that was never meant to take it.
+            If the target is not bound to a record, so no key columns could be derived and this
+            path was reached for a construct that was never meant to load a dataset.
         """
-        if not self.conflict_key:
-            raise AuroraLoadError(
-                f"target {self.schema}.{self.table} declares no conflict key, so it has no merge"
-                " statement; a table with one writer loads through a direct COPY"
+        names = ", ".join(quote_identifier(column) for column in self.columns.values())
+        if self.strategy is LoadStrategy.WHOLE_ROW_MERGE:
+            # WHY : Assumptions: `IS NOT DISTINCT FROM` rather than `=` on every column, because
+            #   two of the columns this target copies are NULLABLE -- the daily feed's two stamps --
+            #   and `NULL = NULL` is unknown rather than true. With `=` the anti-join would find no
+            #   match for any row carrying an unwritten stamp, so a re-run of the feed would insert
+            #   every one of those rows again: the exact duplication this path exists to prevent,
+            #   reintroduced by the one operator that reads as obviously correct.
+            predicate = " AND ".join(
+                f"{_MERGE_TARGET_ALIAS}.{quote_identifier(column)} IS NOT DISTINCT FROM"
+                f" {_MERGE_STAGE_ALIAS}.{quote_identifier(column)}"
+                for column in self.columns.values()
             )
-        # WHY : Trade-offs: DO NOTHING rather than DO UPDATE, and the choice is what makes the
-        #   two writers genuinely compose rather than merely coexist. `V2__seed_reference.sql`
+            staged = ", ".join(
+                f"{_MERGE_STAGE_ALIAS}.{quote_identifier(column)}"
+                for column in self.columns.values()
+            )
+            return (
+                f"INSERT INTO {self.qualified_name} ({names})"
+                f" SELECT {staged} FROM {self.stage_name} AS {_MERGE_STAGE_ALIAS}"
+                f" WHERE NOT EXISTS (SELECT 1 FROM {self.qualified_name}"
+                f" AS {_MERGE_TARGET_ALIAS} WHERE {predicate})"
+            )
+        if not self.key_columns:
+            raise AuroraLoadError(
+                f"target {self.schema}.{self.table} is bound to no record, so its key columns"
+                " could not be derived and it has no merge statement; every declared load target"
+                " names the record it loads"
+            )
+        # WHY : Trade-offs: DO NOTHING rather than DO UPDATE, and the choice is what makes two
+        #   writers genuinely compose rather than merely coexist. `V2__seed_reference.sql`
         #   uses DO NOTHING on all six of its inserts, so with DO NOTHING here the outcome is the
         #   same set of rows whichever writer runs first, whichever runs second, and however many
         #   times either runs. DO UPDATE would instead make the stored description depend on
         #   execution order -- and since this loader now trims its descriptions to match the
         #   migration's exactly, an update would be writing identical values over identical values
         #   while producing a different row version and a different affected-row count.
-        names = ", ".join(quote_identifier(column) for column in self.columns.values())
-        key = ", ".join(quote_identifier(column) for column in self.conflict_key)
+        # WHY : Assumptions: the conflict target is the DERIVED key, so this clause names the
+        #   columns the record's own `KEYS(len off)` window covers and nothing else. Each of the
+        #   ten tables taking this path declares a unique constraint over exactly those columns,
+        #   which is what PostgreSQL requires of an `ON CONFLICT` target; a key that named more or
+        #   fewer columns would raise "there is no unique or exclusion constraint matching the ON
+        #   CONFLICT specification" at run time, after the dataset had been staged.
+        key = ", ".join(quote_identifier(column) for column in self.key_columns)
         return (
             f"INSERT INTO {self.qualified_name} ({names})"
             f" SELECT {names} FROM {self.stage_name}"
@@ -918,14 +1220,14 @@ def _projected(
             return None
         return trimmed
 
-    if projection is Projection.TIMESTAMP_OR_NULL:
+    if projection in (Projection.TIMESTAMP_OR_NULL, Projection.TIMESTAMP_REQUIRED):
         if not isinstance(value, str):
             raise AuroraLoadError(
                 f"field {name} of a record bound for {target.schema}.{target.table} declares a"
                 f" timestamp projection but decoded to {type(value).__name__}"
             )
         try:
-            return timestamp.canonical(value)
+            rendered = timestamp.canonical(value)
         except ValueError as exc:
             # Trade-offs: the shared renderer's message is carried through because it quotes
             #   no part of the value -- it names the width and the two admitted forms only. This
@@ -934,6 +1236,19 @@ def _projected(
                 f"field {name} of a record bound for {target.schema}.{target.table} could not"
                 f" be rendered for column {column}: {exc}"
             ) from exc
+        if rendered is None and projection is Projection.TIMESTAMP_REQUIRED:
+            # WHY : Trade-offs: the refusal names the field, the column and the fact that the span
+            #   is UNWRITTEN, and quotes no part of it. There is nothing in the value worth
+            #   quoting -- an unwritten stamp is 26 blanks or 26 low values, which
+            #   `timestamp.is_unwritten` recognises -- and the record it sits in carries a card
+            #   number, so a message echoing the record to show what was wrong would disclose one.
+            raise AuroraLoadError(
+                f"field {name} of a record bound for {target.schema}.{target.table} holds no"
+                f" written timestamp, and column {column} is declared NOT NULL because every"
+                " baseline writer of that table sets it; the delivery is incomplete rather than"
+                " the row being unposted, so nothing is loaded"
+            )
+        return rendered
 
     if projection is Projection.SEALED_IDENTIFIER:
         cipher = context.identifier_cipher
@@ -1114,6 +1429,16 @@ _BATCH_WRITTEN_RECORDS: Final[frozenset[str]] = frozenset({"TRNX", "REJECT", "IN
 #   this module issues unpredictable in a log an operator is reading to see what ran.
 _STAGE_PREFIX: Final[str] = "carddemo_stage_"
 
+# WHY : Assumptions: the anti-join's two table aliases are named here rather than inline, and they
+#   are spelled in full rather than as `s` and `t`. An alias is what disambiguates the staged row
+#   from the row already in the table, and the whole predicate is a column-by-column comparison
+#   between the two, so a reader of the generated statement -- or of a log line carrying it -- has
+#   to be able to tell at a glance which side is which. Neither spelling is a PostgreSQL reserved
+#   word, and an alias cannot collide with a column name because the two occupy different
+#   namespaces in a statement.
+_MERGE_STAGE_ALIAS: Final[str] = "staged_row"
+_MERGE_TARGET_ALIAS: Final[str] = "existing_row"
+
 # WHY : Assumptions: every mapping below was read from the owning service's own Flyway
 #   migration rather than derived, and each records one anti-corruption decision. TWO of the
 #   baseline's three documented misspellings are corrected here, each at its own mapping site: the
@@ -1140,6 +1465,7 @@ _STAGE_PREFIX: Final[str] = "carddemo_stage_"
 TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
     {
         "XREF": TableTarget(
+            record="XREF",
             schema="account",
             table="card_xref",
             columns=MappingProxyType(
@@ -1150,16 +1476,17 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                 }
             ),
         ),
-        # WHY : Assumptions: the three reference targets are the only ones declaring a conflict
-        #   key, and the only ones trimming a descriptive column. Both declarations exist for the
-        #   same reason: `V2__seed_reference.sql` writes these three tables too, with
-        #   `ON CONFLICT ... DO NOTHING` on each of its inserts, and it writes the descriptions
-        #   TRIMMED -- `'Purchase'`, not `'Purchase'` followed by forty-two blanks. Without the
-        #   conflict key a second writer makes the load fail on a unique violation; without the
-        #   trim the two writers produce rows that differ in content while agreeing in count, so
-        #   the row-count pass would pass and the description a screen renders would depend on
-        #   which writer ran first.
+        # WHY : Assumptions: the three reference targets are the only ones trimming a descriptive
+        #   column, and the reason is that they have a second writer whose rows theirs must MATCH
+        #   rather than merely coexist with. `V2__seed_reference.sql` writes these three tables
+        #   too, with `ON CONFLICT ... DO NOTHING` on each of its inserts, and it writes the
+        #   descriptions TRIMMED -- `'Purchase'`, not `'Purchase'` followed by forty-two blanks.
+        #   Without the trim the two writers produce rows that differ in content while agreeing in
+        #   count, so the row-count pass would pass and the description a screen renders would
+        #   depend on which writer ran first. The merge itself is no longer special to these three:
+        #   every target merges, because a re-run is a normal event for all eleven.
         "TRANTYPE": TableTarget(
+            record="TRANTYPE",
             schema="reference",
             table="transaction_types",
             columns=MappingProxyType(
@@ -1169,9 +1496,9 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                 }
             ),
             projections=MappingProxyType({"TRAN-TYPE-DESC": Projection.TRIMMED}),
-            conflict_key=("type_cd",),
         ),
         "TRANCAT": TableTarget(
+            record="TRANCAT",
             schema="reference",
             table="transaction_categories",
             columns=MappingProxyType(
@@ -1182,7 +1509,6 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                 }
             ),
             projections=MappingProxyType({"TRAN-CAT-TYPE-DESC": Projection.TRIMMED}),
-            conflict_key=("type_cd", "cat_cd"),
         ),
         # WHY : Assumptions: the group id is NOT trimmed although the two descriptions above are,
         #   and the asymmetry follows the COLUMN rather than the value. `acct_group_id` is
@@ -1191,6 +1517,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   `VARCHAR(50)`, where they are not. Trimming a key would also be the wrong habit to
         #   establish here: the interest calculation's `DEFAULT` fallback matches on this column.
         "DISGROUP": TableTarget(
+            record="DISGROUP",
             schema="reference",
             table="disclosure_groups",
             columns=MappingProxyType(
@@ -1201,9 +1528,9 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                     "DIS-INT-RATE": "interest_rate",
                 }
             ),
-            conflict_key=("acct_group_id", "tran_type_cd", "tran_cat_cd"),
         ),
         "ACCOUNT": TableTarget(
+            record="ACCOUNT",
             schema="account",
             table="accounts",
             columns=MappingProxyType(
@@ -1242,6 +1569,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   The column is NULLABLE, so a blank source field becomes a null rather than an envelope
         #   over nothing.
         "CARD": TableTarget(
+            record="CARD",
             schema="card",
             table="cards",
             columns=MappingProxyType(
@@ -1280,6 +1608,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   about a customer; storing `None` in a NOT NULL column would fail the load, which is
         #   correct -- a customer with no first name is a corrupt record, not an absent value.
         "CUSTOMER": TableTarget(
+            record="CUSTOMER",
             schema="account",
             table="customers",
             columns=MappingProxyType(
@@ -1327,13 +1656,19 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   dialect PostgreSQL cannot cast, and on the first blank stamp, which it cannot cast
         #   either. Declaring both keeps the two stamps' handling identical, which is the property
         #   a parity comparison across them depends on.
-        # WHY : Assumptions: NO conflict key, although `ingest_seq` makes every row unique. The
-        #   primary key is `GENERATED BY DEFAULT AS IDENTITY` and this target does not supply it,
-        #   so there is no natural key to conflict ON: the same feed record loaded twice is
-        #   genuinely two rows, and the baseline's own daily feed is a fresh extract per run rather
-        #   than a keyed master. A conflict key here would have to be invented, and an invented key
-        #   silently discards a legitimate duplicate transaction.
+        # WHY : Assumptions: this is the ONE target that merges on the whole row rather than on the
+        #   record's key, and the reason is in `V1__ledger.sql` rather than in the copybook. The
+        #   descriptor keys this record on `DALYTRAN-ID`, but the TABLE does not: its primary key is
+        #   `pk_daily_transactions(ingest_seq)`, an identity column no extract supplies, and
+        #   `transaction_id` is left deliberately NON-unique because the sequential feed
+        #   `app/cbl/CBTRN02C.cbl` reads may carry a value twice. So there is no unique index for an
+        #   `ON CONFLICT` clause to name -- naming one raises at run time -- and a plain COPY re-run
+        #   would succeed and DOUBLE the feed, which no count check would flag as an error.
+        #   Comparing the whole copied tuple instead keeps a legitimate duplicate loadable on the
+        #   first pass and inserts nothing on the second.
         "DALYTRAN": TableTarget(
+            record="DALYTRAN",
+            strategy=LoadStrategy.WHOLE_ROW_MERGE,
             schema="ledger",
             table="daily_transactions",
             columns=MappingProxyType(
@@ -1379,24 +1714,18 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   zero-row case is preserved rather than traded away: an empty extract streams no rows,
         #   commits, and reports `staged=0 inserted=0`, so a corpus-only run behaves exactly as it
         #   did while a real extract now has somewhere to go.
-        # WHY : Assumptions: a conflict key IS declared here, which no other master declares, and
-        #   the reason is the one the reference targets use rather than an exception to it -- this
-        #   table has a SECOND WRITER. `app/cbl/CBTRN02C.cbl` posts from the daily feed into this
-        #   master as part of its three-write unit of work, so by the time a load is re-run the
-        #   posting job may already have inserted rows carrying these keys. A plain COPY would
-        #   abort on the first of them and report a duplicate key, which on a single-writer master
-        #   is useful information but here would misreport a correctly-posted row as a load fault.
-        #   It is also what makes the load restartable: AAP 0.4.1.7 drives the staging state through
-        #   Step Functions redrive, which re-enters a failed state from the beginning, and a
-        #   cutover-sized extract is precisely where a partial load followed by a retry happens.
-        # WHY : Assumptions: the conflict target is `transaction_id` because that is what the
-        #   DESCRIPTOR declares -- `LAYOUTS["TRAN"]` carries `key_length=16` at `key_offset=0`,
-        #   which spans `TRAN-ID` exactly and is the same `KEYS(16 0)` that
-        #   `app/jcl/TRANFILE.jcl` gives the cluster. `V1__ledger.sql` names the matching
-        #   constraint `pk_transactions PRIMARY KEY (transaction_id)`, so the merge conflicts on a
-        #   real unique index rather than on a key invented here. Reading the key off the
-        #   descriptor is what keeps this from becoming a second place the VSAM key length is
-        #   written down and can drift.
+        # WHY : Assumptions: this table has a SECOND WRITER, which is why a merge here is not only
+        #   about re-runs. `app/cbl/CBTRN02C.cbl` posts from the daily feed into this master as part
+        #   of its three-write unit of work, so by the time a load is re-run the posting job may
+        #   already have inserted rows carrying these keys, and a load that aborted on them would
+        #   misreport a correctly-posted row as a load fault.
+        # WHY : Assumptions: the merge conflicts on `transaction_id` and this target says so
+        #   NOWHERE -- the column is derived from `LAYOUTS["TRAN"]`, which carries `key_length=16`
+        #   at `key_offset=0`, spanning `TRAN-ID` exactly, and is the same `KEYS(16 0)` that
+        #   `app/jcl/TRANFILE.jcl` gives the cluster. `V1__ledger.sql` names the matching constraint
+        #   `pk_transactions PRIMARY KEY (transaction_id)`, so the merge conflicts on a real unique
+        #   index. The derivation is what keeps this from becoming a second place the VSAM key
+        #   length is written down and can drift.
         # WHY : Assumptions: the money column is `amount`, taken from `V1__ledger.sql`, and NOT the
         #   `tran_amt` the migration plan's prose names. The shipped migration and
         #   `sql/verify/money_totals.sql` agree on `amount` for both ledger tables, and the
@@ -1405,6 +1734,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   total. `TRAN-AMT` decodes to an exact `Decimal` and lands in `NUMERIC(11,2)` with no
         #   float on the path.
         "TRAN": TableTarget(
+            record="TRAN",
             schema="ledger",
             table="transactions",
             columns=MappingProxyType(
@@ -1424,22 +1754,34 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
                     "TRAN-PROC-TS": "proc_ts",
                 }
             ),
-            # WHY : Trade-offs: the three descriptive columns are trimmed and the two stamps are
+            # WHY : Trade-offs: the three descriptive columns are trimmed and both stamps are
             #   rendered, matching the `DALYTRAN` target field for field because the two layouts
             #   are field for field identical -- same offsets, same kinds, same 350 bytes. Keeping
             #   the two declarations parallel is what lets the posting parity comparison put a
             #   daily row beside the transaction row it became and diff them, which a different
             #   trimming or a different stamp spelling on either side would defeat.
+            # WHY : Refactoring Rationale: the PROCESSING stamp projects
+            #   `TIMESTAMP_REQUIRED` where it previously projected `TIMESTAMP_OR_NULL`, and the two
+            #   stamps of this one target therefore differ from each other. This is the one place
+            #   the parallel with `DALYTRAN` is deliberately broken, and the asymmetry is the
+            #   TABLES': `ledger.transactions.proc_ts` is declared NOT NULL while
+            #   `ledger.daily_transactions.proc_ts` is nullable, each with the evidence recorded at
+            #   the column in `V1__ledger.sql`. Under the previous declaration an unwritten stamp
+            #   became `None` and the COPY hit that NOT NULL constraint at the server -- so the
+            #   only committed transaction-shaped rows in the repository, the five in
+            #   `tests/fixtures/export/happy_path/trandata.txt` whose processing stamps are 26
+            #   blanks, would have failed the load mid-stream with a server diagnostic quoting the
+            #   row. It now fails on the record instead, naming the field and the column, before
+            #   anything is written.
             projections=MappingProxyType(
                 {
                     "TRAN-DESC": Projection.TRIMMED,
                     "TRAN-MERCHANT-NAME": Projection.TRIMMED,
                     "TRAN-MERCHANT-CITY": Projection.TRIMMED,
                     "TRAN-ORIG-TS": Projection.TIMESTAMP_OR_NULL,
-                    "TRAN-PROC-TS": Projection.TIMESTAMP_OR_NULL,
+                    "TRAN-PROC-TS": Projection.TIMESTAMP_REQUIRED,
                 }
             ),
-            conflict_key=("transaction_id",),
         ),
         # WHY : Assumptions: the field spelled `TRANCAT-CD` becomes `category_cd` while its
         #   siblings keep their stems, because the copybook's own group prefix is inconsistent --
@@ -1477,6 +1819,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   is a convention rather than a requirement, and it is recorded as one so a future
         #   reader does not infer a dependency that the DDL does not create.
         "TCATBAL": TableTarget(
+            record="TCATBAL",
             schema="ledger",
             table="transaction_category_balances",
             columns=MappingProxyType(
@@ -1523,6 +1866,7 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         #   span at all, so the baseline's cleartext credential has no path into the target
         #   database through this module or any other.
         "SECUSER": TableTarget(
+            record="SECUSER",
             schema="auth",
             table="users",
             columns=MappingProxyType(
@@ -1545,6 +1889,29 @@ TARGETS: Final[Mapping[str, TableTarget]] = MappingProxyType(
         ),
     }
 )
+
+# WHY : Assumptions: the binding is proven at IMPORT rather than only in the test suite, and it is
+#   proven in both directions -- each target names the record it is filed under, and each has
+#   derived a non-empty key from that record's descriptor. Both halves are needed. A target whose
+#   `record` disagreed with its key would derive another record's key geometry and merge on the
+#   wrong columns, which is the exact drift the derivation exists to remove; and a target left
+#   unbound would derive no key at all, which is a state the class permits for a projection-only
+#   construct and must never reach this registry, because its merge would be refused only once a
+#   load had already streamed the dataset into a staging table.
+# WHY : Trade-offs: the failure is a `ValueError` raised from this module's own import, which is
+#   blunt -- it stops every load rather than the one that is wrong. That is the correct bluntness:
+#   a mis-bound target means the module's own declarations disagree with the copybook registry, and
+#   there is no dataset it would then be safe to load.
+_MISBOUND: Final[tuple[str, ...]] = tuple(
+    name
+    for name, declared in TARGETS.items()
+    if declared.record != name or not declared.key_columns
+)
+if _MISBOUND:
+    raise ValueError(
+        "every load target must name the record it is filed under and derive a key from that"
+        f" record's descriptor, but {', '.join(_MISBOUND)} does not"
+    )
 
 
 def target_names() -> tuple[str, ...]:
@@ -1606,18 +1973,24 @@ def target_for(record_name: str) -> TableTarget:
         ) from exc
 
 
-def connect(settings: AuroraConnectionSettings) -> Any:
-    """Open a database connection from resolved settings.
+def connect(settings: AuroraConnectionSettings, *, expected_role: str | None = None) -> Any:
+    """Open a database connection from resolved settings, optionally proving the login role.
 
     Purpose
     -------
     Keep the driver import inside the one function that needs it, so importing this module on
-    a host without the driver still works and the failure names the missing dependency.
+    a host without the driver still works and the failure names the missing dependency; and give
+    a caller that knows which schema it is loading a way to have that expectation CHECKED rather
+    than assumed.
 
     Parameters
     ----------
     settings : AuroraConnectionSettings
         The resolved connection parameters.
+    expected_role : str | None
+        The login role this connection must authenticate as, which a caller loading one schema
+        obtains from :func:`carddemo_migration.config.role_for_schema`. ``None`` performs no check
+        and is correct for a caller that is not loading a specific schema's table.
 
     Returns
     -------
@@ -1627,22 +2000,36 @@ def connect(settings: AuroraConnectionSettings) -> Any:
     Raises
     ------
     ConfigurationError
-        If the driver is not installed, which is an incomplete environment rather than a
+        If the settings authenticate as a role other than ``expected_role``, or if the driver is
+        not installed -- both being an incomplete or misconfigured environment rather than a
         database that refused.
     AuroraLoadError
         If the driver is present and the connection attempt fails.
     """
-    # WHY : Assumptions: the caller resolves ONE settings object PER SCHEMA and connects as that
-    #   schema's own `carddemo_*` role -- `cli.py` does exactly that, calling
-    #   `resolve_aurora_settings(target.schema)` for each dataset it loads. This function
-    #   deliberately takes the resolved settings rather than a schema name, so it cannot choose a
-    #   role and cannot be handed one connection to reuse for everything.
+    # WHY : Assumptions: role selection is the CALLER's responsibility and this function cannot
+    #   take it over, because it is handed settings that are already resolved. `cli.py` is the
+    #   caller that discharges it, calling `resolve_aurora_settings(target.schema)` per dataset so
+    #   that each load authenticates as that schema's own `carddemo_*` role.
     #   `sql/V0__schemas_and_roles.sql` grants privileges PER OWNING ROLE and gives each role
     #   exactly its own schema, so a single shared superuser connection would load every table
     #   successfully while bypassing the least-privilege boundary the bootstrap exists to
     #   establish -- and a load that only works as a superuser proves nothing about whether the
-    #   service that owns the table can write it. Connecting per schema means an ungranted table
-    #   fails here, during migration, rather than at first write in production.
+    #   service that owns the table can write it.
+    # WHY : Refactoring Rationale: `expected_role` exists because the previous rationale here
+    #   claimed the signature made the mistake impossible -- that taking settings rather than a
+    #   schema name meant this function "cannot be handed one connection to reuse for everything".
+    #   That was not true of the API as written: the settings are opaque to this function, and
+    #   `load_records` accepts any open connection for any target, so nothing prevented a
+    #   superuser connection being resolved once and reused. Rather than restate the claim more
+    #   carefully, the check the claim described is now performed, at the one point that holds both
+    #   the expectation and the credential. It is compared BEFORE the driver is imported, so the
+    #   refusal is reachable on a host with no driver installed and costs no connection attempt.
+    if expected_role is not None and settings.user != expected_role:
+        raise ConfigurationError(
+            f"a load of a table owned by {expected_role!r} would authenticate as"
+            f" {settings.user!r}; the least-privilege boundary the bootstrap establishes is per"
+            " owning role, so the connection is refused rather than made as another role"
+        )
     # WHY : Assumptions: no connection parameter is built from a literal in this module. Host,
     #   port, database, user, password and both TLS settings all come from
     #   `AuroraConnectionSettings.as_connection_params()`, which resolves them from Parameter Store
@@ -1659,9 +2046,12 @@ def connect(settings: AuroraConnectionSettings) -> Any:
     try:
         return psycopg.connect(**settings.as_connection_params())
     except psycopg.Error as exc:
-        # WHY : the settings object's own repr is used, which is defined to withhold the
-        #   password. Formatting the connection parameters here would put the secret in the
-        #   message.
+        # WHY : Trade-offs: the settings object's own repr is used, which is defined to withhold
+        #   the password, so the message names the host, port, database and user but not the
+        #   credential. Formatting the connection parameters here would read better -- a driver
+        #   error is usually diagnosed from exactly those parameters -- and would put the secret
+        #   into every log that captured the failure. The masked repr is the half of that
+        #   diagnostic which is safe to keep.
         raise AuroraLoadError(f"could not connect to the cluster as {settings!r}: {exc}") from exc
 
 
@@ -1696,20 +2086,144 @@ def _cursor_of(connection: _Connection) -> Iterator[_Cursor]:
     yield candidate
 
 
+def _safe_diagnostic(
+    operation: str,
+    target: TableTarget,
+    staged: int,
+    exc: BaseException,
+) -> str:
+    """Describe a driver failure using allow-listed metadata and none of its message text.
+
+    Purpose
+    -------
+    Produce the one sentence a failed statement is reported with, carrying enough to identify the
+    fault -- what was being done, to which table, after how many rows, with which SQLSTATE and
+    which named constraint or column -- and carrying no part of the row that provoked it.
+
+    Parameters
+    ----------
+    operation : str
+        What was being attempted, in words an operator reads: ``staging table creation``,
+        ``bulk copy``, ``merge`` or ``commit``.
+    target : TableTarget
+        The target being loaded, whose schema and table name the message identifies.
+    staged : int
+        How many rows had been accepted into the staging stream when the failure arrived.
+    exc : BaseException
+        The failure. Only its class name and its allow-listed diagnostic attributes are read.
+
+    Returns
+    -------
+    str
+        The sanitised description, always naming the operation, the qualified table and the row
+        count, and naming the SQLSTATE and any diagnostic identifiers the driver supplied.
+
+    Raises
+    ------
+    None
+        A driver that publishes none of the allow-listed attributes yields a shorter sentence
+        rather than an error: this function is called on a failure path and must not fail.
+    """
+    # WHY : Assumptions: the driver's own message is NOT read, and this is the whole point of the
+    #   function rather than an incidental omission. PostgreSQL's error response carries DETAIL and
+    #   CONTEXT beside the primary message; for a unique violation the DETAIL is
+    #   `Key (transaction_id)=(...) already exists`, and for a NOT NULL violation the CONTEXT names
+    #   the COPY line. psycopg surfaces all of them -- `Diagnostic.message_primary`,
+    #   `.message_detail`, `.message_hint` and `.context` -- so interpolating `str(exc)`, which is
+    #   what this module did before, put the conflicting key's VALUE into a message `cli.py` writes
+    #   straight to a container log. Every one of these targets carries a primary account number, a
+    #   national identifier or a cardholder name.
+    # WHY : Assumptions: the exception CLASS NAME is included and is safe to include. A class name
+    #   is a fixed identifier chosen by the driver -- `UniqueViolation`, `NotNullViolation`,
+    #   `InsufficientPrivilege` -- so it carries no row content, and it is the single most useful
+    #   thing an operator can be told about a failure whose text is withheld.
+    # WHY : Trade-offs: the four identifier fields are read through `getattr` rather than by
+    #   importing the driver's diagnostic type. This module imports `psycopg` only inside
+    #   `connect`, so a type-driven implementation would either move that import to module scope --
+    #   breaking the codec-only import guarantee this package holds to -- or import it again on a
+    #   failure path, which is the worst place to require a dependency to be present. The cost is
+    #   that a driver publishing a differently-named diagnostic yields a shorter message.
+    diagnostic = getattr(exc, "diag", None)
+    identifiers = {
+        "sqlstate": getattr(exc, "sqlstate", None),
+        "schema": getattr(diagnostic, "schema_name", None),
+        "table": getattr(diagnostic, "table_name", None),
+        "column": getattr(diagnostic, "column_name", None),
+        "constraint": getattr(diagnostic, "constraint_name", None),
+    }
+    named = ", ".join(f"{label}={value}" for label, value in identifiers.items() if value)
+    detail = f" [{named}]" if named else ""
+    return (
+        f"the {operation} for {target.schema}.{target.table} failed after {staged} staged row(s)"
+        f" and was rolled back: {type(exc).__name__}{detail}"
+    )
+
+
+def _discard(connection: _Connection, operation: str, target: TableTarget, staged: int) -> str:
+    """Roll the transaction back, reporting whether the rollback itself succeeded.
+
+    Purpose
+    -------
+    Leave the connection in a DEFINED state after any failure, and describe what that state is, so
+    a caller returning it to a pool or reusing it is not doing so blind.
+
+    Parameters
+    ----------
+    connection : _Connection
+        The connection whose open transaction is to be discarded.
+    operation : str
+        What had been attempted when the failure arrived, for the message a failed rollback adds.
+    target : TableTarget
+        The target being loaded, named in that message.
+    staged : int
+        How many rows had been accepted, named in that message.
+
+    Returns
+    -------
+    str
+        Empty when the rollback succeeded, which is the ordinary case. Otherwise a sanitised
+        clause naming the failed rollback, to be appended to the original diagnostic.
+
+    Raises
+    ------
+    None
+        A rollback failure is REPORTED rather than raised, deliberately: it arrives while another
+        failure is already being handled, and raising it would replace the diagnosis with its
+        consequence.
+    """
+    # WHY : Assumptions: a failed rollback does not become the raised error, and the reason is that
+    #   it is never the interesting one. A rollback fails because the connection is already broken
+    #   -- the server closed it, the socket died -- which is a CONSEQUENCE of, or concurrent with,
+    #   the failure being handled. Letting it propagate would discard the original diagnosis in
+    #   favour of "rollback failed", the least actionable sentence available. It is appended
+    #   instead, because it changes what an operator must do next: a connection whose rollback
+    #   failed must be discarded rather than reused, and the transaction is already gone in any
+    #   case -- a broken connection has no committed work.
+    try:
+        connection.rollback()
+    except Exception as rollback_failure:  # noqa: BLE001 -- a failure path must not raise its own
+        return (
+            f"; the rollback after this failure also failed"
+            f" ({type(rollback_failure).__name__}), so the connection is unusable and must be"
+            f" discarded rather than reused"
+        )
+    return ""
+
+
 def load_records(
     connection: _Connection,
     target: TableTarget,
     records: Iterable[Mapping[str, str | int | Decimal | bytes]],
     context: LoadContext | None = None,
 ) -> LoadOutcome:
-    """Bulk-load decoded records into one table and commit.
+    """Stage decoded records, merge them into one table, and commit -- once, or not at all.
 
     Purpose
     -------
-    Stream every record through one server-side COPY, then commit once, so the load is one
-    unit of work whose partial application is not observable. When the target declares a
-    conflict key the COPY lands in a session-temporary staging table and one insert merges it,
-    which keeps the same single unit of work while letting the load compose with a second writer.
+    Load one dataset as a single unit of work whose partial application is not observable, and
+    whose repetition adds nothing. Every record streams through one server-side COPY into a
+    session-temporary staging table, one insert moves the rows the target does not already hold,
+    and one commit makes the whole of it durable.
 
     Parameters
     ----------
@@ -1726,14 +2240,15 @@ def load_records(
     Returns
     -------
     LoadOutcome
-        Rows read and rows the table gained. The two differ only on the merge path, where the
-        difference is the number of rows the target already held.
+        Rows staged and rows the table gained. The two differ by the number of staged rows the
+        target already held, so a re-run of a completed load reports every row skipped.
 
     Raises
     ------
     AuroraLoadError
-        If a record does not carry a mapped field, a projection cannot be applied, or the COPY or
-        the merge fails. The transaction is rolled back before the error is raised.
+        If a record does not carry a mapped field, a projection cannot be applied, or the staging,
+        the copy, the merge or the commit fails. The transaction is rolled back before the error
+        is raised, and the message names no value the records carried.
     """
     # WHY : Trade-offs: ONE transaction spans the whole dataset, rather than a commit every N
     #   rows. The cost is a longer-held transaction and its accumulated locks and WAL, which on a
@@ -1745,132 +2260,393 @@ def load_records(
     #   operator's only recovery -- emptying the table and starting over -- needs the DELETE
     #   privilege that no role has. Committing once means the table is either fully loaded or
     #   untouched, and a failure is always re-runnable.
-    if target.conflict_key:
-        return _merge_records(connection, target, records, context)
-    return _copy_records(connection, target, records, context)
-
-
-def _copy_records(
-    connection: _Connection,
-    target: TableTarget,
-    records: Iterable[Mapping[str, str | Decimal | bytes]],
-    context: LoadContext | None,
-) -> LoadOutcome:
-    """Stream every record straight into the target table through one COPY, then commit.
-
-    Purpose
-    -------
-    Carry the load path for a table with exactly one writer, where a row already present is a
-    fault to report rather than a state to merge into.
-
-    Parameters
-    ----------
-    connection : _Connection
-        An open connection. The caller owns closing it.
-    target : TableTarget
-        The target, which must declare no conflict key.
-    records : Iterable[Mapping[str, str | Decimal | bytes]]
-        Decoded records, as a reader yields them.
-    context : LoadContext | None
-        The collaborators a non-mechanical projection needs.
-
-    Returns
-    -------
-    LoadOutcome
-        Rows read, and the same number inserted -- on this path every accepted row goes into the
-        table, so the two counts are equal by construction rather than by observation.
-
-    Raises
-    ------
-    AuroraLoadError
-        If a record cannot be prepared or the COPY fails. The transaction is rolled back first.
-    """
-    written = 0
-    try:
-        with _cursor_of(connection) as cursor, cursor.copy(target.copy_statement()) as stream:
-            for record in records:
-                stream.write_row(target.row_of(prepare_record(target, record, context)))
-                written += 1
-    except AuroraLoadError:
-        # WHY : the rollback happens before the re-raise, so a mapping failure partway through
-        #   a stream leaves no partially-loaded table. Letting it propagate first would leave
-        #   the transaction open until the connection closed, and a connection returned to a
-        #   pool with an open transaction is a defect that surfaces somewhere else entirely.
-        connection.rollback()
-        raise
-    except Exception as exc:
-        connection.rollback()
-        raise AuroraLoadError(
-            f"the bulk load into {target.schema}.{target.table} failed after {written} row(s)"
-            f" and was rolled back: {exc}"
-        ) from exc
-    connection.commit()
-    return LoadOutcome(staged=written, inserted=written)
-
-
-def _merge_records(
-    connection: _Connection,
-    target: TableTarget,
-    records: Iterable[Mapping[str, str | Decimal | bytes]],
-    context: LoadContext | None,
-) -> LoadOutcome:
-    """Stage every record in a temporary table, merge it on the declared key, then commit.
-
-    Purpose
-    -------
-    Carry the load path for a table that has a SECOND writer, so that a load into a table the
-    seed migration has already filled adds the rows that are missing and leaves the rest alone,
-    rather than aborting on the first key collision.
-
-    Parameters
-    ----------
-    connection : _Connection
-        An open connection. The caller owns closing it.
-    target : TableTarget
-        The target, which must declare a conflict key.
-    records : Iterable[Mapping[str, str | Decimal | bytes]]
-        Decoded records, as a reader yields them.
-    context : LoadContext | None
-        The collaborators a non-mechanical projection needs.
-
-    Returns
-    -------
-    LoadOutcome
-        Rows staged and rows the table actually gained. A run against an already-seeded table
-        reports every row staged and none inserted, which is a success and reads as one.
-
-    Raises
-    ------
-    AuroraLoadError
-        If a record cannot be prepared, or the staging, the COPY or the merge fails. The
-        transaction is rolled back first, which also discards the staging table.
-    """
+    # WHY : Refactoring Rationale: there is ONE path here where there were two. A target with no
+    #   second writer used to copy straight into its table, and that path is gone rather than
+    #   merely unused: seven of the eleven datasets took it, and every one of them failed on a
+    #   Step Functions redrive with a duplicate key -- except the daily feed, which succeeded and
+    #   doubled itself. The module docstring records the full argument.
     staged = 0
     inserted = 0
     try:
         with _cursor_of(connection) as cursor:
+            operation = "staging table creation"
             cursor.execute(target.stage_statement())
+            operation = "bulk copy"
             with cursor.copy(target.stage_copy_statement()) as stream:
                 for record in records:
                     stream.write_row(target.row_of(prepare_record(target, record, context)))
                     staged += 1
+            operation = "merge"
             cursor.execute(target.merge_statement())
             # Assumptions: the inserted count is read from the driver's affected-row count for
-            #   the MERGE statement, which under `ON CONFLICT ... DO NOTHING` counts the rows
-            #   actually added and not the rows offered. That is the number an operator needs and
-            #   it is not derivable from anything else this function sees. A driver or a double
-            #   that reports no count is treated as reporting none rather than as reporting zero,
-            #   because zero is a meaningful answer here and must not be manufactured.
+            #   the MERGE statement, which counts the rows actually added and not the rows
+            #   offered. That is the number an operator needs and it is not derivable from
+            #   anything else this function sees. A driver or a double that reports no count is
+            #   treated as reporting none rather than as reporting zero, because zero is a
+            #   meaningful answer here and must not be manufactured.
             reported = getattr(cursor, "rowcount", None)
             inserted = reported if isinstance(reported, int) and reported >= 0 else staged
-    except AuroraLoadError:
-        connection.rollback()
+        # WHY : Assumptions: the COMMIT is inside the guarded block, which is where an earlier
+        #   revision did not put it. A commit can fail on its own -- a deferred constraint, a
+        #   serialization failure, a disk or replication error -- and outside the guard that
+        #   failure escaped as the driver's own exception type, with the driver's own text, past
+        #   every sanitising and rolling-back this function does. The caller then held a
+        #   connection with an aborted transaction it had been given no reason to expect.
+        operation = "commit"
+        connection.commit()
+    except AuroraLoadError as refusal:
+        # WHY : the rollback happens before the re-raise, so a mapping failure partway through
+        #   a stream leaves no partially-loaded table. Letting it propagate first would leave
+        #   the transaction open until the connection closed, and a connection returned to a
+        #   pool with an open transaction is a defect that surfaces somewhere else entirely.
+        # WHY : Assumptions: this branch re-raises the refusal UNCHANGED, because this module
+        #   composed it: `row_of` and `prepare_record` name a field, a column and a table and
+        #   quote no value, which is exactly the diagnostic to keep. Only the failure of a
+        #   rollback is added, and only when there is one to report.
+        broken = _discard(connection, operation, target, staged)
+        if broken:
+            raise AuroraLoadError(f"{refusal}{broken}") from None
         raise
     except Exception as exc:
-        connection.rollback()
-        raise AuroraLoadError(
-            f"the staged merge into {target.schema}.{target.table} failed after"
-            f" {staged} staged row(s) and was rolled back: {exc}"
-        ) from exc
-    connection.commit()
+        broken = _discard(connection, operation, target, staged)
+        # WHY : Assumptions: `from None` rather than `from exc`, so the raised error carries no
+        #   `__cause__`. The sanitised message is only half the protection: a chained cause puts
+        #   the driver's own text -- including the DETAIL naming the conflicting key's value --
+        #   into the traceback of anything that logs `exc_info`, and a traceback is exactly what
+        #   an unexpected failure gets logged with. Suppressing the context is what makes the
+        #   allow-list hold on every path out of this function rather than only on the message.
+        sanitised = _safe_diagnostic(operation, target, staged, exc)
+        raise AuroraLoadError(f"{sanitised}{broken}") from None
     return LoadOutcome(staged=staged, inserted=inserted)
+
+
+#: The identifier allocator the interactive write paths draw from.
+#:
+#: Assumptions: the name is the one
+#: ``services/transaction-service/src/main/resources/db/migration/
+#: V2__ledger_transaction_id_allocator.sql`` creates, spelled schema-qualified for the same reason
+#: every table name in this module is: an unqualified sequence resolves through the session's search
+#: path, and advancing the wrong schema's sequence would leave the real one untouched while
+#: reporting success.
+TRANSACTION_ID_SEQUENCE: Final[str] = "ledger.transaction_id_seq"
+
+#: The pattern the allocator's own migration uses to recognise a sequence-format identifier.
+#:
+#: Assumptions: copied in the sense that it must MATCH the migration's filter, not in the sense of
+#: being a second decision. ``ledger.transactions`` holds two identifier formats -- the sixteen
+#: digits this sequence issues, and the business-date-prefixed form the interest job composes at
+#: ``app/cbl/CBACT04C.cbl:474-480`` -- and only the first is this allocator's to advance past. A
+#: filter that admitted the other would advance the sequence into the date-prefixed range and
+#: consume identifiers for a decade of transactions in one statement.
+_SEQUENCE_FORMAT_PATTERN: Final[str] = "^[0-9]{16}$"
+
+
+@dataclass(frozen=True)
+class SequenceReconciliation:
+    """What one reconciliation of the transaction-identifier allocator found and did.
+
+    Purpose
+    -------
+    Report the three numbers an operator needs to decide whether writes may be enabled: the
+    largest sequence-format identifier the table holds, what the allocator would have issued
+    next before the reconciliation, and what it will issue now.
+
+    Parameters
+    ----------
+    sequence : str
+        The schema-qualified sequence reconciled.
+    stored_maximum : int
+        The largest sequence-format identifier in ``ledger.transactions``, or zero when the table
+        holds none.
+    next_value_before : int
+        What the allocator would have issued next when the reconciliation began.
+    next_value_after : int
+        What it will issue next now. Never lower than :attr:`next_value_before`.
+
+    Raises
+    ------
+    None
+    """
+
+    sequence: str
+    stored_maximum: int
+    next_value_before: int
+    next_value_after: int
+
+    @property
+    def advanced(self) -> bool:
+        """Report whether the allocator had to be moved.
+
+        Returns
+        -------
+        bool
+            ``True`` when the reconciliation advanced the sequence, ``False`` when it was already
+            past every stored identifier and was left alone.
+
+        Raises
+        ------
+        None
+        """
+        return self.next_value_after > self.next_value_before
+
+    @property
+    def would_have_collided(self) -> bool:
+        """Report whether the allocator would have reissued a stored identifier.
+
+        Returns
+        -------
+        bool
+            ``True`` when the value the allocator was about to issue is one the table already
+            holds, which is the defect this step exists to remove.
+
+        Raises
+        ------
+        None
+        """
+        # Assumptions: the comparison is `<=` rather than `<`, because `next_value_before` is the
+        #   value about to be ISSUED. A sequence poised to issue exactly the stored maximum
+        #   collides on its very first allocation, so equality is a collision and not a boundary
+        #   safely inside the loaded range.
+        return self.next_value_before <= self.stored_maximum
+
+    def describe(self) -> str:
+        """Render one operator-readable line stating what the reconciliation did.
+
+        Returns
+        -------
+        str
+            A sentence naming the sequence, the stored maximum and both allocator positions.
+
+        Raises
+        ------
+        None
+        """
+        if not self.advanced:
+            return (
+                f"{self.sequence} already issues {self.next_value_after} and the largest stored"
+                f" identifier is {self.stored_maximum}; nothing to reconcile"
+            )
+        return (
+            f"{self.sequence} advanced from {self.next_value_before} to {self.next_value_after}"
+            f" past a largest stored identifier of {self.stored_maximum}"
+        )
+
+
+def _rollback_quietly(connection: _Connection) -> None:
+    """Roll the transaction back, suppressing any failure the rollback itself reports.
+
+    Purpose
+    -------
+    Keep a failed diagnosis intact on the SEQUENCE path. The load path discards through
+    :func:`_discard`, which names the operation and the target it was working on; the allocator
+    reconciliation below has neither a target nor a staged row count, so it discards through this
+    narrower helper. Either way the translated error must survive: if the rollback raised, a driver
+    exception about the rollback would replace it and the operator would be told about the wrong
+    failure.
+
+    Parameters
+    ----------
+    connection : _Connection
+        The connection whose transaction is to be discarded.
+
+    Returns
+    -------
+    None
+        The transaction is discarded, or the attempt is abandoned.
+
+    Raises
+    ------
+    None
+        Deliberately nothing. See the rationale below.
+    """
+    # WHY : Trade-offs: swallowing an exception is normally the wrong thing to do, and it is the
+    #   right thing here for one specific reason: this function is only ever called on a path that
+    #   is ABOUT to raise. The rollback is best-effort cleanup, and the two ways it can fail are
+    #   both already covered -- the transaction was never open, in which case there is nothing to
+    #   discard, or the connection is gone, in which case the server has already discarded it.
+    #   Neither is news, and either would mask a diagnosis that is.
+    # WHY : Alternatives Considered: attaching the rollback failure to the raised error with
+    #   `raise ... from`. Rejected because the chain slot is already used to carry the ORIGINAL
+    #   cause, which is the one an operator needs; a rollback failure would displace it.
+    try:
+        connection.rollback()
+    except Exception:  # noqa: BLE001 - deliberately broad; see the rationale above
+        return
+
+
+def reconcile_transaction_id_sequence(
+    connection: _Connection,
+    *,
+    schema: str = "ledger",
+) -> SequenceReconciliation:
+    """Advance the transaction-identifier allocator past every identifier already loaded.
+
+    Purpose
+    -------
+    Close the one ordering hazard a cutover has that a fresh deployment does not. The allocator's
+    starting position is derived by its own migration, from
+    ``max(transaction_id)`` over ``ledger.transactions`` -- and on a cutover that migration runs
+    BEFORE the extract is loaded, against an empty table, so it sets the allocator to issue 1.
+    The load then writes the real master with its own identifiers, and the allocator is left
+    pointing into a range that is now occupied. The first interactive transaction add or bill
+    payment after writes are enabled then allocates an identifier the table already holds and
+    fails on the primary key -- as does the next, and the next, for as many allocations as the
+    loaded range is wide.
+
+    Run this after the last load into ``ledger.transactions`` and BEFORE writes are enabled.
+
+    Parameters
+    ----------
+    connection : _Connection
+        An open connection authenticated as the schema's ``_migrator`` role. The caller owns
+        closing it.
+    schema : str
+        The bounded-context schema owning the allocator. Defaults to the only schema that has
+        one, and is a parameter so the owner role is derived rather than named as a literal.
+
+    Returns
+    -------
+    SequenceReconciliation
+        The stored maximum, and the allocator's position before and after.
+
+    Raises
+    ------
+    AuroraLoadError
+        If the owner role cannot be assumed, the sequence or the table cannot be read, or the
+        advance is refused. Nothing is left half applied: the reconciliation issues at most one
+        ``setval``, and a failure before it leaves the allocator exactly where it was.
+    """
+    # WHY : Assumptions: this needs the OWNER's authority, not the service role's.
+    #   `sql/V0__schemas_and_roles.sql` grants each service role `USAGE, SELECT` on its schema's
+    #   sequences -- which is `nextval` and `currval`, and deliberately not `setval`, since
+    #   `setval` requires UPDATE. The caller therefore authenticates as the `_migrator` login and
+    #   this function issues the `SET ROLE`, exactly as the Flyway migration that created the
+    #   sequence does.
+    # WHY : Alternatives Considered: granting `UPDATE ON SEQUENCES` to the runtime service role so
+    #   that the load's own connection could reconcile. Rejected because it hands a permanent
+    #   privilege to a long-lived principal for a one-time cutover step, and the privilege is
+    #   precisely the dangerous one: a role that can `setval` can REWIND the allocator and make
+    #   the service reissue identifiers it has already stored. The migration role already has the
+    #   authority and already exists for exactly this kind of step.
+    owner = owner_role_for_schema(schema)
+    try:
+        with _cursor_of(connection) as cursor:
+            cursor.execute(f"SET ROLE {quote_identifier(owner)}")
+            cursor.execute(
+                f"SELECT last_value, is_called FROM {quote_identifier(schema)}"
+                f".{quote_identifier('transaction_id_seq')}"
+            )
+            position = cursor.fetchone()
+            cursor.execute(
+                "SELECT coalesce((SELECT max(transaction_id::BIGINT)"
+                f" FROM {quote_identifier(schema)}.{quote_identifier('transactions')}"
+                f" WHERE transaction_id ~ '{_SEQUENCE_FORMAT_PATTERN}'), 0)"
+            )
+            maximum = cursor.fetchone()
+    except Exception as exc:
+        _rollback_quietly(connection)
+        raise AuroraLoadError(
+            f"the allocator {TRANSACTION_ID_SEQUENCE} could not be read as {owner}, so it was"
+            f" not reconciled and writes must not be enabled: {exc}"
+        ) from exc
+
+    stored_maximum = _first_int(maximum)
+    last_value = _first_int(position)
+    # Assumptions: `is_called` is what distinguishes a sequence that has issued a value from one
+    #   that has only been positioned. A never-called sequence issues `last_value` itself; a
+    #   called one issues `last_value + 1`. Reading `last_value` alone would understate the next
+    #   value by one on every sequence that has issued anything, which is the difference between
+    #   an advance that clears the loaded range and one that stops one identifier short of it.
+    is_called = bool(_second_value(position))
+    next_value_before = last_value + 1 if is_called else last_value
+    target = stored_maximum + 1
+    if target <= next_value_before:
+        # WHY : Trade-offs: the reconciliation only ever ADVANCES. A sequence already past the
+        #   stored maximum is left exactly where it is, and this is the load-bearing safety
+        #   property of the whole step rather than an optimisation: if writes were ever enabled --
+        #   even briefly, even by a smoke test -- allocations have happened, and setting the
+        #   allocator back to `max + 1` would reissue every identifier allocated since. A
+        #   redundant run is therefore a no-op, which is what makes the step safe to repeat.
+        _rollback_quietly(connection)
+        return SequenceReconciliation(
+            sequence=TRANSACTION_ID_SEQUENCE,
+            stored_maximum=stored_maximum,
+            next_value_before=next_value_before,
+            next_value_after=next_value_before,
+        )
+    try:
+        with _cursor_of(connection) as cursor:
+            cursor.execute(f"SET ROLE {quote_identifier(owner)}")
+            # Assumptions: the third argument is false, so the value passed is the one the NEXT
+            #   allocation returns rather than the last one used -- the same form the creating
+            #   migration uses, for the same reason: it keeps the empty-table case above the
+            #   sequence's declared MINVALUE of 1, which `setval` would otherwise refuse.
+            cursor.execute(
+                f"SELECT setval('{TRANSACTION_ID_SEQUENCE}', %s, false)",
+                (target,),
+            )
+        connection.commit()
+    except Exception as exc:
+        _rollback_quietly(connection)
+        raise AuroraLoadError(
+            f"the allocator {TRANSACTION_ID_SEQUENCE} could not be advanced to {target}, so"
+            f" writes must not be enabled: {exc}"
+        ) from exc
+    return SequenceReconciliation(
+        sequence=TRANSACTION_ID_SEQUENCE,
+        stored_maximum=stored_maximum,
+        next_value_before=next_value_before,
+        next_value_after=target,
+    )
+
+
+def _first_int(row: object) -> int:
+    """Read the first column of a result row as a non-negative integer.
+
+    Parameters
+    ----------
+    row : object
+        A row as the driver returned it, a bare value, or ``None``.
+
+    Returns
+    -------
+    int
+        The value, or zero when the row is absent or the value is not a non-negative integer.
+
+    Raises
+    ------
+    None
+    """
+    # Assumptions: an absent row answers ZERO rather than raising, matching how the guarding row
+    #   count treats the same case -- a table with no rows and a double that arranges none are
+    #   indistinguishable here, and both mean "nothing stored".
+    if row is None:
+        return 0
+    value = row[0] if isinstance(row, (list, tuple)) else row
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _second_value(row: object) -> object:
+    """Read the second column of a result row, or ``None`` when there is not one.
+
+    Parameters
+    ----------
+    row : object
+        A row as the driver returned it, a bare value, or ``None``.
+
+    Returns
+    -------
+    object
+        The second column, or ``None``.
+
+    Raises
+    ------
+    None
+    """
+    # Assumptions: a row too short to have a second column answers `None`, which the caller reads
+    #   as a sequence that has NOT been called -- the conservative reading, because it makes the
+    #   next value `last_value` rather than `last_value + 1` and so can only understate how far
+    #   the allocator has gone, never overstate it.
+    if isinstance(row, (list, tuple)) and len(row) > 1:
+        return row[1]
+    return None

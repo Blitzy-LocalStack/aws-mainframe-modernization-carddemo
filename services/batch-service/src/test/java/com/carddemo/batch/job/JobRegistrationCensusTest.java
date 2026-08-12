@@ -6,7 +6,9 @@ import static org.mockito.Mockito.mock;
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.repository.AccountRepository;
+import com.carddemo.batch.repository.CardRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
+import com.carddemo.batch.repository.CustomerRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
@@ -70,6 +72,19 @@ class JobRegistrationCensusTest {
                 .withBean(DailyTransactionRepository.class,
                         () -> mock(DailyTransactionRepository.class))
                 .withBean(CardXrefRepository.class, () -> mock(CardXrefRepository.class))
+                // WHY : Assumptions: the customer and card projections are contributed here because
+                //       ExportJob's bean method takes all five export sources. They carry no stub
+                //       behaviour, because this census asserts which beans are REGISTERED and never
+                //       runs a job body; a stubbed return would suggest otherwise.
+                //       Refactoring Rationale: they are contributed at all because the export job now
+                //       reads all five masters app/cbl/CBEXPORT.cbl reads. It previously read three, so
+                //       this census could register every job bean without either seam existing -- which
+                //       is exactly why the shortfall reached a review rather than a build. Each is
+                //       contributed ONCE: the runner refuses a second definition of the same bean name,
+                //       so a repeated contribution fails every case in this class on context start-up
+                //       rather than on its own subject.
+                .withBean(CustomerRepository.class, () -> mock(CustomerRepository.class))
+                .withBean(CardRepository.class, () -> mock(CardRepository.class))
                 .withBean(AccountRepository.class, () -> mock(AccountRepository.class))
                 .withBean(TransactionRepository.class, () -> mock(TransactionRepository.class))
                 .withBean(TransactionRejectRepository.class,

@@ -18,6 +18,7 @@ import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionReject;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
@@ -179,8 +180,8 @@ class PostTransactionsJobTest {
         // WHY : Assumptions: the ledger stub EVALUATES the body it is handed. A default-returning mock
         //       would run none of the posting work and every count asserted below would be zero, so the
         //       cases would pass while exercising nothing at all.
-        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any())).thenAnswer(call -> {
-            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(2).get();
+        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any(BatchJobName.class), any())).thenAnswer(call -> {
+            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(3).get();
             return new BatchStepLedger.StepOutcome(outcome, false);
         });
 

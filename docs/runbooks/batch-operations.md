@@ -1,7 +1,7 @@
 # Batch Operations Runbook
 
-> **Purpose.** Operate, inspect, and redrive the CardDemo nightly and ad-hoc
-> Step Functions workflows.
+> **Purpose.** Operate, inspect, and redrive the CardDemo nightly, ad-hoc and
+> dataset round-trip Step Functions workflows.
 >
 > **Source of truth.** `infra/modules/step-functions-batch/main.tf`,
 > `docs/architecture/batch-orchestration.md`, and the immutable JCL under
@@ -17,9 +17,21 @@ all commands run from the repository root.
 # WHAT: read the deployed workflow ARNs from Terraform outputs.
 # WHY : Assumptions: names are environment-specific and must not be copied from
 #       another account or region.
+# WHY : Refactoring Rationale: these three read the COMPOSITE `batch_orchestration`
+#       output and select a member from it, where an earlier revision of this block
+#       used `output -raw daily_batch_state_machine_arn` and
+#       `output -raw adhoc_report_state_machine_arn`. Neither of those root outputs
+#       exists: `infra/envs/<env>/outputs.tf` publishes one output per module, and
+#       for this module it is `batch_orchestration`, whose value is the whole module
+#       output object. Both commands therefore failed with "Output
+#       \"daily_batch_state_machine_arn\" not found", which is a runbook step that
+#       cannot be followed rather than one that is merely imprecise.
 ENVIRONMENT=dev
-DAILY_ARN="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -raw daily_batch_state_machine_arn)"
-ADHOC_ARN="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -raw adhoc_report_state_machine_arn)"
+ORCHESTRATION="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -json batch_orchestration)"
+DAILY_ARN="$(printf '%s' "$ORCHESTRATION" | jq -r '.daily_state_machine_arn')"
+ADHOC_ARN="$(printf '%s' "$ORCHESTRATION" | jq -r '.adhoc_report_state_machine_arn')"
+DATASET_ARN="$(printf '%s' "$ORCHESTRATION" | jq -r '.dataset_roundtrip_state_machine_arn')"
+AUTHZ_EXTRACT_ARN="$(printf '%s' "$ORCHESTRATION" | jq -r '.authorization_extract_state_machine_arn')"
 ```
 
 ## Start the Nightly Chain Manually
@@ -121,20 +133,229 @@ aws stepfunctions start-execution \
   --input "{\"startDate\":\"${START_DATE}\",\"endDate\":\"${END_DATE}\"}"
 ```
 
+## Run the Dataset Export/Import Round Trip
+
+The export/import pair is operator-invoked, not scheduled — exactly as
+`app/jcl/CBEXPORT.jcl` and `app/jcl/CBIMPORT.jcl` are, neither of which appears
+in `app/scheduler/CardDemo.ca7` or `app/scheduler/CardDemo.controlm`. One
+execution runs `--job=export` and then, only if that task exited zero,
+`--job=import` over the object the export wrote.
+
+```bash
+# WHAT: run one export/import round trip for an injected business date.
+# WHY : Assumptions: the execution NAME is derived from the business date and
+#       carries NO timestamp, which is the opposite of the nightly and report
+#       commands above and is deliberate. The name becomes CARDDEMO_BATCH_RUN_ID
+#       inside both tasks, and BatchStepLedger keys on (runId, stepName) over
+#       batch.batch_run -- so a deterministic name is what makes a re-invocation
+#       idempotent: the ledger finds the step already recorded and replays its
+#       outcome instead of running the body again. Step Functions also refuses a
+#       duplicate execution name on a STANDARD machine, so a repeat is normally
+#       refused before it starts.
+# WHY : Trade-offs: because the name is deterministic, a genuine RERUN of the same
+#       business date -- after correcting a cause -- has to be asked for
+#       explicitly, by appending a suffix such as -r2. That is the intended
+#       friction: without it, a re-run of the import would append a second copy of
+#       every record to all six artefacts, and the artefacts carry no marker that
+#       would let a consumer notice.
+BUSINESS_DATE=2022-07-18
+aws stepfunctions start-execution \
+  --state-machine-arn "$DATASET_ARN" \
+  --name "dataset-roundtrip-${BUSINESS_DATE}" \
+  --input "{\"businessDate\":\"${BUSINESS_DATE}\"}"
+```
+
+A malformed or absent `businessDate` is refused by the graph's
+`ValidateDatasetRequest` state before any task starts, so the operator sees
+`InvalidDatasetRequest` immediately rather than paying a task start-up to be
+told the same thing. The shape check is `YYYY-MM-DD`; the calendar check is the
+job's, so `2022-13-45` passes the graph and is refused by the task.
+
+The artefacts one execution produces, all under the dataset bucket:
+
+| Object | Written by | Contents |
+|---|---|---|
+| `export/<yyyymmdd00>/export.dat` | `--job=export` | All five record types — customer `C`, account `A`, cross-reference `X`, transaction `T`, card `D` — at 500 bytes each |
+| `import/<yyyymmdd00>/customer.dat` | `--job=import` | Customer records separated out of the export |
+| `import/<yyyymmdd00>/account.dat` | `--job=import` | Account records |
+| `import/<yyyymmdd00>/card_xref.dat` | `--job=import` | Cross-reference records |
+| `import/<yyyymmdd00>/transaction.dat` | `--job=import` | Transaction records |
+| `import/<yyyymmdd00>/card.dat` | `--job=import` | Card records |
+| `import/<yyyymmdd00>/error.dat` | `--job=import` | One 132-byte diagnostic record per unrecognised or truncated image |
+
+Every one of the six import artefacts is written even when it is empty, because
+the reference allocates its outputs `DISP=(NEW,CATLG,DELETE)` and a consumer
+distinguishing "no records of this type" from "the import did not run" needs the
+empty artefact to exist.
+
+**Three fields in the export are deliberately redacted** and this is not a
+defect to be reported: the national identifier at `app/cpy/CVEXPORT.cpy:36` is
+written as zero, the government-issued identifier at `:37` as blanks, and the
+card verification value at `:96` as an encoded zero. All three are stored
+enciphered under keys the batch task role holds no decrypt right for, and
+acquiring that right in order to write them in clear into an object-store extract
+is refused rather than unimplemented. The divergence is registered in
+`docs/architecture/cobol-to-service-traceability.md`.
+
+## Export or Load the Pending-Authorization Segments
+
+The segment export and the extract load are operator-invoked, not scheduled, for
+the same reason the export/import pair above is: `app/jcl/DBPAUTP0.jcl` runs the
+reference unload on request and appears in neither
+`app/scheduler/CardDemo.ca7` nor `app/scheduler/CardDemo.controlm`. One state
+machine serves both directions and a `mode` field in the input selects which.
+
+**The two directions are alternatives and are never chained.** That is the one
+way this machine differs from the dataset round trip, and it is deliberate:
+verifying an export by loading it back would write into the live `authorization`
+schema, and because `--job=purge-authorizations` deletes expired rows a load run
+after a purge would **resurrect exactly the rows the purge removed**. A
+verification that can undo a retention decision is worse than none, so the load
+is a separate, explicitly-requested mode.
+
+### Export the segments
+
+```bash
+# WHAT: export every pending-authorization summary and its authorizations to two
+#       flat extracts in the dataset bucket.
+# WHY : Assumptions: the execution NAME carries a timestamp, which is the opposite
+#       of the dataset round trip above and is deliberate. That machine derives a
+#       deterministic name because its jobs are ledger-idempotent and a repeat must
+#       replay rather than re-run. This machine's export has no ledger and writes to
+#       keys that CONTAIN the execution name, so two exports of the same business
+#       date are two different sets of objects rather than one overwritten set --
+#       and a unique name is what keeps an earlier export readable after a later one
+#       has run.
+# WHY : Assumptions: no destination is passed. The graph composes both keys from the
+#       bucket, the business date and the execution name, so an export cannot be
+#       aimed at an unrelated key and two concurrent exports cannot collide. Where
+#       the objects landed is read back out of the execution's own input below.
+ENVIRONMENT=dev
+BUSINESS_DATE=2022-07-18
+RUN_NAME="authz-unload-${BUSINESS_DATE}-$(date -u +%Y%m%dT%H%M%SZ)"
+aws stepfunctions start-execution \
+  --state-machine-arn "$AUTHZ_EXTRACT_ARN" \
+  --name "$RUN_NAME" \
+  --input "{\"mode\":\"unload\",\"businessDate\":\"${BUSINESS_DATE}\"}"
+```
+
+The two objects one export writes, under the dataset bucket:
+
+| Object | Contents |
+|---|---|
+| `authorization/extract/dt=<BUSINESS_DATE>/run=<RUN_NAME>/roots.dat` | One 100-byte summary image per `pending_auth_summary` row |
+| `authorization/extract/dt=<BUSINESS_DATE>/run=<RUN_NAME>/children.dat` | One authorization record per `pending_auth_detail` row, 206 bytes in the default `prefixed` form and 200 in `sequential` |
+
+```bash
+# WHAT: read back where the export put its two objects, and what it wrote.
+# WHY : Assumptions: the destinations are recovered from the execution rather than
+#       reconstructed by hand, because the run name is part of the key and a
+#       transcription error would name an object that does not exist. The counts
+#       come from the task's own log line, which reports rootsWritten,
+#       childrenWritten and rootsSkipped and names no account or customer.
+DATASET_BUCKET="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -json datasets | jq -r '.bucket_name')"
+aws s3 ls --recursive \
+  "s3://${DATASET_BUCKET}/authorization/extract/dt=${BUSINESS_DATE}/run=${RUN_NAME}/"
+```
+
+**Neither object appears unless the export completed.** Both are staged and
+published only after the walk returns, so a run that failed part-way leaves no
+object at either key rather than a complete `roots.dat` beside a truncated
+`children.dat` — a pair a consumer could not tell from a correct one, because a
+child record is attributed to its parent by a key only the root file explains.
+
+`rootsSkipped` above is not necessarily an error: a summary row carrying no
+account identifier cannot be exported, and the export reports the count rather
+than failing. The diagnostic names no subject of a skipped row by design; the
+count is the whole of what the log can say about them.
+
+### Choose the record form
+
+The default is the `prefixed` form — the transcription of `cbl/PAUDBUNL.CBL`,
+whose child record carries its packed parent key ahead of the segment. It is the
+form the load reads back, which is why it is the default. The `sequential` form
+is `cbl/DBUNLDGS.CBL`: a bare 200-byte segment with no prefix, attributable to an
+account only by the interleaved order of the two files.
+
+```bash
+# WHAT: export in the sequential form instead of the default prefixed one.
+# WHY : Trade-offs: an extract in this form cannot be loaded back by
+#       --job=load-authorizations, because a child record in it carries nothing
+#       that attributes it to a parent. Ask for it only when the consumer is one
+#       that reads the two files in step, which is what the reference program's own
+#       consumer does.
+aws stepfunctions start-execution \
+  --state-machine-arn "$AUTHZ_EXTRACT_ARN" \
+  --name "authz-unload-seq-${BUSINESS_DATE}-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --input "{\"mode\":\"unload\",\"businessDate\":\"${BUSINESS_DATE}\",\"extractForm\":\"sequential\"}"
+```
+
+The graph passes `extractForm` through to the task only for the export; an
+unpublished value is refused by the service before its context starts, and the
+refusal names both published forms.
+
+### Load an extract back
+
+```bash
+# WHAT: load two prefixed-form extracts into the authorization schema.
+# WHY : Assumptions: BOTH sources are named by the operator rather than derived,
+#       because the extract being loaded was not necessarily produced by this
+#       machine -- the reference programs' own output is a legitimate input and
+#       carries no run identifier a graph could reconstruct. Either source may be
+#       an s3:// location or a filesystem path inside the container.
+# WHY : Assumptions: the load is IDEMPOTENT on the rows it inserts -- it reports
+#       alreadyPresent for a row it finds -- but it is NOT a no-op against a schema
+#       a purge has run on, because a row the purge deleted is absent and will be
+#       inserted again. Confirm the extract's date against the retention window
+#       before running this.
+aws stepfunctions start-execution \
+  --state-machine-arn "$AUTHZ_EXTRACT_ARN" \
+  --name "authz-load-$(date -u +%Y%m%dT%H%M%SZ)" \
+  --input "$(jq -nc \
+      --arg roots "s3://${DATASET_BUCKET}/authorization/extract/dt=${BUSINESS_DATE}/run=${RUN_NAME}/roots.dat" \
+      --arg children "s3://${DATASET_BUCKET}/authorization/extract/dt=${BUSINESS_DATE}/run=${RUN_NAME}/children.dat" \
+      '{mode:"load", rootExtract:$roots, childExtract:$children}')"
+```
+
+An input naming no `mode`, or a `mode` whose own arguments are absent, is refused
+by `ValidateAuthorizationExtractRequest` before any task starts, and the operator
+sees `InvalidAuthorizationExtractRequest` with the two accepted shapes named.
+Inspect and redrive an execution of this machine exactly as for the others above.
+
 ## Poison-Message Handling
 
 Authorization FIFO DLQ entries are quarantined. Do not bulk-redrive them:
-review one message, preserve its opaque group identifier, correct the cause, and
+review one message, preserve its group identifier, correct the cause, and
 replay one message at a time. This maintains the per-group order contract and
 prevents a later authorization from overtaking the failed one.
+
+> Refactoring Rationale: that identifier was described here as **opaque**, and it is not. Sections
+> 0.4.1.8 and 0.7.6 of the technical specification freeze `MessageGroupId` as `card_num`, so the
+> value to preserve is the card number itself, and the exposure that follows is registered as
+> divergence `D-AUTHORIZATION-FIFO-IDENTITY-METADATA`. The practical difference for an operator is
+> the whole reason to correct it: a replay must reuse the value the message already carries rather
+> than recompute anything, and the value is a **primary account number**, so a transcript of this
+> procedure is a transcript containing cardholder data and must be handled as one.
 
 ## Rotate the Messaging HMAC Key (operator-managed)
 
 Each environment root holds `<name-prefix>/<env>/messaging/hmac-key`, injected into the
-`authorization` task alone and read by `com.carddemo.common.messaging` to derive the FIFO
-**message-group identity** and the correlation identity of every pending-authorization message. Its
-resource carries a recorded `checkov` suppression for `CKV2_AWS_57` stating that rotation is an
-**attended** procedure documented in this runbook. This section is that procedure.
+`authorization` task alone, where `config/MessagingIdentityConfig` keys the one tokeniser that
+context holds. Its resource carries a recorded `checkov` suppression for `CKV2_AWS_57` stating that
+rotation is an **attended** procedure documented in this runbook. This section is that procedure.
+
+> Refactoring Rationale: this paragraph said the key derives "the FIFO **message-group identity** and
+> the correlation identity of every pending-authorization message". It no longer derives the group
+> identity at all — sections 0.4.1.8 and 0.7.6 of the technical specification freeze `MessageGroupId`
+> as `card_num` and `MessageDeduplicationId` as `transaction_id`, and both are emitted literally,
+> because a group identity orders one card's messages only while every producer computes it
+> identically and a deduplication identity suppresses a resend only while the requester can predict
+> it. What the key still stands for is the values this context computes **for itself**: the business
+> correlation token and the redacted diagnostic digest, which are the surfaces of `.mapper` that take
+> the tokeniser as a parameter. Assumptions: no component injects that bean today, so no run-time
+> value is currently derived from it; the key is nonetheless required and has no default, because a
+> defaulted or absent key would reduce every value derived through it to an unkeyed digest of a short
+> structured input, which anyone holding one confirms by enumeration.
 
 > Refactoring Rationale: the suppression cited this file while no such procedure existed in it. A
 > suppression whose justification points at a missing document is indistinguishable from an
@@ -143,21 +364,35 @@ resource carries a recorded `checkov` suppression for `CKV2_AWS_57` stating that
 > **messaging-ordering** constraint, and the window it must run in is the batch quiesce bracket this
 > runbook already defines.
 
-**Why this one cannot be rotated while the queue is non-empty.** The group identity is derived from
-the key, so equal cards must derive equal groups across every producer *at the same instant*. Change
-the key while messages are in flight and one card's messages split across two group identifiers —
-which silently forfeits the per-card ordering guarantee the key exists to provide. That failure does
-not surface as an error: both groups are processed, just not in one order. It is therefore the one
-rotation here whose damage is invisible at the time it occurs.
+**Why this one is still attended, and what stopped being true.**
 
-Run it **inside the batch quiesce bracket**, and only after confirming the request queue and its
-dead-letter queue are both empty.
+> Refactoring Rationale: this section argued that the key could not be rotated while the queue was
+> non-empty, because "the group identity is derived from the key, so equal cards must derive equal
+> groups across every producer *at the same instant*", and that rotating mid-flight split one card's
+> messages across two group identifiers and silently forfeited per-card ordering. That hazard **no
+> longer exists**, because the group identity is now the literal card number and is computed from the
+> message rather than from any key. Deleting the section would have been wrong all the same: the
+> secret is still provisioned, still required, and still carries a suppression that names this runbook
+> as where its rotation is written down.
+
+What makes it attended now is narrower and is stated plainly: rotation is a change of key material
+that the running task reads **once at start-up**, so it takes effect only on a roll, and until every
+task has rolled two tasks hold different keys. Any value derived under the old key stops matching one
+derived under the new key, so two log lines about one authorization would not join across the
+rotation boundary. Running it inside the batch quiesce bracket keeps that window inside a period when
+no online writes are being accepted anyway.
+
+Trade-offs: the queue-depth check below is **retained but is no longer load-bearing**, and it is worth
+knowing which. It cannot protect ordering any more, because ordering does not depend on the key; a
+consumer restarted mid-decision is safe on its own terms, since the per-message transaction rolls back
+and the unacknowledged message returns to the queue when its visibility timeout lapses. It is kept
+because it costs one call, it confirms the bracket is genuinely quiet before a roll, and it is the
+check that becomes load-bearing again the moment a derived surface is wired into the message path.
 
 ```bash
 # WHAT: confirms there is nothing in flight before the key changes.
-# WHY : Assumptions: both queues are checked, and the dead-letter queue is not optional -- a
-#       quarantined message replayed after rotation would be re-grouped under the new key while its
-#       siblings were grouped under the old one, which is the split this procedure exists to avoid.
+# WHY : Assumptions: both queues are checked, including the dead-letter queue, because a quarantined
+#       message replayed later is processed by whichever task holds the key at that time.
 #       ApproximateNumberOfMessagesNotVisible is included because an in-flight message held under a
 #       visibility timeout is exactly the case a depth-only check misses.
 aws sqs get-queue-attributes --region "<aws-region>" \

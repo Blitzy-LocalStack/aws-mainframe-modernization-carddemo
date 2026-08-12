@@ -49,8 +49,8 @@ import org.hibernate.type.SqlTypes;
 //       THIS MODULE WRITES THIS TABLE. Two independent contracts establish that. In the baseline
 //       all three programs open the file for input only -- app/cbl/CBTRN01C.cbl:291,
 //       app/cbl/CBTRN02C.cbl:275 and app/cbl/CBACT04C.cbl:254 -- and no program issues a write or
-//       a rewrite against it. In the target, data-migration/sql/V0__schemas_and_roles.sql:768
-//       grants this module's role SELECT on the account schema and line 779 grants UPDATE on
+//       a rewrite against it. In the target, data-migration/sql/V0__schemas_and_roles.sql:1215
+//       grants this module's role SELECT on the account schema and line 1226 grants UPDATE on
 //       account.accounts BY NAME, so no insert, update or delete privilege on the cross-reference
 //       is granted at all. Rows originate in account-service and, for a migrated load, in the
 //       extract-transform-load reader data-migration/src/carddemo_migration/readers/xref.py.
@@ -200,8 +200,8 @@ import org.hibernate.type.SqlTypes;
  *
  * <p>Assumptions: the grant is read-only on this table, and it is worth stating precisely because
  * the batch role does hold a write grant elsewhere in the same schema.
- * {@code data-migration/sql/V0__schemas_and_roles.sql:768} grants {@code SELECT} on the tables of
- * the {@code account} schema, and line 779 grants {@code UPDATE} on {@code account.accounts}
+ * {@code data-migration/sql/V0__schemas_and_roles.sql:1215} grants {@code SELECT} on the tables of
+ * the {@code account} schema, and line 1226 grants {@code UPDATE} on {@code account.accounts}
  * <b>by name</b>. No insert, update or delete privilege on the cross-reference is granted to this
  * module at all. That matches the baseline exactly, where all three programs open the file for
  * input only -- {@code app/cbl/CBTRN01C.cbl:291}, {@code app/cbl/CBTRN02C.cbl:275} and

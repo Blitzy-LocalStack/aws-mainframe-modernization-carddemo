@@ -435,8 +435,15 @@ public class BillPaymentMapper {
      *     the transaction amount. It is a scalar rather than the account record because the account
      *     belongs to a different bounded context, as recorded on this class; the caller is the party
      *     that read it and is also the party that subtracts it afterwards, which keeps the append and
-     *     the balance reduction inside the single unit of work lines 233 to 235 perform. Must not be
-     *     {@code null}
+     *     the balance reduction inside the single unit of work lines 233 to 235 perform. It must
+     *     additionally fit the ledger amount's nine integer digits, which is NARROWER than the ten the
+     *     account master stores -- the caller refuses a wider balance before it reaches this method,
+     *     with the reference's own sentence, and that refusal is registered as
+     *     {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED} in
+     *     {@code docs/architecture/cobol-to-service-traceability.md}. The ceiling is stated here
+     *     because this method is where a wider value would otherwise be refused by the entity's own
+     *     constructor, which reaches a caller as an internal failure rather than as anything it can
+     *     act on. Must not be {@code null}
      * @param paymentTimestamp the instant the caller captured for this payment, reduced to the
      *     resolution the timestamp contract carries and then written to <b>both</b> the originating
      *     and the processing member; must not be {@code null}
@@ -744,13 +751,13 @@ public class BillPaymentMapper {
         Objects.requireNonNull(confirmationState, "confirmationState must not be null");
 
         // WHY : Refactoring Rationale: the account identifier is settled BEFORE the confirmation is
-        //       looked at, and the earlier arrangement looked at the confirmation first. The reference
-        //       catches a never-supplied account identifier at line 159 of app/cbl/COBIL00C.cbl and
-        //       answers it at line 161, and only a submission that survives that test reaches the
-        //       four-way confirmation evaluation at lines 173 to 191 at all. Evaluating the
-        //       confirmation first inverted that order, and the inversion was not cosmetic: the
-        //       commonest first-turn submission leaves BOTH fields empty, and that submission raised
-        //       from the guard below instead of returning the one entry the reference reports.
+        //       looked at. The reference catches a never-supplied account identifier at line 159 of
+        //       app/cbl/COBIL00C.cbl and answers it at line 161, and only a submission that survives
+        //       that test reaches the four-way confirmation evaluation at lines 173 to 191 at all.
+        //       Evaluating the confirmation first would invert that order, and the inversion is not
+        //       cosmetic: the commonest first-turn submission leaves BOTH fields empty, and under the
+        //       inversion it would raise from the guard below instead of returning the one entry the
+        //       reference reports.
         // WHY : Assumptions: a blank account identifier therefore returns its own entry alone, whatever
         //       the confirmation holds. This is not a claim that the confirmation was acceptable; it is
         //       that the reference never formed an opinion about it on this turn, so reporting one

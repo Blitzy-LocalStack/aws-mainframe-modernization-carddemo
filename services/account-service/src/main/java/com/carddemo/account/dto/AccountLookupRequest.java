@@ -25,9 +25,13 @@ import jakarta.validation.constraints.NotNull;
  * without holding any of them.</p>
  *
  * <p>Trade-offs: as a {@code POST} the operation is neither cacheable nor idempotent by method semantics.
- * Neither costs anything for the two consumers this contract has: both are internal service clients that
- * call it once inside a transaction they are about to commit or roll back, so neither would reuse a cached
- * answer. Alternatives Considered: keeping the {@code GET} and sealing the identifier into an opaque
+ * Neither costs anything for the two consumers the account context read has: both are internal service
+ * clients that call it once inside a transaction they are about to commit or roll back, so neither would
+ * reuse a cached answer. Assumptions: this record now serves THREE operations rather than the one it was
+ * written for -- the internal context read, the human account view and the by-account cross-reference
+ * walk, each of which takes an account identifier and nothing else -- and the trade-off above holds for
+ * the two screen reads as well, whose answer a browser must not cache in any case because it carries a
+ * revision the caller is about to submit back. Alternatives Considered: keeping the {@code GET} and sealing the identifier into an opaque
  * selector, as the card contract does for a card number. Rejected here because a sealed selector has to be
  * MINTED by whoever holds the key and handed to the caller, and these callers arrive holding a raw
  * identifier they read out of a transaction record -- there is no prior response for a token to come from,

@@ -1,24 +1,23 @@
 /**
  * Spring configuration package of the pending credit-card authorization bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every class name, file name and count in this charter describes the package's
- * <b>target contract</b> as the migration plan assigns it, and not the set of files present beside
- * this one today. The migration lands its artifacts in plan order and this charter is authored
- * first, so at the checkpoint that authored it this directory holds this charter and nothing else.
- * A class named below that has no file yet is therefore <b>planned</b>, not missing, and a count
- * below is a target total rather than a measurement of the directory. The same distinction holds
- * for the shared-kernel types named further down and for the profile configuration this package
- * reads: each is a contract this package is written against, not a file this charter observed.</p>
+ * <p>Seven compilation units sit in this directory: this charter and the six configuration classes
+ * {@code DataSourceConfig}, {@code InternalIdentityConfig}, {@code MessagingIdentityConfig},
+ * {@code OpenApiConfig}, {@code SecurityConfig} and {@code SqsConfig}. Every class name, file name
+ * and count here is a measurement of that directory, and the marker line is re-measured on every
+ * build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a seventh class arriving without an entry here fails the build:</p>
  *
- * <p>Alternatives Considered: withholding this charter until the four classes it governs exist.
- * Rejected, because the charter is what the authors of those classes work from -- which class
- * belongs here, which does not, and what the closed set is -- so writing it last would leave the
- * package with no stated contract during exactly the interval in which one is needed. The cost
- * accepted is that the inventory reads as present tense unless the distinction is declared, which
- * is what the paragraph above is for; it is the single place a reader has to look in order to tell
- * a target from a measurement.</p>
+ * <pre>
+ * this directory: 7 java files = 6 classes + 1 charter
+ * </pre>
+ *
+ * <p>Assumptions: the shared-kernel types named further down, and the profile configuration this
+ * package reads, are contracts this package is written against rather than members of it, so they are
+ * outside the count above and are cited by path where they matter.</p>
  *
  * <p><b>Purpose.</b> This package holds the Spring configuration for one bounded context and
  * nothing else: the beans and settings that put a validated token, a published contract, a database
@@ -51,23 +50,16 @@
  * a narrow and separately testable responsibility. The enumeration below is the closed set assigned
  * to it, and it is now also a measurement: six files beside this one carry that annotation.</p>
  *
- * <p>Refactoring Rationale: this heading and this count read <b>four</b>, and the enumeration
- * stopped after the message-listener class. Two additions and one deletion have since moved the
- * figure, and each is named here because a "closed set" that disagrees with its own directory
- * stops being a contract a reader can rely on -- Rule 1 fails a rationale that is stale as
- * squarely as one that is absent. The two additions are the keyed-identity classes below. Both arrived
- * with a security correction that took a primary account number out of queue metadata; that correction
- * has since been withdrawn for the two first-in-first-out identities, which specification &sect;0.4.1.8
- * freezes as literal values, and the consequence is recorded on {@link MessagingIdentityConfig}'s bullet
- * below rather than left to be inferred from a class that survived its original purpose. The deletion is
- * {@code MessagingTokenConfig}, a SECOND tokeniser configuration that
- * bound {@code carddemo.security.mask-hmac-key} -- a property the sibling
- * {@code application.yml} withdrew, and which {@code infra/modules/ecs-service} provisions for the
- * extract-transform-load workload alone. It contributed an unqualified bean of the same type as
+ * <p>Refactoring Rationale: a seventh configuration class, {@code MessagingTokenConfig}, was DELETED
+ * from this package rather than repointed, and the deletion is recorded because a reader may find the
+ * name in a diff or a message. It was a second tokeniser configuration binding
+ * {@code carddemo.security.mask-hmac-key} -- a property the sibling {@code application.yml} does not
+ * supply, and which {@code infra/modules/ecs-service} provisions for the extract-transform-load
+ * workload alone. It contributed an unqualified bean of the same type as
  * {@link MessagingIdentityConfig}'s and read a property no deployment of this context supplies, so
- * this context could not start at all under its own declared deployment. It is deleted rather than
- * repointed at the surviving property, because two beans deriving one identity is the condition
- * under which a consumer can silently bind the wrong key.</p>
+ * this context could not start at all under its own declared deployment. Two beans deriving one
+ * identity is the condition under which a consumer silently binds the wrong key, which is why one of
+ * the two had to go rather than both being kept and disambiguated.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} builds the resource server filter chain. Every business request
@@ -123,19 +115,18 @@
  *       purposes, so sharing one value would let a migration workload compute values a production
  *       consumer derives. That separation is the whole reason this class exists rather than a method
  *       on {@code SqsConfig}: the tokeniser is a security primitive keyed from the secret store,
- *       while {@code SqsConfig} wires a transport client. Refactoring Rationale: this bullet said the
- *       tokeniser was what every QUEUE IDENTITY in this context is derived through, and that is no
- *       longer true of either first-in-first-out identity. Specification &sect;0.4.1.8 freezes
+ *       while {@code SqsConfig} wires a transport client. Assumptions: the tokeniser is NOT what the
+ *       two first-in-first-out queue identities are derived through. Specification &sect;0.4.1.8 freezes
  *       {@code MessageGroupId} as {@code card_num} and {@code MessageDeduplicationId} as
- *       {@code transaction_id}, so both are now emitted literally -- a derived group identity is only
- *       equal for equal cards WITHIN one producer, which is not the guarantee the specification
- *       describes. What the tokeniser remains is the keyed primitive the derived-identity surfaces of
- *       {@code .mapper} accept, {@code AuthorizationMessageMapper.businessCorrelationToken} and
- *       {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}; no component of this context
- *       injects the bean at present, and it is retained rather than retired because the deployment
- *       contract that delivers its key is asserted by {@code infra/modules/ecs-service} and
- *       provisioned by both environment roots, which are outside the change this correction is
- *       part of.</li>
+ *       {@code transaction_id}, so both are emitted literally -- a derived group identity is only equal
+ *       for equal cards WITHIN one producer, which is not the guarantee the specification describes.
+ *       What the tokeniser is, is the keyed primitive the derived-identity surfaces of {@code .mapper}
+ *       accept, {@code AuthorizationMessageMapper.businessCorrelationToken} and
+ *       {@code MappingDiagnostic.structuredFields(OpaqueIdentifier)}. Trade-offs: no component of this
+ *       context injects the bean at present, and it is retained rather than retired because the
+ *       deployment contract that delivers its key is asserted by {@code infra/modules/ecs-service} and
+ *       provisioned by both environment roots, so retiring the bean would leave a provisioned secret
+ *       with no declared consumer.</li>
  *   <li>{@link InternalIdentityConfig} supplies the short-lived bearer identity this context
  *       presents when it reads the card cross-reference and the account master from the context
  *       that owns them, from {@code carddemo.internal-identity.authorization-signing-key}. Assumptions: it is

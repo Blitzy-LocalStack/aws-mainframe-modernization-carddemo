@@ -36,7 +36,7 @@ import org.springframework.context.annotation.Configuration;
  * charter beside this file closes the package at three configuration classes and records there why
  * no resource-server chain exists in this module at all.</p>
  *
- * <h2>Four schemas, one data source, one commit</h2>
+ * <h2>Five schemas, one data source, one commit</h2>
  *
  * <p>This is the module's defining oddity and the reason this class carries guards its siblings do
  * not need. Every other bounded context in the reactor reaches exactly one schema, so a search-path
@@ -47,16 +47,16 @@ import org.springframework.context.annotation.Configuration;
  *
  * <ul>
  *   <li>{@code batch} is OWNED and is the only schema this module migrates. It is created for the
- *       batch owner at {@code data-migration/sql/V0__schemas_and_roles.sql:713}, and the runtime
- *       role receives {@code SELECT, INSERT, UPDATE} on its tables at that file's line 973 while
+ *       batch owner at {@code data-migration/sql/V0__schemas_and_roles.sql:723}, and the runtime
+ *       role receives {@code SELECT, INSERT, UPDATE} on its tables at that file's line 983 while
  *       {@code CREATE} is explicitly revoked from it at line 966.</li>
  *   <li>{@code ledger} is owned by {@code transaction-service} and reached under a cross-schema
  *       write grant, {@code SELECT, INSERT, UPDATE} at
- *       {@code data-migration/sql/V0__schemas_and_roles.sql:1115}.</li>
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1162}.</li>
  *   <li>{@code account} is owned by {@code account-service} and reached under a grant narrowed to
  *       one table: schema-wide {@code UPDATE} is revoked at
- *       {@code data-migration/sql/V0__schemas_and_roles.sql:1166}, {@code SELECT} is granted at line
- *       1168, and {@code UPDATE} is granted on {@code account.accounts} alone at line 1179.</li>
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1213}, {@code SELECT} is granted at line
+ *       1215, and {@code UPDATE} is granted on {@code account.accounts} alone at line 1226.</li>
  *   <li>{@code reference} is SELECT ONLY, granted at
  *       {@code data-migration/sql/V0__schemas_and_roles.sql:1215}, with no write grant of any kind.
  *       {@code DisclosureGroupRepository} extends the narrow
@@ -64,10 +64,10 @@ import org.springframework.context.annotation.Configuration;
  *       a mutator is not expressible against that schema at compile time.</li>
  * </ul>
  *
- * <p>Assumptions: the ordered path is {@code batch, ledger, account, reference} with the owned
+ * <p>Assumptions: the ordered path is {@code batch, ledger, account, reference, card} with the owned
  * schema FIRST, and the ordering is part of the contract rather than a preference. The grants above
  * are created by {@code data-migration/sql/V0__schemas_and_roles.sql} and by the services that own
- * the three foreign schemas; this class configures the path and creates none of the privileges it
+ * the four foreign schemas; this class configures the path and creates none of the privileges it
  * depends on.</p>
  *
  * <h2>The transaction posture, and what silently breaks if it is widened</h2>
@@ -128,7 +128,7 @@ import org.springframework.context.annotation.Configuration;
  *       of the form {@code SET search_path TO <schema>[, <schema>...]} naming the ordered list below
  *       and nothing after it.</li>
  *   <li>{@code carddemo.batch.datasource.search-path} -- the ordered, comma-separated schema list
- *       this module declares it needs, defaulting to {@code batch,ledger,account,reference}. The
+ *       this module declares it needs, defaulting to {@code batch,ledger,account,reference,card}. The
  *       owned schema must be first.</li>
  *   <li>{@code spring.datasource.hikari.auto-commit} -- REQUIRED, and must be {@code false}.</li>
  *   <li>{@code spring.datasource.hikari.maximum-pool-size} -- REQUIRED, and at least three.</li>
@@ -147,7 +147,12 @@ import org.springframework.context.annotation.Configuration;
  *   <li>{@code spring.flyway.default-schema} and {@code spring.flyway.schemas} -- REQUIRED, and both
  *       must name the owned schema and no other, which is what keeps migration confined to it.</li>
  *   <li>{@code spring.jpa.hibernate.ddl-auto} -- REQUIRED, and must be a mode that emits no DDL.
- *       The deployed profiles set {@code validate}; the harness profile sets {@code none}.</li>
+ *       All three profiles set {@code validate} -- the two deployed ones and the harness. The
+ *       harness value is worth stating rather than assuming: {@code src/test/resources/application-test.yml}
+ *       creates the seven cross-schema tables this module maps but is forbidden to migrate, so
+ *       {@code validate} there checks all eight entity mappings against real tables and a mapping
+ *       that drifts from an owning migration fails at context load. {@code none} would pass while
+ *       the drift survived to the first query, which is why the harness moved off it.</li>
  * </ul>
  *
  * <p>Assumptions: four further keys are set by those profiles, are NOT read by this class, and are
@@ -211,7 +216,7 @@ public class DataSourceConfig {
     private static final String DDL_AUTO_KEY = "spring.jpa.hibernate.ddl-auto";
 
     /** The ordered schema list this module falls back to when the search-path key is unset. */
-    private static final String DEFAULT_SEARCH_PATH = "batch,ledger,account,reference";
+    private static final String DEFAULT_SEARCH_PATH = "batch,ledger,account,reference,card";
 
     /** HikariCP's own default initialisation-failure timeout, in milliseconds. */
     private static final String HIKARI_DEFAULT_INIT_FAIL_TIMEOUT_MS = "1";
@@ -324,7 +329,6 @@ public class DataSourceConfig {
         this.searchPath = requireOrderedSearchPath(declaredSearchPath);
         this.ownedSchema = requireSchemaName(migrationSchema, MIGRATION_SCHEMA_KEY);
 
-        // WHAT: the cross-check that keeps the migration schema and the resolution schema one schema.
         // WHY : Assumptions: two independent settings decide where an unqualified object lands. The
         //       pool's statement decides where a runtime statement resolves, and
         //       spring.flyway.default-schema decides where migration writes. Each looks correct on
@@ -394,7 +398,6 @@ public class DataSourceConfig {
             @Value("${" + ISOLATE_INTERNAL_QUERIES_KEY + ":true}") boolean isolateInternalQueries,
             @Value("${" + SESSION_OPTIONS_KEY + "}") String sessionOptions) {
 
-        // WHAT: the auto-commit contract the module's streaming readers depend on.
         // WHY : Assumptions: the driver opens a server-side cursor only when a positive fetch size
         //       and a non-auto-commit connection BOTH hold, so with auto-commit on the fetch-size
         //       hint at DailyTransactionRepository:219 does nothing and the driver materialises the
@@ -406,7 +409,6 @@ public class DataSourceConfig {
         //       connection for the whole step.
         requireAutoCommitDisabled(autoCommit);
 
-        // WHAT: the setting that makes the pinning statement outlive the transaction it runs in.
         // WHY : Assumptions: in PostgreSQL a SET is TRANSACTIONAL -- rolling back the transaction it
         //       ran in discards it. HikariCP runs the initialisation statement while setting up each
         //       physical connection, and with auto-commit off that statement opens a transaction
@@ -425,7 +427,6 @@ public class DataSourceConfig {
         //       string that carries the session bounds and out of the setting the plan names.
         requireIsolatedInternalQueries(isolateInternalQueries);
 
-        // WHAT: the pool floor, which is a correctness bound rather than a sizing preference.
         // WHY : Assumptions: a streaming cursor pins one connection for a whole step while the batch
         //       framework commits step and job execution state in a SEPARATE transaction, so a
         //       ceiling of one self-deadlocks and two leaves nothing for migration, the health probe
@@ -443,7 +444,6 @@ public class DataSourceConfig {
         //       HikariCP otherwise normalises silently and which is always an operator error.
         requireViablePoolBounds(maximumPoolSize, minimumIdle);
 
-        // WHAT: the fail-fast and leak-visibility bounds for a task with no operator at the console.
         // WHY : Assumptions: a positive initialisation timeout makes an unreachable database fail at
         //       START-UP, where the orchestrator records a clean failed state, rather than part-way
         //       through a step with a feed partly read; a zero value would let the pool start empty
@@ -464,7 +464,6 @@ public class DataSourceConfig {
         HikariDataSource pool =
                 properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
 
-        // WHAT: the same setting applied to the instance, so the guard above is not merely advice.
         // WHY : Assumptions: property binding runs after this method returns and applies only keys
         //       that are actually present, so a value set here is a DEFAULT the deployed profiles may
         //       override. No shipped profile names this key, so this assignment is what supplies it,
@@ -489,13 +488,11 @@ public class DataSourceConfig {
      */
     @Bean
     public SmartInitializingSingleton batchSessionPostureVerifier(HikariDataSource dataSource) {
-        // WHAT: the deferral of the proof to the point at which the pool is fully configured.
         // WHY : Trade-offs: this spends two pool acquisitions before the first step runs, and that is
         //       the cheapest moment at which they can be spent. The alternative is worse than a late
         //       error rather than merely later: PostgreSQL accepts a search path naming a schema that
         //       is absent or out of order, so without this proof the first unqualified statement of a
         //       nightly run is what decides where rows land, and it decides silently.
-        // WHAT: the statement the pool ACTUALLY holds, read back for use in a failure message.
         // WHY : Assumptions: the value bound onto the pool and the value this class validated come
         //       from two different mechanisms -- property binding onto the pool instance, and a
         //       resolved placeholder on the constructor -- so they can disagree. Quoting the pool's
@@ -563,7 +560,6 @@ public class DataSourceConfig {
             }
         }
 
-        // WHAT: the duplicate check, which guards resolution order rather than tidiness.
         // WHY : Assumptions: a repeated schema is not harmless noise. The list is an ordered
         //       resolution sequence, so a repeat means one of the two positions is dead and a reader
         //       comparing this list against the grants cannot tell which position was intended.
@@ -675,9 +671,8 @@ public class DataSourceConfig {
     private static void requireMigrationConfinedTo(
             List<String> migrationSchemas, String ownedSchema) {
 
-        // WHAT: the boundary that keeps this module out of three other services' migrations.
-        // WHY : Assumptions: this module reaches four schemas but owns exactly one, and the other
-        //       three are migrated by the services that own them. Widening this list would let this
+        // WHY : Assumptions: this module reaches five schemas but owns exactly one, and the other
+        //       four are migrated by the services that own them. Widening this list would let this
         //       module's own migration create or alter an object another service's migration also
         //       describes, and two owners of one table is a divergence no version-ordered history can
         //       reconcile. The narrow list is also consistent with the privileges actually granted:
@@ -703,18 +698,21 @@ public class DataSourceConfig {
     /**
      * Requires the persistence provider to be configured in a mode that emits no schema definition.
      *
-     * <p>Alternatives Considered: {@code none} rather than {@code validate} was the alternative for
-     * the deployed profiles, and {@code validate} is what they set. Seven of this module's eight
-     * mappings describe tables in {@code ledger}, {@code account} and {@code reference} that this
-     * module's own migration never creates, so no migration of its own will ever resolve a drift in
-     * them; {@code none} would defer such a drift to the first statement that touched the changed
-     * column, part way through a run with a feed already partly read, whereas validation reports it
-     * before the first record is read. This method admits {@code none} as well as {@code validate}
-     * because the test harness profile sets it deliberately, and what is refused is narrower and
-     * unambiguous: any mode that would have the provider EMIT definitions.</p>
+     * <p>Alternatives Considered: {@code none} rather than {@code validate}, which is the alternative
+     * every profile rejected -- both deployed profiles and the harness set {@code validate}. Seven of
+     * this module's eight mappings describe tables in {@code ledger}, {@code account} and
+     * {@code reference} that this module's own migration never creates, so no migration of its own
+     * will ever resolve a drift in them; {@code none} would defer such a drift to the first statement
+     * that touched the changed column, part way through a run with a feed already partly read,
+     * whereas validation reports it before the first record is read. This method nonetheless admits
+     * {@code none}, because what it enforces is a mode CLASS and not one value: any mode that emits
+     * no definitions is acceptable here. Pinning it to exactly {@code validate} was considered and
+     * rejected -- it would refuse a future profile that legitimately has no tables to validate
+     * against, and it would add no protection, since the risk this method exists to remove is a
+     * provider that WRITES schema over a migrated one.</p>
      *
      * <p>Assumptions: choosing validation accepts a real cross-service ordering dependency -- this
-     * task cannot start until the services owning those three schemas have applied their own
+     * task cannot start until the services owning those four schemas have applied their own
      * migrations. That is accepted rather than worked around, because a task that could start
      * without them could not post into their tables anyway, and for a nightly chain a clean refusal
      * to start is the better failure.</p>
@@ -983,7 +981,6 @@ public class DataSourceConfig {
                         ownedSchema, "a second pooled connection");
                 requireDistinctBackends(firstPosture, secondPosture);
 
-                // WHAT: the release of both sessions with no transaction left open behind them.
                 // WHY : Assumptions: auto-commit is off by contract, so even a read opens a
                 //       transaction. Returning a connection with one still open would leave it
                 //       counted against the idle-in-transaction bound checked just above, so the

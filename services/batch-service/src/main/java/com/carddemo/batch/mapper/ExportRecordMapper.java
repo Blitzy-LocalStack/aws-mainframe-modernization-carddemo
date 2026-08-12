@@ -1,7 +1,9 @@
 package com.carddemo.batch.mapper;
 
 import com.carddemo.batch.domain.Account;
+import com.carddemo.batch.domain.Card;
 import com.carddemo.batch.domain.CardXref;
+import com.carddemo.batch.domain.Customer;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
@@ -151,6 +153,28 @@ public final class ExportRecordMapper {
      * The name every view's trailing pad is declared under in {@code app/cpy/CVEXPORT.cpy}.
      */
     private static final String FIELD_FILLER = "FILLER";
+
+    /**
+     * The customer view's national identifier at {@code app/cpy/CVEXPORT.cpy:36}, named once here.
+     *
+     * <p>Assumptions: this is the one field name of the customer view given a constant, because it is
+     * the one whose VALUE this file decides rather than copies. Every other name in that view appears
+     * as a literal beside the value it carries; this one is referenced twice -- by the descriptor and
+     * by the elision below -- and a constant is what keeps the two references from drifting apart.</p>
+     */
+    private static final String FIELD_CUSTOMER_SSN = "EXP-CUST-SSN";
+
+    /**
+     * The value written into an unsigned-display span whose source column this module cannot read.
+     *
+     * <p>Assumptions: zero rather than a blank run, and a {@code Long} rather than digit text, both
+     * for the same reason -- the shared codec's unsigned-display encode accepts an integral value or
+     * digit text and refuses a non-digit character, so a blank run would fail the encode outright
+     * instead of producing an empty value. Zero is the empty value that storage kind HAS, and the
+     * codec left-pads it to the field's declared width, so the nine zero digits the customer view
+     * carries are derived from the descriptor rather than written out here.</p>
+     */
+    private static final Long ELIDED_UNSIGNED_VALUE = 0L;
 
     /** The card view's primary account number at {@code app/cpy/CVEXPORT.cpy:94}. */
     private static final String FIELD_CARD_NUM = "EXP-CARD-NUM";
@@ -316,7 +340,7 @@ public final class ExportRecordMapper {
                     CopybookLayout.text("EXP-CUST-ADDR-ZIP", 234, 10),
                     CopybookLayout.sensitiveText("EXP-CUST-PHONE-NUM(1)", 244, 15),
                     CopybookLayout.sensitiveText("EXP-CUST-PHONE-NUM(2)", 259, 15),
-                    CopybookLayout.sensitiveUint("EXP-CUST-SSN", 274, 9),
+                    CopybookLayout.sensitiveUint(FIELD_CUSTOMER_SSN, 274, 9),
                     CopybookLayout.sensitiveText("EXP-CUST-GOVT-ISSUED-ID", 283, 20),
                     CopybookLayout.sensitiveText("EXP-CUST-DOB-YYYY-MM-DD", 303, 10),
                     CopybookLayout.sensitiveText("EXP-CUST-EFT-ACCOUNT-ID", 313, 10),
@@ -825,16 +849,33 @@ public final class ExportRecordMapper {
      * in a 460-byte payload that says which view produced it. The view is held once, on the prefix
      * that carries the byte it was read from.</p>
      *
-     * <p>Alternatives Considered: declaring batch-side {@code Customer} and {@code Card} entities so
-     * that all five views returned an entity uniformly. Rejected because the migration plan assigns
-     * customer data to the account bounded context's schema and card data to the card context's at its
-     * section 0.4.1.3, so an entity for either here would make this module a second owner of a table it
-     * does not own -- the schema-per-service boundary that decision 7 draws, and the cross-service
-     * domain-import prohibition that {@code LayeringRulesTest} asserts, both point the same way. The
-     * charter beside this file records the same conclusion and notes that the absence of a
-     * {@code CustomerRecordMapper} and a {@code CardRecordMapper} from this package follows from it.
-     * Those two views therefore yield ordered field maps, which is what an ETL loader consumes anyway.
+     * <p>Refactoring Rationale: this record shape was authored when this module declared no
+     * {@code Customer} and no {@code Card} entity, and it argued from that absence that the two views
+     * could only ever yield field maps. <b>Both entities now exist</b> --
+     * {@link com.carddemo.batch.domain.Customer} and {@link com.carddemo.batch.domain.Card}, added so
+     * that the export could emit all five of the reference's record types rather than three -- so
+     * that argument no longer holds and is not repeated here. What did NOT change is the shape of
+     * these five components, and the reason is stated below rather than left as inherited structure.
      * </p>
+     *
+     * <p>Assumptions: the two field-map components survive the arrival of the entities because
+     * <b>decode and encode do not carry the same values</b>. Both new entities deliberately omit the
+     * columns the target stores enciphered -- the customer's national and government-issued
+     * identifiers and the card's verification value -- so neither type can hold them. A decode reads
+     * a file this module did not write, whose customer view legitimately carries nine digits of
+     * national identifier at {@code app/cpy/CVEXPORT.cpy:36} and twenty characters of
+     * government-issued identifier at line 37; mapping the decode onto the entities would DISCARD
+     * those values silently, which is a loss the import direction has no business taking. The field
+     * maps preserve every span a foreign file presents. The two entity factories below therefore
+     * serve the encode direction only, and they are the ones this module's own export calls.</p>
+     *
+     * <p>Alternatives Considered: two additional record components, so that a customer or card view
+     * could arrive either as an entity or as a field map. Rejected because the constructor's invariant
+     * is that exactly one of the payload components is populated, and adding a second admissible
+     * carrier per view would make "exactly one" mean "exactly one view" rather than "exactly one
+     * component" -- a weaker invariant expressed by more code. The factories convert at the boundary
+     * instead, so the record still carries one populated component and the conversion is visible at
+     * the one call site that needs it.</p>
      *
      * @param prefix the 40-byte common prefix, whose view selects which projection below is populated
      * @param customerFields the ordered projection of the customer view, or {@code null} for any other
@@ -980,6 +1021,31 @@ public final class ExportRecordMapper {
         }
 
         /**
+         * Builds a customer-view record from this module's read-only customer projection.
+         *
+         * <p>This is the export direction's entry point for the customer view, and it is the one the
+         * export step calls. It exists so that no copybook field name appears in the job: the
+         * projection's sixteen mapped columns become the view's eighteen named fields HERE, where the
+         * view descriptor also lives, and the two the projection deliberately does not carry are
+         * filled with the well-formed empty values recorded on {@link Customer}.</p>
+         *
+         * @param prefix the assembled prefix, whose view must be {@link RecordType#CUSTOMER}
+         * @param customer the customer row to encode, which supplies sixteen of the view's eighteen
+         *     named fields
+         * @return the assembled record
+         * @throws ExportRecordException if the prefix selects any other view
+         * @throws IllegalArgumentException if {@code customer} is {@code null}
+         */
+        public static ExportRecord ofCustomer(Prefix prefix, Customer customer) {
+            // WHY : Assumptions: the overload takes the ENTITY and delegates to the map-taking
+            //       factory's constructor rather than duplicating it, so both directions converge on
+            //       one invariant check. The two overloads are distinguished by argument type alone
+            //       and neither is reachable with a null literal at any call site in this module.
+            return new ExportRecord(prefix, customerFieldsOf(customer), null, null, null, null,
+                    OpaqueSensitiveValue.ABSENT);
+        }
+
+        /**
          * Builds an account-view record.
          *
          * @param prefix the decoded prefix, whose view must be {@link RecordType#ACCOUNT}
@@ -1036,6 +1102,31 @@ public final class ExportRecordMapper {
         public static ExportRecord ofCard(Prefix prefix, Map<String, Object> fields,
                 OpaqueSensitiveValue verificationValue) {
             return new ExportRecord(prefix, null, null, null, null, fields, verificationValue);
+        }
+
+        /**
+         * Builds a card-view record from this module's read-only card projection.
+         *
+         * <p>This is the export direction's entry point for the card view, and it is the one the
+         * export step calls. The verification value is the ABSENT carrier and not a value, because
+         * {@link Card} does not map the enciphered column it would come from; the encode consequently
+         * writes the two-byte encoding of zero over that span, which is a well-formed field rather
+         * than a hole.</p>
+         *
+         * @param prefix the assembled prefix, whose view must be {@link RecordType#CARD}
+         * @param card the card row to encode, which supplies five of the view's six named fields
+         * @return the assembled record
+         * @throws ExportRecordException if the prefix selects any other view
+         * @throws IllegalArgumentException if {@code card} is {@code null}
+         */
+        public static ExportRecord ofCard(Prefix prefix, Card card) {
+            // WHY : Assumptions: the absent carrier is passed EXPLICITLY rather than left to a
+            //       shorter overload, because the alternative reading -- that a verification value
+            //       was simply forgotten here -- is the one a reader would otherwise reach for. The
+            //       absence is a registered divergence, not an omission, and it is recorded on the
+            //       Card projection this factory takes.
+            return new ExportRecord(prefix, null, null, null, null, cardFieldsOf(card),
+                    OpaqueSensitiveValue.ABSENT);
         }
     }
 
@@ -1521,6 +1612,97 @@ public final class ExportRecordMapper {
         };
         CopybookLayout.FieldSpec pad = view.field(FIELD_FILLER);
         fields.put(pad.name(), "");
+        return fields;
+    }
+
+    /**
+     * Builds the customer view's ordered projection from this module's customer entity.
+     *
+     * <p>Trade-offs: two of the view's eighteen named fields are filled with empty values rather than
+     * with data, because {@link Customer} does not map the enciphered columns they would come from --
+     * the national identifier is written as nine zero digits and the government-issued identifier as
+     * twenty blanks. Both are valid values of their declared pictures, so the record stays well formed
+     * and the counterpart import still routes it; what is given up is byte-identity with a reference
+     * export on those two spans alone. The divergence is registered as
+     * {@code D-EXPORT-PROTECTED-FIELDS-ELIDED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} and argued at length on the
+     * projection itself. Refusing to encode without them was the alternative and was rejected: it
+     * would mean this module could not export customers at all, which is the very gap this method
+     * closes.</p>
+     *
+     * @param customer the customer to encode, which supplies sixteen of the eighteen named fields
+     * @return an insertion-ordered map in copybook declaration order, without the pad
+     * @throws IllegalArgumentException if {@code customer} is {@code null}
+     */
+    private static Map<String, Object> customerFieldsOf(Customer customer) {
+        requireProjection(customer, RecordType.CUSTOMER);
+        // WHY : Assumptions: insertion order follows the copybook declaration order of
+        //       app/cpy/CVEXPORT.cpy:25-41 so that the map reads in the order the codec walks the
+        //       descriptor. The codec keys by name and does not require it, but a map ordered
+        //       differently from the record it produces is one a reader has to reconcile by hand.
+        // WHY : Assumptions: the three address lines and the two telephone numbers are named with
+        //       their subscripts -- EXP-CUST-ADDR-LINE(1) and so on -- because the copybook declares
+        //       them as OCCURS groups at app/cpy/CVEXPORT.cpy:29 and :34, and the view descriptor
+        //       spells the subscript into the field name for exactly that reason. A flat name would
+        //       not resolve against the descriptor at all.
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("EXP-CUST-ID", customer.getCustomerId());
+        fields.put("EXP-CUST-FIRST-NAME", blankIfAbsent(customer.getFirstName()));
+        fields.put("EXP-CUST-MIDDLE-NAME", blankIfAbsent(customer.getMiddleName()));
+        fields.put("EXP-CUST-LAST-NAME", blankIfAbsent(customer.getLastName()));
+        fields.put("EXP-CUST-ADDR-LINE(1)", blankIfAbsent(customer.getAddrLine1()));
+        fields.put("EXP-CUST-ADDR-LINE(2)", blankIfAbsent(customer.getAddrLine2()));
+        fields.put("EXP-CUST-ADDR-LINE(3)", blankIfAbsent(customer.getAddrLine3()));
+        fields.put("EXP-CUST-ADDR-STATE-CD", blankIfAbsent(customer.getAddrStateCd()));
+        fields.put("EXP-CUST-ADDR-COUNTRY-CD", blankIfAbsent(customer.getAddrCountryCd()));
+        fields.put("EXP-CUST-ADDR-ZIP", blankIfAbsent(customer.getAddrZip()));
+        fields.put("EXP-CUST-PHONE-NUM(1)", blankIfAbsent(customer.getPhoneNum1()));
+        fields.put("EXP-CUST-PHONE-NUM(2)", blankIfAbsent(customer.getPhoneNum2()));
+        // WHY : Alternatives Considered: leaving the national identifier's span blank, as the
+        //       government-issued identifier's is. Rejected because the two fields have different
+        //       storage kinds and only one of them admits blanks: EXP-CUST-SSN is an unsigned display
+        //       field at app/cpy/CVEXPORT.cpy:36, and the shared codec refuses a non-digit in one,
+        //       so a blank run would fail the encode outright rather than produce an empty value.
+        //       Zero is the empty value an unsigned display field HAS, and nine zero digits is what
+        //       that field's width makes of it.
+        fields.put(FIELD_CUSTOMER_SSN, ELIDED_UNSIGNED_VALUE);
+        fields.put("EXP-CUST-GOVT-ISSUED-ID", "");
+        fields.put("EXP-CUST-DOB-YYYY-MM-DD", isoDateText(customer.getDob()));
+        fields.put("EXP-CUST-EFT-ACCOUNT-ID", blankIfAbsent(customer.getEftAccountId()));
+        fields.put("EXP-CUST-PRI-CARD-HOLDER-IND", blankIfAbsent(customer.getPriCardHolderInd()));
+        fields.put("EXP-CUST-FICO-CREDIT-SCORE", customer.getFicoCreditScore());
+        return fields;
+    }
+
+    /**
+     * Builds the card view's ordered projection from this module's card entity.
+     *
+     * <p>Assumptions: the verification value is ABSENT from this map by construction, not merely
+     * unset. {@link #cardFieldMap(ExportRecord)} rebuilds the map in descriptor order and supplies
+     * that field itself, so a value placed here would be discarded; the encode then writes the
+     * two-byte encoding of zero over the span, which is the {@code COMP} encoding of zero and a
+     * well-formed field. The divergence from a reference export, which carries the stored digits, is
+     * registered as {@code D-EXPORT-PROTECTED-FIELDS-ELIDED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * @param card the card to encode, which supplies five of the six named fields
+     * @return an insertion-ordered map in copybook declaration order, without the pad and without the
+     *     verification value
+     * @throws IllegalArgumentException if {@code card} is {@code null}
+     */
+    private static Map<String, Object> cardFieldsOf(Card card) {
+        requireProjection(card, RecordType.CARD);
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put(FIELD_CARD_NUM, blankIfAbsent(card.getCardNum()));
+        fields.put("EXP-CARD-ACCT-ID", card.getAccountId());
+        fields.put("EXP-CARD-EMBOSSED-NAME", blankIfAbsent(card.getEmbossedName()));
+        // WHY : Assumptions: the export field name keeps the copybook's own spelling,
+        //       EXP-CARD-EXPIRAION-DATE, while the entity property spells the word out. The
+        //       difference is deliberate and is one of exactly three name corrections the migration
+        //       takes: the correction belongs to the target column, and this map's keys are copybook
+        //       field names that must match the descriptor byte for byte.
+        fields.put("EXP-CARD-EXPIRAION-DATE", isoDateText(card.getExpirationDate()));
+        fields.put("EXP-CARD-ACTIVE-STATUS", blankIfAbsent(card.getActiveStatus()));
         return fields;
     }
 

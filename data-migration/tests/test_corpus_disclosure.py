@@ -80,7 +80,7 @@ def _bound_names(node: ast.stmt) -> tuple[str, ...]:
     ------
     None
     """
-    # WHY (Assumptions): the four binding forms that matter for a module of declarations are
+    # Assumptions: the four binding forms that matter for a module of declarations are
     #   covered -- a function, a class, an annotated assignment and a plain assignment -- and an
     #   import is deliberately NOT, because re-importing a name is already ruff's F811 territory and
     #   a conditional import guarded by a version check is a legitimate double binding.
@@ -122,7 +122,7 @@ _PROHIBITED_NAMES = (
     "EXP-TRAN-AMT",
     "TRAN-CAT-BAL",
     # Account identifiers, wherever a record carries one.
-    # WHY (Refactoring Rationale): these seven were NAMED DISCLOSABLE by
+    # Refactoring Rationale: these seven were NAMED DISCLOSABLE by
     #   _CORPUS_DISCLOSABLE_FIELDS on the ground that "the published REST contracts already
     #   render an account identifier in full", while every one of them was in fact marked
     #   sensitive at its declaration site -- so the stated policy and the applied policy
@@ -134,7 +134,7 @@ _PROHIBITED_NAMES = (
     #   HERE so the property is enforced from the direction that matters: this case fails if any
     #   record ever discloses one, whereas removing a name from an allowlist only stops
     #   admitting it.
-    # WHY (Assumptions): PA-ACCT-ID is deliberately NOT in this list. The authorization
+    # Assumptions: PA-ACCT-ID is deliberately NOT in this list. The authorization
     #   allowlist names it, that list is read field by field out of layouts.py by
     #   AuthorizationDisclosurePolicyTest, under
     #   services/common-lib/src/test/java/com/carddemo/common/codec/,
@@ -415,7 +415,7 @@ def test_every_admitted_field_is_actually_disclosed() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Refactoring Rationale): this is the OTHER direction of the audit, and it is here
+    # Refactoring Rationale: this is the OTHER direction of the audit, and it is here
     #   because its absence hid a real contradiction. Seven account identifiers -- ACCT-ID,
     #   CARD-ACCT-ID, XREF-ACCT-ID, TRANCAT-ACCT-ID, EXP-ACCT-ID, EXP-CARD-ACCT-ID and
     #   EXP-XREF-ACCT-ID -- were named as disclosable and were sensitive at every occurrence
@@ -425,7 +425,7 @@ def test_every_admitted_field_is_actually_disclosed() -> None:
     #   a field disclosed WITHOUT being named. The consequence was not a leak but something
     #   harder to find: a reader auditing the corpus by reading the allowlist got the wrong
     #   answer about seven fields.
-    # WHY (Assumptions): the union of the two allowlists is used, matching both audits in the
+    # Assumptions: the union of the two allowlists is used, matching both audits in the
     #   module, and it is sound here because no name occurs in both a corpus-closed and an
     #   authorization-closed record -- so a name admitted by either list must be disclosed
     #   wherever it occurs.
@@ -450,7 +450,7 @@ def test_the_import_time_audit_reports_no_ineffective_admission() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the module's audit and this suite's independent recomputation are both
+    # Assumptions: the module's audit and this suite's independent recomputation are both
     #   asserted, for the same reason the one-directional pair are: the module's version runs at
     #   import and would be skipped entirely by anything that stubbed it out, while this suite's
     #   version cannot protect a deployment that never runs the suite. Each covers the other's
@@ -466,17 +466,17 @@ def test_the_layouts_module_binds_no_top_level_name_twice() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Refactoring Rationale): `_MASK_HMAC_KEY_MIN_BYTES` and `_mask_hmac_key` were declared
+    # Refactoring Rationale: `_MASK_HMAC_KEY_MIN_BYTES` and `_mask_hmac_key` were declared
     #   TWICE in that module, roughly 165 lines apart, with byte-identical bodies. Nothing behaved
     #   differently, and that is precisely why it needed a test: Python binds a module-level name
     #   by executing statements in order, so the second declaration silently replaced the first and
     #   the first remained readable, reviewable and dead. A future strengthening of the key rule
     #   applied to the first copy would have compiled, passed review and had no effect on the one
     #   control that decides whether a redaction tag is confirmable.
-    # WHY (Assumptions): ruff cannot report this and the gap is in the RULE rather than in the
+    # Assumptions: ruff cannot report this and the gap is in the RULE rather than in the
     #   configuration -- F811 covers redefinition of an UNUSED name, and both of these were used.
     #   So the check is written here against the AST rather than expected from the linter.
-    # WHY (Trade-offs): the whole package is walked rather than only the layouts module, because a
+    # Trade-offs: the whole package is walked rather than only the layouts module, because a
     #   duplicate is a hazard wherever it occurs and naming one module would leave the other
     #   thirty-odd unprotected for no saving. Only TOP-LEVEL statements are examined: a name
     #   rebound inside a function is ordinary control flow, and a method redefined in a class body

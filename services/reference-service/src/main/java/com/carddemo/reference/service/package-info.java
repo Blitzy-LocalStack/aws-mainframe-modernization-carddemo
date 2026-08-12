@@ -104,10 +104,18 @@
  * reject.
  *
  * <ul>
- *   <li>No lookup service. Alternatives Considered: one wrapping the phone-area-code, state
- *       and state-zip-prefix repositories. Rejected because those carry no rule beyond
- *       whether a code exists, so they are read directly by this context's web adapters and,
- *       across the service boundary, over HTTP.</li>
+ *   <li>⚠️ Refactoring Rationale: this list used to open "No lookup service", on the ground that the
+ *       phone-area-code, state and state-zip-prefix tables "carry no rule beyond whether a code
+ *       exists" and could therefore be read straight from this context's web adapters. Review
+ *       found the claim false in practice. What the adapter actually held was not one presence
+ *       check but three near-identical keyset browses -- a four-way selection per browse on the
+ *       paging direction and the classification filter, the walk bound that makes the
+ *       next-page flag derivable, the in-memory reversal of a backward page, the envelope
+ *       assembly and three verbatim "NOT found" refusals. Paging IS a rule, it was stated three
+ *       times, and it was stated in the layer the AAP's ports-and-adapters rule says reaches no
+ *       store. {@code AddressLookupService} now owns all three browses, all three item reads and
+ *       all three refusal sentences, and it is a member of this package on exactly the same terms
+ *       as the others.</li>
  *   <li>No Spring Batch job, batch configuration class or batch starter. Assumptions:
  *       {@code COBTUPDT.cbl} is a plain sequential reader, a
  *       {@code PERFORM UNTIL LASTREC = 'Y'} loop at L93-L96 over a file declared
@@ -190,9 +198,12 @@
  *       L1611, and {@code ' TRANSACTION_TYPE table. SQLCODE:'} at {@code COBTUPDT.cbl}
  *       L157, L188 and L219.</li>
  *   <li>Page envelope assembly. {@code PageResponse} carries the item list, an opaque
- *       nullable first key, an opaque nullable last key and a boolean saying whether a
- *       further page exists -- no previous-page flag, page size, page number or total count.
- *       Mappers supply item types only, so assembling the envelope is this layer's job.</li>
+ *       nullable first key, an opaque nullable last key, a boolean saying whether a
+ *       further page follows and a boolean saying whether an earlier page exists -- no page
+ *       size, page number or total count.
+ *       Mappers supply item types only, so assembling the envelope is this layer's job, and that
+ *       includes both availability booleans: only the walk issued here reads the surplus row either
+ *       answer rests on, and neither is inferred from a boundary key being present.</li>
  *   <li>Concurrency. The two tables this context maintains each carry a
  *       {@code version BIGINT NOT NULL DEFAULT 0} column, so the before-image comparison the
  *       baseline decides at {@code COTRTUPC.cbl} L1585 is delegated to the persistence

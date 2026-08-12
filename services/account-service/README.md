@@ -160,7 +160,6 @@ architecture test is a build **failure**, not a silent pass, because the
 this file is run **from the repository root**, not from this module directory.
 
 ```bash
-# WHAT: put the validated JDK and Maven on PATH for a non-login shell.
 # WHY : Assumptions: the toolchain profile script is LOGIN-only, so a
 #       non-interactive shell -- which is what a script, an editor task or a CI
 #       step gets -- starts without it. Exporting both here rather than relying
@@ -173,7 +172,6 @@ export PATH="$JAVA_HOME/bin:/opt/maven/bin:$PATH"
 ### Build
 
 ```bash
-# WHAT: build and test all nine reactor modules, this one among them.
 # WHY : Assumptions: `common-lib` must be built first and is never published to
 #       a registry, so the reactor is the only place its jar and its test-jar
 #       come from. This command also runs Surefire over `*Test`, Failsafe over
@@ -184,7 +182,6 @@ mvn -B -f services/pom.xml clean verify
 ```
 
 ```bash
-# WHAT: build and test only this module and the modules it needs.
 # WHY : Trade-offs: `-am` ("also make") is REQUIRED and is not an optimisation.
 #       Without it Maven resolves `com.carddemo:common-lib:1.0.0-SNAPSHOT` from
 #       the local repository, so the build either fails outright on a clean
@@ -196,7 +193,6 @@ mvn -B -f services/pom.xml -pl account-service -am clean verify
 ```
 
 ```bash
-# WHAT: fire the Checkstyle documentation gate against this module alone.
 # WHY : Trade-offs: `validate` is the phase the gate is bound to, so this stops
 #       before compiling, testing or packaging anything. It is the fastest way
 #       to answer "does my Javadoc satisfy Rule 1" and it is deliberately the
@@ -206,7 +202,6 @@ mvn -B -f services/account-service/pom.xml validate
 ```
 
 ```bash
-# WHAT: build the container image for this module.
 # WHY : Assumptions: the build context is the REPOSITORY ROOT -- the trailing
 #       `.` is the whole point of this command and is not interchangeable with
 #       the module directory. The Dockerfile reaches THREE paths outside this
@@ -314,12 +309,79 @@ a second source of truth — and the `dev` copy had already drifted to omit the
 Secrets Manager location the base declares. The same jar runs with or without
 Parameter Store reachable, because every remote location is `optional:`.
 
+A local run needs four things reachable before it will start, and they fail in
+this order, so bring them up first: the **database** (the migration credential is
+used before anything else), the **token issuer** (the resource server fetches
+issuer discovery while the context refreshes, not on first request), a **free
+port**, and an **SQS endpoint whose three inquiry queues already exist** —
+`application.yml` pins `queue-not-found-strategy: fail`, so the listener aborts
+startup rather than creating queues that nothing else publishes to. Point the
+client at a local emulator with `--spring.cloud.aws.sqs.endpoint=<url>` and create
+the three queues first.
+
+Secrets are prepared **out of band**, in a file that cannot be committed, and the
+launch command then references variables that are already populated. Create the
+file once:
+
+```text
+# .env.account-service.local — ignored by .gitignore (`.env.*`), never committed.
+# Fill each value in from your own secret store. Leave no value in shell history.
+AWS_REGION=
+SPRING_DATASOURCE_URL=
+SPRING_DATASOURCE_USERNAME=
+SPRING_DATASOURCE_PASSWORD=
+SPRING_FLYWAY_USER=
+SPRING_FLYWAY_PASSWORD=
+SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=
+CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID=
+CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID=
+CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY=
+CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY=
+CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY=
+CARDDEMO_REFERENCE_CONTEXT_BASE_URL=
+CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE=
+CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE=
+CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE=
+```
+
 ```bash
-# WHAT: build the bootable jar, then start it against a local database.
-# WHY : Assumptions: the values below are PLACEHOLDERS. Substitute them from
-#       your own secret store; never paste a real credential onto a command
-#       line, where it lands in shell history and in the process table.
-# WHY : Assumptions: each variable set here has NO fallback in
+# WHY : Assumptions: `umask 077` is set BEFORE the file is created, not fixed
+#       afterwards with `chmod`. A `chmod` after the fact leaves a window in
+#       which the file existed group- and world-readable, and on a shared
+#       developer host that window is enough. The `chmod` below is therefore a
+#       belt-and-braces assertion for a file that may already exist from an
+#       earlier session, not the primary control.
+# WHY : Assumptions: the filename is `.env.account-service.local` specifically
+#       because `.gitignore` ignores `.env.*`, which `git check-ignore -v
+#       .env.account-service.local` will confirm naming the rule and line.
+#       Refactoring Rationale: this section previously named
+#       `account-service.local.env`, which matches NO ignore rule in this
+#       repository — a file holding a database password and three signing keys
+#       was one `git add -A` away from being committed. The extension-last
+#       spelling is the whole defect: it reads like an env file to a human and
+#       like an ordinary tracked file to git.
+umask 077
+touch .env.account-service.local
+chmod 600 .env.account-service.local
+git check-ignore -v .env.account-service.local   # prints the rule that protects it
+```
+
+```bash
+# WHY : Assumptions: the credentials arrive by SOURCING the prepared file, so no
+#       secret is typed on this command line, appears in shell history, or shows
+#       up in the process table of a machine other developers can read.
+#       `set -a` exports every assignment the file makes and `set +a` stops that
+#       as soon as it has been read, which keeps the export behaviour scoped to
+#       the file rather than to the rest of the session.
+#       Refactoring Rationale: these values used to be written inline as
+#       `VAR=<description>`. That is not merely untidy — bash parses the
+#       unquoted `<` as an input redirection, so the command failed before Java
+#       started, with a message naming the first word after the angle bracket
+#       rather than anything about configuration. It also invited a real
+#       credential to be pasted onto a command line. Note that `bash -n` accepts
+#       the old form, so a syntax check was never enough to catch it; only
+#       running it was.
+# WHY : Assumptions: each variable in that file has NO fallback in
 #       `application.yml`, so the context refuses to start rather than starting
 #       bound to nothing. That is deliberate: a service that starts with an
 #       unset datasource URL becomes a task that reports healthy and then fails
@@ -332,6 +394,20 @@ Parameter Store reachable, because every remote location is `optional:`.
 #       opening one. Disabling TLS for the loopback hop states plainly that a
 #       local run does not exercise the deployed transport, rather than
 #       appearing to.
+# WHY : Assumptions: `SERVER_ADDRESS=127.0.0.1` is what MAKES the run
+#       loopback-only, and it is a configured property rather than an
+#       assumption. No `application.yml` in this repository sets
+#       `server.address`; the variable reaches Spring Boot's
+#       `ServerProperties.address` through relaxed binding. Verified by running
+#       a service both ways and reading the kernel's listening socket: with the
+#       variable set, /proc/net/tcp shows the local address `0100007F`
+#       (127.0.0.1) and a request to the host's routable address is REFUSED;
+#       without it the row is `00000000` and that same request returns HTTP 200
+#       from off-host. Refactoring Rationale: this block disabled TLS without
+#       binding an address, so the prose called it a loopback hop while the
+#       listener was in fact answering cleartype requests on every interface
+#       the machine has. Disabling TLS is only defensible once nothing outside
+#       the machine can reach the port.
 # WHY : Assumptions: `AWS_REGION` is required to START, not merely to reach AWS.
 #       This module declares the SQS starter for the inquiry consumer and the
 #       SQS client bean is built while the context is constructed, so a context
@@ -340,41 +416,85 @@ Parameter Store reachable, because every remote location is `optional:`.
 #       because they resolve on first call.
 mvn -B -f services/pom.xml -pl account-service -am package
 
-SPRING_PROFILES_ACTIVE=dev \
-SERVER_SSL_ENABLED=false \
-AWS_REGION=<your region> \
-SPRING_DATASOURCE_URL=<jdbc url for your local database> \
-SPRING_DATASOURCE_USERNAME=<account schema role> \
-SPRING_DATASOURCE_PASSWORD=<from your local secret store> \
-SPRING_FLYWAY_USER=<migration role> \
-SPRING_FLYWAY_PASSWORD=<from your local secret store> \
-SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=<issuer location> \
-CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID=<app client identifier> \
-CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID=<key identifier> \
-CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY=<from your local secret store> \
-CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY=<from your local secret store> \
-CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY=<from your local secret store> \
-CARDDEMO_REFERENCE_CONTEXT_BASE_URL=<reference context base url> \
-CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE=<request queue name or url> \
-CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE=<reply queue name or url> \
-CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE=<error queue name or url> \
-java -jar services/account-service/target/account-service-1.0.0-SNAPSHOT.jar
+set -a
+. ./.env.account-service.local
+set +a
+
+export SPRING_PROFILES_ACTIVE=dev
+export SERVER_SSL_ENABLED=false
+export SERVER_ADDRESS=127.0.0.1
+
+java -jar services/account-service/target/account-service.jar
+```
+
+> Refactoring Rationale:  The jar name carries no version. This command read
+> `account-service-1.0.0-SNAPSHOT.jar`, which wrote a version inherited from
+> `services/pom.xml` into two files that cannot read it — this README and the
+> Dockerfile — so a routine version bump silently invalidated both. The module POM now
+> pins `<finalName>account-service</finalName>`, which `services/card-service` already
+> did, so the path is stable across every version change and the name is a contract
+> between the POM, the Dockerfile and this document.
+
+Confirm the binding rather than trusting it — the check costs one command:
+
+```bash
+# WHY : Alternatives Considered: `ss -lntp` or `netstat -lntp`. Rejected because
+#       neither is present in every container this repository is developed in,
+#       and their absence produces a "nothing is listening" answer that reads as
+#       a pass. Reading /proc/net/tcp has no such failure mode. Assumptions: the
+#       address is hex and byte-reversed — `0100007F` is 127.0.0.1 and
+#       `00000000` is every interface. Trade-offs: `--noproxy '*'` is not
+#       decoration; where a transparent HTTP proxy is configured, curl otherwise
+#       answers 502 from the proxy and never reaches the port under test, which
+#       would make a bound listener look unreachable and an unbound one look
+#       refused.
+# WHY : Assumptions: the port is matched as the literal hex string `1F90` (8080)
+#       rather than converted with `strtonum`. That is deliberate — `strtonum` is
+#       a GNU awk extension and the `awk` on a Debian-family image is usually
+#       mawk, which aborts with "function strtonum never defined". Matching the
+#       hex directly works under either awk.
+awk 'NR>1 && $4=="0A" && $2 ~ /:1F90$/ {split($2,a,":"); print "listen address:", a[1]}' \
+    /proc/net/tcp
+curl -s --noproxy '*' --max-time 5 http://127.0.0.1:8080/actuator/health
+curl -sf --noproxy '*' --max-time 5 "http://$(hostname -i | awk '{print $1}'):8080/actuator/health" \
+    && echo 'REACHABLE OFF-HOST — server.address did not take effect' \
+    || echo 'refused from the routable address, as intended'
 ```
 
 ```bash
-# WHAT: run the built image, taking configuration from an env file.
 # WHY : Alternatives Considered: passing each variable with a repeated `-e`
 #       flag. Rejected because the values include credentials and key material,
-#       and a `-e` list puts every one of them in shell history and in the
-#       output of `docker inspect`. An env file keeps them in one
-#       access-controlled place; in deployment neither form is used, because the
-#       ECS task definition resolves them from Parameter Store and Secrets
-#       Manager instead.
+#       and a `-e` list puts every one of them in this shell's history and in
+#       the host process table. An env file keeps them in one owner-only place.
+#       In deployment neither form is used, because the ECS task definition
+#       resolves them from Parameter Store and Secrets Manager instead.
+# WHY : Assumptions: an env file does NOT make these values confidential from
+#       anyone who can query the Docker daemon. Docker resolves `--env-file` when
+#       it CREATES the container and stores the resulting variables in the
+#       container's own configuration, so `docker inspect` prints them under
+#       `Config.Env` exactly as it would for `-e`. What the file buys is
+#       narrower and still worth having: the secrets stay out of shell history
+#       and out of the process table. Refactoring Rationale: this note used to
+#       claim the file kept values out of `docker inspect`. That was a false
+#       assurance, and a false assurance about secret handling is worse than no
+#       note at all, because it invites a reader to treat daemon access as
+#       harmless. Treat anyone with daemon access as holding every value in the
+#       file.
+# WHY : Assumptions: the file is the same ignored, owner-only
+#       `.env.account-service.local` prepared above — not a second file under a
+#       different name. It is also read by the daemon rather than by this shell,
+#       so it takes `KEY=value` lines literally: no `export`, no quoting, and no
+#       variable expansion.
 # WHY : Assumptions: the container publishes 8080 and nothing else. That port is
 #       a contract with the security groups and with the load-balancer target
 #       group, not a local preference, so remapping the container side of `-p`
-#       would diverge from the deployed shape.
-docker run --rm --env-file ./account-service.local.env -p 8080:8080 \
+#       would diverge from the deployed shape. The HOST side is bound to
+#       `127.0.0.1` on purpose: `-p 8080:8080` publishes on every host
+#       interface, which puts a container carrying a database credential on the
+#       network for anything that can route to this machine, and Docker's
+#       published ports are inserted ahead of most host firewall rules rather
+#       than filtered by them.
+docker run --rm --env-file ./.env.account-service.local -p 127.0.0.1:8080:8080 \
   carddemo/account-service:local
 ```
 
@@ -427,6 +547,7 @@ value column is `—` throughout, by design.
 | `CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE` | — | Terraform output (SQS) | none |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | — | minted per task by the image entry point | none |
 | `AWS_REGION` | — | ECS task definition | none |
+| `CARDDEMO_ONLINE_WRITES_PARAMETER` | — | ECS task definition (SSM parameter name) | none in effect |
 | `CARDDEMO_ENVIRONMENT` | — | ECS task definition | has one |
 | `CARDDEMO_COGNITO_ADMIN_GROUP_NAME` | — | Terraform output | has one |
 | `CARDDEMO_COGNITO_USER_GROUP_NAME` | — | Terraform output | has one |
@@ -434,11 +555,25 @@ value column is `—` throughout, by design.
 | `CARDDEMO_SERVER_TLS_KEYSTORE` | — | path the entry point writes | has one |
 | `CARDDEMO_SERVER_TLS_KEY_ALIAS` | — | fixed alias | has one |
 
-`CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` is the one required input that is *not*
-written as a placeholder in `application.yml`: it is bound by Spring's relaxed
-binding onto `carddemo.pagination.cursor.signing-key`. It is called out here
-because a reader auditing the file for `${...}` placeholders will not find it and
-could reasonably conclude it is optional. It is not.
+`CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` and `CARDDEMO_ONLINE_WRITES_PARAMETER` are
+the two inputs that are *not* written as placeholders in `application.yml`: Spring's
+relaxed binding maps them onto `carddemo.pagination.cursor.signing-key` and
+`carddemo.online-writes.parameter`, both declared in the shared kernel's
+auto-configuration. They are called out here because a reader auditing the file for
+`${...}` placeholders will not find either and could reasonably conclude they are
+optional. Neither is, and they fail in opposite ways. The cursor key **stops
+startup**: its bean is `@ConditionalOnProperty` and `service/AccountViewService`
+takes a `CursorToken` as a mandatory constructor argument. The write gate **removes
+itself silently**: both its beans are conditional on the same property and nothing
+outside the auto-configuration injects them, so an absent value leaves the account
+edit accepting writes during the nightly batch window with nothing in the log to say
+the gate is gone. `infra/modules/ecs-service` requires the cursor key by name and
+makes the gate name biconditional for the seven web workloads, so a root that drops
+either fails at `plan`.
+
+Refactoring Rationale: the second name was missing from the table above, which is
+the more consequential of the two omissions precisely because its absence is silent —
+the only symptom is a write accepted at a moment the batch window meant to refuse it.
 
 ### Health and metrics
 
@@ -478,9 +613,35 @@ token, with a per-operation scope such as `internal:account-context.account.read
 
 | Method | Path | Purpose | Baseline origin |
 |---|---|---|---|
-| `GET` | `/api/v1/accounts/{accountId}/view` | Read one account and its customer for the account-view screen | `COACTVWC` |
-| `PUT` | `/api/v1/accounts/{accountId}` | Apply an edited account and customer under a revision precondition | `COACTUPC` |
-| `GET` | `/api/v1/accounts/{accountId}/card-cross-references` | List an account's cross-reference rows in card-number order | `CBACT03C` via the `CXACAIX` path |
+| `POST` | `/api/v1/accounts/view` | Read one account and its customer for the account-view screen | `COACTVWC` |
+| `POST` | `/api/v1/accounts/update` | Apply an edited account and customer under a revision precondition | `COACTUPC` |
+| `POST` | `/api/v1/accounts/card-cross-references/search` | List an account's cross-reference rows in card-number order | `CBACT03C` via the `CXACAIX` path |
+
+Every one of the three is a `POST` on a fixed address, and two of them are reads.
+That is deliberate and it is not REST pedantry being ignored — it is the only
+control available over one specific exposure. Load-balancer access logging is
+mandatory in this deployment and an ELB access record has no field allow-list: the
+**request line** is always written, in full, composed by the load balancer itself
+before any application code runs, so neither `LogSafeText` nor `CardNumberMasker`
+nor `GlobalExceptionHandler` can reach it. This migration's sensitive-data contract
+in [`docs/architecture/observability.md`](../../docs/architecture/observability.md)
+names account and customer identifiers alongside the primary account number as
+values a durable diagnostic may not hold, so the identifier has to travel where the
+access record does not look, which is the body. The keyed forms — `GET
+/api/v1/accounts/{accountId}/view`, `PUT /api/v1/accounts/{accountId}` and `GET
+/api/v1/accounts/{accountId}/card-cross-references` — are **removed** rather than
+retained as aliases: an alias would leave the disclosure reachable by anyone who
+addressed the older shape. `AccountContextContractTest` fails the build if any
+published path template or declared parameter regains a place to put an identifier.
+
+What the two reads give up is cacheability by method semantics, which costs
+nothing here: both answers carry the revision a caller submits back as `If-Match`,
+so a cached body would produce a conflict that did not exist. What the edit gives
+up is idempotence by method semantics, which it never had in effect — the
+precondition refuses a repeated submission rather than applying it twice. The
+`cursor` and `direction` parameters of the walk stay in the query string, because a
+sealed cursor is confidential by construction and a direction is one of two
+published words, so neither is a value the contract prohibits.
 
 ### Internal operations
 
@@ -496,13 +657,13 @@ token, with a per-operation scope such as `internal:account-context.account.read
 
 Three of these are the by-account access path that replaces the `CXACAIX`
 alternate index — `lookup-by-account`, `search-by-account` and the end-user
-`card-cross-references` listing. See [The alternate index is a real access
+`card-cross-references/search` walk. See [The alternate index is a real access
 path](#the-alternate-index-is-a-real-access-path) for why that path has to exist
 at all.
 
 ### The update endpoint returns 409 on a version conflict
 
-`PUT /api/v1/accounts/{accountId}` responds **409 Conflict** when the stored
+`POST /api/v1/accounts/update` responds **409 Conflict** when the stored
 revision has moved since the client read it, and the response body carries this
 message character-for-character:
 
@@ -574,7 +735,7 @@ baseline's figure and not a measurement of ours.
 | `group_id` | `CHAR(10)` | `ACCT-GROUP-ID PIC X(10)` |
 | `version` | `BIGINT NOT NULL DEFAULT 0` | *no source* — the JPA `@Version` column |
 
-**Assumptions:** the four `PIC X(10)` date fields narrow to `DATE` rather than
+Assumptions: the four `PIC X(10)` date fields narrow to `DATE` rather than
 staying `CHAR(10)` because the baseline already stores them in `'YYYY-MM-DD'`
 form. That ordering is the reason the narrowing is safe: an ISO-ordered string
 compares lexically in exactly the order it compares chronologically, so every
@@ -603,16 +764,27 @@ silently changed ordering behaviour and could not have been done this way.
 | `fico_credit_score` | `SMALLINT` | `CUST-FICO-CREDIT-SCORE PIC 9(03)` (line 22) |
 | `version` | `BIGINT NOT NULL DEFAULT 0` | *no source* — the JPA `@Version` column |
 
-**Trade-offs:** the two protected identifiers become `BYTEA` holding ciphertext
+Trade-offs: the two protected identifiers become `BYTEA` holding ciphertext
 rather than a typed `CHAR(9)` and `VARCHAR(20)` holding plaintext. What is given
 up is real: a `BYTEA` column cannot be searched by value, range-scanned or
 usefully indexed, and every read pays a decrypt. What is bought is that a
 database dump, a snapshot restore and a replica all carry ciphertext instead of
-national identifiers. `CustomerIdentifierCipher` and
-`CustomerIdentifierProtectionConfig` own that boundary, and the values are
-returned **masked** rather than decrypted for display.
+national identifiers. `CustomerIdentifierCipher` owns that boundary — it is the
+one class that frames an envelope for these two columns — and
+`CustomerIdentifierProtectionConfig` only wires it to the mapper's port. The
+values are returned **masked** rather than decrypted for display.
 
-**Assumptions:** the FICO score narrows to `SMALLINT` because `PIC 9(03)` bounds
+> ⚠️ **Refactoring Rationale.** This paragraph named both classes as owners, and
+> for a period both were: the configuration held a private nested implementation
+> that framed `[length][key][IV][ciphertext]` while the cipher framed
+> `[CDCI][version][length][key][IV][ciphertext]`, and which one wrote a given row
+> depended on which beans a context registered. Nothing detected it because this
+> service publishes no decipher path for these two columns. The configuration now
+> delegates, so there is exactly **one** writer of this envelope — which is what
+> lets `data-migration` reproduce it byte for byte, asserted across both trees by
+> `CustomerIdentifierCipherTest` and `test_protected_columns.py`.
+
+Assumptions: the FICO score narrows to `SMALLINT` because `PIC 9(03)` bounds
 it to three digits, which fits `SMALLINT` with room to spare; `INTEGER` would
 have cost twice the width for a domain that cannot use it.
 
@@ -723,7 +895,7 @@ plus two ZIP digits. And the group has a fourth component,
 `02 LAST-3-OF-ZIP PIC X(3)` at line 1314, which exists to make the group span a
 full ZIP but is **not itself validated** by any condition name.
 
-**Assumptions:** the phone area-code list is a fixed allow-list captured at a
+Assumptions: the phone area-code list is a fixed allow-list captured at a
 point in time, not a live lookup against the numbering plan that maintains it.
 The practical consequence is that a newly assigned area code is rejected until
 the seeded reference data is refreshed. This module inherits that behaviour
@@ -789,13 +961,13 @@ identity across the turn, and the reply echoes it **unchanged**. The
 on `InquiryMessageListener` so a producer and a test can assert on them rather
 than repeating string literals.
 
-**Assumptions:** the reply destination arrives **on the message** and is not
+Assumptions: the reply destination arrives **on the message** and is not
 configured. Line 366 reads it out of the descriptor rather than out of
 `REPLY-QUEUE-NAME`, so a requester chooses where its answer goes. The target
 honours that: the listener resolves the destination from the `replyToQueueUrl`
 attribute, and the configured reply queue is the fallback rather than the rule.
 
-**Assumptions:** with `MQFMT-STRING` set at line 471 the payload is a string, so
+Assumptions: with `MQFMT-STRING` set at line 471 the payload is a string, so
 **field position and width *are* the interface.** The fixed-layout reply is
 reproduced exactly — a fixed one-thousand-character message, padded with spaces —
 using `InquiryRequestCodec` and `ZonedDecimalCodec` from `common-lib` together
@@ -803,7 +975,7 @@ with `Money` for the amounts. None of those layouts is re-declared in this modul
 a second copy of a record layout is a second thing that can drift.
 
 ⚠️ **The declared `contentType` is `text/plain`, deliberately *not* `text/csv`.**
-*Alternatives Considered:* `text/csv` is the obvious label for a string payload on
+Alternatives Considered: `text/csv` is the obvious label for a string payload on
 a migrated MQ queue and is wrong here. This inquiry payload is **fixed-width**, not
 delimited; `text/csv` is reserved in this migration for the authorization flow,
 whose request genuinely is an eighteen-field comma-separated record. A consumer
@@ -879,7 +1051,7 @@ screen, and it is three keyed reads chained in a fixed order:
 | 2 | `9300-GETACCTDATA-BYACCT` | 774 | the account master (`DATASET` on line 777) | `GO TO 9000-READ-ACCT-EXIT` |
 | 3 | `9400-GETCUSTDATA-BYCUST` | 825 | the customer master (`DATASET` on line 827) | `GO TO 9000-READ-ACCT-EXIT` |
 
-**Assumptions:** the order is a data dependency, not a style. Step 3 is keyed by a
+Assumptions: the order is a data dependency, not a style. Step 3 is keyed by a
 customer identifier the program does not have until step 1 has run — the paragraph
 moves `CDEMO-CUST-ID` into the customer read key only *after* the cross-reference
 read returns. The three hops therefore cannot be reordered or issued in parallel,
@@ -949,7 +1121,7 @@ target reproduces exactly that with an SQS listener using **delete-on-success
 under the queue's visibility period**, bounded by a dead-letter queue at five
 receives. Nothing is acknowledged for a request that was not answered.
 
-**Assumptions:** the absence of an outbox here is a *decision resting on those two
+Assumptions: the absence of an outbox here is a *decision resting on those two
 option values*, not an oversight and not work left undone. It is recorded in this
 form deliberately, because the natural instinct on reading a request/reply
 consumer is to look for the lost-reply window and close it — and doing so here
@@ -1026,7 +1198,7 @@ The message, character-for-character:
 Record changed by some one else. Please review
 ```
 
-**Refactoring Rationale:** the target maps this onto a JPA **`@Version`** column
+Refactoring Rationale: the target maps this onto a JPA **`@Version`** column
 on `Account` and `Customer`, with `OptimisticLockException` surfacing as **HTTP
 409 Conflict** carrying that message — mapped by `GlobalExceptionHandler` in
 `common-lib`, which is not re-implemented here. `EXEC CICS SYNCPOINT` becomes an
@@ -1043,7 +1215,7 @@ without holding anything in between.
 
 #### Divergence — the comparison is case-sensitive where the baseline folded ten fields
 
-**Trade-offs:** `9700-CHECK-CHANGE-IN-REC` does not compare raw bytes. It folds
+Trade-offs: `9700-CHECK-CHANGE-IN-REC` does not compare raw bytes. It folds
 case on exactly **ten** fields before comparing: one through `FUNCTION LOWER-CASE`
 (the account group identifier) and nine through `FUNCTION UPPER-CASE` (first,
 middle and last name, address lines 1 to 3, the state code, the country code and
@@ -1059,7 +1231,7 @@ edit. Registered as `D-UPDATE-CASE-SENSITIVE-COMPARE`.
 
 #### Divergence — the baseline's REWRITE rollback is asymmetric
 
-**Refactoring Rationale:** the two failure paths in `9600-WRITE-PROCESSING` do not
+Refactoring Rationale: the two failure paths in `9600-WRITE-PROCESSING` do not
 behave alike, and the asymmetry is correct in the baseline rather than a defect:
 
 | Failure | Lines | Rollback? | Why the baseline is right |
@@ -1093,7 +1265,7 @@ prohibition is not a convention: it is asserted by `LayeringRulesTest` in
 `common-lib`, which runs against this module's own compiled classes on every
 build.
 
-**Alternatives Considered:** transporting money as a JSON *number*, which is the
+Alternatives Considered: transporting money as a JSON *number*, which is the
 obvious choice and is wrong here. A JSON number is parsed into an IEEE-754 double
 by most clients — `JSON.parse` in a browser produces exactly that — and a double
 cannot represent every two-decimal value exactly. The corruption is silent and
@@ -1110,11 +1282,32 @@ field in this context's records is zoned decimal with sign overpunch, not packed
 which is the direct justification for `ZonedDecimalCodec` in `common-lib` being a
 separate codec rather than a formatting helper.
 
-### DTO numerics transport as digits-only strings
+### DTO numerics transport as strings, and identifiers differ from money
 
-**Assumptions:** the account identifier and every money amount cross the API as a
-**digits-only string**, not as a JSON number. Two independent pieces of baseline
-evidence point the same way, which is why this is a reading of the contract rather
+Assumptions: the account identifier and every money amount cross the API as a
+**string**, not as a JSON number — but they are **two different string shapes**, and
+conflating them is the mistake to avoid:
+
+| Kind | Shape on the wire | Schema | Accepts |
+|---|---|---|---|
+| Identifiers (`accountId`, `customerId`, `cardNumber`) | digits only, no sign, no separator | `pattern: '^[0-9]{1,11}$'` for `accountId` | `'00000000011'` |
+| Money (`creditLimit`, `currentBalance`, cycle credit and debit, cash limit) | **signed**, decimal point **required**, exactly two fractional digits | [`Money`](src/main/resources/openapi/account-api.yaml) — `pattern: '^-?[0-9]{1,10}\.[0-9]{2}$'` | `'5000.00'`, `'-123.45'`, `'0.00'` |
+
+Refactoring Rationale: this section previously said that the identifier *and*
+every money amount cross the API as a "digits-only string". That is right for
+identifiers and wrong for money in the two ways that matter most. A negative
+balance is a normal state in this domain — the reference layout declares
+`ACCT-CURR-BAL` as `PIC S9(10)V99`, signed — so a client that implemented
+"digits-only" would reject the leading `-` on every credit balance it was sent.
+And the decimal point is not optional: `MoneyModule` in `common-lib` serialises
+through `Money.toPlainString()` at scale two, so the emitted form always carries
+the point and two fractional digits, and a client validating digits-only would
+reject **every** amount, including `'0.00'`. The distinction is worth stating as a
+table rather than a sentence because the two rules are genuinely different and a
+single adjective cannot carry both.
+
+Two independent pieces of baseline evidence support carrying these fields as
+strings at all, which is why the string form is a reading of the contract rather
 than a preference.
 
 1. **The baseline itself treats these fields as characters.** The X-over-9
@@ -1141,7 +1334,7 @@ sign or silently normalise leading zeros.
 
 ### The corrected misspelling
 
-**Refactoring Rationale:** `ACCT-EXPIRAION-DATE` at line **11** of
+Refactoring Rationale: `ACCT-EXPIRAION-DATE` at line **11** of
 `app/cpy/CVACT01Y.cpy` becomes `accounts.expiration_date` in SQL and
 `expirationDate` in Java. The baseline spelling is a typographical error, not a
 domain term, and propagating it into a public API and a database schema would make
@@ -1162,7 +1355,7 @@ Two boundaries on it matter:
 
 ### The alternate index is a real access path
 
-**Assumptions:** `CXACAIX` is a genuine access path that online programs read, not
+Assumptions: `CXACAIX` is a genuine access path that online programs read, not
 decoration on a file definition. It becomes the secondary index
 **`idx_card_xref_account_id`** plus a by-account repository query, and four
 independent facts confirm it has to exist at all:
@@ -1220,7 +1413,7 @@ tasks behind a load balancer to serve the same user's consecutive requests.
 
 ### Keyset pagination, never offset
 
-**Alternatives Considered:** offset pagination — `LIMIT ... OFFSET ...` — was
+Alternatives Considered: offset pagination — `LIMIT ... OFFSET ...` — was
 rejected for every list this module returns. Under concurrent inserts and deletes
 an offset shifts beneath the reader, so a row can be **skipped** or **repeated**
 across two consecutive pages. A browse by key cannot do either, because the next
@@ -1258,7 +1451,7 @@ Account number must be a non zero 11 digit number
 ```
 
 Note the second is not merely respaced — it says "number" rather than "Filter",
-and "non zero" rather than "non-zero". *Alternatives Considered:* the two
+and "non zero" rather than "non-zero". Alternatives Considered: the two
 reasonable-looking alternatives are to normalise the double space as an obvious
 typo, or to adopt the `88`-level wording because it reads better. Both are
 rejected: **the emitted literal is what a user sees, so line 672 is the one carried
@@ -1293,14 +1486,25 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-**26** test classes: **23** unit and web-layer tests matching `*Test`, run by
-Surefire, and **3** integration tests matching `*IT`, run by Failsafe. Every test
-package also carries a `package-info.java`, because the documentation gate audits
-test sources too.
+<!-- test-inventory: 28 tests + 5 integration tests -->
+**33** test classes: **28** unit and web-layer tests matching `*Test`, run by
+Surefire, and **5** integration tests matching `*IT`, run by Failsafe. Every one of
+the seven test packages also carries a `package-info.java`, because the
+documentation gate audits test sources too.
+
+Refactoring Rationale: this census read 26 classes (23 plus 3) and its `api` row
+named four of the six classes in that package, omitting `CardXrefControllerTest`
+and `CustomerControllerTest` — the web-layer tests for the cross-reference and
+customer routes. Both routes are described elsewhere in this document as covered,
+so the omission made the coverage of two published endpoints look like a gap that
+a reader might then fill with a duplicate class. The comment line above this
+paragraph is not decoration: `ServiceReadmeInventoryTest` in `common-lib` parses it
+and re-measures both figures against this module's test tree, so this count now
+fails the build when it drifts instead of ageing quietly.
 
 | Package | Classes | What they cover |
 |---|---|---|
-| `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest` | Web-layer binding, routing, status selection and the published contract |
+| `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
 | `service` | `AccountUpdatePreservationTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the update path including the 409-on-version-conflict branch, the read composition, the by-account cross-reference read, address validation, the inquiry consumer, and identifier protection |
 | `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, listener wiring, the served OpenAPI document, and startup |
 | `mapper` | `AccountMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking, the misspelling correction, `FILLER` removal, the fixed-width reply |
@@ -1313,10 +1517,9 @@ The three integration tests are named individually rather than described as a
 repository test at all. Failsafe selects on the `IT` suffix, not on the package.
 
 ```bash
-# WHAT: run every test in this module, unit and integration alike.
 # WHY : Assumptions: Failsafe binds to `integration-test` and `verify`, so the
 #       three `*IT` classes run under `verify` and NOT under `test`. A run that
-#       stops at `test` therefore exercises 23 of the 26 classes and skips every
+#       stops at `test` therefore exercises 25 of the 28 classes and skips every
 #       Testcontainers-backed database assertion -- including the by-account query
 #       that stands in for the CXACAIX alternate index, which is the one query a
 #       reader is most likely to assume is covered.
@@ -1324,23 +1527,69 @@ mvn -B -f services/pom.xml -pl account-service -am verify
 ```
 
 ```bash
-# WHAT: run one test class, or one method within it.
+# WHY : Assumptions: these are scoped with `-pl account-service` and deliberately
+#       WITHOUT `-am`, which is the opposite of every other command in this
+#       section. A `-Dtest=` filter is a GLOBAL property: with `-am` the reactor
+#       also builds the aggregator, whose `architecture-rules` Surefire execution
+#       runs `LayeringRulesTest` out of the shared kernel, and that execution
+#       receives the same filter, matches nothing, and fails the build with "No
+#       tests matching pattern ... were executed!" before account-service is ever
+#       reached. Refactoring Rationale: both of these commands previously carried
+#       `-am` and BOTH failed for that reason, whatever was named after `-Dtest`
+#       — so the shape was wrong, not just the pattern.
+# WHY : Assumptions: dropping `-am` means `common-lib` is resolved from the local
+#       repository rather than rebuilt, so run the full build once first (the
+#       `verify` command above installs nothing, so use
+#       `mvn -B -f services/pom.xml -pl common-lib install` on a fresh clone).
+#       Trade-offs: that is a real prerequisite, accepted because the alternative
+#       is passing `-Dsurefire.failIfNoSpecifiedTests=false` to silence the
+#       aggregator — which would also silence the genuine mistyped-name failure
+#       this command wants to keep.
+# WHY : Assumptions: a `#` selector matches the METHOD NAME. Surefire does not
+#       match `@DisplayName` text, so a pattern drawn from a display name selects
+#       nothing and, correctly, fails. Refactoring Rationale: the second line read
+#       `-Dtest='AccountMapperTest#*Masked*'`; no method in that class contains
+#       "Masked" — the masking cases are named for what they withhold, e.g.
+#       `theEchoWithholdsExactlyTheFourIdentifierComponents`. Verified by running
+#       all three forms: the exact name selects 1 test, `#*Identifier*` selects 3,
+#       and `#*Masked*` selects 0 and exits non-zero.
 # WHY : Trade-offs: `-Dsurefire.failIfNoSpecifiedTests=false` is omitted on
 #       purpose. With a mistyped class name the build then FAILS rather than
 #       reporting a green run in which nothing was selected, which is the failure
 #       mode this flag exists to hide.
-mvn -B -f services/pom.xml -pl account-service -am test -Dtest=AccountUpdatePreservationTest
-mvn -B -f services/pom.xml -pl account-service -am test -Dtest='AccountMapperTest#*Masked*'
+mvn -B -f services/pom.xml -pl account-service test -Dtest=AccountUpdatePreservationTest
+mvn -B -f services/pom.xml -pl account-service test -Dtest='AccountMapperTest#*Identifier*'
 ```
 
 ```bash
-# WHAT: run only the Testcontainers-backed integration tests.
 # WHY : Assumptions: a working container runtime is required -- Testcontainers
 #       starts a real PostgreSQL rather than substituting an in-memory engine. That
 #       is deliberate: an in-memory database would not enforce `CHAR(n)` padding,
 #       `NUMERIC(12,2)` scale or the secondary index this module's queries depend
 #       on, so it would pass on schemas PostgreSQL rejects.
-mvn -B -f services/pom.xml -pl account-service -am verify -Dtest=skip -DfailIfNoTests=false -Dit.test='*IT'
+# WHY : Assumptions: this invokes Failsafe's two goals DIRECTLY after
+#       `test-compile` rather than running `verify` with the Surefire tier
+#       suppressed, because no property can suppress it here. Refactoring
+#       Rationale: this command used to read
+#       `verify -Dtest=skip -DfailIfNoTests=false`, and neither half worked.
+#       `-Dtest=skip` selects a class named "skip", which matches nothing;
+#       `-DfailIfNoTests=false` cannot rescue it because this module inherits an
+#       `architecture-rules` Surefire execution whose POM configuration sets
+#       `<failIfNoTests>true</failIfNoTests>` explicitly, and an explicit
+#       execution configuration wins over a command-line user property. Adding
+#       `-Dsurefire.failIfNoSpecifiedTests=false` does not help either: that flag
+#       governs a different check, and the execution still fails with the plainer
+#       "No tests were executed!". Verified by running all four variants; two
+#       failed at `architecture-rules`, one silently ran nothing, and only this
+#       form ran the integration tier alone.
+# WHY : Trade-offs: invoking plugin goals directly bypasses the lifecycle, so the
+#       jar is not repackaged and nothing is installed. That is exactly what is
+#       wanted for a fast database-only loop, and it is why the full `verify`
+#       above remains the command to trust before pushing. Expect three IT
+#       classes and 23 integration tests; `AwsStarterRuntimeIT` contributes 0 of
+#       them by design, because its LocalStack precondition is absent.
+mvn -B -f services/pom.xml -pl account-service test-compile \
+    failsafe:integration-test failsafe:verify -Dit.test='*IT'
 ```
 
 ### Fixtures are fixed-width at the declared record length
@@ -1399,7 +1648,7 @@ its own limitations in `tests/README.md` §1.1.
   the production source documents it and do not redefine it, which is the same
   stance §13 takes for the programs it does cover.
 
-  **WHY (Trade-offs):** stating plainly that no oracle exists is worth more than
+  Trade-offs: stating plainly that no oracle exists is worth more than
   the reassurance of implying one. A reader who believed a golden master backed
   these paths would treat a green build as evidence of behavioural parity, stop
   reading the COBOL, and lose the only thing that actually establishes parity here
@@ -1489,7 +1738,7 @@ That rule is applied to this file without exception, including in one place wher
 the house precedent reads the other way. `tests/README.md` §1.1 tags its own
 limitation with a singular, parenthesised `WHY (Trade-off):`; the corresponding
 clause under [Known Limitations](#known-limitations) keeps that section's shape but
-writes the label **plural**. *Assumptions:* the parenthesised `WHY (...)` form is a
+writes the label **plural**. Assumptions: the parenthesised `WHY (...)` form is a
 prose convention of that section and is preserved, whereas the label *inside* it is
 a canonical category name and is therefore subject to the spelling rule above. A
 file that declared the singular unacceptable and then used it would be its own
@@ -1635,7 +1884,6 @@ the aligned single space before the colon in `WHY :` — it exists so the two la
 line up in a fixed-width font.
 
 ```text
-# WHAT: <one line, what the command does>
 # WHY : <Canonical Label:> <specific justification>
 ```
 
@@ -1670,12 +1918,12 @@ Everything below is missing **on purpose**. Each entry records its reason so tha
 later reader does not add it back as an oversight. The module's POM carries the same
 reasoning beside the dependency block, so the two cannot drift apart.
 
-- **No Lombok.** *Alternatives Considered:* generated accessors cannot carry the
+- **No Lombok.** Alternatives Considered: generated accessors cannot carry the
   Javadoc that Rule 1's validation gate requires, and the inherited Checkstyle
   configuration runs `MissingJavadocMethod` with `allowMissingPropertyJavadoc="false"`
   — so every generated getter would fail the gate. Java 21 records plus explicit
   constructors give the same brevity with members that can be documented.
-- **No MapStruct.** *Alternatives Considered:* rejected for two independent
+- **No MapStruct.** Alternatives Considered: rejected for two independent
   reasons. Its most recent published release is a beta; and, decisively, the
   copybook-to-DTO mapping here is **not mechanical** — it drops `FILLER`, masks the
   primary account number to its last four digits, never serialises a card
@@ -1683,7 +1931,7 @@ reasoning beside the dependency block, so the two cannot drift apart.
   and maps a screen city field onto address line 3. Every one of those needs an
   inline justification at the mapping site, and a generated mapper has nowhere to
   hold it.
-- **No resilience library and no circuit breaker.** *Alternatives Considered:*
+- **No resilience library and no circuit breaker.** Alternatives Considered:
   `resilience4j-spring-boot3` targets Spring Boot 3.x, and the superseded
   `spring-retry` is unnecessary because Spring Framework 7 — which arrives through
   the Boot 4.1.0 parent — moved retry into the framework core. Where declarative

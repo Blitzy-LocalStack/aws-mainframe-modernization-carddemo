@@ -269,6 +269,47 @@ tags:
 security:
   - bearerAuth: []
 
+# WHY : Refactoring Rationale: every operation below carries x-required-authority,
+#       and this document was for a time the only contract in the reactor that
+#       carried none. The consequence was not cosmetic. Five sibling contracts
+#       publish the field and each has a test that compares the value on every
+#       operation against the authority its own filter chain enforces for that
+#       operation's path, so a route whose contract and chain disagree fails a
+#       build. This document could not be checked that way at all, which left the
+#       only statement of who may reach these operations in prose -- and prose that
+#       no build reads is prose that drifts. TransactionApiRoutingContractTest
+#       performs the comparison, driving the chain's own authorization manager
+#       rather than restating a string, so the two statements of one rule cannot be
+#       edited apart.
+# WHY : Alternatives Considered: expressing the authority as a security-scheme
+#       scope, by writing `security: [{bearerAuth: [carddemo-user]}]` on each
+#       operation. Rejected because the specification requires the scope list to be
+#       EMPTY for a scheme that is not oauth2 or openIdConnect, and bearerAuth here
+#       is `type: http`, so a populated list is invalid and a validating tool would
+#       either reject it or ignore it. Re-declaring the scheme as oauth2 purely to
+#       gain a scope list was rejected in turn: these values are Cognito GROUP names
+#       carried in a cognito:groups claim, not OAuth scopes, and publishing them as
+#       scopes would state something untrue about how the token is issued.
+# WHY : Assumptions: the two admitted values are exactly the two group names the
+#       shared token converter recognises, ADMIN_AUTHORITY and USER_AUTHORITY in
+#       services/common-lib/src/main/java/com/carddemo/common/security/JwtRoleConverter.java,
+#       which are the migrated form of the two SEC-USR-TYPE values 'A' and 'U' at
+#       app/cpy/CSUSR01Y.cpy:22. carddemo-user on an operation means any
+#       authenticated caller of this context may reach it, because every user of
+#       this system holds one of the two groups and an administrator is not denied a
+#       cardholder operation; carddemo-admin would mean the administrative group is
+#       required, which no operation in this context asks for -- every one of them is
+#       a cardholder operation the reference reaches from the main menu.
+x-authority-model:
+  field: x-required-authority
+  values:
+    - carddemo-user
+    - carddemo-admin
+  enforcedBy: >-
+    services/transaction-service/src/main/java/com/carddemo/transaction/config/SecurityConfig.java
+  assertedBy: >-
+    services/transaction-service/src/test/java/com/carddemo/transaction/api/TransactionApiRoutingContractTest.java
+
 # WHY : Refactoring Rationale: every path below carries the /api/v1 prefix, and
 #       the bill-payment collection is published at /api/v1/billpay rather than at
 #       a plural resource name of this document's choosing. An earlier revision
@@ -322,6 +363,7 @@ paths:
     get:
       tags: [Transaction List]
       operationId: listTransactions
+      x-required-authority: carddemo-user
       summary: List transactions as one keyset-paged page.
       description: >-
         Returns one bounded page of transactions in ascending transaction-id
@@ -391,6 +433,7 @@ paths:
     post:
       tags: [Transaction Add]
       operationId: addTransaction
+      x-required-authority: carddemo-user
       summary: Add one transaction with a server-assigned identifier.
       description: >-
         Creates one transaction, migrated from app/cbl/COTRN02C.cbl.
@@ -405,14 +448,16 @@ paths:
         alone is entitled to choose.
 
 
-        Exactly one of accountId and cardNumber is required. The baseline
-        evaluates them in that order at L195 to L226: an account identifier that
-        is present is validated numeric at L197 and used to look the card number
-        up through the cross-reference at L206 to L209, a card number that is
+        At least one of accountId and cardNumber is required, and the account
+        identifier takes precedence when both are supplied. The baseline evaluates
+        them in that order at L195 to L226: an account identifier that is present
+        is validated numeric at L197 and used to look the card number up through
+        the cross-reference at L206 to L209 -- so a card number supplied alongside
+        it is discarded by that lookup rather than refused -- a card number that is
         present is validated numeric at L211 and used to look the account
         identifier up at L220 to L223, and supplying neither is refused at L226.
-        Whichever is supplied, the card number is what the stored record carries,
-        per the MOVE at L459.
+        Whichever is used, the card number is what the stored record carries, per
+        the MOVE at L459.
 
 
         The confirmation decides whether the write happens, which is why one
@@ -545,6 +590,170 @@ paths:
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 
+  # WHY : ⚠️ Refactoring Rationale: this operation publishes the baseline's PF5
+  #       "copy last transaction" action, which was implemented in
+  #       TransactionAddService.copyLastTransactionData and reachable from nothing.
+  #       app/cbl/COTRN02C.cbl binds it at L146 and L147 and performs
+  #       COPY-LAST-TRAN-DATA at L471, which validates the key fields at L473, reads
+  #       the most recent record backwards across L475 to L478, copies eleven of its
+  #       data columns across L480 to L493 and then re-enters PROCESS-ENTER-KEY at
+  #       L495. Leaving it unpublished meant a documented baseline capability existed
+  #       in the migrated code and could not be exercised by any client, which reads
+  #       from the outside as a parity gap and from the inside as dead code.
+  #       Alternatives Considered: deleting the service method and recording the
+  #       action as not migrated. Rejected because the action IS in the baseline and
+  #       the AAP maps COTRN02C wholesale onto this context, so dropping it would be
+  #       a silent scope reduction; the method is also already transcribed and tested,
+  #       so the cheaper of the two corrections is to publish it.
+  #       Alternatives Considered: expressing it as a flag on the add operation --
+  #       a "copySource: LAST" member on TransactionCreateRequest. Rejected because
+  #       the baseline reaches it from a DIFFERENT attention identifier than Enter,
+  #       so it is a separate action rather than a variant of the capture, and a flag
+  #       would make eleven of the request's members conditionally meaningless
+  #       without any schema being able to say so.
+  #       Assumptions: it is a POST rather than a GET even though it can end without
+  #       writing, because the confirmed form writes a row. The same reasoning the
+  #       add operation records applies unchanged: one operation answers both 200 and
+  #       201 because the baseline makes that choice inside one EVALUATE.
+  /api/v1/transactions/copy-last:
+    post:
+      tags: [Transaction Add]
+      operationId: copyLastTransaction
+      x-required-authority: carddemo-user
+      summary: Re-capture the most recently stored transaction as a new one.
+      description: >-
+        Copies the most recently stored transaction into a fresh submission and
+        captures it, migrated from COPY-LAST-TRAN-DATA at app/cbl/COTRN02C.cbl
+        L471, which the baseline reaches from PF5 at L146 and L147.
+
+
+        The request carries the same shape the add operation takes, and exactly
+        one of accountId and cardNumber selects the account or card the new
+        transaction is recorded against. Eleven data members of the submission
+        are OVERWRITTEN from the copied record -- the type code, category code
+        and source at L482 to L484, the amount rendered through the edited
+        picture at L481 and L485, the description at L486, the two dates at L487
+        and L488 and the four merchant members at L489 to L492 -- so values
+        supplied for those members are replaced rather than merged, which is the
+        baseline behaviour. They remain required by the request schema because
+        the baseline validates the key fields at L473 against the same screen the
+        operator was already on.
+
+
+        The confirmation decides whether the copied capture is written, exactly
+        as it does for the add operation, because L495 re-enters
+        PROCESS-ENTER-KEY and the copied values therefore travel the full
+        validation chain rather than a shortened one.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationIdHeader"
+      requestBody:
+        description: >-
+          The submission whose key members select the account or card, and whose
+          confirmation decides whether the copied capture is written. Its eleven
+          data members are replaced from the copied record.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionCreateRequest"
+      responses:
+        "200":
+          description: >-
+            The confirmation was withheld, so no transaction was written. The body
+            reports the normalised amount the copied submission would be captured
+            at and the prompt "Confirm to add this transaction..." verbatim from
+            app/cbl/COTRN02C.cbl L178.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionAddPreview"
+        "201":
+          description: >-
+            The copied transaction was written. The body carries the assigned
+            identifier, the normalised amount and the baseline's own success
+            sentence, and the Location header addresses the new resource.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+            Location:
+              description: >-
+                Absolute path of the created transaction, addressing the view
+                operation for the assigned identifier.
+              required: true
+              schema:
+                type: string
+                description: >-
+                  Path of the created transaction, of the form
+                  /api/v1/transactions/{transactionId}, matching the view
+                  operation's own path key.
+                examples:
+                  - "/api/v1/transactions/0000000000683581"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        # WHY : Assumptions: this status covers TWO absences where the add operation
+        #       covers one, and the second is specific to this action. The supplied
+        #       key may resolve through no cross-reference entry, exactly as for the
+        #       add; or the table may hold no row to copy at all, which the baseline
+        #       reaches through its own backward read at L475 to L478 and reports
+        #       with the read sentence at L664 and L693.
+        "404":
+          description: >-
+            Neither the supplied account identifier nor the supplied card number
+            resolves through the cross-reference, or the table holds no
+            transaction to copy. The aggregate message is "Account ID NOT
+            found..." verbatim from app/cbl/COTRN02C.cbl L593 when the account
+            identifier was supplied, "Card Number NOT found..." verbatim from
+            L626 when the card number was, and "Unable to lookup Transaction..."
+            from L664 and L693 when there was no row to copy.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: >-
+            The assigned identifier already exists. The aggregate message is
+            "Tran ID already exist..." verbatim from app/cbl/COTRN02C.cbl L738,
+            singular verb included, and it is the response for both of the
+            duplicate conditions the baseline handles together at L735 and L736.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: >-
+            The copy, one of the lookups preceding it, or the write failed for a
+            reason the caller cannot correct. The aggregate message is one of
+            "Unable to Add Transaction..." verbatim from app/cbl/COTRN02C.cbl
+            L745, "Unable to lookup Acct in XREF AIX file..." from L600, "Unable
+            to lookup Card # in XREF file..." from L633, or "Unable to lookup
+            Transaction..." from L664 and L693.
+          headers:
+            X-Correlation-Id:
+              $ref: "#/components/headers/XCorrelationId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /api/v1/transactions/{transactionId}:
     description: >-
       One transaction addressed by its identifier, migrated from CICS
@@ -564,6 +773,7 @@ paths:
     get:
       tags: [Transaction View]
       operationId: viewTransaction
+      x-required-authority: carddemo-user
       summary: View one transaction by identifier.
       description: >-
         Returns the thirteen record fields the baseline view screen displays,
@@ -688,6 +898,7 @@ paths:
     post:
       tags: [Bill Payment]
       operationId: payAccountBalanceInFull
+      x-required-authority: carddemo-user
       summary: Pay an account's entire current balance, or preview what would be paid.
       description: >-
         Pays the whole of an account's current balance, migrated from
@@ -741,12 +952,25 @@ paths:
         #       L193 to L194, and at L236 to L239 an unconfirmed request is
         #       answered with the confirm prompt. Answering an error there would
         #       report a failure where the baseline reports a prompt.
+        # WHY : Assumptions: this status covers THREE baseline turns, not one, and the
+        #       description now names all three. A withheld confirmation reaches
+        #       READ-ACCTDAT-FILE at L184 and reports the balance with the prompt at
+        #       L237; a non-positive balance reports it with the advisory at L198; and
+        #       a DECLINED confirmation at L178 to L181 clears the screen at L180
+        #       without reaching the account read at all, so it reports the account
+        #       identifier and nothing else. Naming only the first left the declined
+        #       turn undescribed, which is how a client comes to treat an absent
+        #       balance as a defect.
         "200":
           description: >-
-            The confirmation was withheld, so no payment was made. The body
-            reports the balance that would be paid and, when the confirmation
-            was blank, the prompt "Confirm to make a bill payment..." verbatim
-            from app/cbl/COBIL00C.cbl L237.
+            The confirmation was withheld or declined, so no payment was made. On a
+            withheld confirmation the body reports the balance that would be paid
+            together with the prompt "Confirm to make a bill payment..." verbatim
+            from app/cbl/COBIL00C.cbl L237, or "You have nothing to pay..." from
+            L198 when the balance is not positive. On a declined confirmation it
+            reports the account identifier alone, with neither a balance nor a
+            sentence, because L180 clears the screen and L178 reaches no account
+            read.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1555,7 +1779,7 @@ components:
       #       a further request is issued from, and hasPrev is derivable from
       #       firstKey being non-null -- so the wider shape would publish three
       #       members a caller must be told how to reconcile with three others.
-      required: [items, firstKey, lastKey, hasNext, hasPrevious]
+      required: [items, firstKey, lastKey, hasNext]
       additionalProperties: false
       properties:
         # WHY : Assumptions: the bound of ten is a BASELINE FACT, not a tuning
@@ -1628,18 +1852,6 @@ components:
             beyond the page. When it is false, a forward request would return no
             rows and the baseline answers the attempt with "You are already at the
             bottom of the page..." from app/cbl/COTRN00C.cbl L270.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
         # WHY : Trade-offs: no member states whether a page PRECEDES this one, and the
         #       answer is the presence of firstKey instead. The envelope has four
@@ -1927,16 +2139,19 @@ components:
           maxLength: 75
         - type: "null"
 
-    # WHY : Assumptions: exactly one of accountId and cardNumber, expressed as a
+    # WHY : Assumptions: at least one of accountId and cardNumber, expressed as a
     #       schema constraint rather than left to prose, because the baseline
-    #       evaluates them as mutually exclusive alternatives and derives the one
-    #       it was not given. app/cbl/COTRN02C.cbl L196 takes the account-id
-    #       branch when that field is not blank and fills the card number in from
-    #       the cross-reference at L209; L210 takes the card-number branch and
+    #       refuses a request carrying neither and derives whichever it was not
+    #       given. app/cbl/COTRN02C.cbl L196 takes the account-id branch when that
+    #       field is not blank and fills the card number in from the
+    #       cross-reference at L209; L210 takes the card-number branch -- only when
+    #       no account identifier was supplied, because L196 has precedence -- and
     #       fills the account id in at L223; L224 to L226 refuses a request
     #       carrying neither with "Account or Card Number must be entered...".
-    #       Requiring both would reject a request the baseline accepts, and
-    #       requiring neither would admit one it refuses.
+    #       Requiring both would reject a request the baseline accepts, requiring
+    #       neither would admit one it refuses, and requiring exactly one -- which
+    #       an earlier revision did -- rejected a request the baseline captures on
+    #       the account arm while silently discarding the card number.
     # WHY : Refactoring Rationale: the confirmation IS published, as an optional
     #       property. An earlier revision omitted it, reasoning that a confirmation
     #       is a terminal interaction step and an HTTP request either asks for the
@@ -1987,21 +2202,38 @@ components:
       #       L184, so the field distinguishes three outcomes rather than two.
       #       Dropping it would also have left this contract disagreeing with its
       #       own bill-payment operation, which models the identical field.
-      oneOf:
+      # WHY : ⚠️ Refactoring Rationale: anyOf, where this was oneOf with a `not` on
+      #       each branch -- so it required EXACTLY one key and refused a body
+      #       carrying both. That refused a submission the baseline captures. The
+      #       reference's paragraph SELECTS rather than validates: L196 takes the
+      #       account arm and the card arm at L210 is then never evaluated at all, so
+      #       a body carrying both is processed on the account and the card number is
+      #       discarded at L209 by the cross-reference lookup. No branch in the
+      #       paragraph reports a contradiction and no sentence exists for one. The
+      #       exclusive form also made the account-first precedence unreachable: the
+      #       body was rejected at validation, before the service could apply it.
+      #       Assumptions: the only refusal the paragraph contains is the
+      #       fall-through at L224 to L226, reached when NEITHER key was supplied and
+      #       answered with "Account or Card Number must be entered...". anyOf is
+      #       exactly that: at least one branch must hold.
+      #       Trade-offs: a caller may now send a card number that disagrees with the
+      #       account and receive a success naming neither the disagreement nor the
+      #       value that won. Accepted because it is the baseline's behaviour;
+      #       reporting the conflict would refuse submissions this screen accepts.
+      anyOf:
         - required: [accountId]
           description: >-
-            The account-id form. The card number is resolved from the
+            The account-id form, which is also the form a both-keys submission
+            resolves through. The card number is resolved from the
             cross-reference, as the baseline does at app/cbl/COTRN02C.cbl L206 to
-            L209.
-          not:
-            required: [cardNumber]
+            L209, and a card number supplied alongside is discarded by that lookup.
         - required: [cardNumber]
           description: >-
-            The card-number form. The account identifier is resolved from the
+            The card-number form, reached only when no account identifier was
+            supplied. The account identifier is resolved from the
             cross-reference, as the baseline does at app/cbl/COTRN02C.cbl L220 to
-            L223.
-          not:
-            required: [accountId]
+            L223. Taken only when no account identifier was supplied, because L196
+            gives that field precedence.
       properties:
         accountId:
           allOf:
@@ -2387,27 +2619,54 @@ components:
       examples:
         - "Y"
 
+    # WHY : ⚠️ Refactoring Rationale: payableBalance left the required list and became
+    #       nullable, and the change is a correction rather than a relaxation. THREE
+    #       baseline turns pay nothing and this schema answers all three, not two.
+    #       Two of them read the account and report its balance -- the withheld
+    #       confirmation at app/cbl/COBIL00C.cbl L182 to L194 and the nothing-to-pay
+    #       advisory at L200 to L204. The third is the DECLINED confirmation at L178
+    #       to L181, which performs CLEAR-CURRENT-SCREEN at L180 and never reaches
+    #       READ-ACCTDAT-FILE at L343 at all -- only L177 and L184 do -- so it has
+    #       no balance to report and blanks the field instead of filling it. While
+    #       the member was required, the service had to read an account on that turn
+    #       to satisfy this schema, which charged the account context for an access
+    #       the baseline does not perform and turned a decline on an unknown
+    #       identifier into a 404 where the baseline simply clears the screen.
+    #       Alternatives Considered: a third closed schema for the declined turn,
+    #       carrying no balance member at all. Rejected because it would publish
+    #       three bodies for one operation where the baseline distinguishes two
+    #       outcomes, paid and not paid, and every client would then need a third
+    #       branch. A nullable member on one schema says the same thing once.
+    #       Assumptions: absence is spelled null and never zero. Zero is a balance an
+    #       account can genuinely carry, and it is exactly what the nothing-to-pay
+    #       branch reports, so the two states have to remain distinguishable.
     BillPaymentPreview:
       type: object
       description: >-
-        What a bill payment would pay, returned when the confirmation was withheld
-        and nothing was written. It mirrors the baseline turn at
+        What a bill payment would pay, returned on a turn that paid nothing. It
+        mirrors three baseline turns: the withheld confirmation at
         app/cbl/COBIL00C.cbl L182 to L194, which reads the account and displays its
-        balance without posting.
-      required: [accountId, payableBalance, paid]
+        balance without posting; the nothing-to-pay advisory at L200 to L204; and
+        the declined confirmation at L178 to L181, which clears the screen and
+        reports neither a balance nor a sentence.
+      required: [accountId, paid]
       additionalProperties: false
       properties:
         accountId:
           allOf:
             - $ref: "#/components/schemas/AccountId"
-          description: The account the preview was requested for.
+          description: >-
+            The account the preview was requested for, echoed from the request on
+            every one of the three turns including the declined one, which reads
+            nothing and so can echo only what it was sent.
         payableBalance:
           allOf:
             - $ref: "#/components/schemas/AccountBalance"
           description: >-
             The balance that a confirmed request would pay in full. The baseline
             moves the same value to its display field at app/cbl/COBIL00C.cbl L193
-            to L194.
+            to L194. Absent on the declined turn alone, which clears the screen at
+            L180 without reaching the account read at L343.
         paid:
           type: boolean
           description: >-
@@ -2422,7 +2681,9 @@ components:
             The prompt inviting the caller to confirm, verbatim
             "Confirm to make a bill payment..." from app/cbl/COBIL00C.cbl L237,
             or the refusal "You have nothing to pay..." from L198 when the
-            balance is not positive.
+            balance is not positive. Absent on the declined turn, which sets its
+            error flag at L181 as a control-flow short-circuit and moves no
+            sentence into the message field.
 
     # WHY : Refactoring Rationale: this schema was NARROWED to the four data
     #       members the service actually emits plus the discriminator, and the
@@ -2541,7 +2802,22 @@ components:
         carries a stable machine-readable code, a human-readable aggregate sentence
         reproduced verbatim from the baseline paragraph that detected the failure,
         and one entry per offending field.
-      required: [code, secondaryCode, severity, subsystem, status, correlationId, path, timestamp, fieldErrors]
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
+      required: [code, secondaryCode, message, severity, subsystem, status, correlationId, path, timestamp, fieldErrors, abend]
       additionalProperties: false
       properties:
         # WHY : Refactoring Rationale: this bound is THIRTEEN and an earlier revision

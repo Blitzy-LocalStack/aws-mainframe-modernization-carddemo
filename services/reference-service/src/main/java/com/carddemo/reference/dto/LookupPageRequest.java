@@ -157,7 +157,7 @@ import jakarta.validation.constraints.Size;
  *
  * <p>Trade-offs: no member names how many rows a page holds, so a caller cannot ask for a wider one.
  * The window is bounded and its bound is a constant the answering layer owns, published as
- * {@code AddressLookupController.PAGE_SIZE}. Accepting a size here and leaving it unbounded would let
+ * {@code AddressLookupService.PAGE_SIZE}. Accepting a size here and leaving it unbounded would let
  * one request materialise an entire lookup table, which is an availability exposure rather than an
  * untidiness; accepting a bounded one would mean publishing both the parameter and its ceiling, and the
  * contract states instead that no such parameter appears anywhere in it. The cost accepted is that a

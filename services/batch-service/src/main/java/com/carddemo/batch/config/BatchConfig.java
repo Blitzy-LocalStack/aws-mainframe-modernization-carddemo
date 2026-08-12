@@ -1,6 +1,7 @@
 package com.carddemo.batch.config;
 
 import com.carddemo.batch.BatchApplication;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.service.BatchStepLedger;
@@ -381,11 +382,21 @@ public class BatchConfig {
      * an output no rerun reproduces. Refusing at start-up turns that into a failure the orchestrator
      * catches on state entry rather than a plausible-looking dataset nobody re-derives.</p>
      *
-     * <p>Assumptions: both names are declared REQUIRED and neither is declared optional, so a parameter
-     * this module does not name at all is rejected as well as a missing one. That is the stricter of the
-     * two available readings and it is chosen deliberately: an unrecognised parameter reaching a job is
-     * an orchestration change that has not reached this module, and discovering it at start-up is
-     * cheaper than discovering it in the output.</p>
+     * <p>⚠️ Refactoring Rationale: this rationale used to claim that declaring both names REQUIRED and
+     * neither optional meant "a parameter this module does not name at all is rejected as well as a
+     * missing one". <b>That is the opposite of what the framework does.</b>
+     * {@link DefaultJobParametersValidator} compares the supplied keys against the union of the required
+     * and optional sets ONLY when the optional set is non-empty; with an empty optional set it checks
+     * nothing but the presence of the required keys, so an unrecognised parameter passes validation
+     * silently. The claim is corrected rather than made true, because making it true would need a
+     * composite validator carrying a second rule, and the failure it would catch -- an orchestration
+     * change that has not reached this module -- has no way to produce a wrong OUTPUT: every job reads
+     * its inputs by name and an unread parameter affects nothing it computes. Trade-offs: the cost is
+     * that such a drift is discovered by reading the state machine rather than by a refused launch, which
+     * is accepted; what is not acceptable is a stated guarantee that does not hold, because a reader
+     * relying on it would stop looking. Assumptions: the two required names ARE enforced, and a launch
+     * missing either is refused before the job instance is created -- which is the guarantee the
+     * paragraph above depends on and the one this bean actually delivers.</p>
      *
      * @return the validator every job in this module is built with, never {@code null}
      */
@@ -406,17 +417,36 @@ public class BatchConfig {
      * {@code 05  PARM-DATE           PIC X(10).} sits under {@code 01  EXTERNAL-PARMS.}, and receives it
      * at line 180 through {@code PROCEDURE DIVISION USING EXTERNAL-PARMS.}</p>
      *
-     * <p>Assumptions: there is a format trap here that a caller must not resolve on its own, and it is
-     * named at the point the value is obtained precisely so nobody reinvents it. The token this method
-     * returns is the ISO-shaped surface the command contract accepts, whereas the layout the reference's
-     * own driver injects is compact: {@code app/jcl/INTCALC.jcl:22} passes
-     * {@code PARM='2022071800'}, which is eight date digits followed by {@code 00}, and
-     * {@code app/cbl/CBACT04C.cbl:474-480} concatenates that parameter with a six-digit suffix
-     * {@code DELIMITED BY SIZE} so the run's first generated identifier is {@code 2022071800000001}.
-     * Rendering an ISO-shaped token straight into that position yields the same sixteen characters'
-     * worth of field with the digits in the wrong places -- a value that looks plausible and is not the
-     * reference's. {@link BusinessDate#identifierPrefix()} is the one place that conversion is
-     * expressed; identifier construction must go through it and never through the raw token.</p>
+     * <p>Assumptions: two layouts of this parameter are accepted and they are consumed DIFFERENTLY, and
+     * the difference is named at the point the value is obtained precisely so nobody unifies it. The
+     * token this method returns is whichever ten-character layout the caller supplied -- the ISO-shaped
+     * surface the command contract accepts, or the compact form the reference's own driver injects,
+     * {@code app/jcl/INTCALC.jcl:22} passing {@code PARM='2022071800'}.</p>
+     *
+     * <p>Assumptions: a generated TRANSACTION IDENTIFIER concatenates the token VERBATIM and must not
+     * normalise it. {@code app/cbl/CBACT04C.cbl:476-480} strings the parameter and a six-digit suffix
+     * {@code DELIMITED BY SIZE}, which copies all ten characters of {@code PARM-DATE PIC X(10)} as
+     * supplied -- there is no normalisation anywhere in that program -- so the compact parameter yields
+     * {@code 2022071800000001} and a separated one yields {@code 2024-01-15000001}. The second is not a
+     * guess: it is the committed golden master, at bytes 1 to 16 of
+     * {@code tests/golden/interest/happy_path/transact.expected}, documented at line 161 of that
+     * scenario's README. {@code InterestCalculationService} therefore reads {@link BusinessDate#token()},
+     * and a normalisation applied there would break parity on the one job the oracle pins byte for
+     * byte.</p>
+     *
+     * <p>Assumptions: a DATASET GENERATION KEY normalises the token and must not carry it verbatim,
+     * because an object key is listed and compared as text, so two spellings of one day would be two
+     * prefixes and a run started one way would not find the generation a run started the other way
+     * wrote. {@link BusinessDate#identifierPrefix()} is the one place that conversion is expressed and
+     * the export and import jobs are its only callers.</p>
+     *
+     * <p>Refactoring Rationale: this note previously required that "identifier construction must go
+     * through it and never through the raw token", without qualifying which identifier. Followed
+     * literally it breaks the interest golden, because the reference's identifier IS the verbatim
+     * concatenation; and it was not followed by the code, which read the raw token throughout. A rule
+     * stated in a docstring that the implementation contradicts is worse than no rule -- a later reader
+     * resolves the disagreement in whichever direction the docstring points, which here is the direction
+     * that fails the oracle. The two consumers are now named separately with the evidence for each.</p>
      *
      * @param context the chunk context the framework passes into a tasklet; must not be {@code null}
      * @return the business date the run was started for, never {@code null}
@@ -454,7 +484,6 @@ public class BatchConfig {
                 context.getStepContext().getStepExecution().getJobParameters();
         String value = parameters.getString(name);
 
-        // WHAT: a blank-or-absent guard over the raw parameter string, ahead of any typed parsing.
         // WHY : Assumptions: blank is rejected as well as absent, because an environment variable
         //       exported with an empty value resolves successfully to the empty string. Without this the
         //       step would run with an empty business date, and the coordinate type's own width check
@@ -524,9 +553,7 @@ public class BatchConfig {
     @Bean
     public LedgerGuardedStep ledgerGuardedStep(
             BatchStepLedger ledger,
-            // WHAT: a property placeholder whose key is the orchestrator's own environment-variable
-            //       name, carrying a literal fallback for an unorchestrated launch.
-            // WHY : the variable name is taken from BatchApplication's own public constant rather
+            // WHY : Assumptions: the variable name is taken from BatchApplication's own public constant rather
             //       than spelled a second time, so the environment name this module reads cannot
             //       drift between the two places that read it. The default matches that class's
             //       own fallback exactly, so a task started outside an orchestrator still records
@@ -607,6 +634,8 @@ public class BatchConfig {
          *
          * @param stepName the ledger step name, which is also the Spring Batch step name; must not
          *     be {@code null} or blank
+         * @param jobName the job the step belongs to, forwarded to the ledger so that a published
+         *     failure names its job; must not be {@code null}
          * @param jobRepository the batch job repository the step records its execution in; must
          *     not be {@code null}
          * @param transactionManager the transaction manager whose boundary the body runs inside;
@@ -617,13 +646,23 @@ public class BatchConfig {
          * @throws NullPointerException when any argument is {@code null}
          * @throws IllegalArgumentException when {@code stepName} is blank
          */
+        // WHY : Alternatives Considered: resolving the job inside the tasklet from the running step's
+        //       own context, through BatchJobName.resolve on the framework's job name, rather than
+        //       taking it as a parameter. Rejected because that resolution RAISES on any name outside
+        //       the seven, so a step built through this method and launched under another job name --
+        //       which is what a focused step test does -- would fail inside the ledger on a diagnostic
+        //       about a token rather than on the behaviour under test. Taking it as a parameter also
+        //       means a caller states which job its step belongs to at the point it already states the
+        //       step name, so the two cannot come to disagree.
         public Step build(
                 String stepName,
+                BatchJobName jobName,
                 JobRepository jobRepository,
                 PlatformTransactionManager transactionManager,
                 StepBody body) {
 
             Objects.requireNonNull(stepName, "stepName must not be null");
+            Objects.requireNonNull(jobName, "jobName must not be null");
             Objects.requireNonNull(jobRepository, "jobRepository must not be null");
             Objects.requireNonNull(transactionManager, "transactionManager must not be null");
             Objects.requireNonNull(body, "body must not be null");
@@ -631,8 +670,6 @@ public class BatchConfig {
                 throw new IllegalArgumentException("stepName must not be blank");
             }
 
-            // WHAT: a tasklet that runs the body once through the ledger and parks the graded outcome
-            //       in the step execution context for the listener registered below.
             // WHY : Assumptions: returning FINISHED from the first invocation is what makes the step ONE
             //       transaction rather than a repeated one. A tasklet that returned CONTINUABLE would be
             //       re-invoked in a fresh transaction each time, which would commit the pass in pieces
@@ -641,14 +678,13 @@ public class BatchConfig {
             Tasklet tasklet = (contribution, chunkContext) -> {
                 BusinessDate businessDate = businessDateOf(chunkContext);
                 BatchStepLedger.StepOutcome outcome =
-                        this.ledger.runStep(this.runId, stepName, () -> body.run(businessDate));
+                        this.ledger.runStep(this.runId, stepName, jobName,
+                                () -> body.run(businessDate));
                 chunkContext.getStepContext().getStepExecution().getExecutionContext()
                         .putInt(RETURN_CODE_KEY, outcome.returnCode().numericValue());
                 return RepeatStatus.FINISHED;
             };
 
-            // WHAT: the framework's own step builder, given the auto-configured job repository and
-            //       transaction manager the caller was handed rather than any declared here.
             // WHY : Assumptions: both collaborators arrive as parameters precisely because this module
             //       declares neither. The repository comes from the batch auto-configuration this class
             //       is careful not to disable, and the transaction manager is the single
@@ -707,14 +743,39 @@ public class BatchConfig {
         /**
          * Promotes a body's graded return code to the step's exit status.
          *
-         * <p>Alternatives Considered: {@code StepContribution.setExitStatus}, which is the obvious
-         * route and does not survive. The tasklet step folds a contribution's status in with
-         * {@code ExitStatus.and}, whose severity ranking maps every code beginning {@code COMPLETED} to
-         * one level. The custom warn code therefore compares equal to the incumbent {@code COMPLETED}
-         * and the incumbent is kept, so the grade would be discarded without any error and a run with
-         * rejects would report clean -- the parity difference the return-code paragraph on this class
-         * exists to prevent. A listener that RETURNS a status replaces it outright, which is the only
-         * route that survives the fold.</p>
+         * <p>⚠️ Refactoring Rationale: the rationale here used to reject
+         * {@code StepContribution.setExitStatus} on the ground that the tasklet step folds a
+         * contribution's status in with {@code ExitStatus.and}, "whose severity ranking maps every code
+         * beginning {@code COMPLETED} to one level", so that "the custom warn code therefore compares
+         * equal to the incumbent {@code COMPLETED} and the incumbent is kept" and the grade "would be
+         * discarded without any error". <b>The first clause is right and the conclusion drawn from it is
+         * wrong.</b> The severity ranking does put {@code COMPLETED} and
+         * {@code COMPLETED_WITH_WARNINGS} at one level -- and precisely because they tie on severity,
+         * {@code and} falls through to comparing the two exit CODES lexically, where
+         * {@code "COMPLETED"} sorts before {@code "COMPLETED_WITH_WARNINGS"}, so the incumbent is
+         * REPLACED and the warn code is adopted. It is adopted in either order. So the contribution
+         * route would not have discarded the grade, and a reader who believed this paragraph would have
+         * believed the framework loses a value it in fact keeps.</p>
+         *
+         * <p>Assumptions: the ranking does still dominate in the direction that matters for safety. A
+         * step that failed carries {@code FAILED}, which outranks both completed codes on severity, so
+         * the fold keeps {@code FAILED} whichever side the warn code is on -- a failed run cannot be
+         * reported as a run that merely had rejects by this mechanism. The same holds for
+         * {@code STOPPED} and {@code NOOP}, both of which outrank the completed level.</p>
+         *
+         * <p>Alternatives Considered: {@code StepContribution.setExitStatus}, now that it is known to
+         * work. It is still declined, for a reason that does not depend on the fold at all. The warn
+         * code's survival through {@code and} rests on a lexical comparison between two framework
+         * constants that tie on severity -- an implementation detail of a private ranking method, not a
+         * published contract -- and this module's exit status is the value the orchestration choice
+         * predicate reads to decide whether a night's posting had rejects. Resting a parity-critical
+         * exit code on which of two strings sorts first is a dependency worth not having. A listener
+         * that RETURNS a status replaces it outright, so this route produces the same code without
+         * consulting the ranking, and it additionally gates on the FINAL step status -- something a
+         * contribution applied mid-step cannot do, because at that moment the step has not finished.
+         * Trade-offs: the cost is one small class instead of one method call. The behaviour is covered
+         * end to end by {@code PostTransactionsJobTest}, which drives a real framework execution and
+         * asserts the warn code for a rejected record and its absence for a posted one.</p>
          */
         private static final class ReturnCodeExitStatusListener implements StepExecutionListener {
 
@@ -727,11 +788,12 @@ public class BatchConfig {
              */
             @Override
             public ExitStatus afterStep(StepExecution stepExecution) {
-                // WHAT: an early return that leaves the framework's own status untouched on any
-                //       non-completed step.
-                // WHY : a step that did not complete already carries a failure status that maps to
-                //       the hard-failure exit code, and overwriting it with a warn would report a
-                //       failed run as a run that merely had rejects.
+                // WHY : Assumptions: a step that did not complete already carries a failure status that
+                //       maps to the hard-failure exit code, and overwriting it with a warn would report
+                //       a failed run as a run that merely had rejects. This gate is what makes the
+                //       listener independent of the framework's severity ranking rather than merely
+                //       agreeing with it -- the class note above records why that independence is worth
+                //       having for a value the orchestration choice predicate reads.
                 if (stepExecution.getStatus() != BatchStatus.COMPLETED) {
                     return null;
                 }

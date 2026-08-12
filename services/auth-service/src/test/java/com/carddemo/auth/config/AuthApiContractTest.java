@@ -9,6 +9,7 @@ import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
@@ -507,6 +508,54 @@ class AuthApiContractTest {
     }
 
     /**
+     * Asserts the renewal token is bounded on both sides, by the same number, and generously.
+     *
+     * <p>Refactoring Rationale: the review found this property bounded on NEITHER side. The schema
+     * declared {@code minLength: 1} and no maximum, the record annotated no {@code @Size}, and both
+     * documents justified the absence by naming a transport request-size limit that did not exist -- so
+     * the one operation in this document reachable without a credential accepted a body of any length.
+     * The two sides are now checked against each other rather than each against its own prose, because a
+     * bound declared in a contract that the record does not enforce is a promise a caller can generate a
+     * valid request against and still be refused by.</p>
+     *
+     * <p>Assumptions: the bound is asserted to be at least a FLOOR as well as equal across the two
+     * documents, and the floor is the point. This token is opaque and provider-sized, and the cost of a
+     * bound too tight is a caller holding a valid token that cannot renew and must sign on again with a
+     * credential it may no longer hold. A floor several times the largest token the pool has been
+     * observed to issue is what makes that outcome unreachable, and it is asserted rather than left to
+     * the constant's own comment.</p>
+     *
+     * @throws ReflectiveOperationException if the component or its backing field cannot be resolved,
+     *     which a renamed component would cause and which should fail this test rather than skip it
+     */
+    @Test
+    @DisplayName("the renewal token is bounded identically by the record and the committed schema")
+    void theRenewalTokenIsBoundedOnBothSides() throws ReflectiveOperationException {
+        Map<String, Object> declared = mapping(mapping(mapping(
+                mapping(mapping(contract, "components"), "schemas"), "TokenRefreshRequest"),
+                "properties"), "refreshToken");
+
+        Integer published = (Integer) declared.get("maxLength");
+        assertThat(published)
+                .as("an unbounded token on the one operation reachable without a credential is the"
+                        + " finding this case exists for")
+                .isNotNull()
+                .isGreaterThanOrEqualTo(REFRESH_TOKEN_FLOOR);
+
+        Class<?> record = Class.forName("com.carddemo.auth.dto.TokenRefreshRequest");
+        RecordComponent component = componentNamed(record, "refreshToken");
+        Size enforced = declaredSize(record, component);
+        assertThat(enforced)
+                .as("the committed schema declares maxLength %s, so the record must enforce it -- a"
+                        + " contract-valid body the service refuses is the disagreement a published"
+                        + " contract exists to prevent", published)
+                .isNotNull();
+        assertThat(enforced.max())
+                .as("the record's bound and the published bound must be one number")
+                .isEqualTo(published);
+    }
+
+    /**
      * Asserts the sign-on schema refuses exactly the whitespace-only values the record's constraints do.
      *
      * <p>Refactoring Rationale: the review found the two sides disagreeing. The schema declared
@@ -852,7 +901,7 @@ class AuthApiContractTest {
      * named members the type does not declare.</p>
      */
     @Test
-    @DisplayName("the page envelope declares and requires exactly the shared envelope's five members")
+    @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
     void pageEnvelopeDeclaresExactlyTheSharedEnvelopeMembers() {
         Map<String, Object> page =
                 mapping(mapping(mapping(contract, "components"), "schemas"), "PageResponse");
@@ -862,8 +911,7 @@ class AuthApiContractTest {
         Map<String, Object> properties = (Map<String, Object>) page.get("properties");
         assertThat(required)
                 .as("every member the shared envelope emits must be required")
-                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext",
-                        "hasPrevious");
+                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
         assertThat(properties.keySet())
                 .as("the required list and the declared properties must be the same set")
                 .containsExactlyInAnyOrderElementsOf(required);
@@ -966,5 +1014,60 @@ class AuthApiContractTest {
         assertThatCode(() ->
                 new SecurityConfig.AuthorityRule("  ", JwtRoleConverter.ADMIN_AUTHORITY))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * The smallest renewal-token bound that cannot refuse a token this pool legitimately issues.
+     *
+     * <p>Assumptions: four thousand and ninety-six, which is roughly twice the longest refresh token
+     * this pool has been observed to issue. It is a FLOOR on the published bound rather than the bound
+     * itself, because the contract deliberately does not restate the provider's own sizing -- what must
+     * hold is that the bound cannot lock out a caller holding a valid token, which is what a floor
+     * expresses. It is the same shape of assertion, and for the same reason, as
+     * {@link #PROVIDER_PASSWORD_FLOOR}.</p>
+     */
+    private static final int REFRESH_TOKEN_FLOOR = 4096;
+
+    /**
+     * Resolves one named component of a record.
+     *
+     * @param record the record class to read; must not be {@code null}
+     * @param name the component name to find; must not be {@code null}
+     * @return the named component, never {@code null}
+     * @throws IllegalStateException if the record declares no component of that name, which a rename
+     *     would cause and which must fail rather than silently assert nothing
+     */
+    private static RecordComponent componentNamed(Class<?> record, String name) {
+        for (RecordComponent component : record.getRecordComponents()) {
+            if (component.getName().equals(name)) {
+                return component;
+            }
+        }
+        throw new IllegalStateException(record.getName() + " declares no component named " + name);
+    }
+
+    /**
+     * Reads the size constraint a record component enforces, if it enforces one.
+     *
+     * <p>Assumptions: the accessor is consulted before the backing field, for the same reason
+     * {@link #publishedPattern} consults both -- a record's component annotations are propagated to
+     * whichever targets the annotation itself declares, and reading one alone would report an annotated
+     * component as unannotated depending on which target the annotation happened to reach. The
+     * constraint is NOT declared for the record-component target, so it never survives on the component
+     * itself and reading that would always report an absence.</p>
+     *
+     * @param record the record class declaring the component; must not be {@code null}
+     * @param component the component to read; must not be {@code null}
+     * @return the size constraint the component enforces, or {@code null} when it enforces none
+     * @throws ReflectiveOperationException if the backing field cannot be resolved, which a renamed
+     *     component would cause
+     */
+    private static Size declaredSize(Class<?> record, RecordComponent component)
+            throws ReflectiveOperationException {
+
+        Size onAccessor = component.getAccessor().getAnnotation(Size.class);
+        return onAccessor != null
+                ? onAccessor
+                : record.getDeclaredField(component.getName()).getAnnotation(Size.class);
     }
 }

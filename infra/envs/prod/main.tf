@@ -78,7 +78,19 @@ locals {
   #       coordinated edits -- this value and the mirror push -- which is the same
   #       friction the pinned upstream reference already carried and is what keeps
   #       an upgrade a reviewed change rather than a silent one.
-  telemetry_collector_image_tag  = "v0.48.0"
+  # WHY : Refactoring Rationale: advanced from v0.48.0, which upstream superseded
+  #       with v0.49.0 -- verified against the publishing registry rather than a
+  #       release note: the repository's tag list carries 84 tags of which the
+  #       highest semantic version is v0.49.0, and `latest` is the only non-semver
+  #       entry. Running a superseded collector is a supply-chain position rather
+  #       than a preference, because a sidecar attached to every workload is the one
+  #       container in this estate whose version nothing else compensates for.
+  # WHY : Assumptions: the tag names the artifact the deployment MIRRORS, and the
+  #       digest that pins it lives in .github/workflows/deploy.yml beside the pull
+  #       that resolves it. This value and that one are asserted equal by a gate in
+  #       .github/workflows/infra-ci.yml, because a version advanced here and not
+  #       there would mirror one release and register another.
+  telemetry_collector_image_tag  = "v0.49.0"
   telemetry_collector_repository = "aws-otel-collector"
 
   # WHY : Assumptions: an operator-issued ALB certificate is used when supplied and
@@ -144,14 +156,29 @@ locals {
     # WHY : (1) Refactoring Rationale: this service is forwarded on FIVE patterns
     #       rather than two, because it publishes internal read operations on two
     #       prefixes outside its own subtree -- POST /api/v1/card-xrefs/lookup and
-    #       the customer reads GET /api/v1/customers/{customerId},
-    #       GET /api/v1/customers/{customerId}/record and GET /api/v1/customers,
-    #       alongside GET /api/v1/accounts/{accountId}. The two out-of-subtree
+    #       the customer reads POST /api/v1/customers/lookup,
+    #       POST /api/v1/customers/record and GET /api/v1/customers, alongside
+    #       POST /api/v1/accounts/lookup inside its own. The two out-of-subtree
     #       prefixes were absent from this list while the controllers existed, which
     #       is not a cosmetic gap: a listener with no matching rule answers 404
     #       itself, so the pending-authorization context's cross-reference and
     #       customer calls failed at the load balancer without reaching a task, and
     #       no log in the account service recorded a request at all.
+    #       (1a) Refactoring Rationale: those four addresses were written here as
+    #       keyed GETs -- GET /api/v1/accounts/{accountId},
+    #       GET /api/v1/customers/{customerId}, its /record segment, and the probe's
+    #       HEAD -- which this context has not published for some time. Each moved
+    #       its identifier into a request body because a load balancer composes its
+    #       access record from the request line before any application code runs, and
+    #       the sensitive-data contract in docs/architecture/observability.md names
+    #       account and customer identifiers among the values a durable diagnostic
+    #       may not hold. The FORWARDING is unaffected -- every one of them still
+    #       falls under a pattern in the list below -- so this is a description
+    #       catching up with the addresses rather than a routing change. The three
+    #       end-user account operations have since moved for the same reason, to
+    #       POST /api/v1/accounts/view, POST /api/v1/accounts/update and
+    #       POST /api/v1/accounts/card-cross-references/search, and are likewise
+    #       covered by the existing /api/v1/accounts/* pattern.
     #       (2) Assumptions: `/api/v1/card-xrefs/lookup` is listed as the EXACT
     #       operation path rather than as a `/api/v1/card-xrefs/*` subtree, and the
     #       narrower form is chosen deliberately. That prefix carries exactly one
@@ -160,24 +187,30 @@ locals {
     #       beneath the prefix is refused at the edge instead of reaching the service
     #       to be refused there. The customer prefix uses the subtree form because its
     #       operation is parameterised by identifier and an exact path cannot express
-    #       that.
+    #       that. Assumptions: the customer prefix keeps the subtree form although
+    #       both of its operations are now fixed addresses, because listing the two
+    #       exactly would need two values where the subtree needs one and this list
+    #       is already at the five-value ceiling recorded below.
     #       (3) Refactoring Rationale: the bare `/api/v1/customers` pattern IS now
     #       carried, where this entry previously omitted it and justified the omission
     #       with "no operation sits on either bare prefix". That premise stopped
     #       holding when the ascending customer scan mounted ON the collection
     #       address: a path pattern matches `*` against zero or more characters
-    #       including `/`, so `/api/v1/customers/*` covers
-    #       `/api/v1/customers/{customerId}` and its `/record` segment but NOT the
-    #       bare collection, which requires the separator to be present. Without this
+    #       including `/`, so `/api/v1/customers/*` covers both the presence check
+    #       and the record read beneath the prefix but NOT the bare collection,
+    #       which requires the separator to be present. Without this
     #       value the scan is answered 404 by the listener itself -- the same failure
     #       mode paragraph (1) records for the two prefixes that were missing
     #       entirely, and the one that leaves no request in the service's own log.
     #       (3a) Trade-offs: no bare `/api/v1/card-xrefs` pattern is carried, and this
-    #       list is now AT the ceiling: a single path-pattern condition accepts five
+    #       list is AT the ceiling: a single path-pattern condition accepts five
     #       values, as the card entry below records, and this entry uses all five.
     #       Pairing the card-xrefs prefix too would need six. It is not needed --
-    #       no operation sits on that bare prefix -- but a sixth account pattern of
-    #       any kind now requires splitting the rule rather than extending it.
+    #       no operation sits on that bare prefix -- and it is also what made the
+    #       subtree form in paragraph (2) the only available way to route the two
+    #       missing operations: three exact paths where one stood would have needed
+    #       seven values. A sixth account pattern of any kind now requires splitting
+    #       the rule rather than extending it.
     #       (4) Assumptions: these two prefixes are deliberately NOT added to the
     #       api-gateway-http route table. That module is the PUBLIC edge and its
     #       authorizer validates identity-provider tokens; every operation on these
@@ -192,7 +225,7 @@ locals {
       priority   = 20
       paths = [
         "/api/v1/accounts", "/api/v1/accounts/*",
-        "/api/v1/card-xrefs/lookup",
+        "/api/v1/card-xrefs/*",
         "/api/v1/customers", "/api/v1/customers/*"
       ]
     }
@@ -330,6 +363,32 @@ locals {
     },
   )
 
+  # WHY : Assumptions: the command each workload's container health check runs is
+  #       declared HERE, beside the image each workload uses, because only the image
+  #       knows what it ships and the two schemes in this estate differ. Every entry
+  #       reproduces that workload's own Dockerfile HEALTHCHECK exactly: the seven
+  #       Java services answer HTTPS behind a per-task self-signed leaf, so the probe
+  #       passes --insecure, while batch answers plain HTTP. ECS monitors ONLY the
+  #       command in the task definition and never reads the image's HEALTHCHECK
+  #       instruction, so without this the eight probes those images carry were never
+  #       evaluated in the deployed estate.
+  # WHY : Assumptions: data-migration is deliberately ABSENT, so the module receives
+  #       null for it and declares no check. Its own Dockerfile records that its probe
+  #       is a structural import test rather than a liveness claim and that
+  #       orchestration judges the one-shot task by terminal state and exit code, so a
+  #       health check would add a second verdict on a container that has already
+  #       finished by the time one could be useful.
+  container_health_check_commands = {
+    for name, workload in local.workloads :
+    name => concat(
+      ["/usr/bin/curl", "--fail", "--silent", "--show-error"],
+      workload.online ? ["--insecure"] : [],
+      ["--max-time", "4", "--output", "/dev/null"],
+      ["${workload.online ? "https" : "http"}://127.0.0.1:${module.network.app_container_port}${local.health_check_path}"],
+    )
+    if name != "data-migration"
+  }
+
   # WHY : Assumptions: the eight RUNTIME service login roles are named by
   #       data-migration/sql/V0__schemas_and_roles.sql and created there without a
   #       password; this list is the same inventory in the same order, used to build
@@ -440,6 +499,20 @@ locals {
     "reports/transaction-detail/",
     "statements/",
   ]
+
+  # Assumptions: ONE prefix, and it is the prefix the authorization-extract state
+  #   machine composes its two destination keys under. It is declared here rather than
+  #   written into the policy document below so that the grant and the machine's key
+  #   layout cannot drift apart silently -- the machine's Command.$ expressions build
+  #   `authorization/extract/dt=<date>/run=<execution>/roots.dat` and `.../children.dat`,
+  #   and a grant narrower than that prefix presents as an access-denied error on
+  #   PutObject rather than as a configuration mistake.
+  # Trade-offs: the grant covers the whole prefix rather than one run's keys, because a
+  #   run's keys contain its own execution name and no policy can be written before the
+  #   execution exists. The narrowing that remains is real and is the one that matters:
+  #   this role reaches nothing else in a bucket that also holds every nightly
+  #   transaction generation.
+  authorization_extract_key_prefix = "authorization/extract/"
 }
 
 # -----------------------------------------------------------------------------
@@ -1007,7 +1080,12 @@ resource "aws_secretsmanager_secret_version" "internal_identity_transaction" {
 #   Assumptions: purpose-scoping is the control, not key economy. This key is held
 #   by the SEVEN services holding a component whose constructor requires the
 #   CursorToken bean; the messaging key is held by the authorization consumer alone
-#   and the internal-identity key by exactly three services.
+#   and each of the two per-caller internal-identity keys by exactly two services,
+#   its minter and account-service as the verifier. Refactoring Rationale: this last
+#   clause said "the internal-identity key by exactly three services", which
+#   describes the single shared key that was split per caller precisely so that a
+#   caller's subject became verifiable rather than asserted; the paragraph below
+#   already records the split, so the two disagreed on the same page.
 #   Refactoring Rationale: this said FOUR, and it was stale in both directions --
 #   the distribution gate below named five services at the time, and the measured
 #   holder set is seven. A count that matches neither the code beside it nor the
@@ -1024,12 +1102,16 @@ resource "aws_secretsmanager_secret_version" "internal_identity_transaction" {
 #   was "held by the four services that publish a paged list", and said "the
 #   internal-identity key" was held "by exactly three services". All three were
 #   wrong and they were wrong in different ways. There are five key secrets, not
-#   three. The cursor key is held by five services, and characterising them as
-#   "the services that publish a paged list" is what made the count look
-#   plausible -- auth-service and card-service publish paged lists too and are
-#   deliberately not in the set, because neither declares the property, so the
-#   holder set is the set that BINDS the name and not a property of what a service
-#   publishes. And there is no longer one internal-identity key held by three
+#   three. The cursor key is held by SEVEN services -- auth, account, card,
+#   transaction, reference, authorization and reporting, which is every service in
+#   the distribution gate below except batch and data-migration -- and
+#   characterising them as "the services that publish a paged list" is what made
+#   the earlier count of four look plausible, so the holder set is stated as the set
+#   that BINDS the name rather than as a property of what a service publishes. This
+#   paragraph said FIVE and named auth-service and card-service as deliberately
+#   outside the set; both hold it, and a count contradicting the paragraph three
+#   lines above it is worse than none because a reader takes the more specific of
+#   the two. And there is no longer one internal-identity key held by three
 #   services: there are two, one per calling caller, each held by exactly two --
 #   its minter and the verifier -- which is what makes a caller's subject
 #   verifiable rather than merely asserted. The inventory is spelled out above so
@@ -1859,6 +1941,43 @@ locals {
       environment_name = "CARDDEMO_AUTH_COGNITO_USER_POOL_ID"
       value            = module.cognito.user_pool_id
     }
+
+    # WHY : (1) Assumptions: both of the next two are published because
+    #       services/auth-service/src/main/resources/application.yml resolves them
+    #       with NO fallback -- credential-secret-prefix and
+    #       credential-secret-kms-key-arn are bare ${...} references -- so a
+    #       deployment that omits either does not start. That is deliberate on the
+    #       service's side and it makes publishing them here mandatory rather than
+    #       optional: the values are deployment addresses, and a default address is
+    #       a wrong one that looks right.
+    #       (2) Assumptions: the prefix is read from module.cognito rather than
+    #       composed here. The service derives each entry's full name from it, and
+    #       the IAM statement below scopes the write grant to a wildcard beneath the
+    #       same value, so the two agree by construction; restating the module's
+    #       naming rule in this root is what would let them disagree, and the
+    #       failure would surface as an access denial on a user creation rather than
+    #       at plan time.
+    "auth|CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX" = {
+      service          = "auth"
+      environment_name = "CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX"
+      value            = module.cognito.credential_secret_name_prefix
+    }
+
+    # WHY : Assumptions: the SECRETS key, which is the same key module.cognito
+    #       encrypts its own seeded initial-password entries with -- it is passed
+    #       secrets_kms_key_arn from this same source. One key for every pool
+    #       credential means one key policy and one rotation schedule govern all of
+    #       them, whereas a second key would give two entries holding the same class
+    #       of value two different grant surfaces. The ARN is published rather than
+    #       the alias because CreateSecret takes a key identifier that the store
+    #       resolves under the CALLING identity, and an alias resolved that way is
+    #       one more indirection that can be repointed without the statement below
+    #       changing.
+    "auth|CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN" = {
+      service          = "auth"
+      environment_name = "CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN"
+      value            = module.kms.secrets_key_arn
+    }
     "reference|CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE" = {
       service          = "reference"
       environment_name = "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE"
@@ -1887,6 +2006,59 @@ locals {
     "account|CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE" = {
       service          = "account"
       environment_name = "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE"
+      value            = module.sqs.error_queue_url
+    }
+    # WHY : Refactoring Rationale: this parameter did not exist, and its absence made
+    #       batch-service's whole error-sink configuration inert in every environment.
+    #       config/SqsConfig.java is annotated
+    #       @ConditionalOnProperty(carddemo.messaging.error-queue-url), so with nothing
+    #       supplying the address the class contributed no client and no binding, the
+    #       publisher bean did not exist, and the durable step ledger found an empty
+    #       Optional and published nothing -- while that class's own documentation
+    #       described what "a published event carries". The declared inventory named a
+    #       publish path the running system did not have. Publishing the address here is
+    #       one of the two halves that make it real; the other is the send-only grant the
+    #       batch entry of local.sqs_permissions_by_workload below carries.
+    # WHY : Assumptions: the value is the SAME terminal sink account-service and
+    #       reference-service publish to, and that is deliberate rather than an
+    #       oversight of a batch-specific queue. modules/sqs provisions ONE error queue
+    #       as the migration plan's section 0.4.1.8 maps CARD.DEMO.ERROR, and a consumer
+    #       tells the producers apart by the contentType message attribute --
+    #       text/plain for the two fixed-width producers transcribing their reference
+    #       error paragraphs, application/json for this one, which has no reference
+    #       paragraph to transcribe because the batch programs of app/cbl carry no
+    #       message-queue verb at all.
+    # WHY : Trade-offs: only the ADDRESS is published, and the media type and the two
+    #       ERR-APPLICATION / ERR-PROGRAM identifiers are not. Those three carry
+    #       defaults at the binding method's own parameters, so publishing them would put
+    #       a second copy of a value the image already holds into a place that can drift
+    #       from it. The address has no default and cannot have one, which is exactly why
+    #       it is the gate.
+    # WHY : Refactoring Rationale: this parameter did not exist in either root, and its
+    #       absence disabled a whole configuration class rather than one setting.
+    #       batch-service's config/SqsConfig.java is annotated
+    #       @ConditionalOnProperty(name = "carddemo.messaging.error-queue-url"), so with
+    #       nothing publishing that name the queue client, the validated sink binding and
+    #       the producer bean were all skipped -- and a batch run that failed put no
+    #       message on the terminal error sink the state machine's failure-notification
+    #       state exists to watch. Publishing it here is the configuration half of that
+    #       fix; the IAM half is the batch_service entry in sqs_permissions_by_workload
+    #       below, and the two must travel together because an address without the send
+    #       action is an access-denied on the failure path and the action without the
+    #       address is a grant nothing uses.
+    # WHY : Assumptions: the value is the SAME module.sqs.error_queue_url the account and
+    #       reference contexts already read for their own error-queue variables. There is
+    #       one terminal sink for the whole deployment rather than one per bounded context,
+    #       so three publishers addressing one queue is the design and not a duplication.
+    # WHY : Assumptions: the variable is named for the shared messaging concern rather than
+    #       for this context -- CARDDEMO_MESSAGING_ERROR_QUEUE_URL, not
+    #       CARDDEMO_BATCH_ERROR_QUEUE -- because relaxed binding maps this exact spelling
+    #       to the property the condition above names. A name following the sibling
+    #       CARDDEMO_<CONTEXT>_* shape would bind nothing and would leave the gate closed
+    #       while looking as though it had been supplied.
+    "batch|CARDDEMO_MESSAGING_ERROR_QUEUE_URL" = {
+      service          = "batch"
+      environment_name = "CARDDEMO_MESSAGING_ERROR_QUEUE_URL"
       value            = module.sqs.error_queue_url
     }
     "authorization|CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE" = {
@@ -2049,6 +2221,31 @@ locals {
     "datasets/bucket"                   = module.s3_datasets.bucket_name
     "batch/daily-state-machine-arn"     = module.step_functions.daily_state_machine_arn
     "reporting/adhoc-state-machine-arn" = local.adhoc_report_state_machine_arn
+
+    # WHY : Assumptions: the operator-invoked dataset round-trip machine is
+    #       published here for discovery, alongside the daily machine, and it is
+    #       taken from the module OUTPUT rather than composed from the name prefix.
+    #       The ad-hoc report entry above is composed deterministically only because
+    #       reporting-service's task definition and that machine would otherwise
+    #       form a dependency cycle; no such cycle exists here, so the output is the
+    #       correct source and a rename inside the module cannot leave this value
+    #       pointing at a machine that does not exist.
+    # WHY : Assumptions: publishing the ARN grants nothing. A principal that needs
+    #       to start this machine is granted states:StartExecution on exactly this
+    #       resource in its own runtime policy, as the reporting task is for the
+    #       ad-hoc machine; an operator uses their own role and the exact command in
+    #       docs/runbooks/batch-operations.md. This entry exists so neither has to
+    #       compose an ARN by hand.
+    "batch/dataset-roundtrip-state-machine-arn" = module.step_functions.dataset_roundtrip_state_machine_arn
+
+    # WHY : Assumptions: the operator-invoked authorization-extract machine is
+    #       published on the same reasoning as the round trip above -- from the module
+    #       output, for discovery, and granting nothing by being published. It is under
+    #       the `authorization/` prefix rather than `batch/` because the machine runs the
+    #       authorization image against the authorization schema; filing it under batch
+    #       would put it in the prefix the batch task role reads and imply an ownership
+    #       that does not exist.
+    "authorization/extract-state-machine-arn" = module.step_functions.authorization_extract_state_machine_arn
 
     # WHY : Assumptions: this is the ONE value the ETL cannot derive from the data
     #       it is loading. auth.users declares cognito_sub UUID NOT NULL UNIQUE
@@ -2239,31 +2436,41 @@ locals {
     }
   }
 
-  # WHY : (1) Assumptions: the name is the one ALL THREE images read --
-  #       carddemo.internal-identity.signing-key resolves from
-  #       ${CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY} in
-  #       services/authorization-service/src/main/resources/application.yml L1104,
-  #       services/transaction-service/src/main/resources/application.yml L932 and
-  #       services/account-service/src/main/resources/application.yml L1378 -- and
-  #       infra/modules/ecs-service asserts biconditionally that exactly those three
-  #       services receive it, so the name is a contract rather than a convention.
-  #       (2) Assumptions: this is a secret family that goes to THREE workloads, and
-  #       that is inherent rather than incidental: it is a symmetric signing key, so
-  #       every party that signs and the party that verifies must hold the same bytes.
-  #       Authorization and transaction each MINT a token through their own
-  #       InternalIdentityConfig, and account VERIFIES both, which is why the holder
-  #       count is three rather than the two callers. No further holder may be added:
-  #       any additional holder could mint a token the account context accepts on its
-  #       internal reads, which is precisely the capability this key exists to
-  #       withhold. Every other family here is held by one holder, which is why each
-  #       of their gates names a single service.
-  #       Refactoring Rationale: this note said BOTH images and TWO workloads, naming
-  #       authorization and account and omitting transaction, while the gate below has
-  #       always listed three. An understated trust inventory is the dangerous
-  #       direction to be wrong in: a reader auditing which tasks can mint an
-  #       internally-trusted token would have checked two task definitions and stopped.
-  #       The same understatement was corrected in infra/modules/secrets/main.tf.
-  #       (3) Assumptions: the entry reads from the SCALAR secret this root creates,
+  # WHY : (1) Assumptions: the names are the ones the consuming images read, and
+  #       there are TWO of them rather than one shared name.
+  #       carddemo.internal-identity.authorization-signing-key resolves from
+  #       ${CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY} in
+  #       services/authorization-service/src/main/resources/application.yml L1316
+  #       and services/account-service/src/main/resources/application.yml L1479;
+  #       carddemo.internal-identity.transaction-signing-key resolves from
+  #       ${CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY} in
+  #       services/transaction-service/src/main/resources/application.yml L940 and
+  #       services/account-service/src/main/resources/application.yml L1480.
+  #       infra/modules/ecs-service asserts each membership as its own
+  #       biconditional, so each name is a contract rather than a convention.
+  #       (2) Assumptions: each family goes to exactly TWO workloads -- its one
+  #       minting caller and the verifying callee -- and that is inherent rather
+  #       than incidental: these are symmetric signing keys, so a verifier holds
+  #       what its minter holds. Authorization MINTS with the first through its own
+  #       InternalIdentityConfig and transaction MINTS with the second; account
+  #       VERIFIES both and therefore holds both, while neither caller holds the
+  #       other's. No further holder may be added to either: any additional holder
+  #       could mint a token the account context accepts on its internal reads,
+  #       which is precisely the capability these keys exist to withhold. The
+  #       pagination-cursor family below is a multi-holder family too, at a wider
+  #       count, so a gate naming more than one service is not unique to these two.
+  #       Refactoring Rationale: this note has had the shape wrong twice. It first
+  #       said BOTH images and TWO workloads while naming authorization and account
+  #       and omitting transaction; it was then corrected to ONE shared entry read
+  #       by ALL THREE images under a single CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY.
+  #       That name is now in no image, no gate and neither root -- the two maps
+  #       below are what this root passes -- and the split is substance rather than
+  #       bookkeeping: one shared key made the two callers mutually impersonating,
+  #       because a compromised transaction task held the bytes needed to mint an
+  #       authorization-scoped token that account would accept, so scoping the token
+  #       bought nothing. Per-minter material is what gives the scope claim force.
+  #       The same correction is recorded in infra/modules/secrets/main.tf.
+  #       (3) Assumptions: each entry reads from a SCALAR secret this root creates,
   #       so value_from is the base ARN with no JSON-key selector and IAM authorizes
   #       exactly the ARN each container reads -- the same shape as
   #       tls_secret_sources and deliberately not the composite shape
@@ -2374,14 +2581,48 @@ locals {
   #       successfully and then fail every reply with an access-denied error, which
   #       presents as an unanswered requester rather than as a permissions problem.
   #       (3) Assumptions: a workload absent from this map receives an empty set,
-  #       which grants nothing. That is the correct default: batch and
-  #       data-migration put no message on any of these queues, and the three
-  #       workloads that do are named explicitly so adding a fourth is a visible
-  #       edit rather than an inherited grant.
+  #       which grants nothing. That is the correct default: data-migration puts no
+  #       message on any of these queues, and the four workloads that do are named
+  #       explicitly so adding a fifth is a visible edit rather than an inherited
+  #       grant.
+  #       (4) Refactoring Rationale: the batch entry was ABSENT and the note above
+  #       said batch "put no message on any of these queues", which stopped being
+  #       true and had in fact never been the intent. batch-service ships a queue
+  #       configuration gated on the terminal error sink's address and its durable
+  #       step ledger reports every terminal step failure through it, so the claim
+  #       described the grant rather than the code: with no grant and no published
+  #       address the gate simply never opened, and a night that hard-failed
+  #       reported to the sink that exists for exactly that. The entry grants SEND
+  #       on the error queue and RECEIVE on nothing, which is the queue module's own
+  #       batch_service boundary -- this module consumes no queue, because no
+  #       reference batch program contains an MQ verb and the job is selected from a
+  #       command argument rather than from message arrival.
   sqs_permissions_by_workload = {
     authorization = module.sqs.service_queue_permissions.authorization_service
     account       = module.sqs.service_queue_permissions.account_service
     reference     = module.sqs.service_queue_permissions.reference_service
+    # WHY : Refactoring Rationale: batch was absent from this map, so its task role held no
+    #       sqs statement of any kind while the module it runs carries a queue configuration
+    #       whose one purpose is to notify the terminal error sink that a run failed. The
+    #       first send the producer ever attempted would therefore have been refused, on the
+    #       failure path, which is the least-exercised path in the deployment. The queue
+    #       module's batch_service entry grants sqs:SendMessage on the error queue alone and
+    #       an empty receive list, so this is a send-only boundary rather than a widened one.
+    # WHY : Assumptions: the grant travels with the CARDDEMO_MESSAGING_ERROR_QUEUE_URL
+    #       parameter published above, and neither is useful without the other -- the address
+    #       without the action is an access-denied at the moment a failure is being reported,
+    #       and the action without the address is a permission nothing exercises.
+    batch = module.sqs.service_queue_permissions.batch_service
+  }
+
+  # WHY : Assumptions: the fallback for a workload that touches no queue is declared
+  #       once here rather than inline at each of the two module arguments, so the two
+  #       cannot come to disagree about what "no queue permissions" means. Its member
+  #       names match the queue module's own output shape, which is what lets `lookup`
+  #       unify the two arms into one type.
+  no_queue_permissions = {
+    receive = []
+    send    = []
   }
 
   secret_sources_by_workload = {
@@ -2453,6 +2694,29 @@ locals {
       {
         AWS_REGION           = var.aws_region
         CARDDEMO_ENVIRONMENT = var.environment
+
+        # WHY : Assumptions: the release identity is derived from the SAME expression
+        #       that chooses this workload's image below, so the label a task emits and
+        #       the artifact it runs can never disagree. A digest is used when one is
+        #       supplied for this artifact and the commit tag otherwise, which is the
+        #       posture image_uri already encodes -- production pins the exact build,
+        #       development iterates by pushing over a tag.
+        # WHY : Refactoring Rationale: no root supplied this variable at all, and
+        #       carddemo-common-defaults.yml, the telemetry collector's resource
+        #       processor and OTEL_RESOURCE_ATTRIBUTES all fall back to the literal
+        #       "unspecified" without it -- so every log record, metric series and span
+        #       this estate produced was unattributable to a release. The service module
+        #       now refuses a task whose value is absent, blank or that same placeholder.
+        # WHY : Trade-offs: for a digest reference the label is the digest and not a
+        #       human-readable version. That is preferred here: a digest is the only
+        #       identity that cannot be moved after the fact, and the commit tag remains
+        #       recoverable from the registry, whereas a friendly version string supplied
+        #       independently could name a build the task is not running.
+        CARDDEMO_VERSION = (
+          lookup(var.image_digests, workload.repository, null) != null
+          ? var.image_digests[workload.repository]
+          : var.image_tag
+        )
       },
 
       # WHY : Assumptions: the trust-anchor PATH differs per image because each
@@ -2701,6 +2965,59 @@ data "aws_iam_policy_document" "authorization_runtime" {
     actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
     resources = [module.kms.sqs_key_arn]
   }
+
+  # Refactoring Rationale: these three statements were added with the
+  #   authorization-extract state machine. Without them the segment export had no
+  #   destination that outlived its own container and the extract load had no source it
+  #   could be given -- com.carddemo.authorization.task.ExtractStore is the access path
+  #   and this role is the identity it authenticates as, so the capability was
+  #   unreachable for want of a privilege as much as for want of an entry point.
+  # Assumptions: BOTH a write and a read are granted, because the two directions are
+  #   separate jobs on one role. The export writes the two objects; the load reads two
+  #   an operator names, which may be the export's own output or the reference programs'.
+  statement {
+    sid     = "WriteAuthorizationExtracts"
+    actions = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      "${module.s3_datasets.bucket_arn}/${local.authorization_extract_key_prefix}*"
+    ]
+  }
+
+  statement {
+    sid       = "ReadAuthorizationExtracts"
+    actions   = ["s3:GetObject"]
+    resources = ["${module.s3_datasets.bucket_arn}/${local.authorization_extract_key_prefix}*"]
+  }
+
+  # Assumptions: the listing is bounded by the `s3:prefix` condition key, which is the
+  #   only way a list call can be bounded at all -- its resource is the BUCKET, so an
+  #   object-ARN restriction does not narrow it. Unconditioned, this grant would let an
+  #   authorization task enumerate every nightly transaction generation in the same
+  #   bucket.
+  # Trade-offs: `StringLike` against the prefix followed by a wildcard rather than
+  #   `StringEquals` against the bare prefix, for the reason the reporting document
+  #   records: a listing of one run's own sub-prefix is legitimate and `StringEquals`
+  #   would refuse it.
+  statement {
+    sid       = "ListAuthorizationExtractPrefix"
+    actions   = ["s3:ListBucket"]
+    resources = [module.s3_datasets.bucket_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${local.authorization_extract_key_prefix}*"]
+    }
+  }
+
+  # Assumptions: the dataset bucket is encrypted with the S3 customer-managed key, so a
+  #   put and a get both need the key as well as the object grant. Decrypt is required
+  #   by the read and GenerateDataKey by the write; neither implies the other.
+  statement {
+    sid       = "UseAuthorizationExtractKey"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [module.kms.s3_key_arn]
+  }
 }
 
 data "aws_iam_policy_document" "reporting_runtime" {
@@ -2810,6 +3127,60 @@ data "aws_iam_policy_document" "data_migration_runtime" {
     actions   = ["kms:Decrypt"]
     resources = [module.kms.secrets_key_arn]
   }
+
+  # WHY : Refactoring Rationale: this statement was ABSENT, and its absence made a
+  #   DELIVERED load path fail closed rather than leaving a hardening measure
+  #   undone. loaders/aurora.py seals two projections before it writes them --
+  #   SEALED_IDENTIFIER for customers.ssn_encrypted and
+  #   customers.govt_issued_id_encrypted, SEALED_VERIFICATION_VALUE for
+  #   cards.cvv_encrypted -- and loaders/protected_columns.py draws a fresh
+  #   envelope data key per value to do it. cli.py resolves both key aliases from
+  #   the two parameters this root already publishes, so the aliases arrive and the
+  #   grant did not: every CARDDATA and CUSTDATA load would have been refused by
+  #   KMS with an AccessDenied on GenerateDataKey, surfacing as a failed migration
+  #   step rather than as a missing permission. The card and account workloads hold
+  #   the equivalent grants above; the migration task, which writes the very
+  #   columns they later read, held none, so the asymmetry was the defect.
+  # WHY : Trade-offs: ONE action, not two. GenerateDataKey* covers the whole write
+  #   path -- the caller receives one data key in plaintext and enciphered form
+  #   together and enciphers locally -- and kms:Decrypt is deliberately ABSENT
+  #   where both the card and account grants carry it. loaders/protected_columns.py
+  #   publishes no decipher member at all and records why: a migration writes
+  #   protected columns and never reads them back, so a decrypt grant here would
+  #   widen what a compromised migration task can do with nothing using it. That is
+  #   the one asymmetry between this grant and the two above, and it is chosen.
+  #   kms:Encrypt is absent for the reason those grants give -- a role holding it
+  #   could use this key as a general-purpose encryption oracle -- and
+  #   kms:DescribeKey is absent because the task already holds the alias from the
+  #   parameters it reads.
+  # WHY : Assumptions: BOTH purpose values are listed on ONE statement, where the
+  #   workload grants carry one each. The migration task legitimately writes both
+  #   projections -- it is the only component that loads the customer and card
+  #   extracts -- so splitting them into two statements would express no narrower
+  #   privilege while doubling what has to stay in step. The two values are taken
+  #   verbatim from loaders/protected_columns.py, which puts "customer-identifier"
+  #   and "card-cvv" in the encryption context as authenticated additional data; a
+  #   value that merely looked plausible would fail identically to a missing
+  #   statement.
+  # WHY : Assumptions: the resource is the AURORA key, because both parameters
+  #   published above resolve to that key's alias and both ciphertexts are stored
+  #   in Aurora columns. The condition is what makes the grant specific rather than
+  #   merely small, and infra/modules/kms asserts the same encryption-context
+  #   condition on that key's own policy, so removing it from either side still
+  #   leaves the other enforcing it.
+  statement {
+    sid = "EnvelopeEncryptMigratedProtectedColumns"
+
+    actions = ["kms:GenerateDataKey*"]
+
+    resources = [module.kms.aurora_key_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:carddemo:purpose"
+      values   = ["card-cvv", "customer-identifier"]
+    }
+  }
 }
 
 # WHY : (1) Refactoring Rationale: the auth workload had NO task-role policy at all,
@@ -2835,10 +3206,9 @@ data "aws_iam_policy_document" "data_migration_runtime" {
 #       Refactoring Rationale: this statement granted only THREE and the paragraph
 #       asserted three was exhaustive, while
 #       service/CognitoUserProvisioningService.java calls two more.
-#       AdminRemoveUserFromGroup is issued when a user's type changes -- the update
-#       path removes the old group before adding the new one, and its own compensating
-#       restoreGroup re-adds on failure -- and AdminUpdateUserAttributes is issued on
-#       the same path to carry the changed attributes. Both would have failed with an
+#       AdminRemoveUserFromGroup and AdminUpdateUserAttributes are both issued when a
+#       user's type changes -- the synchronisation path removes the old group, adds
+#       the new one and carries the changed attributes. Both would have failed with an
 #       access denial at the provider, so every user-type change and every attribute
 #       update was broken, and the group removal failing mid-sequence is the worst
 #       shape of that failure: the user would already have been removed from their old
@@ -2846,11 +3216,24 @@ data "aws_iam_policy_document" "data_migration_runtime" {
 #       initiateAuth and respondToAuthChallenge, are deliberately NOT granted: they
 #       are unauthenticated pool operations authorised by the app-client credential
 #       rather than by IAM, so a statement for them would grant nothing.
-#       Notably absent is
-#       AdminSetUserPassword: this service creates no credential, which is the whole
-#       point of moving the one at app/cpy/CSUSR01Y.cpy L21 out of the record, so
-#       granting the ability to set one would hand this task an authority its code
-#       has no call site for.
+#       Refactoring Rationale: this paragraph named an in-process `restoreGroup`
+#       compensation that re-added the old group when the synchronisation failed
+#       part-way. That method is deleted: the durable ledger the service records each
+#       pending synchronisation in reaches the same outcome by retrying the whole
+#       operation, and an in-process callback could not, because a process death
+#       between the provider call and the commit left the two stores disagreeing with
+#       nothing recording it. Naming a deleted mechanism in the justification for a
+#       grant makes the grant look narrower than it is.
+#       Still absent is AdminSetUserPassword, and the reason has changed. The service
+#       DOES now create a credential -- a generated one-time password, published to a
+#       managed-secret entry for its owner to collect, which is what makes a
+#       runtime-created account reachable at all -- but it supplies that value as the
+#       temporary password ON AdminCreateUser rather than setting it afterwards, so
+#       there is no call site for the action and granting it would hand this task an
+#       authority nothing uses. Refactoring Rationale: the earlier wording justified
+#       the absence by asserting this service creates no credential. That is no longer
+#       true, and left standing it would have read as a licence to remove the two
+#       statements below.
 #       (3) Trade-offs: the resource is the single pool ARN rather than a wildcard, so
 #       a second pool in the same account is unreachable from this task even by
 #       accident. The cost is that the statement cannot be written before the pool
@@ -2868,16 +3251,89 @@ data "aws_iam_policy_document" "auth_runtime" {
     ]
     resources = [module.cognito.user_pool_arn]
   }
+
+  # WHY : (1) Refactoring Rationale: these two statements exist because a
+  #       runtime-created pool account was unreachable without them. The account was
+  #       created with the message action suppressed and no temporary password, so the
+  #       provider generated one and delivered it nowhere -- and the pool's schema
+  #       carries no email and no phone attribute, so there was no address a message
+  #       could have reached. Its owner could not obtain a credential, could not
+  #       answer the force-change challenge and could not sign in by any path. The
+  #       service now generates the temporary password itself and writes it to one
+  #       managed-secret entry per account; without these two statements every user
+  #       creation fails at the store instead, which is a louder failure than the
+  #       silent one it replaces but still a broken operation.
+  #       (2) Assumptions: the actions are exactly the three the service issues and no
+  #       fourth. CreateSecret writes the entry; PutSecretValue is the retry path,
+  #       taken when CreateSecret reports the entry already exists, which is what
+  #       makes a repeated provisioning attempt idempotent rather than fatal; and
+  #       DeleteSecret is the compensating withdrawal, issued when a later
+  #       provisioning step fails and the account is being removed, so a credential
+  #       never outlives the identity it opens. GetSecretValue is deliberately NOT
+  #       granted: this task writes these entries and never reads one back, and the
+  #       collecting principal is an out-of-band operator identity rather than this
+  #       role -- the same division the seeded initial-password entries already use.
+  #       (3) Trade-offs: the resource is a wildcard BENEATH the pool credential
+  #       prefix rather than a set of entry ARNs. It has to be, because the names are
+  #       derived at run time from identifiers that do not exist at apply time. The
+  #       compensation is that the prefix is narrow -- the `/runtime-user/` infix is
+  #       written by nothing else, and the seeded entries sit under a sibling
+  #       `/seed-user/` infix that this statement does not reach, so this task cannot
+  #       overwrite or delete a seeded credential.
+  statement {
+    sid = "PublishRuntimeUserCredentials"
+    actions = [
+      "secretsmanager:CreateSecret",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:DeleteSecret",
+    ]
+    resources = [
+      "arn:${data.aws_partition.current.partition}:secretsmanager:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:secret:${module.cognito.credential_secret_name_prefix}/runtime-user/*",
+    ]
+  }
+
+  # WHY : Assumptions: the key grant is separate from the entry grant and carries
+  #       Encrypt and GenerateDataKey but NOT Decrypt. The store performs the
+  #       cryptographic calls under the CALLING identity, so writing an entry
+  #       encrypted with a customer-managed key needs those two actions in this
+  #       policy as well as the entry actions above -- which is precisely the property
+  #       that makes a customer-managed key a stronger control than the account's
+  #       default managed key, where a read grant alone would suffice. Decrypt is
+  #       withheld because this task never reads a credential back, so a grant for it
+  #       would let a compromised task recover every one-time password it had ever
+  #       written rather than only influence the next.
+  statement {
+    sid       = "EncryptRuntimeUserCredentials"
+    actions   = ["kms:Encrypt", "kms:GenerateDataKey"]
+    resources = [module.kms.secrets_key_arn]
+  }
 }
 
 locals {
   task_role_policy_json = {
-    auth           = data.aws_iam_policy_document.auth_runtime.json
-    card           = data.aws_iam_policy_document.card_runtime.json
-    account        = data.aws_iam_policy_document.account_runtime.json
-    reference      = data.aws_iam_policy_document.reference_runtime.json
-    authorization  = data.aws_iam_policy_document.authorization_runtime.json
-    reporting      = data.aws_iam_policy_document.reporting_runtime.json
+    auth          = data.aws_iam_policy_document.auth_runtime.json
+    card          = data.aws_iam_policy_document.card_runtime.json
+    account       = data.aws_iam_policy_document.account_runtime.json
+    reference     = data.aws_iam_policy_document.reference_runtime.json
+    authorization = data.aws_iam_policy_document.authorization_runtime.json
+    reporting     = data.aws_iam_policy_document.reporting_runtime.json
+    # WHY : Assumptions: batch names batch_runtime here and NOT a document that wraps it with
+    #       the error-queue send statement, even though the batch task is the one workload that
+    #       publishes to that queue. The send grant travels by a different route -- the batch
+    #       entry of local.sqs_permissions_by_workload above, which modules/ecs-service turns
+    #       into a send-only statement for that task alone -- so it is already scoped to one
+    #       workload without a second document existing to scope it.
+    #       Alternatives Considered: adding the statement to batch_runtime itself, which is the
+    #       shortest edit and was written that way first. Rejected because
+    #       data_migration_runtime SOURCES batch_runtime to inherit the dataset-bucket and key
+    #       grants the two tasks genuinely share, so a statement added there is inherited by a
+    #       task that publishes no error event, holds no queue client and is never handed the
+    #       sink's address.
+    #       Trade-offs: the queue's encryption-key grant is not restated on either route.
+    #       modules/sqs provisions every queue encrypted under the customer-managed queue key
+    #       and attaches the use-the-key grant to the callers it is told about, so a grant
+    #       written here would be a duplicate whose drift from that list would be invisible. A
+    #       publish that fails with a key error is fixed in that module's caller list.
     batch          = data.aws_iam_policy_document.batch_runtime.json
     data-migration = data.aws_iam_policy_document.data_migration_runtime.json
   }
@@ -2914,24 +3370,46 @@ module "ecs_service" {
   #       without the grant is a pull the execution role is refused, and the grant
   #       without the image authorizes a repository nothing fetches. Both read from
   #       the same mirror repository key, so they cannot name different repositories.
-  telemetry_collector_image = "${module.ecr.repository_urls[local.telemetry_collector_repository]}:${local.telemetry_collector_image_tag}"
+  # WHY : Refactoring Rationale: this reference now prefers the mirrored image's
+  #       DIGEST and falls back to its tag, where it previously always named the tag.
+  #       A tag identifies an artifact by a label the registry lets a push move,
+  #       whereas the digest identifies the bytes; the eight service task definitions
+  #       already resolve their own images this way through image_digests, and the
+  #       sidecar -- the one container every workload runs -- was the exception.
+  #       .github/workflows/deploy.yml records the mirror's digest under the
+  #       `aws-otel-collector` key after the mirror step, so a deployment resolves
+  #       the digest form and a plan run before any mirror exists still resolves the
+  #       tag form rather than failing on a missing key.
+  # WHY : Trade-offs: repository immutability makes the tag form safe as a fallback,
+  #       so this is defence in depth rather than a correction of something broken.
+  #       What it buys is that the task definition records WHICH collector bytes ran,
+  #       which a tag cannot answer after the fact.
+  telemetry_collector_image = (
+    lookup(var.image_digests, local.telemetry_collector_repository, null) != null
+    ? "${module.ecr.repository_urls[local.telemetry_collector_repository]}@${var.image_digests[local.telemetry_collector_repository]}"
+    : "${module.ecr.repository_urls[local.telemetry_collector_repository]}:${local.telemetry_collector_image_tag}"
+  )
   telemetry_collector_repository_arn = (
     module.ecr.repository_arns[local.telemetry_collector_repository]
   )
-  container_name        = each.value.container_name
-  container_port        = module.network.app_container_port
-  task_cpu              = var.ecs_task_cpu
-  task_memory           = var.ecs_task_memory
-  attach_load_balancer  = each.value.online
-  create_service        = each.value.online
-  desired_count         = each.value.online ? var.ecs_desired_count : 1
-  enable_autoscaling    = each.value.online
-  min_capacity          = var.ecs_desired_count
-  max_capacity          = max(var.ecs_desired_count, var.ecs_desired_count * 2)
-  health_check_path     = local.health_check_path
-  target_protocol       = "HTTPS"
-  log_retention_in_days = var.log_retention_days
-  log_group_kms_key_arn = module.kms.s3_key_arn
+  container_name       = each.value.container_name
+  container_port       = module.network.app_container_port
+  task_cpu             = var.ecs_task_cpu
+  task_memory          = var.ecs_task_memory
+  attach_load_balancer = each.value.online
+  create_service       = each.value.online
+  desired_count        = each.value.online ? var.ecs_desired_count : 1
+  enable_autoscaling   = each.value.online
+  min_capacity         = var.ecs_desired_count
+  max_capacity         = max(var.ecs_desired_count, var.ecs_desired_count * 2)
+  health_check_path    = local.health_check_path
+  # WHY : Assumptions: looked up with a null default rather than indexed, because
+  #       data-migration is intentionally absent from the map and the module reads null
+  #       as "this workload has no in-container probe".
+  container_health_check_command = lookup(local.container_health_check_commands, each.key, null)
+  target_protocol                = "HTTPS"
+  log_retention_in_days          = var.log_retention_days
+  log_group_kms_key_arn          = module.kms.s3_key_arn
 
   # WHY : Assumptions: passed for exactly the online workloads, which is the same
   #       gate that injects CARDDEMO_ONLINE_WRITES_PARAMETER into this workload's
@@ -2947,15 +3425,45 @@ module "ecs_service" {
   #       can widen it.
   online_write_gate_parameter_arn = each.value.online ? aws_ssm_parameter.online_writes_enabled.arn : null
 
+  # WHY : Assumptions: the same online/offline topology fact is passed a second time,
+  #       as a boolean, because the module selects the write-gate policy's cardinality
+  #       from it. The ARN above is this root's own aws_ssm_parameter attribute and is
+  #       unknown until that parameter exists, so a count derived from it could not be
+  #       decided during plan; the boolean is known here before anything is created.
+  #       The module refuses the two halves separately, so passing one without the other
+  #       fails at plan time rather than producing a task that cannot read the flag.
+  create_online_write_gate_policy = each.value.online
+
   environment_variables = local.environment_variables_by_workload[each.key]
   ssm_parameter_arns    = local.runtime_parameter_arns_by_service[each.key]
   secret_arns           = local.secret_sources_by_workload[each.key]
   # WHY : Assumptions: the two grants are looked up with a default of the empty set
-  #       rather than indexed, so a workload that puts no message on any queue -- batch
-  #       and data-migration -- receives no SQS statement at all instead of failing the
-  #       plan on a missing map key.
-  sqs_receive_queue_arns        = try(local.sqs_permissions_by_workload[each.key].receive, [])
-  sqs_send_queue_arns           = try(local.sqs_permissions_by_workload[each.key].send, [])
+  #       rather than indexed, so a workload that puts no message on any queue --
+  #       data-migration is now the only one -- receives no SQS statement at all instead of
+  #       failing the plan on a missing map key.
+  # WHY : Refactoring Rationale: this comment named BATCH as a workload that puts no message
+  #       on any queue, and that stopped being true when batch-service's error-sink producer
+  #       was wired. It now appears in sqs_permissions_by_workload above with a send-only
+  #       boundary on the error queue, so the default arm covers data-migration alone. The
+  #       default is kept rather than replaced by direct indexing because data-migration
+  #       still has no queue of any kind and indexing would fail the plan on its missing key.
+  # WHY : Refactoring Rationale: `lookup` with a default, NOT `try`. Both express the
+  #       same intent and only one of them plans. `try` returns an UNKNOWN value
+  #       whenever its expression contains one, because it cannot decide in advance
+  #       whether evaluation would have failed -- and these ARNs are the queue module's
+  #       own attributes, so on a first apply they are unknown. The module selects the
+  #       cardinality of its queue policy from `length()` of these lists, so the whole
+  #       package failed with `Invalid count argument: the "count" value depends on
+  #       resource attributes that cannot be determined until apply` for every
+  #       queue-using workload. `lookup` decides from the map's KEYS, which are known
+  #       here before anything is created, so the length is known even though the ARNs
+  #       inside are not. Measured both forms against an unknown-valued map before
+  #       changing this.
+  # WHY : Assumptions: the default object declares BOTH members, because lookup must
+  #       return one type for every key. An empty object would make the two arms
+  #       disagree and fail type unification rather than falling back.
+  sqs_receive_queue_arns        = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).receive
+  sqs_send_queue_arns           = lookup(local.sqs_permissions_by_workload, each.key, local.no_queue_permissions).send
   create_task_role_policy       = contains(keys(local.task_role_policy_json), each.key)
   task_role_policy_json         = lookup(local.task_role_policy_json, each.key, null)
   execution_secret_kms_key_arns = length(local.secret_sources_by_workload[each.key]) > 0 ? [module.kms.secrets_key_arn] : []
@@ -3139,15 +3647,24 @@ module "step_functions" {
   batch_task_definition_arn          = module.ecs_service["batch"].task_definition_arn
   data_migration_task_definition_arn = module.ecs_service["data-migration"].task_definition_arn
   reporting_task_definition_arn      = module.ecs_service["reporting"].task_definition_arn
-  batch_container_name               = module.ecs_service["batch"].container_name
-  data_migration_container_name      = module.ecs_service["data-migration"].container_name
-  reporting_container_name           = module.ecs_service["reporting"].container_name
-  private_app_subnet_ids             = module.network.private_app_subnet_ids
-  task_security_group_id             = module.network.app_security_group_id
+
+  # WHY : Assumptions: a FOURTH image is wired because the operator-invoked
+  #       authorization-extract machine runs the authorization container, not the batch
+  #       one. The segment export reads the authorization schema and only that context's
+  #       database role may, so the capability cannot be hosted in an image that already
+  #       had a task definition here.
+  authorization_task_definition_arn = module.ecs_service["authorization"].task_definition_arn
+
+  batch_container_name          = module.ecs_service["batch"].container_name
+  data_migration_container_name = module.ecs_service["data-migration"].container_name
+  reporting_container_name      = module.ecs_service["reporting"].container_name
+  authorization_container_name  = module.ecs_service["authorization"].container_name
+  private_app_subnet_ids        = module.network.private_app_subnet_ids
+  task_security_group_id        = module.network.app_security_group_id
 
   # WHY : Assumptions: every role the state machine may run a task AS is
   #       enumerated -- the task role and the task EXECUTION role of each of the
-  #       three task definitions above, six entries for three images. The module
+  #       four task definitions above, eight entries for four images. The module
   #       turns the list into the Resource of one iam:PassRole statement, so an
   #       omitted entry is not a narrower grant but a run-task that fails with an
   #       access-denied error naming iam:PassRole rather than the missing role.
@@ -3158,6 +3675,8 @@ module "step_functions" {
     module.ecs_service["data-migration"].execution_role_arn,
     module.ecs_service["reporting"].task_role_arn,
     module.ecs_service["reporting"].execution_role_arn,
+    module.ecs_service["authorization"].task_role_arn,
+    module.ecs_service["authorization"].execution_role_arn,
   ]
   quiesce_function_arn        = aws_lambda_function.quiesce.arn
   resume_function_arn         = aws_lambda_function.resume.arn
@@ -3217,15 +3736,21 @@ module "observability" {
     for name in keys(local.online_services) :
     name => module.ecs_service[name].target_group_arn_suffix
   }
-  api_gateway_id                  = module.api_gateway.api_id
-  api_gateway_stage_name          = module.api_gateway.stage_name
-  aurora_cluster_identifier       = module.aurora.cluster_identifier
-  aurora_max_capacity             = var.aurora_max_capacity
-  database_connection_threshold   = local.database_connection_budget
-  queue_names                     = module.sqs.queue_names
-  daily_state_machine_arn         = module.step_functions.daily_state_machine_arn
-  vpc_flow_log_group_name         = module.network.flow_log_group_name
-  cloudfront_distribution_id      = module.cloudfront_spa.distribution_id
+  api_gateway_id                = module.api_gateway.api_id
+  api_gateway_stage_name        = module.api_gateway.stage_name
+  aurora_cluster_identifier     = module.aurora.cluster_identifier
+  aurora_max_capacity           = var.aurora_max_capacity
+  database_connection_threshold = local.database_connection_budget
+  queue_names                   = module.sqs.queue_names
+  daily_state_machine_arn       = module.step_functions.daily_state_machine_arn
+  vpc_flow_log_group_name       = module.network.flow_log_group_name
+  cloudfront_distribution_id    = module.cloudfront_spa.distribution_id
+  # WHY : Assumptions: the same fact is also passed as a boolean, because the module
+  #       selects the distribution alarm's cardinality from it. The identifier above is
+  #       created by this root and is unknown until then, so a count derived from it
+  #       could not be decided during plan. This root always creates the distribution,
+  #       so the alarm is always wanted.
+  create_cloudfront_alarm         = true
   kms_key_arn                     = module.kms.s3_key_arn
   log_retention_days              = var.log_retention_days
   log_group_names                 = local.lambda_log_group_names

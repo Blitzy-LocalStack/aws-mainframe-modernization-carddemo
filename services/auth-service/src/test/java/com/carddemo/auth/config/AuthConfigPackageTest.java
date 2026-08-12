@@ -38,9 +38,10 @@ import org.yaml.snakeyaml.Yaml;
  * asserts the property that matters, which is that the two documents agree.</p>
  *
  * <p>Alternatives Considered: standing up an application context and reading the generated document from
- * the running service. Rejected because the generated document's paths come from request handlers this
- * module has not authored yet, so a context-based assertion could only cover the same members these
- * direct assertions cover while adding a container start-up to every run.</p>
+ * the running service. Rejected because the generated document would then have to agree with the
+ * committed one before this test could compare either against the annotations, so a drift between the two
+ * would surface as a context that failed to start rather than as the difference it is. Reading the
+ * committed contract off the class path asserts the property that matters with no container to start.</p>
  */
 class AuthConfigPackageTest {
 

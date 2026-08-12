@@ -16,8 +16,24 @@
  *       -- a {@code CHAR(10)} that had been authored as a {@code VARCHAR} pads nothing, and a check
  *       constraint that can never be false is indistinguishable from one that was mistyped;</li>
  *   <li>that the three keyset window queries the customer scan is built on order ascending, resume
- *       STRICTLY after a position and concatenate into a walk that visits every row exactly once.</li>
+ *       STRICTLY after a position and concatenate into a walk that visits every row exactly once;</li>
+ *   <li>that {@code V2__account_inquiry_reply_ledger.sql} applies as written and that its claim statement
+ *       reports a conflict on the second delivery of one request rather than inserting a second row or
+ *       overwriting the first. That claim is the ENGINE's decision -- {@code INSERT ... ON CONFLICT DO
+ *       NOTHING} reporting zero affected rows -- so a substituted ledger would return whatever a stub was
+ *       told to and would pass against a statement with a typo in it;</li>
+ *   <li>that the account update's two writes -- the customer row flushed first and the account row second
+ *       -- COMMIT together and ROLL BACK together, which only an engine that can commit and roll back can
+ *       show.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: the fourth property is a later addition, and the gap it closed is instructive.
+ * The service test that covers those two writes substitutes the transaction manager and the controller test
+ * substitutes the whole service, so every assertion about them was made against a component that cannot
+ * commit and cannot roll back -- and the service test's own comment deferred the commit to "the
+ * container-backed integration test" that did not yet exist. The property was therefore asserted nowhere
+ * while appearing to be assigned somewhere, which is the failure mode a charter naming the split is
+ * supposed to prevent. {@code AccountUpdateAtomicityIT} closes it.
  *
  * <p>Refactoring Rationale: the sibling {@code api} charter already named this package as the home of
  * container-backed repository assertions while the package did not exist, so the split of

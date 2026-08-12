@@ -27,7 +27,7 @@
  * repository ruleset audits at-clause bodies for emptiness, so an invented empty at-clause would be
  * reported rather than credited.</p>
  *
- * <h2>The three configuration types, and what each one owns</h2>
+ * <h2>The four configuration types, and what each one owns</h2>
  *
  * <p>Assumptions: the inventory below is the package contract the migration plan assigns, and each
  * entry carries its own marker for whether that contract is discharged on disk. Naming a type here is
@@ -74,22 +74,35 @@
  *       auto-configured one, and the two could disagree about which account and region they
  *       address.</dd>
  *
+ *   <dt>{@code DataSourceConfig} -- LANDED</dt>
+ *   <dd>The pool this whole context reads and writes through, and the startup proof that the
+ *       connections it hands out resolve an unqualified table name in the {@code reference} schema. It
+ *       binds the pool from {@code spring.datasource.hikari}, which keeps the ceiling, the idle floor
+ *       and the connection-initialization statement per-profile values rather than compiled ones, and
+ *       it registers one callback that asks the server {@code SELECT current_schema()} and compares
+ *       the answer with {@code spring.flyway.default-schema}. Assumptions: those are two INDEPENDENT
+ *       configuration keys, and comparing them is what makes the check falsifiable -- a check deriving
+ *       its expectation from the same key that set the path could never fail. Assumptions: the failure
+ *       it exists for is otherwise silent and lands in a DIFFERENT service, because PostgreSQL accepts
+ *       a search path naming a schema that does not exist and every other context reads this one's
+ *       seeded lookup rows to validate an address, so a wrong path surfaces as a validation refusal
+ *       several hops from its cause.</dd>
+ *
  * </dl>
  *
- * <p>Refactoring Rationale: this charter listed a fourth type, {@code DataSourceConfig}, as PLANNED,
- * and no such type exists here. The entry is WITHDRAWN rather than fulfilled, because the reasoning the
- * entry itself carried is the reasoning against it: the schema pin and the pool sizing are declared once
- * in this module's {@code application.yml}, under
- * {@code spring.datasource.hikari.connection-init-sql} and the pool keys beside it, and a type here
- * would restate neither. A charter that names a type as planned states an obligation, and an obligation
- * no one intends to meet reads to the next author as unfinished work rather than as a decision. The set
- * above is therefore closed at three, and the closed set is four compilation units: this descriptor and
- * the three types.
- *
- * <p>Assumptions: the one thing the withdrawn entry offered beyond the declaration -- a check that the
- * search-path pin took EFFECT rather than merely being asked for -- is not lost with it. That check
- * belongs to a test against a real engine rather than to a configuration type, because a configuration
- * type can only assert what it itself set.
+ * <p>Refactoring Rationale: {@code DataSourceConfig} was listed here as PLANNED and then recorded as
+ * WITHDRAWN, on the argument that the schema pin and the pool sizing are both declared in this module's
+ * {@code application.yml} and that a type here would restate them. That withdrawal is REVERSED and the
+ * type has landed: the migration plan assigns this package a datasource binding, and the argument was
+ * right about the declaration while being wrong about the check. The type restates no setting. It asks
+ * the server what the session resolved and compares that answer with a schema name declared on a
+ * different key, so what it asserts is that the pin took EFFECT rather than that it was requested, and
+ * those are different facts. Alternatives Considered: leaving the effect-check to an integration test
+ * against a real engine, which is what the withdrawal proposed instead. Rejected, because a test proves
+ * the pin on the engine the test starts, while a startup callback proves it on the engine the
+ * deployment is pointed at -- including a cluster whose search path was altered at the role or database
+ * level after the image was built and tested. The set above is therefore closed at FOUR types, and the
+ * closed set is five compilation units: this descriptor and the four types.
  *
  * <dl>
  *   <dt>{@code OpenApiConfig} -- LANDED</dt>

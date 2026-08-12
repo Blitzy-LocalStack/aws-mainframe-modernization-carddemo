@@ -162,12 +162,26 @@ locals {
               targets = ["127.0.0.1:${var.container_port}"]
             }]
             tls_config = {
-              # WHY : Assumptions: the application certificate names the
-              #       internal service hostname, while the task-local scrape
-              #       deliberately uses loopback so the metrics endpoint is
-              #       never exposed through a security-group rule. The TLS
-              #       channel still protects bytes inside the task namespace;
-              #       hostname verification cannot succeed against 127.0.0.1.
+              # WHY : Assumptions: the scrape deliberately uses loopback so the
+              #       metrics endpoint is never exposed through a security-group
+              #       rule, and the TLS channel still protects the bytes inside
+              #       the task namespace.
+              # WHY : Refactoring Rationale: verification is skipped because the
+              #       listener certificate is UNANCHORED, not because of its
+              #       names. This note used to say "hostname verification cannot
+              #       succeed against 127.0.0.1", which
+              #       config/docker/generate-listener-material.sh:164 contradicts
+              #       -- it mints the leaf with
+              #       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so loopback IS a
+              #       subject-alternative name. What no container in the task has
+              #       is the issuer: the leaf is self-signed and minted per task,
+              #       so nothing can anchor it. Measured with the generator's own
+              #       keytool arguments against a loopback TLS listener: a
+              #       verifying client fails with "self-signed certificate (18)"
+              #       and reports no name mismatch at all. The distinction is why
+              #       supplying a name would not remove this flag, and why the only
+              #       alternative would be exporting the per-task leaf into the
+              #       collector's own trust store on every start.
               insecure_skip_verify = true
             }
           }]
@@ -236,6 +250,33 @@ locals {
     }
   }
 
+  # WHY : Refactoring Rationale: the metrics pipeline is created for EVERY workload
+  #       and its receiver list now includes otlp, where it used to exist only when
+  #       create_service was true and read the Prometheus receiver alone. The
+  #       consequence of the old shape was that the two task-mode workloads -- batch
+  #       and data-migration -- ran a collector that exported traces and no metrics at
+  #       all, so a failed nightly step produced spans and left every counter, timer
+  #       and gauge the job recorded unexported. There was nothing to scrape in those
+  #       tasks either: batch starts with no web listener, so a scrape receiver could
+  #       not have supplied them whatever it was pointed at.
+  # WHY : Assumptions: the two receivers serve two DIFFERENT modes and cannot
+  #       double-count, because a workload only ever feeds one of them. A serving task
+  #       is scraped -- telemetry_environment_variables below leaves Micrometer's OTLP
+  #       registry disabled for it, exactly as before -- and a one-shot task pushes,
+  #       with the registry enabled and the scrape target absent. Enabling both on one
+  #       workload is what would export a meter twice, which is the hazard the earlier
+  #       single-receiver shape was written to avoid, and it stays avoided by the
+  #       environment split rather than by omitting a pipeline.
+  # WHY : Trade-offs: reporting-service is create_service = true and its task
+  #       definition is ALSO started directly by the batch state machine, in
+  #       WebApplicationType.NONE. That one shape therefore carries a Prometheus
+  #       scrape configuration with no listener behind it while it runs as a task; the
+  #       collector reports the scrape failure at warn level and exports nothing extra.
+  #       The state machine supplies the push variables as container overrides for
+  #       those runs, so the metrics still arrive. Splitting reporting into two task
+  #       definitions would remove the harmless warning at the cost of two revisions to
+  #       keep in step for one image, which is the duplication this module exists to
+  #       prevent.
   telemetry_pipelines = merge(
     {
       traces = {
@@ -243,14 +284,12 @@ locals {
         processors = ["memory_limiter", "resource", "tail_sampling", "batch"]
         exporters  = ["awsxray"]
       }
-    },
-    var.create_service ? {
       metrics = {
-        receivers  = ["prometheus"]
+        receivers  = var.create_service ? ["otlp", "prometheus"] : ["otlp"]
         processors = ["memory_limiter", "resource", "batch"]
         exporters  = ["awsemf"]
       }
-    } : {},
+    },
   )
 
   telemetry_collector_configuration = yamlencode({
@@ -273,7 +312,28 @@ locals {
   #       point it at loopback; no collector endpoint is exposed outside the
   #       task. Metrics remain Prometheus-scraped to avoid exporting the same
   #       meter through both OTLP and the collector's Prometheus receiver.
-  telemetry_environment_variables = var.enable_telemetry_collector ? {
+  # WHY : Assumptions: OTEL_METRICS_EXPORTER stays "none" for every workload, and it
+  #       is NOT the switch that turns metrics on. It configures the OpenTelemetry SDK,
+  #       which this estate uses for TRACES only; the meters come from Micrometer, whose
+  #       own OTLP registry is on every service's runtime classpath and is governed by
+  #       the management.otlp.metrics.export.* properties that
+  #       carddemo-common-defaults.yml disables for local runs. Setting the SDK
+  #       exporter here would create a second, independently configured metrics path
+  #       rather than enabling the one that exists.
+  # WHY : Refactoring Rationale: the three MANAGEMENT_OTLP_METRICS_EXPORT_* names below
+  #       are supplied to the task-mode workloads and withheld from the serving ones,
+  #       and that split is what stops a meter being exported twice. A serving task
+  #       publishes /actuator/prometheus and the collector scrapes it; a one-shot task
+  #       publishes nothing to scrape, so it pushes instead. Before this, the push path
+  #       was configured nowhere and the scrape path did not exist in task mode, so
+  #       batch and data-migration exported no metrics at all.
+  # WHY : Assumptions: the step is shortened to fifteen seconds for a pushing workload.
+  #       The registry's own default publishes once a minute, and a batch step that
+  #       finishes inside that window would exit having exported nothing -- the
+  #       shutdown flush is best effort and a one-shot container is the case most likely
+  #       to lose it. Fifteen seconds bounds that loss to a quarter of a step at four
+  #       times the request volume, which is negligible against a nightly chain.
+  telemetry_environment_variables = var.enable_telemetry_collector ? merge({
     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/protobuf"
     OTEL_LOGS_EXPORTER                 = "none"
@@ -282,7 +342,11 @@ locals {
     OTEL_SERVICE_NAME                  = var.service_name
     OTEL_TRACES_EXPORTER               = "otlp"
     OTEL_TRACES_SAMPLER                = "always-on"
-  } : {}
+    }, var.create_service ? {} : {
+    MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED = "true"
+    MANAGEMENT_OTLP_METRICS_EXPORT_STEP    = "15s"
+    MANAGEMENT_OTLP_METRICS_EXPORT_URL     = "http://127.0.0.1:4318/v1/metrics"
+  }) : {}
 
   effective_environment_variables = merge(
     var.environment_variables,
@@ -420,11 +484,23 @@ locals {
     #       Spring aborts context refresh on an unresolvable placeholder, so the task
     #       crash-looped. Both roots now publish all three as runtime parameters and the
     #       required map below obliges authorization to carry them.
+    # WHY : Refactoring Rationale: CARDDEMO_MESSAGING_ERROR_QUEUE_URL is admitted, and
+    #       its absence from this set is why batch-service's error sink could not be
+    #       wired: a name a root publishes but this set omits is refused by the
+    #       task-definition precondition below. It is admitted and deliberately NOT
+    #       required, because config/SqsConfig.java is conditional on it -- a task that
+    #       is handed no address contributes no publisher and records its failures in the
+    #       log alone, which is a supported configuration and the one a local run uses.
+    #       Requiring it would make that configuration unplannable and would contradict
+    #       the condition the class declares. The reader-set precondition below still
+    #       constrains it in the other direction: carrying the address obliges the
+    #       workload to be batch, so admitting it here does not admit it everywhere.
     "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN",
     "CARDDEMO_ACCOUNT_CONTEXT_BASE_URL",
     "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE",
     "CARDDEMO_ACCOUNT_INQUIRY_REQUEST_QUEUE",
+    "CARDDEMO_MESSAGING_ERROR_QUEUE_URL",
     # WHY : Refactoring Rationale: CARDDEMO_AUTH_COGNITO_CLIENT_ID and
     #       CARDDEMO_COGNITO_APP_CLIENT_ID were both admitted here and both are
     #       removed, for two different reasons that happened to look alike.
@@ -452,7 +528,45 @@ locals {
     #       the set is pruned to names with a current reader rather than left to
     #       accumulate.
     "CARDDEMO_AUTH_COGNITO_USER_POOL_ID",
+    # WHY : (1) Refactoring Rationale: these two are admitted because auth-service now
+    #       writes a one-time credential for each pool account it creates at run time,
+    #       and its application.yml resolves both with NO fallback -- so a task that
+    #       does not receive them cannot refresh its context at all. Before they were
+    #       admitted, both roots published them and this module's precondition refused
+    #       them, which fails a plan against a real account and nothing earlier.
+    #       (2) Assumptions: the Parameter Store channel rather than the Secrets
+    #       Manager one, for both. Neither value IS a secret: one is the name prefix
+    #       an entry is written under and the other the ARN of the key it is encrypted
+    #       with, and the protection of the credential comes from the entry grant and
+    #       the key grant in the calling root's task policy, not from concealing
+    #       either address. Routing them through the secret channel would oblige a
+    #       root to create two Secrets Manager entries holding non-secret text and
+    #       would give this task read access to them for no gain.
+    "CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN",
+    "CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX",
     "CARDDEMO_CONFIG_PREFIX",
+    # WHY : Refactoring Rationale: CARDDEMO_MESSAGING_ERROR_QUEUE_URL was absent from this
+    #       set and from both roots, and that absence was the configuration half of a
+    #       producer that could not run. batch-service gates its whole queue configuration
+    #       on carddemo.messaging.error-queue-url through @ConditionalOnProperty, so with
+    #       no root publishing the name the address, the send shape and the producer bean
+    #       were all skipped -- the module documented a terminal error sink and put no
+    #       message on it. Both roots now publish it for batch and the required map below
+    #       obliges batch to carry it.
+    # WHY : Assumptions: it is a PARAMETER rather than a secret, on the same terms as the
+    #       six queue addresses already admitted here: a queue address is a routing
+    #       selector that appears in the queue's own ARN and in every metric dimension the
+    #       queue publishes, so Parameter Store discloses nothing and the secret channel
+    #       stays for values that are actually secret.
+    # WHY : Trade-offs: it is spelled CARDDEMO_MESSAGING_ERROR_QUEUE_URL rather than
+    #       CARDDEMO_BATCH_ERROR_QUEUE, so it does not follow the CARDDEMO_<CONTEXT>_*
+    #       shape the two inquiry contexts use for their three queues each. The spelling
+    #       is fixed by the property it binds, because relaxed binding maps this exact
+    #       name to carddemo.messaging.error-queue-url; and the property is named for the
+    #       shared messaging concern rather than for one context because a second
+    #       publisher on this one terminal sink would bind the same key. Renaming the
+    #       variable to match the sibling shape would bind nothing at all, silently.
+    "CARDDEMO_MESSAGING_ERROR_QUEUE_URL",
     "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE",
     "CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST",
     # WHY : Refactoring Rationale: these two were added because the ACCOUNT context now
@@ -619,8 +733,26 @@ locals {
     #       extract output, this keys a row address a browser holds, and a single
     #       name would rotate all three together.
     "CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY",
-    "CARDDEMO_SERVER_TLS_CERTIFICATE",
-    "CARDDEMO_SERVER_TLS_PRIVATE_KEY",
+    # WHY : Refactoring Rationale: CARDDEMO_SERVER_TLS_CERTIFICATE and
+    #       CARDDEMO_SERVER_TLS_PRIVATE_KEY were admitted here and are now REMOVED,
+    #       which is the only remaining trace of the listener material they carried.
+    #       This set exists so a name can only be injected when some image reads it --
+    #       the rule this module states as "current readers only" -- and neither name
+    #       has a reader or a producer any more. Listener material is minted per task
+    #       by config/docker/generate-listener-material.sh, which draws a fresh key
+    #       pair and a self-signed leaf and exports CARDDEMO_SERVER_TLS_KEYSTORE,
+    #       CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD and CARDDEMO_SERVER_TLS_KEY_ALIAS
+    #       for the JVM; no application.yml binds a PEM pair, no root publishes one,
+    #       and authorization-service's EnvironmentClosureTest asserts that neither
+    #       name appears in its resolved environment. Admitting a name with no reader
+    #       invites a root to inject shared server private keys into every online
+    #       task, which is exactly the state the per-task mint was introduced to
+    #       remove.
+    # WHY : Trade-offs: a deployment that genuinely wanted to inject certificate
+    #       authority-issued listener material now has to restore the name here AND a
+    #       reader for it in the same change. That friction is deliberate: the pairing
+    #       is what the "current readers only" rule buys, and a name kept admissible
+    #       "in case" is indistinguishable from one that is wired.
     "SPRING_DATASOURCE_PASSWORD",
     "SPRING_DATASOURCE_USERNAME",
     # WHY : Assumptions: a migrating service receives TWO database credentials,
@@ -663,12 +795,37 @@ locals {
   #       launch the ETL image and therefore the only task allowed to receive
   #       the mask HMAC key. Binding these names to one service prevents a root
   #       from accidentally distributing either capability to every task.
+  # WHY : Refactoring Rationale: AWS_REGION is required of the THREE workloads that
+  #       bind it without a fallback and of no others, which is a narrower rule than
+  #       "every task gets it". account-service, batch-service and reference-service
+  #       each pin `spring.cloud.aws.region.static: ${AWS_REGION}` in their base
+  #       profile, so an unresolvable placeholder aborts context refresh before the
+  #       queue client is built; authorization-service deliberately does NOT pin it
+  #       and lets the SDK's own provider chain resolve the region, and its profiles
+  #       record that choice. Both roots already inject the variable into every
+  #       workload, so this closes a check that was absent rather than adding an input:
+  #       a root that dropped it planned cleanly and produced three tasks that could
+  #       not start.
+  # WHY : Assumptions: it belongs in the PLAIN set and not the parameter or secret set,
+  #       because a region is neither confidential nor deployment-derived -- both roots
+  #       supply it as var.aws_region, the same value the provider is configured with.
+  # WHY : Refactoring Rationale: CARDDEMO_VERSION is required of EVERY workload, and
+  #       until now it was required of none. Three independent consumers read it --
+  #       carddemo-common-defaults.yml binds carddemo.version, the collector's resource
+  #       processor upserts service.version, and OTEL_RESOURCE_ATTRIBUTES carries the
+  #       same value onto every span -- and all three fall back to the literal
+  #       "unspecified" when it is absent. Because no root supplied it, every log
+  #       record, every metric series and every trace in this estate was labelled
+  #       "unspecified", so no signal could be attributed to a release and a
+  #       regression could not be bracketed between two deployments. Requiring the
+  #       name here, and refusing a blank or placeholder value in the precondition at
+  #       the task definition, is what makes the label real.
   required_plain_environment_names = {
-    auth        = toset([])
-    account     = toset([])
-    card        = toset([])
-    transaction = toset([])
-    reference   = toset([])
+    auth        = toset(["CARDDEMO_VERSION"])
+    account     = toset(["AWS_REGION", "CARDDEMO_VERSION"])
+    card        = toset(["CARDDEMO_VERSION"])
+    transaction = toset(["CARDDEMO_VERSION"])
+    reference   = toset(["AWS_REGION", "CARDDEMO_VERSION"])
     # WHY : Refactoring Rationale: batch was listed as requiring
     #       CARDDEMO_DB_ALTERNATE_USERS and CARDDEMO_PARAMETER_PREFIX, and reporting
     #       as requiring CARDDEMO_TRUSTED_PROXY_PATTERN. Verified against the
@@ -678,13 +835,14 @@ locals {
     #       reporting-service's application.yml. A name belongs here only when the
     #       image cannot behave correctly without it, because requiring a value the
     #       image already knows forces every root to restate it.
-    batch         = toset([])
-    authorization = toset([])
-    reporting     = toset([])
+    batch         = toset(["AWS_REGION", "CARDDEMO_VERSION"])
+    authorization = toset(["CARDDEMO_VERSION"])
+    reporting     = toset(["CARDDEMO_VERSION"])
     data-migration = toset([
       "CARDDEMO_DB_ALTERNATE_USERS",
       "CARDDEMO_DB_SSL_MODE",
       "CARDDEMO_PARAMETER_PREFIX",
+      "CARDDEMO_VERSION",
     ])
   }
 
@@ -703,6 +861,19 @@ locals {
     #       both roots do publish it as a parameter.
     auth = toset([
       "CARDDEMO_AUTH_COGNITO_USER_POOL_ID",
+      # WHY : Assumptions: these two are REQUIRED and not merely admitted, which is
+      #       the stronger of the two states this module offers and is warranted for
+      #       the same reason the pool identifier above is. Both are resolved by
+      #       services/auth-service/src/main/resources/application.yml as bare
+      #       placeholders, so an unset value aborts context refresh rather than
+      #       degrading -- the workload does not start and no user creation is
+      #       attempted. Requiring them moves that failure from container start to
+      #       plan time, which is where a missing deployment input is cheapest to
+      #       find. The contrast is with CARDDEMO_MESSAGING_ERROR_QUEUE_URL, admitted
+      #       above without being required precisely because its reader gates on it
+      #       and starts without it.
+      "CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN",
+      "CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX",
       "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID",
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
@@ -806,7 +977,24 @@ locals {
       "SPRING_DATASOURCE_URL",
       "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI",
     ])
-    batch = toset(["SPRING_DATASOURCE_URL"])
+    # WHY : Refactoring Rationale: CARDDEMO_MESSAGING_ERROR_QUEUE_URL is REQUIRED of this
+    #       workload and not merely admitted, and that distinction is the whole point.
+    #       Admitting a name lets a root publish it; requiring it is what stops a root
+    #       from silently NOT publishing it, which is precisely the state batch-service
+    #       was in. Its config/SqsConfig.java is annotated @ConditionalOnProperty on the
+    #       property this variable binds, so an absent variable fails nothing -- it makes
+    #       the client, the validated binding and the producer bean all vanish and takes
+    #       the run's failure notification with them. That is the worst failure mode
+    #       available here, because it is silent and it is only observable on a night that
+    #       has already gone wrong.
+    # WHY : Assumptions: requiring it is safe rather than newly restrictive. Both roots
+    #       publish it from module.sqs.error_queue_url, the same output the two inquiry
+    #       contexts already read for their own error-queue variables, so the value exists
+    #       in every environment this repository provisions.
+    batch = toset([
+      "CARDDEMO_MESSAGING_ERROR_QUEUE_URL",
+      "SPRING_DATASOURCE_URL",
+    ])
     # WHY : Refactoring Rationale: the first three names below were absent, and the
     #       omission was the difference between a running service and a crash loop.
     #       authorization-service binds carddemo.account-context.base-url,
@@ -903,14 +1091,16 @@ locals {
     #       into a plan-time failure instead.
     # WHY : Refactoring Rationale: CARDDEMO_SERVER_TLS_CERTIFICATE and
     #       CARDDEMO_SERVER_TLS_PRIVATE_KEY were listed here and in the
-    #       authorization set below, and both are WITHDRAWN. They remain ADMISSIBLE
-    #       secret names above, because a root may legitimately choose to inject a
-    #       real certificate, but they cannot be REQUIRED: the listener material is
-    #       no longer a deployment input at all. Each image's entry point
+    #       authorization set below, and both are WITHDRAWN -- from this set and, as
+    #       of the same change that recorded it, from the ADMISSIBLE set above as
+    #       well. An earlier revision withdrew only the requirement and kept them
+    #       admissible on the ground that "a root may legitimately choose to inject a
+    #       real certificate", which contradicted this module's own current-readers-only
+    #       rule: no application.yml binds a PEM pair and no root publishes one, so
+    #       the names had neither reader nor producer. Each image's entry point
     #       (config/docker/generate-listener-material.sh) mints that task's own key
-    #       pair and self-signed certificate before the JVM starts, and this
-    #       module's own variables.tf records the same withdrawal for the same
-    #       reason. Requiring them would fail every correct call at plan time.
+    #       pair and self-signed certificate before the JVM starts, and this module's
+    #       own variables.tf records the same withdrawal for the same reason.
     # WHY : Refactoring Rationale: CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY is required
     #       of this service, and the omission it corrects would have been a crash
     #       loop rather than a missing feature. account-service publishes a keyset
@@ -1022,7 +1212,25 @@ locals {
     #       tag that variable names is derived in
     #       carddemo_migration.copybook.layouts, which runs in the data-migration
     #       image and still requires it below; no Java module reads it.
-    batch = toset(["SPRING_DATASOURCE_USERNAME", "SPRING_DATASOURCE_PASSWORD"])
+    # WHY : Refactoring Rationale: the two migrator names were MISSING from this set
+    #       while every other Flyway-running workload listed them, and the omission
+    #       was a crash loop rather than a narrower requirement. batch-service's
+    #       application.yml enables Flyway and binds `spring.flyway.user` and
+    #       `spring.flyway.password` to ${SPRING_FLYWAY_USER} and
+    #       ${SPRING_FLYWAY_PASSWORD} with NO fallback, so an unresolvable placeholder
+    #       aborts context refresh before the first job runs. Both roots already
+    #       publish the pair to every migrating workload, batch included, so this is
+    #       the check catching up with the wiring rather than a new requirement.
+    #       Assumptions: batch is the workload whose migration matters most, because
+    #       batch.batch_run is the step ledger an orchestrator redrive reads to decide
+    #       whether a step already completed -- so a batch task that starts without its
+    #       migrator identity fails the nightly chain on a missing relation.
+    batch = toset([
+      "SPRING_DATASOURCE_USERNAME",
+      "SPRING_DATASOURCE_PASSWORD",
+      "SPRING_FLYWAY_USER",
+      "SPRING_FLYWAY_PASSWORD",
+    ])
     # WHY : Refactoring Rationale: authorization was listed without
     #       CARDDEMO_MESSAGING_HMAC_KEY, and the omission was not cosmetic. The
     #       service derives the pending-authorization queue's group identity through
@@ -1045,10 +1253,11 @@ locals {
     #       to every task of the service.
     # WHY : Assumptions: the two listener-material names a parallel revision required here,
     #       CARDDEMO_SERVER_TLS_CERTIFICATE and CARDDEMO_SERVER_TLS_PRIVATE_KEY, are
-    #       deliberately absent. config/docker/generate-listener-material.sh mints a key pair
-    #       and a self-signed certificate per task at start-up, so neither is a deployment
-    #       input, and requiring them would oblige a root to inject shared listener material
-    #       -- the state the per-task mint exists to remove.
+    #       deliberately absent from this set and are no longer admissible at all.
+    #       config/docker/generate-listener-material.sh mints a key pair and a self-signed
+    #       certificate per task at start-up, so neither is a deployment input, and
+    #       admitting them would oblige nothing but would permit a root to inject shared
+    #       listener material -- the state the per-task mint exists to remove.
     authorization = toset([
       # WHY : Assumptions: authorization requires its OWN signing key, one of the two the
       #       account context verifies against, because it is the signing half of one
@@ -1315,6 +1524,27 @@ data "aws_iam_policy_document" "execution" {
   #       exact keys and to calls arriving through Secrets Manager for one of
   #       this task's exact secret ARNs; the execution role cannot use the same
   #       key directly against an unrelated ciphertext.
+  # WHY : Refactoring Rationale: the SecretARN condition reads `resource_arn`,
+  #       and it previously read a `policy_arn` member that this module never
+  #       declares -- secret_arns is map(object({ value_from, resource_arn })).
+  #       Terraform reported nothing at validate time, because validate does not
+  #       evaluate the map's contents, so the fault surfaced only once a real
+  #       plan carried a non-empty map, as `Unsupported attribute: this object
+  #       does not have an attribute named "policy_arn"`. Every one of the nine
+  #       workloads injects at least one secret, so it blocked the whole package.
+  # WHY : Assumptions: resource_arn is the CORRECT member for this condition and
+  #       not merely the one that exists. Secrets Manager populates the
+  #       SecretARN encryption-context entry with the BASE secret ARN, so a
+  #       condition compared against value_from -- which may carry an ECS
+  #       JSON-key or version selector suffix -- would never match and would deny
+  #       every decrypt. The variable exists to keep those two representations
+  #       apart, and this is the side that IAM consumes.
+  # WHY : Trade-offs: StringLike rather than StringEquals is retained. Secrets
+  #       Manager appends a six-character random suffix to the ARN it puts in the
+  #       encryption context only when the caller supplied a name-only ARN, and a
+  #       root that assembled an ARN without that suffix would otherwise be
+  #       denied; the pattern still names one exact secret per entry, so nothing
+  #       is widened beyond this task's own list.
   dynamic "statement" {
     for_each = length(var.execution_secret_kms_key_arns) > 0 && length(var.secret_arns) > 0 ? [true] : []
 
@@ -1333,7 +1563,7 @@ data "aws_iam_policy_document" "execution" {
       condition {
         test     = "StringLike"
         variable = "kms:EncryptionContext:SecretARN"
-        values   = distinct([for source in values(var.secret_arns) : source.policy_arn])
+        values   = distinct([for source in values(var.secret_arns) : source.resource_arn])
       }
     }
   }
@@ -1513,8 +1743,13 @@ resource "aws_iam_role_policy" "task_sqs" {
 #       including this statement nor prevented from replacing it. Composing it here
 #       makes the action and the resource properties of the module that a tfvars file
 #       cannot influence.
+# WHY : Assumptions: the cardinality is selected from create_online_write_gate_policy
+#       and not from testing the ARN against null, because the ARN is the roots'
+#       own aws_ssm_parameter attribute and is unknown before that parameter
+#       exists. variables.tf records the plan failure that produced this change
+#       and why the boolean is root-owned.
 data "aws_iam_policy_document" "task_online_write_gate" {
-  count = var.online_write_gate_parameter_arn == null ? 0 : 1
+  count = var.create_online_write_gate_policy ? 1 : 0
 
   statement {
     sid       = "AllowOnlineWriteFlagRead"
@@ -1525,7 +1760,7 @@ data "aws_iam_policy_document" "task_online_write_gate" {
 }
 
 resource "aws_iam_role_policy" "task_online_write_gate" {
-  count = var.online_write_gate_parameter_arn == null ? 0 : 1
+  count = var.create_online_write_gate_policy ? 1 : 0
 
   name   = "${local.resource_name}-task-online-write-gate"
   role   = aws_iam_role.task.id
@@ -1607,6 +1842,40 @@ resource "aws_iam_role_policy" "task_telemetry" {
 #       start with per-step container overrides.
 resource "aws_ecs_task_definition" "this" {
   family = local.resource_name
+
+  # WHY : Refactoring Rationale: the task definition now depends on every policy
+  #       attached to the TASK role, and previously nothing did. The only explicit
+  #       edge in this module was from the service to the execution-role policy, and
+  #       Terraform infers ordering from references alone -- the container
+  #       definitions reference the two role ARNs, not the inline policies attached
+  #       to them, so all five policy resources were free to be created after this
+  #       one. Two consequences followed. A task started before its application
+  #       policy existed received access-denied on its first queue receive, its first
+  #       write-gate read or its first log export, which presents as an application
+  #       fault rather than as a missing grant; and this resource's ARN is consumed
+  #       by infra/modules/step-functions-batch, so a state machine could be handed a
+  #       task definition whose role was not yet usable.
+  # WHY : Assumptions: the edge belongs on the TASK DEFINITION rather than only on
+  #       the service, because the two task-only workloads have no service at all --
+  #       batch and data-migration are started by the state machine from this
+  #       resource, so an edge on aws_ecs_service would leave exactly the workloads
+  #       with no readiness barrier unprotected. The service keeps its own edge
+  #       below, which now names the task-role policies as well, so a rolling
+  #       deployment cannot begin before the grants it will run under are in place.
+  # WHY : Trade-offs: the list names the four conditional policy resources with
+  #       splat expressions rather than being derived, so adding a sixth policy to
+  #       this role means adding a line here. That friction is preferred to a
+  #       depends_on on the role itself, which would NOT work: an inline policy is a
+  #       separate resource that depends on the role, so depending on the role
+  #       orders this before the policies rather than after them.
+  depends_on = [
+    aws_iam_role_policy.task,
+    aws_iam_role_policy.task_sqs,
+    aws_iam_role_policy.task_online_write_gate,
+    aws_iam_role_policy.task_telemetry,
+    aws_iam_role_policy_attachment.task,
+    aws_iam_role_policy.execution,
+  ]
 
   # WHY : Assumptions: Fargate requires cpu and memory at the task level and
   #       rejects any pair outside its published matrix, so these are not free
@@ -1774,17 +2043,42 @@ resource "aws_ecs_task_definition" "this" {
         }
       }
 
-      # WHY : Alternatives Considered: a container-level healthCheck was
-      #       considered and deliberately left out. The command a container
-      #       health check runs has to exist inside the image, and only the
-      #       service's own Dockerfile knows which binaries its base image
-      #       actually ships -- a headless Corretto runtime image carries no
-      #       curl. Each Dockerfile therefore owns its HEALTHCHECK, where the
-      #       base image is pinned and known, and the target group below owns
-      #       the check that decides whether a task receives traffic. A third
-      #       check here, with a command this module cannot verify against an
-      #       image it never sees, would add a failure mode without adding a
-      #       signal.
+      # WHY : Refactoring Rationale: a container-level healthCheck IS declared here
+      #       when the caller supplies a command, and it used to be left out on the
+      #       stated ground that "each Dockerfile therefore owns its HEALTHCHECK". The
+      #       first half of that was right and the conclusion was wrong: ECS monitors
+      #       only the healthCheck in the TASK DEFINITION and never reads the image's
+      #       HEALTHCHECK instruction, so the eight probes those Dockerfiles carry
+      #       govern `docker run` and a local compose file and were never evaluated in
+      #       the deployed estate. The seven request-serving workloads still had the
+      #       target group's check, which is a different signal -- it decides whether a
+      #       task receives traffic -- and batch had no health signal at all.
+      # WHY : Assumptions: the objection the old comment raised is answered rather
+      #       than overruled. The command is not composed here, because only the image
+      #       knows what it ships and the schemes differ across this estate; it is an
+      #       input that the root supplying the image also supplies, and variables.tf
+      #       records why null is a legitimate answer for a workload with no probe.
+      # WHY : Assumptions: startPeriod reads the grace-period INPUT rather than
+      #       local.health_check_grace_period, and the difference matters for exactly
+      #       the workload this check was added for. That local is deliberately null
+      #       when no load balancer is attached, because ECS rejects a service-level
+      #       grace period without one -- so reading it here would leave batch, the
+      #       one workload with no other health signal, with no start window at all
+      #       and a probe that failed while the JVM was still starting. The two
+      #       readiness windows still agree for a load-balanced workload, since both
+      #       resolve the same input.
+      # WHY : Assumptions: the window has to cover a cold JVM start plus the Flyway
+      #       migration a service runs before it binds. A failure inside startPeriod
+      #       does not count towards retries, so an over-long value delays detection
+      #       while an under-long one reports a task unhealthy that is legitimately
+      #       still starting.
+      healthCheck = var.container_health_check_command == null ? null : {
+        command     = var.container_health_check_command
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = var.health_check_grace_period_seconds
+      }
     }
     ],
     var.enable_telemetry_collector ? [
@@ -1909,6 +2203,34 @@ resource "aws_ecs_task_definition" "this" {
         null,
       ) != null
       error_message = "every task must set CARDDEMO_DB_SSL_ROOT_CERT to the image-local trust-anchor path, because the service images and the data-migration image install the Aurora certificate bundle at different locations and verify-full needs the right one."
+    }
+
+    precondition {
+      # WHY : Assumptions: the value has to be PRESENT, non-blank and not the literal
+      #       fallback, because those are three different ways of arriving at the same
+      #       useless label and only the first is caught by the required-name check
+      #       above. carddemo-common-defaults.yml resolves carddemo.version to
+      #       "unspecified" when the variable is absent, and this module's own
+      #       resource-attribute and OTEL_RESOURCE_ATTRIBUTES expressions use the same
+      #       word, so a task that supplied the placeholder explicitly would be
+      #       indistinguishable from one that supplied nothing -- while looking wired.
+      # WHY : Assumptions: the release identity is not checked for SHAPE, only for
+      #       being a real value. Both roots derive it from the same expression that
+      #       chooses this workload's image -- the immutable digest where one is
+      #       supplied and the commit tag otherwise -- so a shape rule here would
+      #       either duplicate image_uri's own validation or refuse one of the two
+      #       legitimate forms.
+      # WHY : Trade-offs: a deployment that genuinely has no release identity can no
+      #       longer start rather than starting with everything it emits labelled
+      #       "unspecified". That is the intended exchange: an unattributable signal
+      #       costs more during an incident than a refused plan costs during a
+      #       deployment, and the roots already hold the value.
+      condition = (
+        lookup(var.environment_variables, "CARDDEMO_VERSION", "") != "" &&
+        trimspace(lookup(var.environment_variables, "CARDDEMO_VERSION", "")) != "" &&
+        lookup(var.environment_variables, "CARDDEMO_VERSION", "") != "unspecified"
+      )
+      error_message = "every task must set CARDDEMO_VERSION to the release identity of the image it runs, and it may be neither blank nor the literal \"unspecified\": that word is the fallback carddemo-common-defaults.yml, the collector's service.version attribute and OTEL_RESOURCE_ATTRIBUTES all resolve to when the variable is absent, so supplying it explicitly would leave every log record, metric series and span unattributable to a release while appearing to be configured."
     }
 
     precondition {
@@ -2057,7 +2379,7 @@ resource "aws_ecs_task_definition" "this" {
         #       name is a permission the task cannot use. Pairing them here is why the
         #       module takes the ARN as a typed input rather than trusting the caller's own
         #       policy document, which is unknown at plan time.
-        contains(keys(var.environment_variables), "CARDDEMO_ONLINE_WRITES_PARAMETER") == (var.online_write_gate_parameter_arn != null)
+        contains(keys(var.environment_variables), "CARDDEMO_ONLINE_WRITES_PARAMETER") == var.create_online_write_gate_policy
       )
       error_message = "service-specific secret and trust configuration was distributed to the wrong bounded context."
     }
@@ -2067,12 +2389,19 @@ resource "aws_ecs_task_definition" "this" {
       #       conflated, and this block separates them. The first precondition above
       #       checks that a supplied name appears in the module's exact schema, which
       #       is a check on the NAME. It says nothing about WHICH workload may receive
-      #       it, so every admitted name was distributable to all ten -- the card
+      #       it, so every admitted name was distributable to all nine -- the card
       #       service could be handed the reporting state-machine ARN, and reference
       #       the account inquiry queues, and both would plan cleanly. The block above
       #       closed that for eleven names one at a time as each was noticed; the
-      #       thirteen clauses here complete the set, so "exact allowlist" now
-      #       constrains the pairing of name and workload rather than the name alone.
+      #       fifteen clauses here -- fourteen over ssm_parameter_arns and one over
+      #       secret_arns -- complete the set, so "exact allowlist" now constrains the
+      #       pairing of name and workload rather than the name alone.
+      # WHY : Refactoring Rationale: the count above was corrected when the batch clause
+      #       was added, and it is stated as two numbers that sum rather than as one
+      #       total because the previous wording said "thirteen" while the block held
+      #       fourteen -- the figure had counted only the parameter clauses and read as
+      #       though it counted them all. A prose count in a file with a machine-checkable
+      #       answer should say which population it counts.
       # WHY : Assumptions: every clause is biconditional, and the reverse direction is
       #       the half that earns the block. Forward-only ("if the service is card it
       #       must have the CVV key alias") catches an omission, which the required
@@ -2089,19 +2418,32 @@ resource "aws_ecs_task_definition" "this" {
       #       the queues are its own consumption endpoints. CARDDEMO_ACCOUNT_CONTEXT_-
       #       APPROVED_ORIGIN belongs to AUTHORIZATION and not to account, because it is
       #       the origin the CALLER checks the context's answer came from.
+      # WHY : Trade-offs: CARDDEMO_MESSAGING_ERROR_QUEUE_URL is the ONE name asserted in a
+      #       single direction rather than biconditionally, and the asymmetry is deliberate.
+      #       The reverse half is stated -- carrying the address obliges the workload to be
+      #       batch -- because that is the least-privilege property, and the terminal error
+      #       sink's address in the hands of a workload with no publisher is exactly the
+      #       drift this block exists to catch. The forward half is deliberately NOT stated,
+      #       because batch-service's SqsConfig is CONDITIONAL on the name: a task handed no
+      #       address contributes no publisher and records its failures in the log alone, so
+      #       obliging batch to carry it would make a configuration the image explicitly
+      #       supports unplannable. Alternatives Considered: stating it biconditionally, as
+      #       every other clause here does, which would have been more uniform and would have
+      #       encoded a requirement the application does not have.
       # WHY : Trade-offs: CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID is scoped to the seven
-      #       request-serving services rather than to all ten, which is the one clause
-      #       here that lists more services than it excludes. It is still worth stating:
-      #       the two it excludes are batch and data-migration, neither of which serves a
-      #       request or validates a token, so the clause is what stops an audience
-      #       expectation being handed to a workload with no resource server to apply it
-      #       to. The cost is that adding an eighth request-serving service means editing
-      #       this line, which is the intended friction -- the alternative is a set that
-      #       silently admits whatever is added next.
+      #       request-serving services rather than to all nine workloads, which is the
+      #       one clause here that lists more services than it excludes. It is still
+      #       worth stating: the two it excludes are batch and data-migration, neither of
+      #       which serves a request or validates a token, so the clause is what stops an
+      #       audience expectation being handed to a workload with no resource server to
+      #       apply it to. The cost is that adding an eighth request-serving service means
+      #       editing this line, which is the intended friction -- the alternative is a
+      #       set that silently admits whatever is added next.
       condition = (
         (var.service_name == "auth") == contains(keys(var.secret_arns), "CARDDEMO_AUTH_COGNITO_CLIENT_ID") &&
         (var.service_name == "auth") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_AUTH_COGNITO_USER_POOL_ID") &&
         (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_CONTEXT_APPROVED_ORIGIN") &&
+        (var.service_name == "batch") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_ERROR_QUEUE_URL") &&
         (var.service_name == "authorization") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_PAUTH_REQUEST_QUEUE") &&
         (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE") &&
         (var.service_name == "account") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_ACCOUNT_INQUIRY_REPLY_QUEUE") &&
@@ -2111,10 +2453,11 @@ resource "aws_ecs_task_definition" "this" {
         (var.service_name == "reference") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE") &&
         (var.service_name == "reporting") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_REPORTING_STEP_FUNCTIONS_STATE_MACHINE_ARN") &&
         (var.service_name == "card") == contains(keys(var.ssm_parameter_arns), "CARDDEMO_SECURITY_CVV_KEY_ID") &&
+        (!contains(keys(var.ssm_parameter_arns), "CARDDEMO_MESSAGING_ERROR_QUEUE_URL") || var.service_name == "batch") &&
         contains(["auth", "account", "card", "transaction", "reference", "authorization", "reporting"], var.service_name) == contains(keys(var.ssm_parameter_arns), "CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID") &&
         contains(["auth", "account", "card", "transaction", "reference", "authorization", "reporting"], var.service_name) == contains(keys(var.ssm_parameter_arns), "SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI")
       )
-      error_message = "a configuration name was distributed to a workload that has no reader for it, or withheld from the workload that does. Every admitted name is authorised for an exact set of services, derived from which application.yml resolves it."
+      error_message = "a configuration name was distributed to a workload that has no reader for it, or withheld from the workload that does. Every admitted name is authorised for an exact set of services, derived from which application.yml resolves it. CARDDEMO_MESSAGING_ERROR_QUEUE_URL is constrained in one direction only, its reader treating it as optional, so it may be absent from batch but may not be present anywhere else."
     }
 
     precondition {
@@ -2312,9 +2655,21 @@ resource "aws_ecs_service" "this" {
   #       resources. ECS rolling replacement needs none of them; it replaces
   #       tasks inside the one target group under the percentage bounds below.
   #       The operational contract that follows is worth writing down because
-  #       it is what an operator actually does: roll forward is a rolling
-  #       deployment with an updated image tag, and roll back is
-  #       `terraform -chdir=infra/envs/<env> destroy`.
+  #       it is what an operator actually does, and it has THREE levels rather
+  #       than the two an earlier version of this note gave. Roll forward is a
+  #       rolling deployment with an updated image reference. Rolling BACK one
+  #       service is the same operation with the previous reference, which
+  #       registers the earlier task definition revision again and replaces
+  #       tasks under the same percentage bounds; the deployment circuit breaker
+  #       configured below performs exactly that automatically when a new
+  #       revision cannot become healthy.
+  #       Refactoring Rationale: `terraform -chdir=infra/envs/<env> destroy` is
+  #       NEITHER of those and the earlier note named it as the rollback
+  #       procedure. It is environment TEARDOWN: it removes the cluster, the
+  #       database, the queues and the state machine along with the services, so
+  #       following it to undo one bad image would destroy the environment.
+  #       docs/runbooks/deploy.md and this module's README both keep revision
+  #       rollback and teardown apart, and this comment now agrees with them.
   deployment_controller {
     type = "ECS"
   }
@@ -2408,7 +2763,23 @@ resource "aws_ecs_service" "this" {
   #       it may create the service before the policy exists, and the apply
   #       fails intermittently in a way that reads like a transient AWS error
   #       rather than a missing dependency.
-  depends_on = [aws_iam_role_policy.execution]
+  # WHY : Refactoring Rationale: the list named the execution-role policy alone,
+  #       which ordered the image pull correctly and left the APPLICATION role's
+  #       grants unordered -- so the first tasks of a new service could be placed
+  #       before their queue, write-gate or telemetry statements existed and would
+  #       fail their first request rather than fail to start. The task-role policies
+  #       are named here as well as on the task definition above: the definition's
+  #       edge protects the two task-only workloads that have no service, and this
+  #       one protects a rolling deployment that replaces tasks under an existing
+  #       definition.
+  depends_on = [
+    aws_iam_role_policy.execution,
+    aws_iam_role_policy.task,
+    aws_iam_role_policy.task_sqs,
+    aws_iam_role_policy.task_online_write_gate,
+    aws_iam_role_policy.task_telemetry,
+    aws_iam_role_policy_attachment.task,
+  ]
 
   # WHY : Trade-offs: Application Auto Scaling writes desired_count at run
   #       time, so Terraform has to stop reconciling it -- otherwise every plan

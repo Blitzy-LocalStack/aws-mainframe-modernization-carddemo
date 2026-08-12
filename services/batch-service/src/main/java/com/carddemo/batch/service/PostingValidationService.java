@@ -187,16 +187,17 @@ public class PostingValidationService {
     public PostingDecision validate(DailyTransaction transaction) {
         Objects.requireNonNull(transaction, "transaction must not be null");
 
-        // WHY : Refactoring Rationale: an earlier revision of this class owned neither read. It
-        //       accepted the cross-reference and the account already resolved and held no repository
-        //       at all, which left the guard at :372 outside the class that transcribes :370. Two
-        //       things followed. The skipped read could not be demonstrated here, because a caller
-        //       had necessarily performed it before calling, so the distinction between reason 100
-        //       EXCLUDING reason 101 and merely outranking it was untestable at this level. And the
-        //       reads themselves were unverifiable against app/jcl/XREFFILE.jcl, so nothing prevented
-        //       a caller resolving the card through the alternate index rather than the base cluster.
-        //       Owning both reads restores the guard to the paragraph it belongs to; the overload
-        //       below keeps the caller that needs the entities from paying for a second read.
+        // WHY : Refactoring Rationale: this class owns BOTH reads rather than accepting the
+        //       cross-reference and the account already resolved. Taking them pre-resolved would put
+        //       the guard at :372 outside the class that transcribes :370, with two consequences. The
+        //       skipped read could not be demonstrated here at all, because a caller would
+        //       necessarily have performed it before calling, so the distinction between reason 100
+        //       EXCLUDING reason 101 and merely outranking it would be untestable at this level. And
+        //       the reads themselves would be unverifiable against app/jcl/XREFFILE.jcl, so nothing
+        //       would prevent a caller resolving the card through the alternate index rather than the
+        //       base cluster. Owning both keeps the guard in the paragraph it belongs to; the
+        //       overload below keeps a caller that needs the entities from paying for a second
+        //       read.
         Optional<CardXref> crossReference = lookupCrossReference(transaction);
 
         // WHY : Assumptions: flatMap expresses the :372 guard exactly, because it does not invoke its
@@ -209,7 +210,7 @@ public class PostingValidationService {
         //       type discard the surplus finding. Rejected because it would issue one wasted query
         //       for every unresolvable card in the daily feed, and because it would make the
         //       exclusion an artefact of precedence rather than of control flow -- the observable
-        //       reason would agree while the reads no longer matched the reference.
+        //       reason would agree while the reads themselves diverged from the reference.
         Optional<Account> account = crossReference.flatMap(this::lookupAccount);
 
         return new PostingDecision(decide(transaction, crossReference, account), crossReference,

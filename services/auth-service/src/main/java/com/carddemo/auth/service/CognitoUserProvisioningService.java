@@ -1,6 +1,15 @@
 package com.carddemo.auth.service;
 
+import com.carddemo.common.observability.ThrowableDigest;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +25,12 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminUpdate
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.DeleteSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceExistsException;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
 /**
  * Creates the managed-identity account a user row authenticates as, assigns its group, and reports
@@ -43,8 +58,9 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  *
  * <p>The managed identity provider is Amazon Cognito, reached through its administrative user-pool
  * API. The package charter beside this file states the responsibility as identity exchange and
- * deliberately does not name the provider, so that the provider can be named in the one class that
- * talks to it -- which is this one, and the sign-on exchange when it lands.</p>
+ * deliberately does not name the provider, so that the provider is named only in the two classes that
+ * talk to it: this one, for the administrative user-management API, and
+ * {@link CognitoIdentityService}, for the authentication API the sign-on exchange uses.</p>
  *
  * <h2>Trade-offs: provisioning is separated from the sign-on exchange</h2>
  *
@@ -57,53 +73,81 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  * one class would mean one task role carrying both sets, so a defect on the unauthenticated sign-on
  * path would reach account creation.</p>
  *
- * <h2>Trade-offs: no credential is created, and the handover is stated rather than implemented</h2>
+ * <h2>How the first credential reaches its owner</h2>
  *
- * <p>The account is created with the provider's message delivery suppressed and with no temporary
- * credential supplied, so the provider generates one it does not deliver and the account stands in its
- * force-change state. That is not an oversight, and it is the same decision the published contract
- * already records: {@code CreateUserRequest} carries no password property, because the reference
- * system's handling of one is the defect this migration is undoing -- {@code app/cpy/CSUSR01Y.cpy} L21
- * stores {@code SEC-USR-PWD PIC X(08)} in the clear, {@code app/cbl/COSGN00C.cbl} L223 compares it in
- * the clear, and {@code app/cbl/COUSR02C.cbl} L169 writes it back out onto a screen. Returning a
- * generated credential from this operation would put one on an outbound path again, in the one service
- * whose whole purpose is that credentials stop travelling.</p>
+ * <p>Purpose: the account is created with the provider's message delivery suppressed, carrying a
+ * temporary password this class generates, and that password is published to a per-user managed-secret
+ * entry encrypted with the deployment's customer-managed key. The account therefore stands in its
+ * force-change state with a credential that exists, is retrievable by a principal holding
+ * {@code GetSecretValue} and the key's permission, and buys exactly one sign-in before the pool
+ * requires it to be replaced.</p>
  *
- * <p>Assumptions: the first credential therefore reaches its owner the way every other one in this
- * deployment does -- through the provider's own administrative reset, whose generated values the
- * infrastructure writes to Secrets Manager rather than to a response body. The seed identities are
- * established the same way, by {@code infra/modules/cognito/seed_user_bootstrap.py}, and this class
- * deliberately mirrors that script's call shape so that a runtime-created account and a seeded one are
- * indistinguishable afterwards: the same three attributes, the same suppressed delivery, and group
- * membership as a separate act.</p>
+ * <p>Refactoring Rationale: no credential was created at all. The account was created with delivery
+ * suppressed AND with no temporary password, so the provider generated one and sent it nowhere; the
+ * pool's schema carries the two names and the custom type and no email or phone attribute, so there
+ * was no address a message could have gone to either. The account was therefore unreachable: a
+ * runtime-created user could not obtain a credential, could not complete the force-change challenge,
+ * and could not sign in by any path. The one operation the reference system's whole user-administration
+ * suite exists to enable -- {@code app/cbl/COUSR01C.cbl} creating a user who then signs on -- had no
+ * working equivalent.</p>
  *
- * <h2>Assumptions: a caller that fails after provisioning must withdraw</h2>
+ * <p>Assumptions: this is the SAME handover the seed identities use, and the shape is deliberately
+ * copied from {@code infra/modules/cognito/seed_user_bootstrap.py} so that a runtime-created account
+ * and a seeded one are reached by one procedure. Both generate a policy-compliant value from the same
+ * alphabet, both apply it as a TEMPORARY password so the pool forces a change at first sign-in, and
+ * both write {@code {"username", "password"}} into an entry encrypted with the secrets key. The
+ * username travels inside the protected payload for the reason that script records: a holder of the
+ * secret must be able to tell which identity it opens, and naming the identity inside the encrypted
+ * value is strictly better than naming it in the entry's own name.</p>
+ *
+ * <p>Assumptions: the temporary password is applied on the CREATE call rather than by a following
+ * administrative reset, and the difference is a permission. The seed script resets because its identity
+ * already exists -- Terraform's own user resource made it -- so a create would fail on every apply. This
+ * class owns the create, so it can supply the value there and the task role needs no
+ * {@code AdminSetUserPassword} grant at all. It also removes a window: there is never a moment where
+ * the account exists holding a provider-generated password nobody can obtain.</p>
+ *
+ * <p>Trade-offs: no credential is returned to the caller and none is logged, so this operation's
+ * response says nothing about the handover. That is the point rather than an omission -- the reference
+ * system's handling of a credential is the defect this migration is undoing, since
+ * {@code app/cpy/CSUSR01Y.cpy} L21 stores {@code SEC-USR-PWD PIC X(08)} in the clear,
+ * {@code app/cbl/COSGN00C.cbl} L223 compares it in the clear and {@code app/cbl/COUSR02C.cbl} L169
+ * writes it back out onto a screen. What the operator needs instead is the entry's NAME, and that is
+ * derived rather than transported: it is the configured prefix, the fixed segment
+ * {@value #SECRET_NAME_INFIX}, and the hexadecimal digest of the user identifier, so anyone who knows
+ * the identifier can recompute it and nobody who merely lists entries learns an identifier from one.
+ * The honest limit of that opacity is stated where the name is built: an eight-character identifier
+ * space is small enough to enumerate against a digest, so the name is defence in depth and the controls
+ * that actually protect the value are {@code GetSecretValue} and the key policy -- exactly as for the
+ * seed entries.</p>
+ *
+ * <h2>Assumptions: nothing survives a failed provisioning</h2>
  *
  * <p>The pool account must exist before the row can carry its subject, so provisioning happens first
- * and the row is written second. If the write then fails -- most likely on the primary key, which is
- * what refuses a duplicate identifier -- the pool account would survive with no row referring to it.
- * {@link #withdraw(String)} exists for exactly that path and is the caller's obligation, because only
- * the caller knows whether its transaction committed. It is idempotent, so a caller may invoke it
- * without first establishing whether the account was reached.</p>
+ * and the row is written second. Two windows follow from that, and both are closed rather than
+ * documented. Inside this class, every step after the account is created -- reading the subject back,
+ * joining the group, publishing the credential -- runs under a handler that WITHDRAWS the account and
+ * discards its credential entry before re-raising, so a post-create failure leaves nothing behind and a
+ * retry meets a clean pool. Outside it, a caller whose row write then fails calls
+ * {@link #withdraw(String)}, which is that same cleanup and is the caller's obligation because only the
+ * caller knows whether its transaction committed. It treats an absent account and an absent entry as
+ * success, so it may be invoked without first establishing how far provisioning got.</p>
+ *
+ * <p>Refactoring Rationale: the internal handler is the half that did not exist. A failure of the
+ * group-membership call, or a response that described no subject, left an account that could
+ * authenticate with a row that was never written; the identifier then became permanently unusable,
+ * because a later create met the pool's duplicate-username condition, which this service deliberately
+ * does not translate into a client-facing conflict. Nothing reported it and nothing repaired it.</p>
  *
  * <h2>Where this is called from</h2>
  *
- * <p>Assumptions: the one caller is the create-user path -- the handler behind {@code POST
- * /api/v1/auth/users}, which the migration plan assigns to {@code com.carddemo.auth.api} and
- * {@code UserService} in this package. Neither is authored yet, and the state of this package is
- * recorded the same way {@code com.carddemo.auth.config}'s charter records its own: by naming what is
- * present and what the contract still owes, rather than by leaving a reader to infer it. The order
- * that handler must follow is fixed by the paragraph above -- provision, then write the row with the
- * returned subject, then {@link #withdraw(String)} if the write fails -- and is stated here because
- * this class is where the ordering constraint originates.</p>
- *
- * <p>Alternatives Considered: deferring this class until that handler exists, so that no bean is
- * present without a call site. Rejected because the two halves of the fix are separable and only one
- * of them is a capability. Withdrawing the subject from
- * {@code com.carddemo.auth.dto.CreateUserRequest} closed the exposure immediately, but it also
- * removed the only way a subject could reach a row; leaving no server-side provisioner would have
- * replaced a caller-chosen subject with no subject at all, which the {@code NOT NULL} column refuses.
- * Landing the provisioner with the withdrawal keeps the contract satisfiable at every point.</p>
+ * <p>Assumptions: the callers are {@code UserService} in this package -- the create path, which calls
+ * {@link #provision}, and the update and delete paths, which reach {@link #synchronise} and
+ * {@link #withdraw} through the durable task ledger {@link IdentitySyncService} drains -- behind the
+ * handlers {@code com.carddemo.auth.api.UserController} publishes. The order the create path must
+ * follow is fixed by the paragraph above, provision then write the row with the returned subject then
+ * withdraw if the write fails, and it is stated here because this class is where the ordering
+ * constraint originates.</p>
  */
 @Service
 public class CognitoUserProvisioningService {
@@ -157,11 +201,74 @@ public class CognitoUserProvisioningService {
     /** The reference user-type value denoting an ordinary user, from {@code COCOM01Y.cpy} L28. */
     static final String USER_TYPE_USER = "U";
 
+    /**
+     * The fixed segment separating the configured prefix from the digest in a credential entry's name.
+     *
+     * <p>Assumptions: the segment distinguishes an entry this service writes from the seed entries the
+     * infrastructure writes under the same prefix, which use {@code /seed-user/}. Two families under one
+     * prefix is what lets the task role be granted write permission on this family alone, so a defect
+     * here cannot overwrite a seed identity's handover.</p>
+     */
+    static final String SECRET_NAME_INFIX = "/runtime-user/";
+
+    /**
+     * How many hexadecimal characters of the identifier's digest name the entry.
+     *
+     * <p>Assumptions: thirty-two characters are half of a SHA-256 digest, which is far beyond what
+     * uniqueness over an eight-character identifier space requires and is chosen for that reason rather
+     * than for collision resistance -- a shorter prefix would be equally unique here and would look as
+     * though it had been tuned. The name is not a security control; the reasoning is on
+     * {@link #credentialSecretName(String)}.</p>
+     */
+    static final int SECRET_NAME_DIGEST_LENGTH = 32;
+
+    /** The smallest temporary-password length this service will generate. */
+    static final int MIN_TEMPORARY_PASSWORD_LENGTH = 14;
+
+    /** The largest temporary-password length the provider's own policy admits. */
+    static final int MAX_TEMPORARY_PASSWORD_LENGTH = 128;
+
+    /** The lower-case characters a generated temporary password draws from. */
+    private static final String PASSWORD_LOWERCASE = "abcdefghijklmnopqrstuvwxyz";
+
+    /** The upper-case characters a generated temporary password draws from. */
+    private static final String PASSWORD_UPPERCASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    /** The digits a generated temporary password draws from. */
+    private static final String PASSWORD_DIGITS = "0123456789";
+
+    /**
+     * The symbols a generated temporary password draws from.
+     *
+     * <p>Assumptions: this is character for character the set
+     * {@code infra/modules/cognito/main.tf} declares as {@code password_special_charset} at its line
+     * 266 and hands the seed bootstrap as {@code CARDDEMO_PASSWORD_SYMBOLS}. Every member is inside the
+     * provider's permitted symbol set, and the two paths draw from one alphabet so a value generated
+     * here and one generated there are indistinguishable in shape. Alternatives Considered: the
+     * provider's whole permitted set, which is wider. Declined because it includes characters that need
+     * escaping in a shell and in a JSON document, and this value is read by a person out of a stored
+     * document and typed once.</p>
+     */
+    private static final String PASSWORD_SYMBOLS = "!#%*+-:=?@^_~";
+
+    /**
+     * The source of randomness a temporary password is drawn from.
+     *
+     * <p>Assumptions: {@link SecureRandom} and not {@code java.util.Random}, because this value is
+     * credential material for one sign-in and a predictable generator would make it guessable from
+     * another value the same generator produced. It is a static field because the instance is
+     * thread-safe and seeding one per call would add cost with no benefit.</p>
+     */
+    private static final SecureRandom RANDOM = new SecureRandom();
+
     /** Records provisioning outcomes for an operator; carries no attribute value and no subject. */
     private static final Logger LOG = LoggerFactory.getLogger(CognitoUserProvisioningService.class);
 
-    /** The administrative provider client this class issues its three calls through. */
+    /** The administrative provider client this class issues its pool calls through. */
     private final CognitoIdentityProviderClient provider;
+
+    /** The managed-secret client the initial-credential handover is published through. */
+    private final SecretsManagerClient secrets;
 
     /** The user pool every call below is scoped to. */
     private final String userPoolId;
@@ -171,6 +278,15 @@ public class CognitoUserProvisioningService {
 
     /** The group an ordinary user row's account is added to. */
     private final String userGroupName;
+
+    /** The managed-secret name prefix every credential entry this service writes sits beneath. */
+    private final String credentialSecretPrefix;
+
+    /** The customer-managed key a credential entry this service creates is encrypted with. */
+    private final String credentialSecretKmsKeyArn;
+
+    /** How many characters a generated temporary password carries. */
+    private final int temporaryPasswordLength;
 
     /**
      * Binds the provider client, the pool and the two group names.
@@ -183,31 +299,88 @@ public class CognitoUserProvisioningService {
      * chain already resolves an authority against -- so a pool whose groups were renamed cannot leave
      * this class assigning one name while authorization matched another.</p>
      *
+     * <p>Assumptions: the credential-entry prefix and the key that encrypts an entry are injected with
+     * no fallback, for the same reason the pool identifier is: a default would let the service start and
+     * write a runtime user's one-time credential somewhere nobody looks, or unencrypted by the
+     * customer-managed key the deployment's own audit rests on. A missing value stops startup instead.
+     * The length has a default because it is a policy preference rather than a deployment address, and
+     * it is validated here so a value the pool would refuse is found at startup rather than on the first
+     * create.</p>
+     *
      * @param provider the administrative provider client; must not be {@code null}
+     * @param secrets the managed-secret client the credential handover is published through; must not
+     *     be {@code null}
      * @param userPoolId the pool every call is scoped to; must not be blank
      * @param adminGroupName the group name for the {@code 'A'} user type; must not be blank
      * @param userGroupName the group name for the {@code 'U'} user type; must not be blank
+     * @param credentialSecretPrefix the managed-secret name prefix credential entries sit beneath, being
+     *     the same prefix the infrastructure writes seed entries under; must not be blank
+     * @param credentialSecretKmsKeyArn the customer-managed key a created entry is encrypted with; must
+     *     not be blank
+     * @param temporaryPasswordLength how many characters a generated temporary password carries; must be
+     *     between {@link #MIN_TEMPORARY_PASSWORD_LENGTH} and {@link #MAX_TEMPORARY_PASSWORD_LENGTH}
+     *     inclusive
+     * @throws NullPointerException if the provider or the secret client is {@code null}
+     * @throws IllegalStateException if the configured password length is outside the admitted range
      */
     public CognitoUserProvisioningService(CognitoIdentityProviderClient provider,
+            SecretsManagerClient secrets,
             @Value("${carddemo.auth.cognito.user-pool-id}") String userPoolId,
             @Value("${carddemo.security.cognito.admin-group-name}") String adminGroupName,
-            @Value("${carddemo.security.cognito.user-group-name}") String userGroupName) {
-        this.provider = provider;
+            @Value("${carddemo.security.cognito.user-group-name}") String userGroupName,
+            @Value("${carddemo.auth.cognito.credential-secret-prefix}") String credentialSecretPrefix,
+            @Value("${carddemo.auth.cognito.credential-secret-kms-key-arn}")
+            String credentialSecretKmsKeyArn,
+            @Value("${carddemo.auth.cognito.temporary-password-length:24}")
+            int temporaryPasswordLength) {
+        this.provider = Objects.requireNonNull(provider, "provider must not be null");
+        this.secrets = Objects.requireNonNull(secrets, "secrets must not be null");
         this.userPoolId = userPoolId;
         this.adminGroupName = adminGroupName;
         this.userGroupName = userGroupName;
+        this.credentialSecretPrefix = credentialSecretPrefix;
+        this.credentialSecretKmsKeyArn = credentialSecretKmsKeyArn;
+        // WHY : Assumptions: the length is checked at CONSTRUCTION and not at generation, because the
+        //       failure it prevents is a configuration mistake and the useful moment to report one is
+        //       startup. Checked at generation instead, the first create-user request after a bad
+        //       deployment would fail with a fault the caller can do nothing about, and every later one
+        //       would fail the same way. Trade-offs: the lower bound is this class's own and is above
+        //       the provider's minimum, because a value shorter than the pool's configured minimum is
+        //       refused by the pool anyway and the pool's minimum is not readable from here; the upper
+        //       bound is the provider's own ceiling.
+        if (temporaryPasswordLength < MIN_TEMPORARY_PASSWORD_LENGTH
+                || temporaryPasswordLength > MAX_TEMPORARY_PASSWORD_LENGTH) {
+            throw new IllegalStateException("carddemo.auth.cognito.temporary-password-length must be"
+                    + " between " + MIN_TEMPORARY_PASSWORD_LENGTH + " and "
+                    + MAX_TEMPORARY_PASSWORD_LENGTH + " but was " + temporaryPasswordLength
+                    + ": a shorter value is refused by the pool's own password policy and a longer one"
+                    + " exceeds the provider's ceiling, and either way no runtime-created user could"
+                    + " receive a credential");
+        }
+        this.temporaryPasswordLength = temporaryPasswordLength;
     }
 
     /**
      * Creates the pool account for a new user row, adds it to the group its type selects, and returns
      * the subject the provider minted.
      *
-     * <p>Assumptions: the order of the two provider calls is fixed and is not interchangeable. The
-     * account has to exist before it can be added to a group, and the subject is only available from
-     * the create response, so a failure of the membership call leaves an account that authenticates
-     * but carries no authority -- which is why that failure propagates rather than being absorbed. An
-     * account with no group is refused at every guarded route, so the visible outcome of a partial
-     * provisioning is a caller who can sign on and do nothing, not a caller with unintended authority.
+     * <p>Assumptions: the order of the calls is fixed and is not interchangeable. The account has to
+     * exist before it can be added to a group and before a password can be set on it, and the subject is
+     * only available from the create response, so nothing can be reordered ahead of the create. Group
+     * membership precedes the credential handover so that a value is only ever published for an account
+     * that already carries the authority its row describes.
+     *
+     * <p>Refactoring Rationale: every step after the create runs under a handler that WITHDRAWS the
+     * account before re-raising, and previously none did. A failed membership call, or a response
+     * describing no subject, left an account that could authenticate with no row behind it; the
+     * identifier then became permanently unusable, because a later create met the pool's
+     * duplicate-username condition, which this service deliberately does not translate into a
+     * client-facing conflict. Withdrawing turns every failure on this method into a clean retry.
+     * Alternatives Considered: leaving the caller to compensate, which it does for its own row write.
+     * Rejected because the caller cannot tell a create that never happened from one that happened and
+     * then failed halfway, so it would have to withdraw on every provisioning failure including the ones
+     * that created nothing -- and a withdrawal is a provider call, so that is a second call on the
+     * common path for the sake of the rare one.
      *
      * @param userId the row's identifier and the provider username, at most the eight characters
      *     {@code SEC-USR-ID PIC X(08)} declares at {@code app/cpy/CSUSR01Y.cpy} L18; must not be
@@ -216,8 +389,10 @@ public class CognitoUserProvisioningService {
      * @param lastName the family name to record on the account; must not be {@code null}
      * @param userType {@code "A"} or {@code "U"}, the whole domain at {@code app/cpy/COCOM01Y.cpy}
      *     L27 and L28; must not be {@code null}
-     * @return the subject the provider assigned, which is the value {@code auth.users.cognito_sub}
-     *     stores and the only link between a presented token and the row; never {@code null}
+     * @return the subject the provider assigned -- the value {@code auth.users.cognito_sub} stores and
+     *     the only link between a presented token and the row -- paired with the name of the managed
+     *     secret entry holding the account's first credential, so the administrator who created the
+     *     user is told where to collect it; never {@code null}, and it never carries the credential
      * @throws IllegalArgumentException if {@code userType} is outside the two-value domain, raised
      *     before any provider call so an out-of-domain value creates nothing
      * @throws IllegalStateException if the created account carries no subject attribute, which would
@@ -228,192 +403,316 @@ public class CognitoUserProvisioningService {
      *     deliberately not translated into a client-facing conflict, because the authority for a
      *     duplicate identifier is the primary key on {@code auth.users} and not the pool
      */
-    public UUID provision(String userId, String firstName, String lastName, String userType) {
+    public ProvisionedIdentity provision(
+            String userId, String firstName, String lastName, String userType) {
         String groupName = groupFor(userType);
+        String temporaryPassword = temporaryPassword();
 
         AdminCreateUserResponse created = this.provider.adminCreateUser(AdminCreateUserRequest
                 .builder()
                 .userPoolId(this.userPoolId)
                 .username(userId)
-                // WHY : Assumptions: delivery is SUPPRESSED and no temporary credential is supplied,
-                //       which together mean the provider generates one and sends nothing. The pool
-                //       declares no email or phone attribute -- its schema is the two names and the
-                //       custom type -- so there is no address a message could be delivered to, and an
-                //       unsuppressed call would fail rather than notify anyone. The seed bootstrap at
-                //       infra/modules/cognito/seed_user_bootstrap.py makes the same choice at its own
-                //       AdminCreateUser payload, so a runtime account and a seeded one arrive in the
-                //       same state.
+                // WHY : Assumptions: delivery is SUPPRESSED because there is nowhere to deliver to. The
+                //       pool's schema is the two names and the custom type -- it declares no email and
+                //       no phone attribute, following app/cpy/CSUSR01Y.cpy, which declares neither --
+                //       so an unsuppressed call would fail rather than notify anyone. The seed
+                //       bootstrap at infra/modules/cognito/seed_user_bootstrap.py suppresses for the
+                //       same reason, so a runtime account and a seeded one arrive in the same state.
                 .messageAction(MessageActionType.SUPPRESS)
+                // WHY : Refactoring Rationale: a temporary password is supplied HERE, and previously
+                //       none was. Suppressed delivery with no temporary password means the provider
+                //       generates a value and sends it nowhere, so the account existed in its
+                //       force-change state holding a credential no principal could obtain -- a user
+                //       who could never sign in and never complete the challenge. Supplying the value
+                //       is what makes the handover below possible at all.
+                // WHY : Assumptions: TEMPORARY and not permanent. The pool places the account in its
+                //       force-change state, so this value buys exactly one sign-in and is inert
+                //       afterwards; that is what makes storing it acceptable, because the person's
+                //       real password never exists outside their own session. The seed script records
+                //       the identical reasoning at its own Permanent-false argument.
+                .temporaryPassword(temporaryPassword)
                 .userAttributes(
                         attribute(ATTRIBUTE_GIVEN_NAME, firstName),
                         attribute(ATTRIBUTE_FAMILY_NAME, lastName),
                         attribute(ATTRIBUTE_USER_TYPE, userType))
                 .build());
 
-        UUID subject = subjectOf(created, userId);
+        try {
+            UUID subject = subjectOf(created, userId);
 
-        // WHY : Assumptions: membership is a separate call rather than an attribute of the account,
-        //       which mirrors the infrastructure's own decision to hold it as a separate resource --
-        //       recorded above aws_cognito_user_in_group in infra/modules/cognito/main.tf. The
-        //       consequence that matters is that a later role change is a membership change and does
-        //       not touch the identity or its credential, so a user whose type changes keeps the
-        //       subject their row is bound to.
-        this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(this.userPoolId)
-                .username(userId)
-                .groupName(groupName)
-                .build());
+            // WHY : Assumptions: membership is a separate call rather than an attribute of the account,
+            //       which mirrors the infrastructure's own decision to hold it as a separate resource --
+            //       recorded above aws_cognito_user_in_group in infra/modules/cognito/main.tf. The
+            //       consequence that matters is that a later role change is a membership change and does
+            //       not touch the identity or its credential, so a user whose type changes keeps the
+            //       subject their row is bound to.
+            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
+                    .userPoolId(this.userPoolId)
+                    .username(userId)
+                    .groupName(groupName)
+                    .build());
 
-        // WHY : Assumptions: the line records the identifier and the group and NOT the subject. The
-        //       subject is the value a presented token is matched on, so a log store holding it holds
-        //       the linkage between a person and their token claims; the identifier is already the
-        //       row's primary key and is disclosed by every other line about this request.
-        LOG.info("event=auth.identity.provisioned userId={} group={}", userId, groupName);
+            publishCredential(userId, temporaryPassword);
 
-        return subject;
+            // WHY : Assumptions: the line records the identifier and the group and NOT the subject, and
+            //       nothing at all about the credential beyond that one was published. The subject is
+            //       the value a presented token is matched on, so a log store holding it holds the
+            //       linkage between a person and their token claims; the identifier is already the row's
+            //       primary key and is disclosed by every other line about this request. The entry's
+            //       name is omitted because it is derivable from the identifier, so recording it would
+            //       add a second copy of a locator without adding information.
+            LOG.info("event=auth.identity.provisioned userId={} group={} credential=published",
+                    userId, groupName);
+
+            return new ProvisionedIdentity(subject, credentialSecretName(userId));
+
+        } catch (RuntimeException incomplete) {
+            // WHY : Assumptions: the withdrawal removes BOTH the account and any credential entry the
+            //       publication may have created, because a half-published handover is worse than none:
+            //       a value would sit in the store for an account that is about to be deleted, and the
+            //       next create for the identifier would then overwrite it and be indistinguishable
+            //       from the first. withdraw treats both absences as success, so it is correct however
+            //       far this method got.
+            // WHY : Trade-offs: a failure of the withdrawal itself is recorded and DISCARDED, and the
+            //       original failure is what propagates. The caller asked why provisioning failed and
+            //       that is the answer it needs; the cleanup failure is a second, operational fact that
+            //       no caller can act on, so it is attached to the first as a suppressed exception and
+            //       named on its own line. Propagating it instead would report a symptom in place of a
+            //       cause and would make a transient provider fault with clean cleanup
+            //       indistinguishable from a genuine orphan.
+            try {
+                withdraw(userId);
+            } catch (RuntimeException uncleanable) {
+                LOG.error("event=auth.identity.provision-orphaned userId={} action=withdraw-account"
+                        + " failure={}", userId, ThrowableDigest.of(uncleanable));
+                incomplete.addSuppressed(uncleanable);
+            }
+            throw incomplete;
+        }
     }
 
     /**
-     * Moves an identity's group membership from the group one reference type selects to the group
-     * another selects, restoring the original membership if the second half of the move fails.
+     * Publishes one account's temporary credential to the managed-secret entry its owner collects it
+     * from.
      *
-     * <p>Purpose: this is the operation that gives a user-type change its effect. The local
-     * {@code auth.users.user_type} column names an authority but confers none: every authority a
-     * request is matched against is derived by {@code com.carddemo.common.security.JwtRoleConverter}
-     * from the signed {@code cognito:groups} claim, so until the membership behind that claim moves,
-     * a promoted user is still refused every administrative route and a demoted one still reaches
-     * every one of them. The baseline had no equivalent, because {@code app/cbl/COUSR02C.cbl} moved
-     * {@code SEC-USR-TYPE} in the record it had read at L322 and rewrote it at L360, and that single
-     * byte WAS the authority -- {@code app/cbl/COADM01C.cbl} read it back from the same file. Splitting
-     * the name of an authority from the grant of it is a consequence of moving identity to a managed
-     * provider, and this method is where the two are put back together.</p>
+     * <p>Assumptions: creation is attempted first and an existing entry is written to instead, which
+     * makes the publication idempotent under a retry. The entry's name is derived from the identifier,
+     * so a second provisioning of the same identifier addresses the same entry rather than accumulating
+     * one per attempt -- and the value it then holds is the one that works, because the pool holds the
+     * password from the most recent create.</p>
      *
-     * <p>Assumptions: the source membership is removed BEFORE the target membership is added, and the
-     * order is a security decision rather than an arbitrary one. Either order has a window in which
-     * the provider's view is neither the old state nor the new one, and the two windows are not
-     * equivalent. Removing first leaves the identity holding NO group for the width of one provider
-     * call, so a token minted inside that window carries no authority and is refused everywhere --
-     * the fail-closed outcome. Adding first would leave it holding BOTH groups, so a token minted in
-     * that window carries administrative authority in every case, including the demotion of an
-     * administrator that is precisely the operation intended to take that authority away. A momentary
-     * denial is recoverable by retrying a request; a momentary escalation is not recoverable at
-     * all.</p>
+     * <p>Assumptions: the created entry names the customer-managed key explicitly rather than relying on
+     * the account's default managed key. The value being stored is the direct replacement for the
+     * cleartext {@code SEC-USR-PWD} field at {@code app/cpy/CSUSR01Y.cpy} L21, and a customer-managed key
+     * gives an auditable, revocable key policy that the default does not, so possession of the entry is
+     * not sufficient without the key's permission. The infrastructure makes the same choice for the seed
+     * entries at {@code infra/modules/cognito/main.tf}.</p>
      *
-     * <p>Assumptions: the compensating call reverses only the removal, because the removal is the only
-     * half that can have succeeded when this method fails. If the removal itself fails nothing has
-     * changed and there is nothing to put back; if the removal succeeded and the addition failed the
-     * identity is groupless, and re-adding the source group returns it exactly to the state it held
-     * before the call. There is no third case, because the two calls are the whole of the mutation.</p>
+     * <p>Assumptions: the payload pairs the username with the password, and the username is inside the
+     * ENCRYPTED value rather than in the entry's name. A holder of the entry has to be able to tell
+     * which identity it opens, and naming the identity inside the protected payload is strictly better
+     * than naming it in a resource name any principal with list permission can read. This is the same
+     * pairing and the same reasoning as the seed bootstrap's own payload.</p>
      *
-     * <p>Trade-offs: a compensation that itself fails is logged at error level and the original failure
-     * is what propagates, with the compensation's failure attached as a suppressed exception. What is
-     * given up is that the caller is told what it asked about -- why the reassignment did not happen --
-     * rather than what is arguably more urgent, that an identity is now groupless. The alternative,
-     * propagating the compensation failure instead, was rejected because it would report a symptom in
-     * place of a cause and would make the common case, a transient provider failure with a clean
-     * compensation, indistinguishable from the rare one. The suppressed exception carries the second
-     * failure to any handler that logs the throwable rather than only its message, and the error line
-     * names the identifier so an operator can repair the membership directly.</p>
+     * <p>Trade-offs: the payload is composed by concatenation rather than by a serialiser. It is two
+     * fixed keys and two values that are a generated password from a known alphabet and an identifier
+     * the request boundary has already constrained to eight non-blank characters, so no value here can
+     * carry a quote or a backslash to escape; a serialiser would add a dependency and an object graph to
+     * emit a two-member document. The alphabet is fixed by this class, which is what makes that safe --
+     * a wider alphabet would need escaping and would need a serialiser with it.</p>
      *
-     * <p>Alternatives Considered: reading the current membership with {@code AdminListGroupsForUser}
-     * first and skipping calls that are already satisfied. Rejected because it converts one mutation
-     * into a read plus a mutation whose decision is based on a state that may have changed between
-     * them, and because both provider calls are already idempotent -- adding a member that is present
-     * and removing one that is absent both succeed -- so the read would buy nothing that retrying does
-     * not already give. The membership the provider holds, not a snapshot of it, is what the calls act
-     * on.</p>
-     *
-     * @param userId the provider username, being the row identifier the membership belongs to; must not
-     *     be {@code null}
-     * @param fromUserType the reference type the identity currently holds, {@code "A"} or {@code "U"}
-     *     per {@code app/cpy/COCOM01Y.cpy} L27 and L28; must not be {@code null}
-     * @param toUserType the reference type it is to hold, from the same two-value domain and different
-     *     from {@code fromUserType}; must not be {@code null}
-     * @return evidence that the provider now holds the target membership, which is what
-     *     {@link UserAuthorityService} requires before the local column may be assigned; never
+     * @param userId the row identifier and provider username the credential belongs to; must not be
      *     {@code null}
-     * @throws IllegalArgumentException if either type is outside the two-value domain, or if the two
-     *     are equal -- an equal pair is not a reassignment and is refused here rather than treated as a
-     *     silent success, because a caller asking to move an authority to where it already stands has
-     *     confused a no-op with a move and {@link AuthorityReassignment#unchanged} states the no-op
-     *     without calling the provider at all
-     * @throws software.amazon.awssdk.core.exception.SdkException if the provider refused or could not be
-     *     reached, after the membership has been restored to what it was
+     * @param temporaryPassword the generated one-time value, held only for the duration of this call;
+     *     must not be {@code null}
+     * @throws software.amazon.awssdk.core.exception.SdkException if the store refused both the creation
+     *     and the write, which leaves an account whose credential nobody can collect and is therefore
+     *     raised rather than absorbed
      */
-    public AuthorityReassignment reassignGroup(String userId, String fromUserType, String toUserType) {
-        String fromGroup = groupFor(fromUserType);
-        String toGroup = groupFor(toUserType);
-        if (fromGroup.equals(toGroup)) {
-            throw new IllegalArgumentException(
-                    "fromUserType and toUserType must differ to reassign a group membership");
-        }
-
-        this.provider.adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
-                .userPoolId(this.userPoolId)
-                .username(userId)
-                .groupName(fromGroup)
-                .build());
+    private void publishCredential(String userId, String temporaryPassword) {
+        String secretName = credentialSecretName(userId);
+        String payload = "{\"username\":\"" + userId + "\",\"password\":\"" + temporaryPassword + "\"}";
 
         try {
-            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                    .userPoolId(this.userPoolId)
-                    .username(userId)
-                    .groupName(toGroup)
+            this.secrets.createSecret(CreateSecretRequest.builder()
+                    .name(secretName)
+                    // WHY : Assumptions: the description carries purpose and lifecycle and NO identity,
+                    //       because a description is readable through metadata APIs that do not decrypt
+                    //       the value. Naming the user here would undo the point of keeping the identity
+                    //       inside the payload.
+                    .description("Generated one-time initial credential for a CardDemo identity created"
+                            + " at run time. Temporary: must be changed at first sign-in.")
+                    .kmsKeyId(this.credentialSecretKmsKeyArn)
+                    .secretString(payload)
                     .build());
-        } catch (RuntimeException failure) {
-            restoreGroup(userId, fromGroup, failure);
-            throw failure;
-        }
-
-        // WHY : Assumptions: both group names are recorded and the subject is not, which is the same
-        //       division the provisioning line above draws. An authority change is the single most
-        //       consequential thing this service does to an identity, so the line has to say which
-        //       authority was taken and which was given; the subject would add the linkage between a
-        //       person and their token claims to a log store, and no diagnostic here needs it.
-        LOG.warn("event=auth.identity.authority-reassigned userId={} fromGroup={} toGroup={}",
-                userId, fromGroup, toGroup);
-
-        return new AuthorityReassignment(userId, fromUserType, toUserType, true);
-    }
-
-    /**
-     * Puts a removed group membership back after the addition that was to replace it failed.
-     *
-     * <p>Assumptions: this is a compensation and not a retry, so it is attempted exactly once. A loop
-     * here would hold the caller's thread across an outage for a state an operator can repair, and
-     * would leave the identity groupless for longer than a single call's timeout either way. The error
-     * line below is the durable record that the repair is outstanding.</p>
-     *
-     * @param userId the provider username whose membership is being restored
-     * @param fromGroup the group name to restore, being the one this method's caller removed
-     * @param failure the failure that made the restoration necessary, which the caller propagates and
-     *     which carries any compensation failure as a suppressed exception
-     */
-    private void restoreGroup(String userId, String fromGroup, RuntimeException failure) {
-        try {
-            this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                    .userPoolId(this.userPoolId)
-                    .username(userId)
-                    .groupName(fromGroup)
+        } catch (ResourceExistsException alreadyPublished) {
+            // WHY : Assumptions: an existing entry is WRITTEN TO rather than treated as a conflict. The
+            //       name is derived from the identifier, so this condition means the identifier has been
+            //       provisioned before -- either a retry of this create, or a create following a delete
+            //       that removed the account. In both cases the value that works is the one the pool
+            //       just accepted, so the entry must carry it; refusing here would leave a stale value
+            //       that opens nothing. Trade-offs: the previous value is superseded, which is
+            //       acceptable precisely because it was inert -- it was either never collected, or
+            //       already spent on a sign-in for an account that no longer exists.
+            this.secrets.putSecretValue(PutSecretValueRequest.builder()
+                    .secretId(secretName)
+                    .secretString(payload)
                     .build());
-            LOG.warn("event=auth.identity.authority-reassign-compensated userId={} restoredGroup={}",
-                    userId, fromGroup);
-        } catch (RuntimeException compensationFailure) {
-            // WHY : Trade-offs: attaching the second failure to the first rather than replacing it, and
-            //       the reason is stated on the public method above. What this line adds is the one
-            //       piece of information the propagated exception cannot carry to an operator who sees
-            //       only a log: that the identity currently holds no group at all and which group it
-            //       should hold. Every guarded route refuses a caller in that state, so the visible
-            //       symptom is a user who signs on and can do nothing, which is why the message names
-            //       the repair rather than only the fault.
-            LOG.error("event=auth.identity.authority-reassign-orphaned userId={} missingGroup={} "
-                    + "action=restore-membership", userId, fromGroup, compensationFailure);
-            failure.addSuppressed(compensationFailure);
         }
     }
 
     /**
-     * Deletes the pool account provisioned for an identifier, so a failed row write leaves none behind.
+     * Discards the credential entry an identifier's account collects its first credential from.
+     *
+     * <p>Assumptions: absence is success, which is what makes this safe on every cleanup path -- the
+     * entry may never have been created, because the failure being compensated may have preceded the
+     * publication.</p>
+     *
+     * <p>Trade-offs: the deletion is forced rather than scheduled with a recovery window, and the reason
+     * is the name. The name is derived from the identifier, and a scheduled deletion RESERVES the name
+     * for the whole recovery window while refusing a write to it, so a re-create of the same identifier
+     * inside that window could neither create the entry nor write to it -- the identifier would be
+     * unusable for weeks through a path no operator would see. Forcing the deletion gives up the ability
+     * to recover a value that is a one-time handover for an account being removed in the same act, which
+     * is nothing worth recovering. The infrastructure's seed entries keep a recovery window because their
+     * names are opaque and Terraform-managed, so the same reasoning does not reach them.</p>
+     *
+     * @param userId the row identifier whose credential entry is to be discarded; must not be
+     *     {@code null}
+     */
+    private void discardCredential(String userId) {
+        try {
+            this.secrets.deleteSecret(DeleteSecretRequest.builder()
+                    .secretId(credentialSecretName(userId))
+                    .forceDeleteWithoutRecovery(true)
+                    .build());
+        } catch (ResourceNotFoundException absent) {
+            // WHY : Assumptions: swallowed deliberately, and only this one exception is. The method's
+            //       contract is that no credential entry remains for the identifier, and one that was
+            //       never created already satisfies it. Every other store failure propagates, because an
+            //       entry that could not be removed holds a value for an account that no longer exists.
+            LOG.info("event=auth.identity.credential-discard-noop userId={}", userId);
+        }
+    }
+
+    /**
+     * Derives the managed-secret name an identifier's credential entry is published under.
+     *
+     * <p>Assumptions: the name is DERIVED from the identifier rather than generated, so it can be
+     * recomputed. An operator who has just created a user needs to find that user's handover entry, and
+     * nothing transports the name to them -- it is deliberately absent from the response and from the
+     * log. Deriving it means the procedure is "hash the identifier" rather than "find the value we
+     * failed to give you". It also makes the publication idempotent, since a retry addresses the entry
+     * the previous attempt created rather than making a second one.</p>
+     *
+     * <p>Trade-offs: the digest is defence in depth and NOT the control that protects the value, and the
+     * limit is worth stating plainly rather than leaving to be assumed. {@code SEC-USR-ID PIC X(08)} at
+     * {@code app/cpy/CSUSR01Y.cpy} L18 is eight characters, which is a small enough space to enumerate
+     * against a published digest, so a principal who can list entries and who guesses an identifier can
+     * confirm the guess. What the digest buys is that listing entries does not HAND OUT identifiers. What
+     * actually protects the credential is {@code secretsmanager:GetSecretValue} together with the
+     * customer-managed key's policy, which is the same pair the seed entries rely on. Alternatives
+     * Considered: an opaque random suffix, as the seed entries use. Rejected because a random name cannot
+     * be recomputed, so it would have to be transported -- and the two ways to transport it are the
+     * create response and the log, which are the two places this design keeps credential locators out
+     * of.</p>
+     *
+     * @param userId the row identifier and provider username; must not be {@code null}
+     * @return the fully qualified managed-secret name for that identifier's credential entry; never
+     *     {@code null}
+     * @throws IllegalStateException if the platform does not provide SHA-256, which would mean the name
+     *     could not be derived at all
+     */
+    // WHY : Refactoring Rationale: the derivation is PUBLISHED rather than private, because the
+    //       creation response now carries the entry's NAME (never its value). Two independently
+    //       authored resolutions of the same defect met here: one generated the credential and handed
+    //       it back in the response body, the other published it to the managed secret store and
+    //       returned nothing. The body route leaks a live credential into every proxy and browser
+    //       log, so the store route stands; but an administrator still has to be told WHERE the
+    //       credential is, and deriving that name in a second place would be two statements of one
+    //       rule. Exposing the derivation keeps the rule here and lets the response carry a locator.
+    public String credentialSecretName(String userId) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(userId.getBytes(StandardCharsets.UTF_8));
+            String hex = HexFormat.of().formatHex(digest);
+            return this.credentialSecretPrefix + SECRET_NAME_INFIX
+                    + hex.substring(0, SECRET_NAME_DIGEST_LENGTH);
+        } catch (NoSuchAlgorithmException unavailable) {
+            // WHY : Assumptions: raised rather than falling back to the identifier itself. Every Java
+            //       platform is required to provide SHA-256, so reaching this is a broken runtime; a
+            //       fallback would silently publish entries under a naming scheme that discloses the
+            //       identifier and would then be indistinguishable from the intended one.
+            throw new IllegalStateException(
+                    "SHA-256 is unavailable, so a credential entry name cannot be derived",
+                    unavailable);
+        }
+    }
+
+    /**
+     * Generates one policy-compliant temporary password.
+     *
+     * <p>Assumptions: one character is drawn from EACH of the four classes before the remainder is drawn
+     * from their union, and the result is then shuffled. Drawing uniformly from the union alone would
+     * satisfy a class requirement only with high probability, and a value that fails the pool's policy is
+     * rejected at the create call -- so a create-user request would fail intermittently, for a reason no
+     * caller could act on and no test would reproduce reliably.</p>
+     *
+     * <p>Trade-offs: all four classes are always included rather than being selected from the pool's
+     * configured policy. Including all four satisfies a policy that requires any SUBSET of them, so one
+     * generator serves every policy shape without this service reading five more properties that could
+     * disagree with the pool's actual configuration. The one policy this cannot satisfy is a minimum
+     * length above the configured length, which is exactly why the length is configurable and is
+     * validated at startup. Alternatives Considered: reading the policy from the pool with
+     * {@code DescribeUserPool}. Rejected because it adds a provider call and a permission to a path that
+     * runs on every create, to learn a value that changes when the infrastructure changes and is already
+     * expressible as configuration.</p>
+     *
+     * <p>Assumptions: the value is returned as a {@code String} rather than a character array that could
+     * be cleared. Every consumer of it -- the request builder, the SDK's serialiser, the payload below --
+     * takes a string, so a character array would be converted at the boundary and the conversion would
+     * leave exactly the copy the array existed to avoid. {@link SignOnRequest} records the same accepted
+     * compromise for the credential a caller presents.</p>
+     *
+     * @return a generated temporary password of the configured length, drawn from all four character
+     *     classes; never {@code null}
+     */
+    private String temporaryPassword() {
+        String alphabet = PASSWORD_LOWERCASE + PASSWORD_UPPERCASE + PASSWORD_DIGITS + PASSWORD_SYMBOLS;
+        List<Character> characters = new ArrayList<>(this.temporaryPasswordLength);
+        characters.add(pick(PASSWORD_LOWERCASE));
+        characters.add(pick(PASSWORD_UPPERCASE));
+        characters.add(pick(PASSWORD_DIGITS));
+        characters.add(pick(PASSWORD_SYMBOLS));
+        while (characters.size() < this.temporaryPasswordLength) {
+            characters.add(pick(alphabet));
+        }
+
+        // WHY : Assumptions: the shuffle is seeded from the SAME secure source the draws are, because a
+        //       shuffle from a predictable source would put the four class members back into a
+        //       predictable arrangement and would leak the first four positions' classes.
+        Collections.shuffle(characters, RANDOM);
+
+        StringBuilder password = new StringBuilder(this.temporaryPasswordLength);
+        for (Character character : characters) {
+            password.append(character.charValue());
+        }
+        return password.toString();
+    }
+
+    /**
+     * Draws one character uniformly from a class.
+     *
+     * @param characterClass the characters to draw from; must not be empty
+     * @return one character of that class
+     */
+    private static Character pick(String characterClass) {
+        return Character.valueOf(characterClass.charAt(RANDOM.nextInt(characterClass.length())));
+    }
+
+    /**
+     * Deletes the pool account provisioned for an identifier and discards its credential entry, so a
+     * failed row write leaves neither behind.
      *
      * <p>Assumptions: this began as a compensating action alone. It exists because the pool account has
      * to be created before the row can carry its subject, so the window between the two is real and a
@@ -436,10 +735,20 @@ public class CognitoUserProvisioningService {
      * it means a row was removed while an account that can still authenticate remains, which is a
      * pool identity with no row -- refused at every guarded route, but present.</p>
      *
+     * <p>Assumptions: the credential entry is discarded BEFORE the account, and the order matters in one
+     * direction only. An entry outliving its account holds a value that opens nothing and would be
+     * overwritten by the next create for the identifier; an account outliving its entry holds a
+     * credential nobody can collect, which is precisely the condition the handover exists to prevent.
+     * Discarding first means a failure between the two leaves the recoverable shape rather than the
+     * unrecoverable one, and the caller may invoke this method again because both halves treat absence as
+     * success.</p>
+     *
      * @param userId the provider username to remove, being the row identifier provisioning used; must
      *     not be {@code null}
      */
     public void withdraw(String userId) {
+        discardCredential(userId);
+
         try {
             this.provider.adminDeleteUser(AdminDeleteUserRequest.builder()
                     .userPoolId(this.userPoolId)

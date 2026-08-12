@@ -9,7 +9,8 @@
  * not assign its reference type. The type names an authority that the signed {@code cognito:groups} claim
  * actually confers, so a mapper that assigned it would commit a row describing an authority nobody granted
  * -- and, on the demotion direction, a row reporting that an administrator's access had been withdrawn when
- * it had not. Moving it belongs to {@code com.carddemo.auth.service.UserAuthorityService}, which moves the
+ * it had not. Moving it belongs to {@code com.carddemo.auth.service.UserService}, whose update path records
+ * the move in the durable task ledger inside the same transaction as the row change and whose applier moves the
  * provider membership first.</p>
  *
  * <p>Assumptions: the assertions are written against a real {@code com.carddemo.auth.domain.User} rather

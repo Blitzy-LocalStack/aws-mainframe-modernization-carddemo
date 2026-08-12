@@ -22,9 +22,10 @@ import org.springframework.data.repository.query.Param;
  * {@code app/app-authorization-ims-db2-mq} unless another root is named, because that tree is read
  * as this interface's specification and is never modified. The package charter in
  * {@code package-info.java} carries the rulings that apply to all four interfaces here -- the
- * absence of a transaction boundary, the absence of a lock mode, the unqualified table names, the
- * exclusion of masking and the prohibition on binary floating-point in the money path -- and this
- * file relies on them rather than restating them.</p>
+ * absence of a transaction boundary, where a lock mode may and may not be declared, the unqualified
+ * table names, the exclusion of masking and the prohibition on binary floating-point in the money path
+ * -- and this file relies on them rather than restating them. The one declared lock in the whole
+ * package is on this interface, and it carries its reasoning at its own point of use below.</p>
  *
  * <p>Three access paths reach this table, and they are the three the reference programs use. One
  * authorization is read by its whole composite key, for the detail screen and for the fraud
@@ -294,9 +295,55 @@ public interface PendingAuthDetailRepository
      * that directly, and it also avoids inventing a sentinel value for a key whose columns are both
      * declared not null.</p>
      *
+     * <p>Refactoring Rationale: this is now the ONLY way a caller opens a walk of one account's
+     * children, and the rulings below moved here from an unpaged sibling that took no limit and has
+     * been REMOVED. That method's own documentation claimed "both callers need every child before they
+     * can conclude anything about the parent", and by the time it was removed neither caller existed:
+     * the expiry sweep had been converted to bounded chunks after an unbounded read was found to make
+     * its transaction size a function of one account's history, and the extract was converted for the
+     * same reason. A repository method with no production caller and a comment naming two is worse than
+     * an absent one, so the signature is gone and every ruling it carried is restated here, where the
+     * walks that observe them actually begin.
+     *
+     * <p>Alternatives Considered: a single set-based delete of the aged rows behind one modifying
+     * query, which would remove the whole child set of an account in one statement. Rejected because
+     * the reference sweep does per-row arithmetic on the PARENT while it walks, and a set-based delete
+     * would perform none of it. {@code cbl/CBPAUP0C.cbl} L287 to L292 branches on the child's response
+     * code: for an approved authorization it subtracts one from the parent's approved count and the
+     * child's approved amount from the parent's approved total, and otherwise it subtracts one from the
+     * declined count and the child's transaction amount from the declined total. Those are four
+     * different subtractions selected per row from a value only that row carries, so a statement that
+     * deleted the rows in bulk would leave the parent's four running counters holding totals for
+     * children that no longer exist, with nothing in the schema able to detect the drift. Row-by-row
+     * visitation is what keeps the parent's arithmetic attached to the row that drives it, and it is
+     * why the sweep pages this read rather than replacing it with a statement.</p>
+     *
+     * <p>Assumptions: the predicate that selects a row for removal is age ALONE and is INCLUSIVE, and
+     * it belongs to the caller rather than to this read. {@code cbl/CBPAUP0C.cbl} L284 qualifies a row
+     * when the day difference is greater than OR EQUAL TO the expiry threshold, so a row exactly at the
+     * threshold is removed. Nothing else narrows it: that program tests no match status anywhere, so
+     * neither this read nor its caller may add such a condition.</p>
+     *
+     * <p>Assumptions: removal proceeds CHILD BEFORE PARENT, and the order is part of the contract even
+     * though the sequencing itself lives in the caller. {@code cbl/CBPAUP0C.cbl} deletes the child at
+     * paragraph {@code 5000-DELETE-AUTH-DTL} at L303, whose delete of {@code PAUTDTL1} is at L310 to
+     * L313, and only afterwards deletes the root at {@code 6000-DELETE-AUTH-SUMMARY} at L328, whose
+     * delete of {@code PAUTSUM0} is at L335 to L338. The migrated schema states the same dependency as
+     * a foreign key from this table to the summary, so reversing the order would be refused by the
+     * database rather than merely diverging from the reference. Paging cannot disturb it, because a
+     * chunk boundary falls between two children and never between the last child and its parent.</p>
+     *
+     * <p>Assumptions: the limit means two different things to the two kinds of caller, and both are
+     * legitimate. A screen sets it to its page size PLUS ONE so the extra row reports whether a further
+     * page exists; a bulk walk -- the expiry sweep and the extract -- sets it to its chunk size and
+     * treats a short answer as proof the ordering is exhausted. Neither reading is imposed here,
+     * because the look-ahead row is a presentation concern and this read has no way to tell the two
+     * callers apart.</p>
+     *
      * @param accountId the account whose authorizations are wanted; must not be {@code null}
-     * @param limit the greatest number of rows to return, which a caller sets to its page size plus
-     *     one so the extra row reports whether a further page exists; must not be {@code null}
+     * @param limit the greatest number of rows to return, which a paging caller sets to its page size
+     *     plus one so the extra row reports whether a further page exists, and a bulk caller sets to
+     *     its chunk size; must not be {@code null}
      * @return up to {@code limit} authorizations ordered newest first, the last of which may be the
      *     look-ahead row, and an empty list when the account has none
      */
@@ -426,46 +473,6 @@ public interface PendingAuthDetailRepository
      */
     Optional<PendingAuthDetail> findByCardNumAndTransactionId(String cardNum, String transactionId);
 
-    /**
-     * Reads every authorization beneath one account, newest first.
-     *
-     * <p>Assumptions: this is the unpaged child walk, and both callers need every child before they
-     * can conclude anything about the parent. The expiry sweep visits each child to decide whether it
-     * has aged out, and the extract writes each child in sequence; the reference programs express both
-     * as a retrieval repeated until the parent's children are exhausted, with no page boundary
-     * anywhere in the loop.</p>
-     *
-     * <p>Alternatives Considered: a single set-based delete of the aged rows behind one modifying
-     * query, which would remove the whole child set of an account in one statement. Rejected because
-     * the reference sweep does per-row arithmetic on the PARENT while it walks, and a set-based delete
-     * would perform none of it. {@code cbl/CBPAUP0C.cbl} L287 to L292 branches on the child's response
-     * code: for an approved authorization it subtracts one from the parent's approved count and the
-     * child's approved amount from the parent's approved total, and otherwise it subtracts one from the
-     * declined count and the child's transaction amount from the declined total. Those are four
-     * different subtractions selected per row from a value only that row carries, so a statement that
-     * deleted the rows in bulk would leave the parent's four running counters holding totals for
-     * children that no longer exist, with nothing in the schema able to detect the drift. Row-by-row
-     * visitation is what keeps the parent's arithmetic attached to the row that drives it.</p>
-     *
-     * <p>Assumptions: the predicate that selects a row for removal is age ALONE and is INCLUSIVE, and
-     * it belongs to the caller rather than to this read. {@code cbl/CBPAUP0C.cbl} L284 qualifies a row
-     * when the day difference is greater than OR EQUAL TO the expiry threshold, so a row exactly at the
-     * threshold is removed. Nothing else narrows it: that program tests no match status anywhere, so
-     * neither this read nor its caller may add such a condition.</p>
-     *
-     * <p>Assumptions: removal proceeds CHILD BEFORE PARENT, and the order is part of the contract even
-     * though the sequencing itself lives in the caller. {@code cbl/CBPAUP0C.cbl} deletes the child at
-     * paragraph {@code 5000-DELETE-AUTH-DTL} at L303, whose delete of {@code PAUTDTL1} is at L310 to
-     * L313, and only afterwards deletes the root at {@code 6000-DELETE-AUTH-SUMMARY} at L328, whose
-     * delete of {@code PAUTSUM0} is at L335 to L338. The migrated schema states the same dependency as
-     * a foreign key from this table to the summary, so reversing the order would be refused by the
-     * database rather than merely diverging from the reference.</p>
-     *
-     * @param accountId the account whose authorizations are wanted; must not be {@code null}
-     * @return every authorization beneath that account ordered newest first, and an empty list when it
-     *     has none
-     */
-    List<PendingAuthDetail> findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(Long accountId);
     /**
      * Inserts one authorization row, leaving an existing row for the same key untouched.
      *

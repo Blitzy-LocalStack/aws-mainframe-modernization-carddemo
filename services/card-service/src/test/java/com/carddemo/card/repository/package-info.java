@@ -104,14 +104,16 @@
  *
  * <p>Assumptions: every query method on {@code CardRepository} returns {@code List<Card>}, so a test in
  * this package asserts a row sequence and not a page envelope. The shared envelope
- * {@link com.carddemo.common.web.PageResponse} -- carrying items, both boundary keys and the
- * further-page indicator -- is assembled one layer up, in {@code com.carddemo.card.service}, and the
+ * {@link com.carddemo.common.web.PageResponse} -- carrying items, both boundary keys and BOTH
+ * availability indicators, the further-page one and the earlier-page one -- is assembled one layer
+ * up, in {@code com.carddemo.card.service}, and the
  * reason is a hard constraint rather than a layering preference: that envelope's canonical constructor
  * requires each cursor component to be a token sealed by {@code com.carddemo.common.web.CursorToken}
- * and refuses a raw key, enforced at
- * {@code services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java:342-343} by the
- * check at {@code :357-364} and asserted against a raw key at
- * {@code services/common-lib/src/test/java/com/carddemo/common/web/PageResponseTest.java:263-271}.
+ * and refuses a raw key, enforced by the {@code requireSealed} check the constructor runs on both
+ * cursor components in
+ * {@code services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java} and asserted
+ * against a raw key by {@code rawCompositeKeyIsRefusedAsACursor} in
+ * {@code services/common-lib/src/test/java/com/carddemo/common/web/PageResponseTest.java}.
  * Sealing needs key material and the subject the token is issued for, neither of which a repository
  * interface has. A test here that expected an envelope from the repository would be asserting a
  * contract that deliberately lives elsewhere.</p>

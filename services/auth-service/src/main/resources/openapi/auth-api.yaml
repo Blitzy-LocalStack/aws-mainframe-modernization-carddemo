@@ -7,19 +7,22 @@
 #       controllers exist here the document springdoc serves at /v3/api-docs must
 #       agree with it. A difference between the two is a defect in whichever one
 #       moved; it is not a tolerated variation and it is not something to reconcile
-#       at runtime. Landed at this checkpoint: config/SecurityConfig.java, which
-#       enforces the authority each operation below declares, and
-#       config/AuthApiContractTest.java, which asserts the two against each other.
-#       Planned and NOT yet authored: the browser client ui/src/api/auth.ts and
-#       every controller, request shape, response shape and mapper of this module -
-#       so no operation below is served yet, and a reader should not expect to find
-#       a Java type implementing one. The contract
-#       covers seven operations: the sign-on token exchange migrated from
-#       app/cbl/COSGN00C.cbl, the challenge exchange that completes it for a
-#       user whose password is temporary, and the four user-administration
-#       operations migrated from app/cbl/COUSR00C.cbl, COUSR01C.cbl,
-#       COUSR02C.cbl and COUSR03C.cbl, whose shared list view contributes the
-#       fifth of those.
+#       at runtime. Every artifact this contract governs is present, and each is
+#       held to it mechanically rather than by review: config/SecurityConfig.java
+#       enforces the authority each operation below declares; api/AuthController.java
+#       and api/UserController.java serve the operations; the request and response
+#       shapes are the eleven types under dto/, into which mapper/UserMapper.java
+#       translates the stored row; config/AuthApiContractTest.java compares the served
+#       route set and the declared authorities against this document in BOTH
+#       directions, so a published operation with no handler and a handler this
+#       document omits both fail; and the browser client ui/src/api/auth.ts calls
+#       these operations, which ui/src/api/contracts.test.ts asserts against this same
+#       document. The contract covers eight operations: the sign-on token exchange
+#       migrated from app/cbl/COSGN00C.cbl, the challenge exchange that completes it
+#       for a user whose password is temporary, the token renewal that has no baseline
+#       counterpart, and the four user-administration operations migrated from
+#       app/cbl/COUSR00C.cbl, COUSR01C.cbl, COUSR02C.cbl and COUSR03C.cbl, whose
+#       shared list view contributes the fifth of those.
 #
 # Structure: purpose for every top-level block is stated here, in the one place a
 #       format with no docstring construct has available, so that each block below
@@ -27,11 +30,15 @@
 #       - servers: the single server entry, declared as a substitutable variable
 #         rather than as any environment's address.
 #       - security: the bearer scheme, applied to every operation by default.
-#       - paths: the six operations of this context, in the order a user meets
-#         them -- sign on, list users, create one, read one, update one, delete
-#         one.
+#       - paths: the eight operations of this context, in the order a user meets
+#         them -- sign on, answer a sign-on challenge, renew a token set, then
+#         list users, create one, read one, update one, delete one. The first
+#         three are the pre-token operations and the last five are
+#         administrative, which is the split the operation census asserts.
 #       - components.securitySchemes: the single authentication scheme every
-#         operation but sign-on requires.
+#         operation but the three pre-token ones requires -- sign-on, challenge
+#         and refresh each declare an empty security requirement, because a
+#         caller cannot present the token they exist to issue or renew.
 #       - components.headers: the response header every operation returns,
 #         declared once.
 #       - components.responses: the two error responses that are identical across
@@ -80,29 +87,23 @@
 #       provisioned environment does not permit. Every method, authority, schema
 #       and message text below is exactly as specified; only the reachable prefix
 #       is used.
-#       (3) Refactoring Rationale: POST /api/v1/auth/challenge IS contracted
-#       here, and an earlier revision of this document left it out on the ground
-#       that "describing them from the route key alone would put a guess into the
-#       artifact the browser client is generated from". That reasoning had a hole
-#       in it: the challenge is not an optional extra flow but the FIRST thing
-#       every provisioned user does, because the infrastructure seeds each user
-#       with a temporary password (infra/modules/cognito/variables.tf,
-#       temporary_password_validity_days), and the earlier revision routed that
-#       outcome to 500 -- so the omission did not leave a flow undescribed, it
-#       left the system unusable and reported the fact as a server fault. Nor was
-#       the shape a guess: it is the pool's own documented challenge exchange, and
-#       its members are named on SignOnChallenge and SignOnChallengeRequest below.
-#       POST /api/v1/auth/refresh REMAINS outside this document, and that omission
-#       is a decision rather than an oversight: token renewal is reachable without
-#       having signed on in this exchange at all, its shape is the pool's refresh
-#       grant rather than anything migrated from a baseline program, and no
-#       operation in this document consumes or returns a refresh token beyond
-#       handing one to the caller. The two are the pre-token keys validated at
-#       infra/modules/api-gateway-http/variables.tf. The cost is that this
-#       document is still not the whole edge surface for /auth; the omission is
-#       recorded here so a reader comparing this file against the route table sees
-#       a decision rather than
-#       an oversight.
+#       (3) Assumptions: all THREE unauthenticated /auth routes are contracted
+#       here -- POST /api/v1/auth/signon, POST /api/v1/auth/refresh and
+#       POST /api/v1/auth/challenge -- so this document is the whole edge surface
+#       for /auth and a reader comparing it against the route table finds no gap.
+#       Those three are exactly the pre-token keys validated at
+#       infra/modules/api-gateway-http/variables.tf, so the gateway forwards no
+#       operation this document does not describe.
+#       Assumptions: the challenge in particular is not an optional extra flow but
+#       the FIRST thing every provisioned user does, because the infrastructure
+#       seeds each user with a temporary password
+#       (infra/modules/cognito/variables.tf, temporary_password_validity_days).
+#       Trade-offs: omitting it would not merely leave a flow undescribed -- the
+#       outcome would route to 500, so the very first sign-on of every provisioned
+#       user would report a server fault with no path to set a permanent password.
+#       Its shape is the pool's own documented challenge exchange rather than a
+#       guess, and its members are named on SignOnChallenge and
+#       SignOnChallengeRequest below.
 #       (4) Refactoring Rationale: no password is carried anywhere except the
 #       sign-on request, which forwards it to the identity provider and keeps
 #       nothing. The baseline handled the credential three ways and this contract
@@ -192,17 +193,18 @@ info:
     name: Apache-2.0
     identifier: Apache-2.0
 
-# WHY : (1) Assumptions: the edge address is a Terraform output consumed at
-#       deploy time, never a value committed to source -- no service hard-codes
-#       an endpoint. The browser client resolves the same origin from its own
+# WHY : Assumptions: the edge address is a Terraform output consumed at deploy
+#       time, never a value committed to source -- no service hard-codes an
+#       endpoint. The browser client resolves the same origin from its own
 #       build-time VITE_API_BASE_URL, so a literal host written here would be a
-#       second, competing source for one value. (2) Trade-offs: the default is
-#       the reserved, permanently unresolvable example.invalid name rather than a
-#       plausible-looking hostname. A plausible default is worse than an obvious
-#       placeholder, because a tool that silently used it would attempt a real
-#       connection to somebody's host; a name reserved never to resolve fails
-#       immediately and unmistakably, at the cost of the document not being
-#       directly executable until the variable is supplied.
+#       second, competing source for one value.
+# WHY : Trade-offs: the default is the reserved, permanently unresolvable
+#       example.invalid name rather than a plausible-looking hostname. A
+#       plausible default is worse than an obvious placeholder, because a tool
+#       that silently used it would attempt a real connection to somebody's host;
+#       a name reserved never to resolve fails immediately and unmistakably, at
+#       the cost of the document not being directly executable until the variable
+#       is supplied.
 servers:
   - url: "{edgeOrigin}"
     description: >-
@@ -221,9 +223,10 @@ tags:
   - name: Sign-On
     description: >-
       The token exchange migrated from app/cbl/COSGN00C.cbl, together with the
-      challenge exchange that completes it for a user whose password is
-      temporary. Both are reachable without a token, because between them they are
-      the operations that issue one, and both carry x-required-authority none.
+      challenge exchange that completes it for a user whose password is temporary
+      and the refresh exchange that renews an expired token set. All three are
+      reachable without a token, because between them they are the operations
+      that issue one, and all three carry x-required-authority none.
   - name: User Administration
     description: >-
       List, create, read, update and delete over the auth schema's users table,
@@ -247,14 +250,13 @@ tags:
 security:
   - bearerAuth: []
 
-# WHY : Refactoring Rationale: the authority each operation requires is declared
-#       as a MACHINE-READABLE field on the operation, and an earlier revision of
-#       this document declared it in prose and in a tag name only. Five of the six
-#       operations here say "Requires the carddemo-admin authority" in their
-#       description, and nothing could read that: a generator, a gateway or a
-#       linter saw five ordinary authenticated routes indistinguishable from any
-#       other, so the administrative restriction was an assertion rather than a
-#       contract. Every operation now carries x-required-authority, and
+# WHY : Assumptions: the authority each operation requires is declared as a
+#       MACHINE-READABLE field, and prose alone would not do. Five operations here
+#       also say "Requires the carddemo-admin authority" in their description, and
+#       nothing can read that: a generator, a gateway or a linter would see five
+#       ordinary authenticated routes indistinguishable from any other, leaving the
+#       administrative restriction an assertion rather than a contract. Every
+#       operation carries x-required-authority, and
 #       AuthApiContractTest asserts that the value on each one agrees with the
 #       authority SecurityConfig enforces for the path it sits on, so the two
 #       cannot drift apart while both continue to compile.
@@ -287,42 +289,43 @@ x-authority-model:
     services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java
   assertedBy: >-
     services/auth-service/src/test/java/com/carddemo/auth/config/AuthApiContractTest.java
-# WHY : (1) Assumptions: each operation is stateless. The baseline carried
-#       continuity between screen turns in the communication area declared at
+# WHY : Assumptions: each operation is stateless. The baseline carried continuity
+#       between screen turns in the communication area declared at
 #       app/cpy/COCOM01Y.cpy lines 19 to 44, and that structure decomposes into
 #       four separate mechanisms here rather than being ported: its navigation
 #       fields become the browser's own route history, its identity fields become
 #       claims in the signed token, its selection fields become path parameters,
 #       and its re-entry discriminator (CDEMO-PGM-CONTEXT with the two condition
 #       names at lines 29 to 31) disappears entirely, because an operation that
-#       returns a field-error array has no first-entry-versus-re-entry
-#       distinction left to make. (2) Refactoring Rationale: the identity move is
-#       a correction and not merely a relocation. CDEMO-USER-TYPE at lines 26 to
-#       28 lived in storage the client echoed back on the next request, so a
-#       client could in principle return a type it was never issued; the group
-#       claim that replaces it is signed by the user pool and the client cannot
-#       assert anything at all. (3) Assumptions: control transfer between screens
-#       is a client concern now. The sign-on program's branch to one of two menu
-#       programs -- XCTL to 'COADM01C' at app/cbl/COSGN00C.cbl lines 231 to 234
-#       and to 'COMEN01C' at lines 236 to 239 -- becomes a route change the
-#       browser performs after reading the group claim out of the token it just
-#       received, so no operation here returns a next-screen instruction.
-#       (4) Trade-offs: every operation below states its own security requirement
-#       even though the document-level default already supplies the same value to
-#       four of the five, so the requirement is written twice for those. The
-#       duplication is accepted because the two protect against opposite
-#       mistakes: the document default covers an operation added later whose
-#       author forgets a security block, while the explicit per-operation
-#       declaration survives an edit to that default. Neither alone is enough,
-#       and an operation's authentication posture is the last thing in this
-#       contract that should be inferable only from a value declared elsewhere.
+#       returns a field-error array has no first-entry-versus-re-entry distinction
+#       left to make.
+# WHY : Refactoring Rationale: the identity move is a correction and not merely a
+#       relocation. CDEMO-USER-TYPE at lines 26 to 28 lived in storage the client
+#       echoed back on the next request, so a client could in principle return a
+#       type it was never issued; the group claim that replaces it is signed by the
+#       user pool and the client cannot assert anything at all.
+# WHY : Assumptions: control transfer between screens is a client concern. The
+#       sign-on program's branch to one of two menu programs -- XCTL to 'COADM01C'
+#       at app/cbl/COSGN00C.cbl lines 231 to 234 and to 'COMEN01C' at lines 236 to
+#       239 -- becomes a route change the browser performs after reading the group
+#       claim out of the token it just received, so no operation here returns a
+#       next-screen instruction.
+# WHY : Trade-offs: every operation below states its own security requirement even
+#       though the document-level default already supplies the same value to the
+#       five authenticated ones, so the requirement is written twice for those. The
+#       duplication is accepted because the two protect against opposite mistakes:
+#       the document default covers an operation added later whose author forgets a
+#       security block, while the explicit per-operation declaration survives an
+#       edit to that default. Neither alone is enough, and an operation's
+#       authentication posture is the last thing in this contract that should be
+#       inferable only from a value declared elsewhere.
 paths:
 
   /api/v1/auth/signon:
     description: >-
-      The credential exchange. It is the only path in this document reachable
-      without a bearer token, because it is the path that issues one, and the edge
-      publishes it as an unauthenticated route.
+      The credential exchange. It is one of the three paths in this document
+      reachable without a bearer token, because it is the path that mints the
+      first one, and the edge publishes it as an unauthenticated route.
 
     post:
       tags: [Sign-On]
@@ -330,10 +333,10 @@ paths:
       summary: Exchange a user identifier and password for access tokens.
       description: >-
         Migrated from app/cbl/COSGN00C.cbl. Submits the credential to the
-        configured Cognito user pool and returns the token set on success. This
-        is the only operation in this document reachable without a bearer token,
-        because it is the operation that issues one; it is published at the edge
-        as the unauthenticated route POST /api/v1/auth/signon.
+        configured Cognito user pool and returns the token set on success. It
+        requires no bearer token, because it is the operation that mints the first
+        one; it is published at the edge as the unauthenticated route
+        POST /api/v1/auth/signon.
 
 
         Two behavioural divergences from the baseline are documented rather than
@@ -373,16 +376,17 @@ paths:
               $ref: "#/components/schemas/SignOnRequest"
       responses:
         "200":
-          # Refactoring Rationale: this status carries TWO shapes, and an earlier
-          #   revision of this document declared one. The pool answers an initial
-          #   authentication with either a token set or a challenge, and the
-          #   earlier revision had nowhere for the second to go, so it was reported
-          #   as 500 -- which meant the first sign-on of every seeded user, whose
-          #   password is temporary by construction, reported a server fault. Both
-          #   outcomes are 200 because in both the credential was ACCEPTED: the
+          # Assumptions: this status carries TWO shapes, and ONE would not do. The
+          #   pool answers an initial authentication with either a token set or a
+          #   challenge, and a document declaring only the token set leaves the
+          #   challenge nowhere to go but 500 -- which would make the first sign-on
+          #   of every seeded user, whose password is temporary by construction,
+          #   report a server fault. Both outcomes are 200 because in both the
+          #   credential was ACCEPTED: the
           #   difference is whether tokens were issued, not whether the caller was
           #   recognised, and 401 would tell a caller its credential was wrong when
-          #   it was right.
+          #   it was right, while 500 would report a routine flow as a server
+          #   fault.
           # Assumptions: the two are discriminated by a required outcome member
           #   rather than by which members are present, so a client branches on a
           #   value it can read rather than on an absence it has to infer.
@@ -459,21 +463,17 @@ paths:
           #   merging them is that user enumeration through this endpoint stops;
           #   what is given up is a diagnostic the baseline showed the operator.
           #   The divergence is registered as D-SIGNON-EXISTENCE-UNIFORM.
-          # Refactoring Rationale: this comment and the description below used to
-          #   say the second literal "remains reachable under an explicitly
-          #   selected legacy provider posture". No such posture exists. The app
-          #   client fixes PreventUserExistenceErrors to ENABLED at line 609 of
-          #   infra/modules/cognito/main.tf, and lines 603 to 608 of that file
-          #   record the deliberate refusal to expose it as a module input --
-          #   because a reachable legacy value would put the enumeration channel
-          #   one tfvars line away. A contract advertising a posture no operator
-          #   can select is not documenting an option; it is stating something
-          #   untrue about the system, so both claims are withdrawn.
-          # Assumptions: the traceability link to line 249 survives the
-          #   withdrawal. The literal is cited by the register entry above and is
-          #   carried in the browser application's message catalogue, so nothing
-          #   is lost by declining to advertise it as a response of this
-          #   operation -- which it is not.
+          # Assumptions: no provider posture makes the second literal reachable.
+          #   The app client fixes PreventUserExistenceErrors to ENABLED at line
+          #   609 of infra/modules/cognito/main.tf, and lines 603 to 608 of that
+          #   file record the deliberate refusal to expose it as a module input,
+          #   because a selectable legacy value would put the enumeration channel
+          #   one tfvars line away. Advertising a posture no operator can select
+          #   would state something untrue about the system.
+          # Assumptions: the traceability link to line 249 is kept even though the
+          #   literal is not a response of this operation. It is cited by the
+          #   register entry above and carried in the browser application's
+          #   message catalogue, so the lineage stays discoverable.
           description: >-
             The credential was refused. The message is
             "Wrong Password. Try again ..." (app/cbl/COSGN00C.cbl lines 242 to
@@ -504,11 +504,11 @@ paths:
           #   and it deliberately does not reuse the 401 message, because telling a
           #   caller its password was wrong when the pool was simply unreachable
           #   would send it to reset a working credential.
-          # Refactoring Rationale: NEW_PASSWORD_REQUIRED no longer arrives here.
-          #   An earlier revision of this document reported it as this status,
-          #   which made the first sign-on of every seeded user a server fault and
-          #   left no path to a permanent password; it is now the 200 above,
-          #   carrying the challenge shape, because the credential was in fact
+          # Assumptions: NEW_PASSWORD_REQUIRED does NOT arrive here, and the
+          #   exclusion is deliberate rather than an omission. Reporting it as this
+          #   status would make the first sign-on of every seeded user a server
+          #   fault and leave no path to a permanent password; it belongs to the 200
+          #   above, carrying the challenge shape, because the credential was in fact
           #   accepted.
           description: >-
             The credential could not be evaluated. The message is
@@ -562,19 +562,18 @@ paths:
           # Assumptions: the renewed set carries a NEW refreshToken and the caller must
           #   replace the one it sent. The app client is provisioned with refresh-token
           #   rotation enabled and a zero retry grace period
-          #   (infra/modules/cognito/main.tf:581-584), so the pool issues a replacement
+          #   (infra/modules/cognito/main.tf:595-598), so the pool issues a replacement
           #   and invalidates the submitted token at once.
-          # Refactoring Rationale: this note previously stated the opposite -- that the
-          #   property is null here because the pool does not reissue one -- which was
-          #   false against the provisioned client and not merely imprecise. A caller
-          #   following it would keep the token it sent, and its SECOND renewal would be
-          #   refused as a reuse, so the operation would appear to work once and then
-          #   fail permanently. The property remains nullable on the shared shape for
-          #   the sign-on direction, where the pool may legitimately return none.
+          # Assumptions: the property stays NULLABLE on the shared token-set shape even
+          #   so, because the sign-on direction may legitimately return none, and the
+          #   service passes through whatever the pool supplied rather than substituting
+          #   a placeholder a caller could not use. A caller that kept the token it sent
+          #   would have its SECOND renewal refused as a reuse, so the operation would
+          #   appear to work once and then fail permanently.
           description: >-
             The refresh token was accepted. The body is the same token set shape
-            sign-on returns, carrying a new access token and identity token and a
-            null refreshToken.
+            sign-on returns, carrying a new access token, a new identity token and a
+            new refreshToken that replaces the one submitted.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -786,21 +785,21 @@ paths:
         #   Its shape is a version marker, a payload and a code separated by
         #   periods; treat it as text to be echoed unchanged and never parse or
         #   construct one.
-        # Refactoring Rationale: ONE cursor parameter, and an earlier revision of
-        #   this document declared two, named lastKey and firstKey after the two
-        #   members a caller copies them FROM. Two inputs named after the two
-        #   members invited a client to send the wrong one for its direction,
-        #   because nothing in either name says which direction it belongs to.
-        #   One input named cursor cannot be the wrong one, the direction
+        # Alternatives Considered: TWO cursor parameters, named lastKey and firstKey
+        #   after the two members a caller copies them FROM. Rejected -- two inputs
+        #   named after the two members invite a client to send the wrong one for its
+        #   direction, because nothing in either name says which direction it belongs
+        #   to. One input named cursor cannot be the wrong one, the direction
         #   parameter beside it carrying that choice explicitly instead.
         # Assumptions: the envelope publishes exactly four members -- items,
-        #   firstKey, lastKey and hasNext -- and an earlier revision of this
-        #   document described two further paging positions named nextCursor and
-        #   prevCursor. Those were WITHDRAWN, as the card contract records at its
-        #   own envelope, so a caller pages from firstKey and lastKey and no
-        #   member of either other name exists to copy. It also makes this document agree with the card and
-        #   transaction contracts, which declare the same single parameter, so
-        #   there is one paging shape across this migration rather than three.
+        #   firstKey, lastKey and hasNext -- so a caller pages from firstKey and
+        #   lastKey, and no separately named nextCursor or prevCursor member exists
+        #   to copy. Refactoring Rationale: those two names were WITHDRAWN, as the
+        #   card contract records at its own envelope, so a reader meeting them in
+        #   history should not restore them. Keeping the four also makes this document
+        #   agree with the card and transaction contracts, which declare the same
+        #   single parameter, so there is one paging shape across this migration
+        #   rather than three.
         # Assumptions: the direction is carried in the SEAL of each token as well
         #   as in the direction parameter, so replaying the previous-page position
         #   with direction next cannot silently answer with the wrong page: the
@@ -824,8 +823,8 @@ paths:
         - $ref: "#/components/parameters/PagingDirection"
       responses:
         "200":
-          # Assumptions: a cursor naming a row that no longer exists is NOT a
-          #   not-found condition. The baseline's read on the supplied key keys on
+          # Assumptions: a cursor naming a row since deleted is NOT a not-found
+          #   condition. The baseline's read on the supplied key keys on
           #   DFHRESP(NOTFND) at app/cbl/COUSR00C.cbl line 600 and falls through
           #   to a CONTINUE, treating the position as the start of the file rather
           #   than as an error, so a caller holding a cursor to a since-deleted
@@ -847,7 +846,7 @@ paths:
           #   app/cbl/COUSR00C.cbl and none carries a space before its ellipsis.
           #   The two classes stay distinguishable in the response rather than by
           #   message: a guard returns the same page the caller already held, while
-          #   an arrival returns a different page which no longer offers the
+          #   an arrival returns a different page that does not offer the
           #   direction travelled -- hasNext false going forward, or no firstKey
           #   going back.
           # Alternatives Considered: returning these five as the response message
@@ -871,7 +870,7 @@ paths:
             already at that end returns the page it already held -- the baseline's
             "You are already at the top of the page..." and
             "You are already at the bottom of the page...". A move that happened
-            and landed on an end returns the new page no longer offering that
+            and landed on an end returns the new page, which does not offer that
             direction -- the baseline's
             "You are at the top of the page...",
             "You have reached the bottom of the page..." and
@@ -933,7 +932,23 @@ paths:
         itself and reads the subject back from the provider -- see the
         create-request schema for the full rationale on both. On success the
         response is 201 with the created row, including the subject the row was
-        bound to, and a Location header naming it.
+        bound to and the ONE-TIME credential the new account was created with, and
+        a Location header naming the row.
+
+
+        Refactoring Rationale: that credential is new to this response, and its
+        absence was a defect rather than a hardening measure. The pool account is
+        created with message delivery suppressed -- the pool declares no email or
+        phone attribute, so there is no address to deliver to -- and previously with
+        no credential supplied either, so the provider minted one internally and
+        sent it nowhere. A user created here held an account, the right group and a
+        row bound to its subject, and could never sign on, because the credential
+        was known to nobody and no operation existed to reset it. The value is now
+        generated by the service, returned once, and is not retrievable afterwards:
+        no column stores it and no other operation answers with it. It is
+        single-use in the strict sense -- the account stands in the provider's
+        force-change state, so presenting it raises the new-password challenge that
+        POST /api/v1/auth/challenge answers and nothing else can be done with it.
 
 
         The success message the baseline composed --
@@ -962,7 +977,9 @@ paths:
         "201":
           description: >-
             The row was created. The body is the stored row as a subsequent read
-            would return it, and the Location header addresses it.
+            would return it, PLUS the one-time credential for its owner's first
+            sign-on, and the Location header addresses the row. Hand the credential
+            over now: it appears in this response and nowhere else.
           headers:
             Location:
               description: >-
@@ -977,7 +994,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/UserResponse"
+                $ref: "#/components/schemas/CreatedUserResponse"
         "400":
           # Assumptions: the order of entries in fieldErrors is the order the
           #   baseline validated in, because the first error a user sees is
@@ -986,14 +1003,14 @@ paths:
           #   name, last name, user identifier, then user type -- and the
           #   create-request schema's property order reproduces exactly that
           #   sequence.
-          # Refactoring Rationale: the key list below named a fifth field,
-          #   cognitoSub, which the create-request schema no longer carries. It
-          #   never had a baseline literal to report either -- the four literals
-          #   quoted here have always been exactly four -- so naming it promised a
-          #   fieldErrors entry that could not be produced. A body that still names
-          #   it is refused by additionalProperties: false, which is a schema
-          #   violation rather than a field-level validation failure and so reports
-          #   no logical field at all.
+          # Assumptions: the key list below names FOUR fields and no more, matching
+          #   the four baseline literals and the four properties the create-request
+          #   schema carries. Naming a fifth -- cognitoSub, for instance, which this
+          #   request does not accept -- would promise a fieldErrors entry that
+          #   cannot be produced: a body carrying an unknown member is refused by
+          #   additionalProperties: false, which is a schema violation rather than a
+          #   field-level validation failure and so reports no logical field at
+          #   all.
           description: >-
             A required value was absent or outside its domain. Each fieldErrors
             entry is keyed by the logical field -- firstName, lastName, userId or
@@ -1337,8 +1354,8 @@ paths:
       responses:
         "204":
           # Alternatives Considered: returning 200 with the deleted row, which
-          #   was rejected because it would hand back a representation of
-          #   something that no longer exists and invite a client to cache or
+          #   was rejected because it would hand back a representation of a row
+          #   that has just ceased to exist and invite a client to cache or
           #   redisplay it. 204 states the outcome and nothing more.
           description: >-
             The row was deleted. No body, by design.
@@ -1407,28 +1424,29 @@ paths:
 
 components:
 
-  # WHY : (1) Assumptions: authority comes from the signed cognito:groups claim
-  #       and from nothing else. The shared kernel's JwtRoleConverter reads that
-  #       claim and grants carddemo-admin for the baseline's 'A' user type and
+  # WHY : Assumptions: authority comes from the signed cognito:groups claim and
+  #       from nothing else. The shared kernel's JwtRoleConverter reads that claim
+  #       and grants carddemo-admin for the baseline's 'A' user type and
   #       carddemo-user for 'U', which are the two values app/cpy/COCOM01Y.cpy
   #       lines 26 to 28 enumerate, and the group names it recognises are the
   #       literals the Cognito module provisions. No request field, header or body
-  #       value can add an authority. (2) Assumptions: all five
-  #       user-administration operations require carddemo-admin, and the evidence
-  #       is that every one of the five baseline programs returned to the ADMIN
-  #       menu rather than the general one -- 'COADM01C' at
-  #       app/cbl/COUSR00C.cbl line 126, app/cbl/COUSR01C.cbl line 94,
-  #       app/cbl/COUSR02C.cbl lines 114 and 125, and app/cbl/COUSR03C.cbl lines
-  #       113 and 124. A screen reachable only from the administrator's menu, and
-  #       returning only to it, was administrator-only in effect, so restricting
-  #       the whole family is a transcription of the baseline's reachability
-  #       rather than a new restriction. (3) Trade-offs: the scopes array is
-  #       empty, which is a limitation of the scheme type rather than an absence
-  #       of a scope requirement. A bearer scheme in OpenAPI cannot express
-  #       scopes; the token the service accepts must still carry the pool's
-  #       administrative sign-in scope, and both the edge route authorization and
-  #       this service's own token validator assert it. The requirement is stated
-  #       in the description below so it is not lost.
+  #       value can add an authority.
+  # WHY : Assumptions: all five user-administration operations require
+  #       carddemo-admin, and the evidence is that every one of the five baseline
+  #       programs returned to the ADMIN menu rather than the general one --
+  #       'COADM01C' at app/cbl/COUSR00C.cbl line 126, app/cbl/COUSR01C.cbl line
+  #       94, app/cbl/COUSR02C.cbl lines 114 and 125, and app/cbl/COUSR03C.cbl
+  #       lines 113 and 124. A screen reachable only from the administrator's menu,
+  #       and returning only to it, was administrator-only in effect, so
+  #       restricting the whole family transcribes the baseline's reachability
+  #       rather than imposing a new restriction.
+  # WHY : Trade-offs: the scopes array is empty, which is a limitation of the
+  #       scheme type rather than an absence of a scope requirement. A bearer
+  #       scheme in OpenAPI cannot express scopes; the token the service accepts
+  #       must still carry the pool's administrative sign-in scope, and both the
+  #       edge route authorization and this service's own token validator assert
+  #       it. The requirement is stated in the description below so it is not
+  #       lost.
   securitySchemes:
     bearerAuth:
       type: http
@@ -1515,16 +1533,15 @@ components:
       schema:
         $ref: "#/components/schemas/PageDirection"
 
-    # Refactoring Rationale: the correlation identity is declared on the REQUEST
-    #   side as well as the response, and an earlier revision of this document
-    #   declared it on the response side alone. The inbound shape is part of the
+    # Assumptions: the correlation identity is declared on the REQUEST side as well
+    #   as the response, and declaring it on the response side alone would leave the
+    #   client's own value checked against nothing. The inbound shape is part of the
     #   contract whether or not the contract states it, because the shared filter
     #   at
     #   services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java
     #   accepts an inbound value and refuses one that is over-long or carries an
-    #   unsafe character, and the already-authored browser client sends the header
-    #   on every request from ui/src/api/client.ts. A shape published on one
-    #   direction only left the client's value checked against nothing.
+    #   unsafe character, and the browser client sends the header on every request
+    #   from ui/src/api/client.ts.
     CorrelationIdHeader:
       name: X-Correlation-Id
       in: header
@@ -1614,7 +1631,7 @@ components:
         lines 26 to 30 closed five VSAM files to the CICS region for the duration of
         the posting chain and app/jcl/OPENFIL.jcl reopened them, so a write attempted
         in between received a file-status error and abended. The migrated bracket
-        deliberately closes WRITES only, so every read this service publishes keeps
+        deliberately closes WRITES only, so the reads this service publishes keep
         answering while the window is closed.
 
 
@@ -1633,31 +1650,32 @@ components:
             $ref: "#/components/schemas/ApiError"
 
 
-  # WHY : (1) Assumptions: the five mirrored shapes -- the cursor token, the page
-  #       envelope, the error body, its per-field entry and its abend aggregate --
-  #       describe types published by services/common-lib and are NOT local
-  #       redefinitions of them. A contract cannot reference a Java type, so the
-  #       shape has to be written out here; what must never happen is that the
-  #       written shape drifts from the published one, because a locally invented
-  #       error or paging shape would compile, serve, and disagree with the eight
-  #       services that share the originals. This is the same discipline the
-  #       reference suite states for record layouts at tests/README.md lines 540
-  #       to 542, where a layout is resolved through one include path and never
-  #       duplicated. Every property name and order below is the shared record's
-  #       own. (2) Assumptions: property names are the record component names
-  #       exactly, because no property-naming strategy is configured anywhere in
-  #       this service or in the shared defaults it imports, so the serialiser
-  #       emits component names verbatim. Renaming one here would produce a
-  #       contract the runtime contradicts on the first response.
-  #       (3) Assumptions: the six schemas this context owns take their field
-  #       widths from two independent readings apiece, the 80-byte record at
+  # WHY : Assumptions: the seven mirrored shapes -- the cursor token, the paging
+  #       direction, the correlation identity, the page envelope, the error body,
+  #       its per-field entry and its abend aggregate -- describe types published by
+  #       services/common-lib and are NOT local redefinitions of them. A contract
+  #       cannot reference a Java type, so the shape has to be written out here;
+  #       what must never happen is that the written shape drifts from the published
+  #       one, because a locally invented error or paging shape would compile, serve
+  #       and disagree with the eight services that share the originals. This is the
+  #       same discipline the reference suite states for record layouts, where a
+  #       layout is resolved through one include path and never duplicated. Every
+  #       property name and order below is the shared record's own.
+  # WHY : Assumptions: property names are the record component names exactly,
+  #       because no property-naming strategy is configured anywhere in this service
+  #       or in the shared defaults it imports, so the serialiser emits component
+  #       names verbatim. Renaming one here would produce a contract the runtime
+  #       contradicts on the first response.
+  # WHY : Assumptions: the nine schemas this context owns take their field widths
+  #       from two independent readings apiece, the 80-byte record at
   #       app/cpy/CSUSR01Y.cpy lines 17 to 23 and the symbolic maps cited on each
-  #       property, which is why the widths are expressed as constraints a caller
-  #       is held to rather than as documentation. (4) Refactoring Rationale: the
-  #       fixed-length record's padding is not carried across. SEC-USR-FILLER at
-  #       app/cpy/CSUSR01Y.cpy line 23 is twenty-three bytes that exist to make
-  #       the record eighty bytes long; it addresses no data, no program reads it,
-  #       and a JSON payload has no length to pad, so it appears in no schema.
+  #       property, which is why the widths are expressed as constraints a caller is
+  #       held to rather than as documentation.
+  # WHY : Refactoring Rationale: the fixed-length record's padding is not carried
+  #       across. SEC-USR-FILLER at app/cpy/CSUSR01Y.cpy line 23 is twenty-three
+  #       bytes that exist to make the record eighty bytes long; it addresses no
+  #       data, no program reads it, and a JSON payload has no length to pad, so it
+  #       appears in no schema.
   schemas:
 
     SignOnRequest:
@@ -1692,16 +1710,15 @@ components:
         #   least one non-whitespace character", which is precisely what @NotBlank
         #   asserts. Anchoring it would instead demand the whole value be a single
         #   non-whitespace character and would refuse every real identifier.
-        # Refactoring Rationale: this facet also had to be made to appear in the
-        #   OTHER document this service publishes, and the review found that it did
-        #   not. The document served from /v3/api-docs is GENERATED from the Java
-        #   annotations, and a non-blank constraint contributes a minimum length and
-        #   no pattern at all, so the generated description of this property was
-        #   strictly weaker than this committed one -- it admitted a value of spaces
-        #   that both this document and the record refuse. The Java record now
-        #   publishes the identical string through a schema-documentation annotation,
-        #   declared once as SignOnRequest.NON_WHITESPACE_PATTERN, so the two
-        #   documents agree character for character.
+        # Assumptions: this facet must also appear in the OTHER document this
+        #   service publishes. The document served from /v3/api-docs is GENERATED
+        #   from the Java annotations, and a non-blank constraint contributes a
+        #   minimum length and no pattern at all, so a generated description of this
+        #   property would be strictly weaker than this committed one and would admit
+        #   a value of spaces that both this document and the record refuse. The Java
+        #   record publishes the identical string through a schema-documentation
+        #   annotation, declared once as SignOnRequest.NON_WHITESPACE_PATTERN, so the
+        #   two documents agree character for character.
         # Alternatives Considered: adding a bean-validation @Pattern carrying this
         #   expression, which would have been a runtime constraint rather than a
         #   documentation one. Rejected on two independent grounds. A
@@ -1810,20 +1827,34 @@ components:
           description: >-
             The identifier the token set being renewed was issued for, at most eight
             characters. Must not be blank.
-        # Assumptions: no maxLength, deliberately. The value is opaque and
-        #   provider-sized, so a bound guessed here would refuse a token the pool had
-        #   legitimately issued -- which on this operation means locking a caller out
-        #   until it signs on again with a credential it may no longer hold. An
-        #   oversized body is refused by the transport's own request-size limit
-        #   instead, one hop later than a field constraint would refuse it.
+        # Refactoring Rationale: this property carried NO maxLength and the comment
+        #   here justified the absence by saying an oversized body would be refused by
+        #   the transport's own request-size limit instead. Both halves were false. No
+        #   such limit existed -- the servlet container's post-size setting bounds form
+        #   data, which this operation does not accept, and no service or gateway
+        #   configuration named a body size -- so an unbounded JSON body reached the
+        #   deserialiser on the one operation in this document that requires no
+        #   credential. Throttling limits how OFTEN a caller may call, not how many
+        #   bytes one call may carry, so it did not substitute either.
+        # Assumptions: the bound is deliberately generous rather than tight, and the
+        #   asymmetry is the whole argument. The value is opaque and provider-sized, so
+        #   a bound set near the largest token observed would eventually refuse one the
+        #   pool had legitimately issued -- which on this operation means locking a
+        #   caller out until it signs on again with a credential it may no longer hold.
+        #   Accepting a longer invalid value costs only bytes, and those are bounded
+        #   before this facet is evaluated at all: the shared kernel's request-body
+        #   filter refuses a body above its configured ceiling with 413, before parsing
+        #   and before the security chain runs. 8192 is several times the largest token
+        #   observed and an eighth of that ceiling, so the two controls stay ordered.
         refreshToken:
           type: string
           minLength: 1
+          maxLength: 8192
           pattern: "\\S"
           writeOnly: true
           description: >-
             The refresh token a previous sign-on returned, replayed unaltered. Must
-            not be blank.
+            not be blank, and at most 8192 characters.
             Write-only: it travels in this request only and appears in no response.
 
     SignOnResponse:
@@ -1835,15 +1866,14 @@ components:
       additionalProperties: false
       required: [outcome, userId, accessToken, idToken, tokenType, expiresIn]
       properties:
-        # Refactoring Rationale: this member exists so that the two things a
-        #   sign-on can return are told apart by a value rather than by which
-        #   members a client happens to find present. An earlier revision of this
-        #   document had only one success shape, so a pool response that was a
-        #   CHALLENGE rather than a token set had nowhere to go and was reported as
-        #   500 -- see the rationale on SignOnChallenge. With two success shapes a
-        #   client must be able to branch, and branching on the presence of
-        #   accessToken would make a missing member load-bearing, which is exactly
-        #   the kind of inference a closed schema exists to remove.
+        # Assumptions: this member exists so that the two things a sign-on can return
+        #   are told apart by a VALUE rather than by which members a client happens to
+        #   find present. Alternatives Considered: branching on the presence of
+        #   accessToken. Rejected -- it makes a missing member load-bearing, which is
+        #   exactly the kind of inference a closed schema exists to remove. The
+        #   alternative to two success shapes at all is one, which leaves a pool
+        #   response that is a CHALLENGE nowhere to go but 500; see the rationale on
+        #   SignOnChallenge.
         outcome:
           type: string
           const: AUTHENTICATED
@@ -1912,22 +1942,20 @@ components:
             The client re-authenticates or renews before it elapses; this service
             rejects an expired token rather than extending it.
 
-    # Refactoring Rationale: this shape and the operation that consumes it are
-    #   REQUIRED for the migrated system to be usable at all, and an earlier
-    #   revision of this document omitted both. Cognito answers an initial
-    #   authentication with either a token set or a CHALLENGE, and one challenge in
+    # Assumptions: this shape and the operation that consumes it are REQUIRED for
+    #   the migrated system to be usable at all, so neither may be dropped as an
+    #   optional extra. Cognito answers an initial authentication with either a token
+    #   set or a CHALLENGE, and one challenge in
     #   particular is unavoidable here: every seed user is created with a temporary
     #   password whose validity is measured in days
     #   (infra/modules/cognito/variables.tf, temporary_password_validity_days), and
-    #   a temporary password always yields NEW_PASSWORD_REQUIRED on first use. The
-    #   earlier revision routed that outcome to 500, its own rationale naming "a
-    #   challenge the flow cannot complete" as an integration failure -- so the
-    #   very first sign-on of every provisioned user reported a server fault, and
-    #   no path existed to set a permanent password. The edge already publishes the
-    #   route this contract now declares: POST /api/v1/auth/challenge is one of the
-    #   three deliberately unauthenticated keys in
-    #   infra/modules/api-gateway-http/variables.tf, so the gateway was forwarding
-    #   an operation this document did not describe.
+    #   a temporary password always yields NEW_PASSWORD_REQUIRED on first use.
+    #   Trade-offs: routing that outcome to 500 as an integration failure would make
+    #   the very first sign-on of every provisioned user report a server fault with no
+    #   path to set a permanent password, which is why the challenge is a contracted
+    #   outcome rather than an error. The edge publishes the matching route:
+    #   POST /api/v1/auth/challenge is one of the three deliberately unauthenticated
+    #   keys in infra/modules/api-gateway-http/variables.tf.
     # Assumptions: the challenge has NO baseline counterpart and none is invented
     #   for it. The reference sign-on compared a stored password directly at
     #   app/cbl/COSGN00C.cbl lines 211 to 256 and had no notion of a credential
@@ -2139,10 +2167,7 @@ components:
     #   is mandatory, and accepted on update where the path already carries it, so
     #   a body could name a different user than the path and the contract would
     #   have to say which wins. Two schemas cannot express that contradiction at
-    #   all. Refactoring Rationale: this note used to name the subject alongside
-    #   the identifier as the second optional property such a schema would need.
-    #   Neither request schema carries a subject now, so only the identifier
-    #   remains, and the count in the sentence was corrected with it.
+    #   all.
 
     CreateUserRequest:
       type: object
@@ -2166,15 +2191,14 @@ components:
         a body that names it is refused with 400 rather than silently ignored.
       additionalProperties: false
       required: [firstName, lastName, userId, userType]
-      # Refactoring Rationale: the three character properties below carry
-      #   pattern "\\S" and an earlier revision of this schema did not. Each
-      #   declared minLength: 1 alone and each said in prose that it must not be
-      #   blank, so a value of twenty spaces was schema-VALID and service-INVALID:
-      #   CreateUserRequest annotates all three @NotBlank, which refuses it. A
-      #   caller generating a request from this document could therefore build a
-      #   body this document accepts and the service answers 400, which is exactly
-      #   the disagreement a published contract exists to prevent. The prose said
-      #   the right thing; nothing machine-readable said it.
+      # Assumptions: the three character properties below carry pattern "\\S", and
+      #   minLength: 1 with a prose sentence would NOT be enough. Under minLength
+      #   alone a value of twenty spaces is schema-VALID and service-INVALID, because
+      #   CreateUserRequest annotates all three @NotBlank and refuses it -- so a
+      #   caller generating a request from this document could build a body the
+      #   document accepts and the service answers 400, which is exactly the
+      #   disagreement a published contract exists to prevent. Prose cannot close it;
+      #   only a machine-readable constraint can.
       # Assumptions: the pattern is UNANCHORED, the JSON Schema default, so "\\S"
       #   as a partial match reads "contains at least one non-whitespace
       #   character" -- precisely what @NotBlank asserts. Anchoring it would demand
@@ -2232,25 +2256,22 @@ components:
             because neither admitted value is blank. Choosing A grants that user
             the carddemo-admin authority at sign-on, including the authority to
             reach these operations.
-        # Refactoring Rationale: a fifth property, cognitoSub, stood here and has
-        #   been withdrawn. It was declared required and described as "the subject
-        #   identifier of the already-provisioned Cognito account this row
-        #   represents ... supplied by whatever provisioned that account, because
-        #   this service does not create pool accounts". The subject is the ONLY
-        #   link between a presented token and a row -- auth.users declares the
-        #   column NOT NULL UNIQUE -- so a caller able to nominate it was a caller
-        #   able to decide which pool identity a new row authenticates as. An
-        #   administrator could bind a row to another person's subject, or to a
-        #   subject whose pool account holds the administrator group while the row
-        #   records 'U'; the signed group claim wins every authorization decision,
-        #   so the row's own type would be decoration. A well-formed UUID was the
-        #   whole of what the schema could check, so neither case was detectable.
-        # Assumptions: the withdrawal is only half the fix. The service now creates
-        #   the pool account and its group membership from the four properties
-        #   above and reads the subject back from the provider's own response, so
-        #   the row and the pool identity are established by one act and cannot
-        #   drift. The subject is returned on the 201 as part of UserResponse, so a
-        #   caller learns which subject its row was bound to.
+        # Refactoring Rationale: the pool subject is deliberately NOT a property of
+        #   this request. It is the ONLY link between a presented token and a row --
+        #   auth.users declares the column NOT NULL UNIQUE -- so a caller able to
+        #   nominate it would be a caller able to decide which pool identity a new
+        #   row authenticates as. An administrator could bind a row to another
+        #   person's subject, or to a subject whose pool account holds the
+        #   administrator group while the row records 'U'; the signed group claim
+        #   wins every authorization decision, so the row's own type would be
+        #   decoration. A well-formed UUID is the whole of what a schema could
+        #   check, so neither case would be detectable.
+        # Assumptions: excluding it is only half of what makes the link safe. The
+        #   service creates the pool account and its group membership from the four
+        #   properties above and reads the subject back from the provider's own
+        #   response, so the row and the pool identity are established by one act
+        #   and cannot drift. The subject is returned on the 201 as part of
+        #   UserResponse, so a caller learns which subject its row was bound to.
         # Alternatives Considered: keeping the property and validating it against
         #   the pool -- reading the named subject back and refusing one that does
         #   not exist or whose group disagrees with userType. Rejected because it
@@ -2280,14 +2301,12 @@ components:
       #   pattern for the same reason the create body's do -- each description
       #   asserted the value must not be blank while minLength: 1 beside it admitted
       #   a value of twenty spaces, so the document contradicted itself.
-      # Refactoring Rationale: this note previously said the record implementing
-      #   this body was "not yet authored" and that the disagreement would be
-      #   reintroduced when it landed. It has landed:
-      #   com.carddemo.auth.dto.UpdateUserRequest annotates both names @NotBlank,
-      #   which refuses exactly what this facet refuses, and publishes this identical
-      #   string into the GENERATED document through a schema-documentation
-      #   annotation -- which was the half the review found missing, since a
-      #   non-blank constraint renders as a minimum length and no pattern. The
+      # Assumptions: com.carddemo.auth.dto.UpdateUserRequest annotates both names
+      #   @NotBlank, which refuses exactly what this facet refuses, and publishes this
+      #   identical string into the GENERATED document through a schema-documentation
+      #   annotation. That second half is load-bearing: a non-blank constraint on its
+      #   own renders as a minimum length and no pattern, so without the annotation the
+      #   generated document and this one would disagree on this single facet. The
       #   expression is stated once in Java, on
       #   SignOnRequest.NON_WHITESPACE_PATTERN.
       properties:
@@ -2335,6 +2354,107 @@ components:
             not roll back, so a successful move followed by a failed commit would
             leave the move applied and this row unchanged, with nothing recording
             it.
+
+    CreatedUserResponse:
+      type: object
+      description: >-
+        The body of a successful create: the five stored columns exactly as
+        UserResponse publishes them, plus the one-time credential the new pool
+        account was created with.
+
+
+        Assumptions: the five row properties are REPEATED here rather than composed
+        from UserResponse with allOf. UserResponse declares
+        additionalProperties: false, and a composition that adds a property to a
+        schema which forbids additional properties is ill-defined -- several
+        validators refuse every instance of it. Repeating the properties keeps this
+        body a strict superset of the read body, so a client that ignores the new
+        property reads exactly what it read before.
+
+
+        Refactoring Rationale: NO credential crosses the wire in this response. What
+        this body adds to the read body is the NAME of the managed-secret entry the
+        credential was published to, and three properties of the credential itself
+        keep the handover safe from there. It is single-use: the account stands in
+        the provider's force-change state, so presenting it raises the new-password
+        challenge and can do nothing else. It is never persisted:
+        db/migration/V1__auth.sql declares no password column, deliberately,
+        undoing SEC-USR-PWD PIC X(08) at app/cpy/CSUSR01Y.cpy line 21 which the
+        baseline stored in the clear, compared in the clear at
+        app/cbl/COSGN00C.cbl line 223 and wrote back onto a screen at
+        app/cbl/COUSR02C.cbl line 169. And it is never logged: both the response
+        record and the provisioning result override their diagnostic rendering to
+        withhold what they hold.
+
+
+        Alternatives Considered: answering with the generated credential itself.
+        Rejected because a credential in a response body is copied into every proxy
+        log and browser history between the service and the operator, and the
+        migration forbids a credential reaching a place with no audit trail; the
+        value is published to a per-user managed-secret entry encrypted with the
+        customer-managed key instead, and this body names that entry. Alternatives
+        Considered: answering with the read body and nothing else, leaving the name
+        to be recomputed from the identifier. Rejected because that tells an operator
+        the derivation rule rather than the answer, while a locator is not a secret.
+
+
+        Trade-offs: reading the entry needs secretsmanager:GetSecretValue and the
+        key's grant, which the task role holds and a browser session does not, so
+        onboarding ends with one privileged read. That is accepted: it is an audited
+        step in a store that already has rotation and an audit trail.
+      additionalProperties: false
+      required:
+        [userId, firstName, lastName, userType, cognitoSub, credentialSecretName]
+      properties:
+        userId:
+          type: string
+          maxLength: 8
+          description: >-
+            The row's identifier and primary key, at most eight characters, with the
+            column's blank padding already removed.
+        firstName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's given name, at most twenty characters.
+        lastName:
+          type: string
+          maxLength: 20
+          description: >-
+            The user's family name, at most twenty characters.
+        userType:
+          type: string
+          minLength: 1
+          maxLength: 1
+          enum: ["A", "U"]
+          description: >-
+            The user's role, A for administrator or U for ordinary user, per
+            app/cpy/COCOM01Y.cpy lines 26 to 28.
+        cognitoSub:
+          type: string
+          format: uuid
+          description: >-
+            The Cognito subject identifier the row is bound to, minted by the
+            provider when it created the account.
+        credentialSecretName:
+          type: string
+          minLength: 1
+          description: >-
+            The name of the managed-secret entry holding the one-time credential the
+            account was created with. Collect the value from that entry and present it
+            once at first sign-on: the account is in the provider's force-change
+            state, so POST /api/v1/auth/signon answers with the new-password challenge
+            and POST /api/v1/auth/challenge completes the exchange. The credential
+            itself never appears in this body.
+
+
+            Assumptions: the property is REQUIRED, not optional. An absent locator
+            would mean an account nobody can reach, and a client handling both shapes
+            could not tell that from an omission of its own. No format is declared,
+            because the value is a resource name rather than a secret; minLength is a
+            floor rather than the derived length, which is deliberately not published
+            -- the derivation is a property of the service and this contract should not
+            invite a client to validate against it.
 
     UserResponse:
       type: object
@@ -2469,23 +2589,21 @@ components:
         pages anywhere in this envelope, because supplying one would require
         counting the whole table on every request that only ever returns ten rows.
       additionalProperties: false
-      required: [items, firstKey, lastKey, hasNext, hasPrevious]
+      required: [items, firstKey, lastKey, hasNext]
       properties:
-        # Assumptions: these four properties, in this order, are the four components
+        # Assumptions: these five properties, in this order, are the five components
         #   of the shared page envelope services/common-lib publishes, so what a
         #   caller receives here is that record serialised and nothing else. The
-        #   transaction and card contracts declare the same four under the same
+        #   transaction and card contracts declare the same five under the same
         #   required list, so one client type reads a page from any of the three.
-        # Refactoring Rationale: an earlier revision of this schema declared seven
-        #   properties -- the two boundary tokens, a separate forward and backward
-        #   scan position, and a backward availability indicator -- and argued here
-        #   that the four-component figure was a summary the runtime contradicted.
-        #   The alignment ran the wrong way. Four components is the shape this
-        #   migration fixed for the envelope, the shared record now declares exactly
-        #   those four, and a contract does not reinterpret the plan it implements.
-        #   Nothing the three withdrawn properties carried is lost: a page whose rows
-        #   were all filtered away after being read carries its two scan positions in
-        #   firstKey and lastKey, which is what they are on such a page, and backward
+        # Alternatives Considered: SEVEN properties -- the two boundary tokens, a
+        #   separate forward and backward scan position, and a backward availability
+        #   indicator. Rejected: four components is the shape this migration fixed for
+        #   the envelope, the shared record declares exactly those four, and a
+        #   contract does not reinterpret the plan it implements. Nothing the three
+        #   extra properties would carry is lost -- a page whose rows were all
+        #   filtered away after being read carries its two scan positions in firstKey
+        #   and lastKey, which is what they are on such a page, and backward
         #   availability is the presence of firstKey.
         items:
           type: array
@@ -2551,18 +2669,6 @@ components:
             binds the forward paging control to this value, which is what the
             baseline's own next-page indicator expressed, and it is never true
             without a lastKey to continue from.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
     # WHY : (1) Assumptions: these three describe the shared error record, its
     #       per-field entry and its abend aggregate exactly as
@@ -2583,16 +2689,17 @@ components:
     #       advice that builds this shape returns ResponseEntity<ApiError> and sets
     #       no content type of its own, so the framework negotiates application/json
     #       and that is what a caller actually receives.
-    #       Refactoring Rationale: an earlier revision declared the failing
-    #       responses as application/problem+json, which was wrong twice over. It
-    #       described a media type no handler emits, so a client routing on content
-    #       type before parsing would have taken the wrong branch on every failure;
-    #       and this shape is not an RFC 9457 problem document -- it declares
+    #       Alternatives Considered: declaring the failing responses as
+    #       application/problem+json. Rejected twice over. It names a media type no
+    #       handler emits, so a client routing on content type before parsing would
+    #       take the wrong branch on every failure; and this shape is not an RFC 9457
+    #       problem document -- it declares
     #       code, secondaryCode, severity, subsystem, status, correlationId, path,
     #       timestamp, fieldErrors and abend, and none of the type, title, detail
     #       and instance members that specification requires. Declaring the media
-    #       type the handler emits is the correction; restructuring the shared shape
-    #       into a problem document was rejected because it is published by
+    #       type the handler emits is what this document does; restructuring the
+    #       shared shape into a problem document was also rejected, because it is
+    #       published by
     #       services/common-lib for all eight services and the two sibling
     #       contracts already describe it as application/json.
     ApiError:
@@ -2604,7 +2711,22 @@ components:
         offending fields where the failure is attributable to fields, and the
         correlation identifier to quote when reporting it.
       additionalProperties: false
-      required: [code, secondaryCode, severity, subsystem, status, correlationId, path, timestamp, fieldErrors]
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
+      required: [code, secondaryCode, message, severity, subsystem, status, correlationId, path, timestamp, fieldErrors, abend]
       properties:
         code:
           type: string
@@ -2631,19 +2753,19 @@ components:
         #   program line it originates on, including spacing before an ellipsis,
         #   which differs per program and even within one program and is therefore
         #   never normalised -- see the note in this file's header.
-        # Refactoring Rationale: the bound is 75, the shared rendering width
+        # Assumptions: the bound is 75, the shared rendering width
         #   ApiError.MESSAGE_RENDERING_WIDTH declares from
         #   CCARD-ERROR-MSG PIC X(75) and CCARD-RETURN-MSG PIC X(75) at
-        #   app/cpy/CVCRD01Y.cpy lines 28 and 29. An earlier revision declared 78
-        #   here, taken from the width the message field occupies in all five auth
-        #   maps (app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372,
-        #   COUSR01.CPY line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84). Both
-        #   widths are real, but one record is shared by every service and cannot
-        #   be described at two widths at once: a client reading three contracts
-        #   would see three bounds on one property. The shared constant wins, and it
-        #   costs nothing -- the longest string carried here is 44 characters and the
-        #   longest the shared advice can emit is 58, so no message is shortened to
-        #   fit either width. The 78-character screen field is recorded here rather
+        #   app/cpy/CVCRD01Y.cpy lines 28 and 29. Alternatives Considered: 78, the
+        #   width the message field occupies in all five auth maps
+        #   (app/cpy-bms/COSGN00.CPY line 84, COUSR00.CPY line 372, COUSR01.CPY
+        #   line 90, COUSR02.CPY line 90 and COUSR03.CPY line 84). Both widths are
+        #   real, but one record is shared by every service and cannot be described
+        #   at two widths at once: a client reading three contracts would see three
+        #   bounds on one property. The shared constant wins, and it costs nothing
+        #   -- the longest string carried here is 44 characters and the longest the
+        #   shared advice can emit is 58, so no message is shortened to fit either
+        #   width. Trade-offs: the 78-character screen field is recorded here rather
         #   than dropped, because it is the width a renderer reproducing the 3270
         #   presentation has to allow for.
         message:
@@ -2759,11 +2881,11 @@ components:
         #   received a literal asterisk marker, whereas a rejected value did not --
         #   which is the disjunction at app/cpy/CSSETATY.cpy lines 18 and 19 with the
         #   marker written at lines 23 to 25.
-        # Refactoring Rationale: an earlier revision published the acceptable state
-        #   here on the ground that the enumeration is the shared one. Publishing a
-        #   member no response can carry describes a state a client must write a
-        #   branch for and will never reach, and it disagreed with the sibling
-        #   contracts, which publish two.
+        # Alternatives Considered: publishing the acceptable state here too, on the
+        #   ground that the enumeration is the shared one. Rejected -- a published
+        #   member no response can carry describes a state a client must write a branch
+        #   for and will never reach, and it would disagree with the sibling contracts,
+        #   which publish two.
         state:
           type: string
           enum: [NOT_OK, BLANK]

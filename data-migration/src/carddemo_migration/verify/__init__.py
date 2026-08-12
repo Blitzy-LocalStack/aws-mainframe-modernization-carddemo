@@ -40,8 +40,8 @@ The three passes
     systematically mis-decoded sign overpunch. Paired with
     ``data-migration/sql/verify/money_totals.sql``.
 
-WHY (Refactoring Rationale)
----------------------------
+Refactoring Rationale:
+----------------------
 ``__all__`` was an empty list and none of the three passes was reachable through this package
 boundary, so every consumer imported a submodule directly -- ``from
 carddemo_migration.verify.money_parity import compare_money_totals``. That works and it is what

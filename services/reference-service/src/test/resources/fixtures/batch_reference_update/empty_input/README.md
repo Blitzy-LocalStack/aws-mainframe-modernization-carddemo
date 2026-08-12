@@ -155,7 +155,7 @@ That last path deserves one clarification, because its paragraph name misleads.
 with no abend call in it. Control returns through `1003-TREAT-RECORD` into the loop at
 L93 to L96, the next record is read at L95, and the run ends on the warn-tier code.
 So the contrast this scenario draws is against a **soft reject that continues**, not
-against a crash. The sibling scenario `../invalid_type_soft_reject/` is the one that
+against a crash. The sibling scenario `../invalid_type_abend/` is the one that
 exercises it. [`../../README.md`](../../README.md) section 3.6 carries the full
 analysis, and its section 12 lists reading that paragraph as a termination among the
 named failure modes of this tree.

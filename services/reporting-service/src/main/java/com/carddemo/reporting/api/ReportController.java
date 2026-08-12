@@ -12,6 +12,8 @@ import com.carddemo.reporting.dto.TransactionReportTotals;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.TransactionReportService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
 import java.security.Principal;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -22,6 +24,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -155,8 +158,49 @@ public class ReportController {
      * the one the browser client sends. It is compared case-insensitively because a query parameter is
      * caller-typed text, and refusing a differently-cased spelling of a value this contract itself
      * names would be a refusal a caller could not act on.
+     *
+     * <p>The published enumeration is authoritative here: {@code PageDirection} in
+     * {@code src/main/resources/openapi/reporting-api.yaml} enumerates exactly {@code next} and
+     * {@code previous}, and {@code ui/src/api/reporting.ts} types the parameter as that enumeration and
+     * defaults it to {@code next}.
+     *
+     * <p>WARNING -- Refactoring Rationale: this constant held {@code "prev"}, which the published
+     * enumeration does not offer, so the only value a contract-conforming caller could send for a
+     * backward step was read as no match and answered with a FORWARD page. Backward paging was
+     * unreachable over the published interface -- not degraded, but absent -- and a caller holding a
+     * leading position fared worse than one holding a trailing one: the leading token is sealed under
+     * the backward binding, so opening it with the forward binding fails its authenticated decryption
+     * and that caller saw a refusal rather than a page. The defect survived its own test suite because
+     * the tests sent {@code ReportController.PREVIOUS_DIRECTION} rather than the literal the contract
+     * publishes, so every assertion moved with the constant and none could ever disagree with it.
+     * {@code ReportControllerTest.thePublishedBackwardValueSelectsABackwardRead} now sends the published
+     * spelling as a hard-coded literal, and
+     * {@code ReportControllerTest.theDirectionValuesAreTheOnesTheContractPublishes} pins both constants
+     * against those literals, for exactly that reason.
      */
-    public static final String PREVIOUS_DIRECTION = "prev";
+    public static final String PREVIOUS_DIRECTION = "previous";
+
+    /**
+     * The direction value that reads forward from a held cursor, which is also the default.
+     *
+     * <p>Assumptions: the forward value is NAMED rather than left as the absence of the backward one,
+     * so that a direction this operation does not recognise can be told apart from the direction the
+     * published enumeration declares as its default. While it was unnamed, the predecessor of
+     * {@link #backwardRequested(String)} tested for the backward spelling alone and read every other
+     * string as forward, so a misspelled direction was answered with a page the caller had not asked to
+     * read rather than being refused -- the same class of silent substitution that made the backward
+     * spelling itself unreachable.
+     */
+    public static final String NEXT_DIRECTION = "next";
+
+    /**
+     * Name of the query parameter the two direction values are sent in, as the contract publishes it.
+     *
+     * <p>Assumptions: the name is stated once and read both by the binding annotation and by the
+     * refusal that names the offending field, so a rejection cannot name a parameter the request never
+     * carried.
+     */
+    public static final String DIRECTION_PARAMETER = "direction";
 
     /**
      * The scope element naming a backward walk, so a leading position cannot be replayed forward.
@@ -184,16 +228,25 @@ public class ReportController {
     public static final String SUBMITTED_SUFFIX = " report submitted for printing ...";
 
     /**
-     * Sentence returned with a deliberate cancellation.
+     * Verbatim fragment the reference opens its confirmation prompt with.
      *
-     * <p>Refactoring Rationale: this sentence has no counterpart in the reference, which writes no
-     * message at all on the cancel branch at {@code app/cbl/CORPT00C.cbl} L480 to L483 -- it clears
-     * the screen and redisplays it, leaving the operator with no statement of what happened. A target
-     * client receiving a 200 with no sentence would face the same ambiguity over the wire, so one is
-     * supplied. It is deliberately a constant rather than an assembly over the report name, because
-     * nothing was submitted and naming a report would imply that something had been.
+     * <p>Assumptions: reproduced character for character from {@code app/cbl/CORPT00C.cbl} L466,
+     * including the trailing blank. The reference assembles the prompt with a {@code STRING}
+     * statement at L465 to L470 whose second operand is the report name delimited by a space, so the
+     * rendered sentence is this fragment, the trimmed name, and the fragment below;
+     * {@link #confirmationPrompt(String)} performs the same assembly.
      */
-    public static final String CANCELLED_MESSAGE = "Report was not submitted.";
+    public static final String CONFIRM_PROMPT_PREFIX = "Please confirm to print the ";
+
+    /**
+     * Verbatim fragment the reference closes its confirmation prompt with.
+     *
+     * <p>Assumptions: reproduced character for character from {@code app/cbl/CORPT00C.cbl} L469,
+     * including the leading blank. Note that its three trailing full stops have NO space before them,
+     * where {@link #SUBMITTED_SUFFIX} does have one -- the two sentences are similar, differ by that
+     * single character, and are never merged.
+     */
+    public static final String CONFIRM_PROMPT_SUFFIX = " report...";
 
     private final ReportExecutionService executions;
 
@@ -238,10 +291,16 @@ public class ReportController {
      *
      * @param request the report request the caller submitted; validated declaratively before this
      *     method is entered
+     * @param idempotencyKey the caller's optional submission key, sent in the
+     *     {@link ReportExecutionService#IDEMPOTENCY_KEY_FIELD} header. Sending the same key twice makes
+     *     the second submission a duplicate the orchestrator refuses, which is how a client retrying an
+     *     abandoned call avoids starting a second run; omitting it makes every submission a distinct
+     *     run, which is what lets the same report be produced again over the same range
      * @return the outcome, reporting either the accepted run or the cancellation; never {@code null}
      * @throws ClientInputException if no report type is selected or more than one is, if a custom
-     *     range omits or misstates a bound, or if the confirmation answer is neither of the two the
-     *     reference recognises
+     *     range omits or misstates a bound, if the confirmation answer is neither of the two the
+     *     reference recognises, or if a supplied submission key carries a character or a length an
+     *     execution name may not hold
      */
     // WHY : Refactoring Rationale: the method name is the published operation identifier verbatim,
     //       and an earlier revision named it submitReport. The documentation library derives an
@@ -252,11 +311,27 @@ public class ReportController {
     //       second annotation to paper over it.
     @PostMapping(path = SUBMISSION_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<ReportSubmissionOutcome> submitTransactionReport(
-            @Valid @RequestBody ReportRequest request) {
+            @Valid @RequestBody ReportRequest request,
+            @RequestHeader(name = ReportExecutionService.IDEMPOTENCY_KEY_FIELD, required = false)
+                    String idempotencyKey) {
         String reportName = executions.resolveReportName(request);
         ReportExecutionService.DateRange range = executions.resolveRange(request, reportName);
+        ReportExecutionService.Confirmation answer = executions.resolveConfirmation(request);
 
-        if (!executions.isConfirmed(request)) {
+        // WHY : Refactoring Rationale: the unanswered turn is answered HERE with a 200 and the
+        //       reference's prompt, where an earlier revision let the service RAISE for it and so
+        //       answered a 400 with a problem body. The reference does not treat an unanswered
+        //       confirmation as a fault: L464 to L474 of app/cbl/CORPT00C.cbl composes a prompt naming
+        //       the report and re-displays the screen, which is a question being asked rather than a
+        //       mistake being reported. The published contract declares the same thing, and a caller
+        //       written against it reads a 400 as "correct the request" -- so the earlier shape told a
+        //       caller its request was wrong when the only thing outstanding was its own answer.
+        if (answer == ReportExecutionService.Confirmation.UNANSWERED) {
+            return ResponseEntity.ok(
+                    ReportSubmissionOutcome.unanswered(confirmationPrompt(reportName)));
+        }
+
+        if (answer == ReportExecutionService.Confirmation.DECLINED) {
             // WHY : Assumptions: a deliberate cancellation answers 200 and a started run answers 201,
             //       which is what the published contract declares and what the browser client
             //       switches on -- it reads the status before it reads the body, so the two outcomes
@@ -271,11 +346,24 @@ public class ReportController {
             //       durable handle to an execution that is still running rather than a finished
             //       report; it was declined only because the published document names 201, and a
             //       controller that answered 202 would break the client written against that document.
-            return ResponseEntity.ok(ReportSubmissionOutcome.cancelled(CANCELLED_MESSAGE));
+            // WHY : Refactoring Rationale: the cancellation carries NO sentence, where an earlier
+            //       revision carried a target-authored one reading "Report was not submitted." The
+            //       reference's cancel branch clears the message line -- INITIALIZE-ALL-FIELDS at L633
+            //       to L646 of app/cbl/CORPT00C.cbl includes WS-MESSAGE among the fields it clears --
+            //       so the operator is shown a blank line, and transformation rule T8 admits no
+            //       user-visible string that the baseline does not carry. The ambiguity the invented
+            //       sentence was defending against is already answered by the two members a caller
+            //       actually reads: the status is 200 and the submitted member is false.
+            return ResponseEntity.ok(ReportSubmissionOutcome.cancelled());
         }
 
-        ReportSubmissionResponse accepted =
-                executions.start(request, reportName, range.start(), range.end());
+        // WHY : Assumptions: the submission key is passed straight through rather than defaulted here.
+        //       Whether an omitted key means "give this run a fresh identity" or "reuse the previous
+        //       one" is a decision about duplicate submissions, which ReportExecutionService owns and
+        //       documents on its execution-name builder; minting a value here would move half of that
+        //       decision into the transport layer and leave the two halves to be kept in agreement.
+        ReportSubmissionResponse accepted = executions.start(
+                request, reportName, range.start(), range.end(), idempotencyKey);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ReportSubmissionOutcome.accepted(accepted, submittedMessage(reportName)));
     }
@@ -300,12 +388,16 @@ public class ReportController {
      * @param startDate the first business date to cover, in {@code YYYY-MM-DD} order
      * @param endDate the last business date to cover, in {@code YYYY-MM-DD} order
      * @param cursor the sealed position a previous page reported, or {@code null} for the first page
-     * @param direction the direction to read the cursor in, {@code null} meaning forward
+     * @param direction the direction to read the cursor in, either {@link #NEXT_DIRECTION} or
+     *     {@link #PREVIOUS_DIRECTION} as the published enumeration declares them, {@code null} meaning
+     *     forward
      * @param principal the authenticated caller, supplied by the framework; the page's boundary
      *     tokens are bound to its name, so a cursor issued to another operator is refused
      * @return one bounded page of detail lines with its two sealed boundaries; never {@code null}
      * @throws ClientInputException if either bound is not a calendar date, if the range is inverted,
-     *     or if the range selects more rows than the service is willing to assemble
+     *     if the direction is neither of the two values the contract publishes, if a direction is sent
+     *     without the cursor it moves from, or if the range selects more rows than the service is
+     *     willing to assemble
      * @throws IllegalStateException if a detail line cannot be resolved to its reference dimensions,
      *     which is the target's equivalent of the reference abending on an unresolved lookup
      */
@@ -313,8 +405,14 @@ public class ReportController {
     public PageResponse<TransactionReportLineResponse> listTransactionReportLines(
             @RequestParam("startDate") String startDate,
             @RequestParam("endDate") String endDate,
-            @RequestParam(name = "cursor", required = false) String cursor,
-            @RequestParam(name = "direction", required = false) String direction,
+            // WHY : Assumptions: the width ceiling is the runtime token's own ceiling rather than a
+            //       round number, so the published schema and the sealed token cannot drift. Without
+            //       it an arbitrarily long value reached the authenticated decryption, which spends
+            //       cipher work on a string that could not have been issued by this service.
+            @RequestParam(name = "cursor", required = false)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            String cursor,
+            @RequestParam(name = DIRECTION_PARAMETER, required = false) String direction,
             Principal principal) {
 
         LocalDate start = parseBound(startDate, "startDate");
@@ -348,22 +446,81 @@ public class ReportController {
         //       rather than through a helper that would have one caller.
         String backwardBinding = directionBinding(principal.getName(), start, end, true);
         String forwardBinding = directionBinding(principal.getName(), start, end, false);
-        boolean backward = PREVIOUS_DIRECTION.equalsIgnoreCase(direction);
-        String openedKey = cursor == null || cursor.isBlank()
-                ? null
-                : this.cursorToken.open(backward ? backwardBinding : forwardBinding, cursor);
-        if (backward && openedKey == null) {
+        boolean backward = backwardRequested(direction);
+        boolean held = cursor != null && !cursor.isBlank();
+        if (direction != null && !direction.isBlank() && !held) {
             // WHY : Assumptions: a direction with no cursor is refused rather than answered with the
-            //       leading page. A backward step is taken from the first row of the window the caller
-            //       holds, so without that row the request names nothing; answering the first page
-            //       would tell a caller it had reached the beginning when it had not asked.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, "cursor",
+            //       leading page, and the refusal now covers BOTH values rather than the backward one
+            //       alone. A step is taken FROM a position, so without one the request names nothing;
+            //       answering the first page would silently discard a stated intent, which for a
+            //       backward request means telling a caller it had reached the beginning when it had
+            //       not asked, and is the one outcome a paging caller cannot detect from the answer.
+            //       Refactoring Rationale: the guard tested the backward case only, so
+            //       `direction=next` with no cursor was accepted and answered the opening page --
+            //       which happens to be the right rows, but establishes that the pairing rule the
+            //       contract states holds for one of its two values. The same rule is stated once for
+            //       a module with several browses on reference-service's
+            //       ReferencePaging.requireCursorForDirection; this context has one browse, so it is
+            //       applied inline rather than through a helper with a single caller.
+            //       Assumptions: the reverse pairing -- a cursor with no direction -- is NOT refused,
+            //       which is deliberate. An absent direction means forward, the contract's published
+            //       default, and that is a complete instruction when a position is supplied.
+            throw new ClientInputException(ApiError.CODE_VALIDATION, DIRECTION_PARAMETER,
                     "a paging direction must be sent with the cursor it moves from");
         }
+
+        String openedKey = held
+                ? this.cursorToken.open(backward ? backwardBinding : forwardBinding, cursor)
+                : null;
 
         return reports.readDetailLinePage(start, end, openedKey, backward,
                 (key, leading) -> this.cursorToken.seal(
                         leading ? backwardBinding : forwardBinding, key));
+    }
+
+    /**
+     * Reports whether a caller asked to step backward, refusing any direction the contract omits.
+     *
+     * <p>Assumptions: an unsupplied direction reads forward, because the published parameter is
+     * optional and its schema declares {@code next} as the default, so a first page carries no
+     * direction at all. Every supplied value is then matched against the two the enumeration publishes
+     * and anything else is refused, which is the whole point of naming the forward value: a direction
+     * that matches neither is a request this operation cannot honour, and answering it with the forward
+     * page would report rows the caller never asked for as though they were the ones it did.
+     *
+     * <p>Alternatives Considered: converting through a shared wire-value parse, the way
+     * {@code PageDirection.fromRequestParameter} does for the services that own several browses.
+     * Rejected because that enumeration is declared per module -- {@code auth-service} and
+     * {@code reference-service} each own a copy in their own {@code dto} package and neither is
+     * visible here -- so reaching it would mean either a dependency between two services' DTO packages,
+     * which the layering rules in {@code common-lib} forbid outright, or a third copy of a two-value
+     * enumeration for the ONE paged read this context has. The same reasoning already stands recorded
+     * beside the cursor bindings this method feeds, which are composed inline for the same reason.
+     *
+     * <p>Trade-offs: matching case-insensitively while refusing unpublished values accepts a spelling
+     * the contract does not literally declare, such as {@code PREVIOUS}. That is deliberate and is the
+     * trade this class already recorded on {@link #PREVIOUS_DIRECTION}: a differently-cased spelling of
+     * a value the contract itself names is unambiguous, so refusing it would be a refusal the caller
+     * could not act on, whereas a value the contract never names is genuinely unreadable.
+     *
+     * @param direction the direction as the caller sent it, which may be {@code null} or blank
+     * @return {@code true} when the caller asked to read backward; {@code false} when it asked to read
+     *     forward or asked for no direction at all
+     * @throws ClientInputException if the direction is neither of the two the contract publishes, named
+     *     against the {@code direction} parameter so the caller can correct the request it sent
+     */
+    private static boolean backwardRequested(String direction) {
+        if (direction == null || direction.isBlank()) {
+            return false;
+        }
+        if (PREVIOUS_DIRECTION.equalsIgnoreCase(direction)) {
+            return true;
+        }
+        if (NEXT_DIRECTION.equalsIgnoreCase(direction)) {
+            return false;
+        }
+        throw new ClientInputException(ApiError.CODE_VALIDATION, DIRECTION_PARAMETER,
+                "a paging direction must be " + NEXT_DIRECTION + " or " + PREVIOUS_DIRECTION);
     }
 
     /**
@@ -433,6 +590,27 @@ public class ReportController {
      */
     private static String submittedMessage(String reportName) {
         return reportName.trim() + SUBMITTED_SUFFIX;
+    }
+
+    /**
+     * Assembles the reference's confirmation prompt around a report name.
+     *
+     * <p>Assumptions: the name is trimmed between the two fragments, which is what the reference's
+     * {@code DELIMITED BY SPACE} operand does at {@code app/cbl/CORPT00C.cbl} L468. The three names
+     * are already untrailed constants, so the trim changes nothing today and is written anyway because
+     * it is the assembly rule rather than an incidental property of the current values -- the same
+     * reason {@link #submittedMessage(String)} trims.</p>
+     *
+     * <p>Assumptions: the two fragments are joined in the reference's own order and neither is shared
+     * with the submission sentence. They differ from it by one character, the space before the three
+     * dots, and a helper that derived one from the other would make that difference an accident
+     * waiting to be tidied away.</p>
+     *
+     * @param reportName the resolved report name the prompt names
+     * @return the prompt a caller displays, well inside the outcome's declared message width
+     */
+    private static String confirmationPrompt(String reportName) {
+        return CONFIRM_PROMPT_PREFIX + reportName.trim() + CONFIRM_PROMPT_SUFFIX;
     }
 
     /**

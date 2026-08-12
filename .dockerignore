@@ -2,18 +2,32 @@
 # .dockerignore
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Excludes paths from the REPOSITORY-ROOT build context. Exactly one image is
-#   built from that context: services/batch-service/Dockerfile, whose own header
-#   records why -- it compiles the unpublished common-lib sibling from source and
-#   the inherited Checkstyle gate reads config/checkstyle, both of which sit
-#   outside its own tree, so no narrower context can build it. Without this file
-#   the daemon receives the whole working tree, which is neither small nor safe.
+#   Excludes paths from the REPOSITORY-ROOT build context. ALL EIGHT service
+#   images are built from that context -- auth, account, card, transaction,
+#   reference, batch, authorization and reporting -- and each one needs it for the
+#   same three reasons its own header records: it compiles the unpublished
+#   common-lib sibling from source, its inherited Checkstyle gate reads
+#   config/checkstyle, and its runtime stage copies the shared entry point and the
+#   trust-anchor installer from config/docker. Every one of those paths sits
+#   outside the service's own tree, so no narrower context can build any of them;
+#   `.github/workflows/services-ci.yml` and `.github/workflows/deploy.yml` both
+#   pass `.` for all eight. Without this file the daemon receives the whole
+#   working tree for each of those eight builds, which is neither small nor safe.
 #
-#   The repository's other image, data-migration/Dockerfile, is built from
-#   data-migration/ as its context and is therefore governed by
-#   data-migration/.dockerignore instead. The daemon resolves this file from the
-#   context root, so this one has no effect on that build and that one has no
-#   effect on this build. Each context needs its own file; neither is redundant.
+#   Refactoring Rationale: this paragraph used to say "exactly one image is built
+#   from that context: services/batch-service/Dockerfile", and to describe
+#   data-migration as "the repository's other image". Both were wrong by
+#   measurement -- the repository commits TEN Dockerfiles, eight of which share
+#   this context -- and the error mattered in one direction: a reader adding an
+#   exclusion here would have weighed it against one image and would have broken
+#   eight.
+#
+#   The two remaining images are built from their own trees and are governed by
+#   their own files: data-migration/Dockerfile with data-migration/ as its context
+#   and data-migration/.dockerignore, and ui/Dockerfile with ui/ as its context
+#   and ui/.dockerignore. The daemon resolves this file from the context root, so
+#   this one has no effect on either of those builds and neither has any effect on
+#   these eight. Each context needs its own file; none of the three is redundant.
 #
 # Parameters (the inputs this file governs):
 #   One input: the set of paths the daemon receives when a build is started from
@@ -38,13 +52,14 @@
 #
 # WHY (non-obvious design decisions):
 #   1. Refactoring Rationale: this file exists at the ROOT rather than beside the
-#      Dockerfile it governs, because the daemon resolves .dockerignore from the
-#      build CONTEXT and not from the location of the Dockerfile. The batch image
-#      is built from the root with an explicit --file, so a copy of these rules
-#      placed in services/batch-service/ would be ignored completely -- present,
-#      plausible, and doing nothing. This placement is the only one that takes
-#      effect for that build, and it is the reason the second image needs its own
-#      file at its own context root rather than inheriting these rules.
+#      Dockerfiles it governs, because the daemon resolves .dockerignore from the
+#      build CONTEXT and not from the location of the Dockerfile. Each of the eight
+#      service images is built from the root with an explicit --file, so a copy of
+#      these rules placed in services/<name>/ would be ignored completely --
+#      present, plausible, and doing nothing. This placement is the only one that
+#      takes effect for those eight builds, and it is the reason the ui and
+#      data-migration images each need their own file at their own context root
+#      rather than inheriting these rules.
 #   2. Assumptions: the three reasons for each exclusion below are secret
 #      exposure, layer contamination and context size, in that order of
 #      importance. Secret exposure is the reason .git and .env* are named first:
@@ -95,13 +110,14 @@
 .env.*
 
 # WHY : Refactoring Rationale: build output is excluded so that what an image
-#       contains is what the image built. The batch image compiles the
-#       unpublished common-lib sibling from source inside the builder; if a
+#       contains is what the image built. Every service image compiles the
+#       unpublished common-lib sibling from source inside its builder; if a
 #       host-built services/*/target/ were transferred, a stale jar could be
 #       present at a path the build expects to create, and the resulting image
 #       would depend on the state of the machine that ran the build rather than
 #       on the commit. That failure is invisible on the machine that produced it
-#       and reproducible nowhere else.
+#       and reproducible nowhere else, and it would be invisible eight times over
+#       rather than once.
 target
 **/target
 build

@@ -30,9 +30,57 @@
  * without the version cannot express "change it only if nobody else did", so the service refuses one.
  */
 
-import { getApiClient } from './client';
-import { requestPath } from './types';
-import type { ContractOperation, PageDirection, PageResponse } from './types';
+import { getApiClient, requestPath } from './client';
+import type {
+  ContractOperation,
+  DateEvaluationResult,
+  DisclosureGroupRate,
+  LookupListQuery,
+  MaintenanceActionBatchRequest,
+  MaintenanceActionBatchResponse,
+  PageResponse,
+  PhoneAreaCodeListQuery,
+  ReferenceListQuery,
+  TransactionCategory,
+  TransactionCategoryCreateRequest,
+  TransactionCategoryReplaceRequest,
+  TransactionType,
+  TransactionTypeCreateRequest,
+  TransactionTypeReplaceRequest,
+  UsPhoneAreaCode,
+  UsState,
+  UsStateZipPrefix,
+} from './types';
+
+/*
+ * WHY : Refactoring Rationale: the reference wire shapes are RE-EXPORTED from ./types rather than
+ *       declared here, so every consumer's import path is unchanged while each shape has one definition.
+ */
+export type {
+  PhoneAreaCodeClass,
+  TransactionType,
+  TransactionTypeCreateRequest,
+  TransactionTypeReplaceRequest,
+  TransactionCategory,
+  TransactionCategoryCreateRequest,
+  TransactionCategoryReplaceRequest,
+  DisclosureGroupRate,
+  UsPhoneAreaCode,
+  UsState,
+  UsStateZipPrefix,
+  DateMask,
+  DateFeedbackCode,
+  DateEvaluationResult,
+  MaintenanceActionType,
+  MaintenanceAction,
+  MaintenanceActionBatchRequest,
+  MaintenanceActionOutcomeState,
+  MaintenanceActionOutcome,
+  MaintenanceActionBatchResponse,
+  ReferenceListQuery,
+  LookupListQuery,
+  PhoneAreaCodeListQuery,
+} from './types';
 
 const LIST_TRANSACTION_TYPES: ContractOperation = {
   method: 'GET',
@@ -176,204 +224,35 @@ export const REFERENCE_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   APPLY_REFERENCE_MAINTENANCE_ACTIONS,
 ];
 
-/**
- * Which class of North American area code a row records.
- *
- * Assumptions: two members, 'G' for a geographic code and 'E' for a non-geographic one, transcribed
- * from the two allow-lists in `app/cpy/CSLKPCDY.cpy`. Address validation admits both but treats them
- * differently, which is why the class is published rather than filtered out at the source.
- */
-export type PhoneAreaCodeClass = 'G' | 'E';
-
 /** One transaction type, with the concurrency token its replace operation requires. */
-export interface TransactionType {
-  readonly typeCd: string;
-  readonly description: string;
-  readonly version: number;
-}
 
 /** The fields a transaction-type creation accepts. */
-export interface TransactionTypeCreateRequest {
-  readonly typeCd: string;
-  readonly description: string;
-}
-
-/**
- * The fields a transaction-type replace accepts.
- *
- * Assumptions: the code is not among them. It addresses the row from the target, so admitting it in
- * the body as well would create a request whose two halves could disagree about which row changes.
- */
-export interface TransactionTypeReplaceRequest {
-  readonly description: string;
-  readonly version: number;
-}
 
 /** One transaction category, keyed by its type and its own code. */
-export interface TransactionCategory {
-  readonly typeCd: string;
-  readonly catCd: string;
-  readonly description: string;
-  readonly version: number;
-}
 
 /** The fields a transaction-category creation accepts. */
-export interface TransactionCategoryCreateRequest {
-  readonly typeCd: string;
-  readonly catCd: string;
-  readonly description: string;
-}
 
 /** The fields a transaction-category replace accepts. */
-export interface TransactionCategoryReplaceRequest {
-  readonly description: string;
-  readonly version: number;
-}
-
-/**
- * One disclosure-group interest rate, and which group actually supplied it.
- *
- * Assumptions: three members describe the fallback rather than one, and that is the point of the
- * shape. `app/cbl/CBACT04C.cbl` L415 to L441 falls back to the group literally named `DEFAULT` when the
- * account's own group has no row, and a response reporting only the rate would leave a caller unable to
- * tell a configured rate from a defaulted one. `requestedAcctGroupId`, `appliedAcctGroupId` and
- * `defaultGroupApplied` make that distinction explicit.
- */
-export interface DisclosureGroupRate {
-  readonly requestedAcctGroupId: string;
-  readonly appliedAcctGroupId: string;
-  readonly tranTypeCd: string;
-  readonly tranCatCd: string;
-  readonly interestRate: string;
-  readonly defaultGroupApplied: boolean;
-}
 
 /** One North American area code and its class. */
-export interface UsPhoneAreaCode {
-  readonly areaCd: string;
-  readonly codeClass: PhoneAreaCodeClass;
-}
 
 /** One two-letter state code. */
-export interface UsState {
-  readonly stateCd: string;
-}
 
 /** One four-character state-and-ZIP-prefix pair. */
-export interface UsStateZipPrefix {
-  readonly stateZipCd: string;
-}
-
-/**
- * Which mask a date is being evaluated against.
- *
- * Assumptions: the two published forms are the hyphenated and the compact one, and the contract
- * accepts any string of up to ten characters for the parameter while defaulting it to the hyphenated
- * form. The union here names the two the service supports, so a screen cannot offer a third by
- * accident, and the parameter type below widens to string for exactly the case where a caller is
- * echoing a mask it received.
- */
-export type DateMask = 'YYYY-MM-DD' | 'YYYYMMDD';
-
-/**
- * Which specific defect a date evaluation found, or that it found none.
- *
- * Assumptions: ten members, transcribed from the feedback codes `app/cbl/CSUTLDTC.cbl` and its two
- * companion copybooks distinguish. They are carried across individually rather than collapsed into a
- * boolean because the baseline's reply is a structured triple -- a severity, a message number and
- * message text -- and a per-field error must be able to name which part of a date was wrong.
- */
-export type DateFeedbackCode =
-  | 'INVALID_DATE'
-  | 'INSUFFICIENT_DATA'
-  | 'BAD_DATE_VALUE'
-  | 'INVALID_ERA'
-  | 'UNSUPP_RANGE'
-  | 'INVALID_MONTH'
-  | 'BAD_PIC_STRING'
-  | 'NON_NUMERIC_DATA'
-  | 'YEAR_IN_ERA_ZERO'
-  | 'OTHER';
 
 /** The verdict on one date, with the structured feedback the baseline's date utility returns. */
-export interface DateEvaluationResult {
-  readonly feedbackCode: DateFeedbackCode;
-  readonly severity: number;
-  readonly messageNumber: number;
-  readonly verdict: string;
-  readonly date: string;
-  readonly mask: string;
-}
 
 /** Which change one batch maintenance entry requests. */
-export type MaintenanceActionType = 'INSERT' | 'UPDATE' | 'DELETE';
-
-/**
- * One entry of a batch reference update.
- *
- * Assumptions: `description` is nullable because a delete entry carries none. Requiring it would make
- * a caller invent a value for a row it is removing, and the service would then have to ignore it.
- */
-export interface MaintenanceAction {
-  readonly action: MaintenanceActionType;
-  readonly typeCd: string;
-  readonly description?: string | null | undefined;
-}
 
 /** A batch of reference maintenance entries, applied in the order given. */
-export interface MaintenanceActionBatchRequest {
-  readonly actions: readonly MaintenanceAction[];
-}
 
 /** How one batch maintenance entry resolved. */
-export type MaintenanceActionOutcomeState = 'APPLIED' | 'NO_ROWS_FOUND' | 'FAILED';
-
-/**
- * The outcome of one batch maintenance entry, positioned so it can be matched to its request entry.
- *
- * Assumptions: `position` is zero-based and is echoed rather than inferred from array order, so a
- * caller can match an outcome to its entry even if a future service answered out of order.
- */
-export interface MaintenanceActionOutcome {
-  readonly position: number;
-  readonly action: MaintenanceActionType;
-  readonly typeCd: string;
-  readonly outcome: MaintenanceActionOutcomeState;
-  readonly applied: boolean;
-  readonly message: string;
-}
-
-/**
- * The outcome of a whole batch, with the aggregate return code the baseline job would have set.
- *
- * Assumptions: `returnCode` is 0 or 4 and 4 is a WARNING rather than a failure, matching the
- * mainframe condition-code convention the reference batch program uses: a row that matched nothing is
- * a soft outcome, not an error. A caller treating 4 as a failure would report a successful run as
- * broken.
- */
-export interface MaintenanceActionBatchResponse {
-  readonly outcomes: readonly MaintenanceActionOutcome[];
-  readonly returnCode: number;
-}
 
 /** Criteria the transaction-type and transaction-category browses may narrow by. */
-export interface ReferenceListQuery {
-  readonly typeCode?: string | undefined;
-  readonly description?: string | undefined;
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
 
 /** Criteria a keyset browse over a seeded lookup table is read with. */
-export interface LookupListQuery {
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
 
 /** Criteria the area-code browse may narrow by. */
-export interface PhoneAreaCodeListQuery extends LookupListQuery {
-  readonly codeClass?: PhoneAreaCodeClass | undefined;
-}
 
 /**
  * Assembles the paging parameters shared by every browse in this module.
@@ -685,15 +564,15 @@ export async function getUsStateZipPrefix(stateZipCd: string): Promise<UsStateZi
  * Assumptions: the date travels as a query parameter, which is safe here in a way it would not be for
  * a card number: a calendar date a user typed into a form field is not a secret, and the operation is
  * a pure read that a browser may legitimately cache and repeat.
- * Assumptions: the mask parameter is typed as a plain string and NOT as {@link DateMask}, even though
- * that union names the two forms the service supports. The contract accepts any string of up to ten
+ * Assumptions: the mask parameter is typed as a plain string and NOT as the `DateMask` union declared
+ * in `./types`, even though that union names the two forms the service supports. The contract accepts any string of up to ten
  * characters here, and the one legitimate caller of the wider type is a screen echoing back a mask it
  * received in a previous result -- narrowing the parameter would make that round trip need a cast.
  * Writing it as `DateMask | string` was the first attempt and is rejected: a union of a literal type
  * with `string` collapses to `string`, so it reads as a constraint while imposing none, and the lint
  * rule that forbids it is right to.
  * @param {string} date - Eight or ten characters of date text, matching the mask.
- * @param {string} [mask] - The mask to read it against, normally one of the two {@link DateMask} forms.
+ * @param {string} [mask] - The mask to read it against, normally one of the two `DateMask` forms.
  *   Omit it for the hyphenated form the contract defaults to.
  * @returns {Promise<DateEvaluationResult>} The verdict and the structured feedback behind it.
  * @throws {Error} If the request fails.

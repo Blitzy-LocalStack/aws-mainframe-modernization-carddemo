@@ -1760,7 +1760,7 @@ final class ReportingDtoMapperTest {
         //       reached three service contracts before anything failed. Exact equality is what makes an
         //       added member fail here, in the module that publishes a page, rather than in review.
         assertThat(envelopeComponents)
-                .containsExactly("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
+                .containsExactly("items", "firstKey", "lastKey", "hasNext");
         assertThat(PageResponse.empty().items()).isEmpty();
         assertThat(PageResponse.empty().firstKey()).isNull();
         assertThat(PageResponse.empty().lastKey()).isNull();
@@ -1796,8 +1796,7 @@ final class ReportingDtoMapperTest {
                                         rows,
                                         TRANSACTION_IDENTIFIER,
                                         TRANSACTION_IDENTIFIER,
-                                        true,
-                                        false))
+                                        true))
                 .isInstanceOf(IllegalArgumentException.class)
                 // WHY : Assumptions: the type alone does not identify WHICH guard fired. The envelope
                 //       validates five components and its factory could equally reject a self

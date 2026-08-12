@@ -27,9 +27,16 @@ The two loaders
     ``TARGETS`` registry declares one target per base-master record, mapping each decoded
     field to the column the owning service named for it; that mapping is declared rather than
     derived, because the transformation is not mechanical, and it is where the baseline's three
-    misspelled field names are corrected. It is the ONLY module in this distribution permitted
-    to import ``psycopg``, and it does so inside the single function that opens a connection
-    rather than at module scope.
+    misspelled field names are corrected. It is the only module on the LOAD path permitted to
+    import ``psycopg``, and it does so inside the single function that opens a connection rather
+    than at module scope. One other module in the distribution imports the driver --
+    :mod:`carddemo_migration.credentials`, in ``_connect`` and ``_sql_module`` -- and that is
+    stated here rather than glossed over, because "``aurora`` is the sole owner" was written
+    before the credential step existed and was false the moment it landed. The two sites are not
+    duplication: ``aurora`` connects as a per-schema LOGIN role and verifies which one, whereas
+    the credential step connects as the cluster's MASTER user in order to run ``ALTER ROLE``, and
+    routing the second through the first would require ``aurora.connect`` to accept the very
+    principal its role check exists to refuse.
 ``s3_stage``
     Stages a dataset generation into versioned object storage beneath
     ``<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/``, which is the migrated form of
@@ -80,22 +87,31 @@ Layering guarantees
 These are properties other modules, and the tests that check them, are entitled to rely on.
 They are stated here because this is the boundary at which they hold.
 
-* **Nothing here declares a layout.** No record offset, byte length, key geometry, record
-  length, dataset name or field width appears in this file or is re-declared by the modules
-  below. Every one of them lives exactly once, in
+* **Nothing here declares byte geometry.** No record offset, byte length, key geometry, record
+  length or field width appears in this file or is re-declared by the modules below. Every one
+  of them lives exactly once, in
   :mod:`carddemo_migration.copybook.layouts`, and is imported from there. That single copy is
   the Python analogue of compiling every COBOL program against one copybook include path, and
   it is why two loaders cannot drift apart on the same record: there is one place to change
-  and one place to review.
+  and one place to review. Dataset and table NAMES are a different matter and do appear below,
+  necessarily: ``aurora.TARGETS`` is keyed by record name and names each target table, and
+  ``s3_stage.GENERATION_FAMILIES`` names each family's path segments. Those are the mappings
+  this subpackage exists to declare -- the guarantee is about geometry, not about names, and
+  saying otherwise would have made a true and checkable claim read as a false one.
 * **No endpoint, credential, connection string, bucket name, ARN or account identifier appears
   in source.** Every one is obtained from :mod:`carddemo_migration.config`, which resolves them
   when a command runs rather than when a module is imported, reading them from AWS Systems
   Manager Parameter Store and Secrets Manager. That timing is what makes a checkout of this
   repository inert on its own, and it is what turns "nothing sensitive committed" from a review
   habit into a structural property of the tree.
-* **The third-party clients are confined by module.** ``psycopg`` belongs solely to ``aurora``;
-  the AWS SDK is reached only along the ``s3_stage`` path, and only through ``config``. Neither
-  leaks into ``carddemo_migration.copybook``, which is contractually standard-library-only so
+* **The third-party clients are confined, and the confinement is stated exactly.** No module
+  anywhere in this distribution imports ``psycopg`` at MODULE scope; exactly two import it at
+  all, each inside the one function that needs it -- ``aurora.connect`` on the load path, and
+  ``credentials._connect``/``credentials._sql_module`` on the credential-application path. The
+  AWS SDK is likewise imported at no module scope: it is reached only through ``config``, which
+  imports it inside a function, and ``s3_stage`` does not import it at all. Neither client
+  leaks into ``carddemo_migration.copybook`` or ``carddemo_migration.readers``, which are
+  contractually standard-library-only so
   that the codecs stay exercisable against known-answer vectors on a bare checkout with no
   driver installed, no SDK installed and no credential configured. A codec defect is the one
   class of defect in this package that is silent -- it produces plausible numbers that are
@@ -129,8 +145,10 @@ spelling every existing consumer already uses, so curating withdraws nothing tha
 before.
 
 ``LOADER_MODULES``
-    The three module names in this subpackage, in dependency order rather than alphabetical
-    order: ``aurora``, ``s3_stage``, ``protected_columns``.
+    An INVENTORY of the three module names in this subpackage, in alphabetical order:
+    ``aurora``, ``protected_columns``, ``s3_stage``. It answers "which modules are here", not
+    "in what order do they run" -- there is no such order to state, as the next paragraph
+    records.
 ``aurora``, ``s3_stage``, ``protected_columns``
     The modules themselves, each reachable by attribute under its own stable name.
 
@@ -330,12 +348,18 @@ __all__ = [
     "target_names",
 ]
 
-# WHY : Assumptions: the three are published in DEPENDENCY order rather than alphabetically,
-#   because the order carries information a reader needs: `aurora` is the load, `s3_stage` is
-#   the staging that precedes a load from object storage, and `protected_columns` is neither --
-#   it is the cipher supplier `aurora` reaches for on two of its eleven records. Sorting the
-#   tuple would put the one module that is not a loader in the middle of the two that are.
-LOADER_MODULES: Final[tuple[str, ...]] = ("aurora", "s3_stage", "protected_columns")
+# WHY : Refactoring Rationale: this tuple is an INVENTORY in ALPHABETICAL order, and it was
+#   previously documented as "dependency order" while being neither that nor workflow order.
+#   Dependency order would be `protected_columns`, then `aurora` which imports it, with
+#   `s3_stage` unordered against both since nothing here imports it; workflow order would be
+#   `s3_stage` first, because a dataset is staged before it is loaded. The old tuple was a third
+#   arrangement matching neither, so a reader deriving either fact from it would have been wrong.
+# WHY : Trade-offs: alphabetical order is chosen because the tuple answers a MEMBERSHIP question
+#   -- which modules does this subpackage contain -- and any meaning-bearing order invites a
+#   reader to draw a conclusion the tuple cannot support. The two real orders are stated in prose
+#   in the module docstring, where they can be qualified; a tuple cannot carry "unordered against
+#   both".
+LOADER_MODULES: Final[tuple[str, ...]] = ("aurora", "protected_columns", "s3_stage")
 
 # WHY : Trade-offs: the values are (module, attribute) PAIRS rather than the objects themselves,
 #   so this constant is inert and building it imports nothing at all. That is the whole
@@ -427,13 +451,26 @@ def __getattr__(name: str) -> Any:  # noqa: ANN401 -- the surface spans modules,
     #   forwarded every name to importlib would turn a typo into an ImportError from deep inside
     #   the import machinery, and would make any module that happened to sit in this directory
     #   reachable as part of the public surface.
-    # WHY : Assumptions: Python calls this only after ordinary attribute lookup has already
-    #   failed, so a name already resolved -- by this hook or by an explicit `from ... import`
-    #   -- is found in the package namespace and never reaches here. That is what makes each
-    #   import happen at most once without any cache being written in this file.
+    # WHY : Refactoring Rationale: the resolved object is BOUND into the package namespace before
+    #   it is returned, and it previously was not. The comment here used to claim that Python
+    #   calling this hook only after ordinary lookup fails was enough to make each resolution
+    #   happen once -- which is true of the MODULE branch above, because `import_module` binds the
+    #   submodule as an attribute of this package as a side effect, and false of this branch,
+    #   because nothing bound the class or function it returns. Every subsequent access to a
+    #   re-exported entry point therefore re-entered this hook and re-ran `import_module` and
+    #   `getattr`. Caching restores the property the comment described: at most one resolution per
+    #   name, per process.
+    # WHY : Assumptions: `globals()` is the package's own module namespace, so writing there is
+    #   exactly the binding an eager `from ... import` would have produced -- the same name, the
+    #   same object, reached by ordinary attribute lookup thereafter, so this hook is not called
+    #   again for it. The alternative, a private dict consulted at the top of this function, would
+    #   keep every access paying a hook call and would leave `vars(package)` disagreeing with what
+    #   the package resolves.
     if name in _EXPORTS:
         module_name, attribute = _EXPORTS[name]
-        return getattr(importlib.import_module(f"{__name__}.{module_name}"), attribute)
+        resolved = getattr(importlib.import_module(f"{__name__}.{module_name}"), attribute)
+        globals()[name] = resolved
+        return resolved
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -459,9 +496,9 @@ def __dir__() -> list[str]:
     ------
     None
     """
-    # WHY : Assumptions: dir() is overridden for the same reason the reader and verification
-    #   entry points override it -- a lazily resolved name is absent from this package's
-    #   namespace until it is touched, so the default implementation would report a surface that
-    #   GROWS as a session proceeds and would differ between two processes that had run
-    #   different commands.
+    # WHY : Assumptions: dir() is overridden because a lazily resolved name is absent from this
+    #   package's namespace until it is touched -- and, now that resolution CACHES into that
+    #   namespace, the default implementation would report a surface that GROWS as a session
+    #   proceeds and would differ between two processes that had run different commands. Deriving
+    #   the answer from `__all__` alone makes it the documented contract in every process.
     return sorted(__all__)

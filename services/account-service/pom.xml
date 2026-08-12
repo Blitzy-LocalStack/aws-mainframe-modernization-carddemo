@@ -187,14 +187,12 @@
               card-service, transaction-service, reference-service,
               batch-service, authorization-service or reporting-service.
               Importing another service's domain package is forbidden and is to
-              be enforced mechanically rather than by review, by the rule set
-              authored at
+              enforced mechanically rather than by review, by the rule set at
               services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
-              and re-run per module against its own classes. That class is
-              authored at a later index of the same plan and does not exist yet,
-              so at this checkpoint the boundary is carried by review; the
-              test-scoped ArchUnit declaration further down is what lets this
-              module run its own copy when it lands.
+              and re-run per module against its own classes. The test-scoped
+              ArchUnit declaration further down is what lets this module run its
+              own copy of that rule set, so a forbidden import fails this
+              module's build rather than a reviewer's attention.
         -->
         <dependency>
             <groupId>com.carddemo</groupId>
@@ -554,8 +552,7 @@
               the test phase and Failsafe runs *RepositoryIT in integration
               test and verify, writing to target/surefire-reports and
               target/failsafe-reports. Those two directories are collected by
-              .github/workflows/services-ci.yml, itself authored at a later index
-              of the same plan, and must never be relocated.
+              .github/workflows/services-ci.yml and must never be relocated.
         -->
 
         <!--
@@ -733,6 +730,37 @@
     -->
 
     <build>
+        <!--
+        WHY : Assumptions: this pins the build output to target/account-service.jar
+              instead of target/account-service-1.0.0-SNAPSHOT.jar, and
+              services/account-service/Dockerfile copies that exact literal path.
+              The name is a CONTRACT between this file and that Dockerfile, so
+              neither may change it alone.
+        WHY : Refactoring Rationale: the Dockerfile previously copied the version
+              suffixed name, so the version this POM inherits from the parent was
+              written into a second file that has no way to read it. A version bump
+              in services/pom.xml, a routine edit that touches nothing here, then
+              broke this module's image build at its LAST instruction, after the
+              whole reactor had already compiled, which is the most expensive point
+              at which to discover a wrong path, and the error read as a missing
+              artifact rather than as a stale literal. services/card-service/pom.xml
+              already set this element for exactly that reason and its Dockerfile
+              already copied the unsuffixed name, so the two modules are no longer
+              inconsistent about which name is correct.
+        WHY : Alternatives Considered: leaving the version in the Dockerfile and
+              matching the jar with a wildcard. Rejected because a wildcard keeps
+              working right up until target holds two jars, for instance after a
+              version change with no intervening clean, and then copies the wrong
+              one with no error at all, which is a worse failure than the one being
+              fixed because it ships.
+        WHY : Alternatives Considered: passing the version into the build as a
+              Docker build argument. Rejected because it moves the coupling rather
+              than removing it: the argument still has to be supplied correctly by
+              every caller, and CI, a local build and a developer's ad hoc
+              docker build are three callers that would each have to agree.
+        -->
+        <finalName>account-service</finalName>
+
         <plugins>
             <!--
             WHY : Assumptions: the repackage goal rewrites the plain library

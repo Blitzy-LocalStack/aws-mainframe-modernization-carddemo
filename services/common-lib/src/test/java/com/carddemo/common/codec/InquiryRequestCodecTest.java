@@ -214,19 +214,112 @@ class InquiryRequestCodecTest {
                 .hasMessageContaining("WS-KEY");
     }
 
+    // WHY : Refactoring Rationale: this case asserted that the rendering CONTAINED the key, on the reading
+    //       that an account identifier is safe because the system calls it internal. The observability
+    //       contract requires an identifier to be omitted from a durable field rather than shortened, so
+    //       the assertion is now an ABSENCE. The function code moved the same way for a different reason:
+    //       four characters of unconstrained wire content reaching a journal line through a record's own
+    //       rendering is CWE-117 by the shortest route available.
     /**
-     * Verifies the diagnostic rendering omits the filler.
+     * Verifies the diagnostic rendering omits the filler, the key and the raw function code.
      *
      * <p>Assumptions: the filler is 985 characters neither flow reads and a producer may put anything in it,
-     * so rendering it would place unexamined wire content into a log line.</p>
+     * so rendering it would place unexamined wire content into a log line. The same is true of the four
+     * characters of the function field, and the key is an account identifier.</p>
      */
     @Test
-    @DisplayName("the diagnostic rendering omits the filler")
+    @DisplayName("the diagnostic rendering omits the filler, the key and the raw function")
     void theRenderingOmitsTheFiller() {
         String rendered = InquiryRequestCodec.decode(
-                "INQA00000000123" + "SECRET".repeat(100)).toString();
+                "FRGE00000000123" + "SECRET".repeat(100)).toString();
 
-        assertThat(rendered).contains("INQA").contains("00000000123").doesNotContain("SECRET");
+        assertThat(rendered)
+                .doesNotContain("SECRET")
+                .doesNotContain("00000000123")
+                .doesNotContain("FRGE")
+                .contains(InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED)
+                .contains("keyUsable=true");
+    }
+
+    // WHY : Assumptions: the classification is asserted to be one of the three declared tokens for EVERY
+    //       input tried, including inputs carrying a line terminator and a forged event prefix. Asserting
+    //       only that the forged text is absent would pass for a method that returned the empty string, so
+    //       the membership assertion is what establishes that a caller always gets something to log.
+    /**
+     * Verifies the function classification is closed and never echoes wire content.
+     */
+    @Test
+    @DisplayName("the function classification is closed and echoes no wire content")
+    void theFunctionClassificationIsClosed() {
+        String forged = "\nev";
+        for (String function : java.util.List.of("INQA", "inqa", "    ", " INQ", "XXXX", forged, "\u0000AB\u0000")) {
+            String label = InquiryRequestCodec
+                    .decode(function + "00000000001").functionLabel();
+            assertThat(label)
+                    .as("the label for %s must be one of the three declared tokens",
+                            function.replace("\n", "\\n").replace("\u0000", "\\0"))
+                    .isIn(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY,
+                            InquiryRequestCodec.FUNCTION_LABEL_BLANK,
+                            InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED);
+        }
+
+        assertThat(InquiryRequestCodec.decode("INQA00000000001").functionLabel())
+                .isEqualTo(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY);
+        assertThat(InquiryRequestCodec.decode("    00000000001").functionLabel())
+                .isEqualTo(InquiryRequestCodec.FUNCTION_LABEL_BLANK);
+        assertThat(InquiryRequestCodec.decode("inqa00000000001").functionLabel())
+                .as("the reference comparison is case sensitive, so a lower-case code is not the literal")
+                .isEqualTo(InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED);
+    }
+
+    // WHY : Assumptions: the diagnostic is asserted by OFFSET and not by content, because a consumer of the
+    //       error sink locates every value positionally. A case that only checked the fields were present
+    //       would pass for a buffer whose gaps had moved, which is the one way this contract breaks.
+    /**
+     * Verifies the error diagnostic places every field at the offset the reference group declares.
+     */
+    @Test
+    @DisplayName("the error diagnostic places every field at its declared offset")
+    void theErrorDiagnosticIsPositional() {
+        String composed = InquiryRequestCodec.errorDiagnostic(
+                "4000-PROCESS-REQUEST-REPLY", "ERROR WHILE READING ACCTFILE", "carddemo-error", "detail");
+
+        int messageAt = InquiryRequestCodec.DIAGNOSTIC_PARAGRAPH_WIDTH
+                + InquiryRequestCodec.DIAGNOSTIC_GAP_WIDTH;
+        int queueAt = InquiryRequestCodec.DIAGNOSTIC_PREFIX_LENGTH
+                - InquiryRequestCodec.DIAGNOSTIC_QUEUE_NAME_WIDTH;
+
+        assertThat(composed.substring(0, InquiryRequestCodec.DIAGNOSTIC_PARAGRAPH_WIDTH))
+                .as("a 26-character paragraph name arrives as its leading 25")
+                .isEqualTo("4000-PROCESS-REQUEST-REPL");
+        assertThat(composed.substring(messageAt,
+                messageAt + InquiryRequestCodec.DIAGNOSTIC_MESSAGE_WIDTH))
+                .as("a 28-character return message arrives as its leading 25")
+                .isEqualTo("ERROR WHILE READING ACCTF");
+        assertThat(composed.substring(queueAt,
+                queueAt + InquiryRequestCodec.DIAGNOSTIC_QUEUE_NAME_WIDTH).trim())
+                .isEqualTo("carddemo-error");
+        assertThat(composed.substring(InquiryRequestCodec.DIAGNOSTIC_PREFIX_LENGTH))
+                .as("the failure detail occupies space the baseline leaves blank")
+                .isEqualTo("detail");
+        assertThat(InquiryRequestCodec.frame(composed))
+                .hasSize(InquiryRequestCodec.MESSAGE_LENGTH);
+    }
+
+    // WHY : Assumptions: an over-long detail is asserted to be TRUNCATED rather than to raise, because the
+    //       raise would happen on the reporting path and would replace the fault being reported.
+    /**
+     * Verifies an over-long failure detail is truncated to what the message length leaves.
+     */
+    @Test
+    @DisplayName("an over-long failure detail is truncated rather than refused")
+    void anOverLongDetailIsTruncated() {
+        String composed = InquiryRequestCodec.errorDiagnostic(null, null, null,
+                "x".repeat(InquiryRequestCodec.MESSAGE_LENGTH * 2));
+
+        assertThat(composed).hasSize(InquiryRequestCodec.MESSAGE_LENGTH);
+        assertThat(InquiryRequestCodec.frame(composed))
+                .hasSize(InquiryRequestCodec.MESSAGE_LENGTH);
     }
 
     /**

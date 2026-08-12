@@ -38,6 +38,38 @@ import java.util.Objects;
  * decimal places and no currency, so wrapping it in a money type would assert a scale it does not
  * have; the contract bounds it as an integer between -9999 and 9999 accordingly.
  *
+ * <h2>Sixteen components are segment columns and four are composed customer display values</h2>
+ *
+ * <p>Refactoring Rationale: the last four components were emitted by this record while the published
+ * {@code PendingAuthSummary} schema declared only the sixteen above them AND declared
+ * {@code additionalProperties: false}. A closed schema that omits a member the server emits is not a
+ * documentation gap: every response this operation produced was rejected by the document that described
+ * it, so a client validating responses refused a body the server considered correct and a client that did
+ * not validate accepted four members it was never told about. The schema now declares all twenty, and
+ * {@code config/AuthorizationApiContractTest} compares the two sets in both directions so they cannot
+ * diverge again.
+ *
+ * <p>Assumptions: the four are published rather than removed because the reference screen genuinely
+ * renders them. {@code app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy} declares {@code CNAMEI} at
+ * L66, {@code ADDR001I} at L78, {@code ADDR002I} at L90 and {@code PHONE1I} at L96, and
+ * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} composes all four at L757 through L779.
+ * Deleting them to satisfy the closed schema would have produced a document that agreed with a screen
+ * missing four of its fields.
+ *
+ * <p>Assumptions: the four are COMPOSED IN THIS CONTEXT and not by the account context, and the earlier
+ * statement that the account context composed them was wrong. That context publishes nine STORED customer
+ * columns -- three name components, three address lines, a state code and an unnarrowed ten-character
+ * postal code -- and {@code service/RestAccountContextClient#customerDisplay(long)} composes these four
+ * out of them, reproducing the reference statement for statement. The distinction matters because the
+ * composition carries reference behaviour a reader would otherwise take for a defect here: a blank middle
+ * name still contributes its single position, so the name holds three spaces in the middle, and each value
+ * truncates at the map width rather than overflowing.
+ *
+ * <p>Assumptions: all four are nullable and the schema publishes none of them as required, while every
+ * segment column above is required. A customer the account context no longer holds yields a summary whose
+ * sixteen columns are all present and whose four display values are absent, and a required display member
+ * would turn a neighbouring context's missing row into a failure of this response.
+ *
  * @param accountId the eleven-digit account this summary belongs to, never {@code null}
  * @param customerId the nine-digit customer that owns the account, never {@code null}
  * @param authStatus the one-character authorization status of the account, or {@code null} when the
@@ -57,11 +89,16 @@ import java.util.Objects;
  *     {@code null}
  * @param approvedAuthAmt the total amount approved against the account, never {@code null}
  * @param declinedAuthAmt the total amount declined against the account, never {@code null}
- * @param customerName the customer's name as the reference screen displays it, composed by the account
- *     context; {@code null} when no customer could be resolved for the identifier the segment names
- * @param addressLine1 the first composed address line; {@code null} on the same terms
- * @param addressLine2 the second composed address line; {@code null} on the same terms
- * @param phoneNumber1 the customer's first telephone number; {@code null} on the same terms
+ * @param customerName the cardholder's name as the reference screen composes it at
+ *     {@code COPAUS0C.cbl} L758 to L764, bounded at the map's twenty-five characters; {@code null} when no
+ *     customer could be resolved for the identifier the segment names
+ * @param addressLine1 the first composed address line, {@code COPAUS0C.cbl} L766 to L770, bounded at
+ *     twenty-five characters; {@code null} on the same terms
+ * @param addressLine2 the second composed address line, {@code COPAUS0C.cbl} L771 to L777 -- the third
+ *     stored address line, the state code and the leading five postal-code characters, NOT the second
+ *     stored address line -- bounded at twenty-five characters; {@code null} on the same terms
+ * @param phoneNumber1 the cardholder's primary telephone number narrowed to the map's thirteen characters
+ *     from the stored fifteen, {@code COPAUS0C.cbl} L779; {@code null} on the same terms
  */
 public record PendingAuthSummaryView(
         String accountId,

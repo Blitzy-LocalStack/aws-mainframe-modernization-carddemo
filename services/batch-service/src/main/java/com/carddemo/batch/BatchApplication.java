@@ -1,11 +1,14 @@
 package com.carddemo.batch;
 
 import com.carddemo.batch.config.BatchConfig;
+import com.carddemo.batch.dto.BatchErrorEvent;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchJobParameters;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
+import com.carddemo.batch.service.BatchErrorPublisher;
 import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -21,6 +24,7 @@ import org.springframework.batch.core.job.parameters.JobParameters;
 import org.springframework.batch.core.job.parameters.JobParametersBuilder;
 import org.springframework.batch.core.launch.JobInstanceAlreadyCompleteException;
 import org.springframework.batch.core.launch.JobOperator;
+import org.springframework.batch.core.step.StepExecution;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -38,24 +42,34 @@ import org.springframework.context.ConfigurableApplicationContext;
  * therefore stated in full below rather than left to be inferred from the code, because an ambiguity
  * here propagates outward into infrastructure that this repository's Java cannot correct.</p>
  *
- * <h2>What is not yet runnable, stated before either contract</h2>
+ * <h2>How a token becomes a running job, stated before either contract</h2>
  *
- * <p>Assumptions: <strong>no {@link Job} bean exists in this module yet, so no {@code --job=} value
- * can currently complete a run.</strong> This class is authored ahead of the seven jobs it launches:
- * {@link #JOB_NAMES} is the argument contract those beans must satisfy, not an inventory of beans
- * that exist. Both contracts below are therefore TARGET contracts, and the two things that already
- * hold today are worth separating from the two that do not. What holds: argument parsing, validation
- * and the usage diagnostic run without a database, a credential or a job bean, and
- * {@link #resolveJob} fails FAST and BY NAME -- it raises with the requested token and the registry's
- * actual contents, which for an empty registry is an empty list, so the failure reads as "no job is
- * registered" rather than as a null dereference or a hung task. What does not hold: an invocation
- * with a valid token and a valid business date reaches that failure rather than running work, and
- * the exit-status contract below cannot be exercised end to end until the beans land. Trade-offs:
- * publishing the closed token set before the beans exist is deliberate -- the orchestration state
- * machine and each job bean are authored against it, so it has to be settled first -- and the cost
- * is exactly this paragraph, which a reader needs in order to tell a not-yet-authored bean from a
- * misspelled one. Each job bean must register under its token EXACTLY, because the token is an
- * orchestration contract rather than an internal label.</p>
+ * <p>Assumptions: <strong>the module registers exactly seven {@link Job} beans, one for each token in
+ * {@link #JOB_NAMES}.</strong> {@code com.carddemo.batch.job} holds seven {@code @Configuration}
+ * classes, and each contributes exactly one {@code @Bean} method returning a {@code Job} whose name
+ * comes from the matching {@link BatchJobName} constant rather than from a literal. {@link #resolveJob}
+ * therefore LOOKS A TOKEN UP rather than switching on it: it iterates the registered {@code Job}
+ * beans, compares each bean's own {@code getName()} against the already-validated argument, and when
+ * none matches raises with both the requested token and the registry's sorted contents.</p>
+ *
+ * <p>WHY the bean's NAME rather than its bean identifier is the contract: the identifier is a Java
+ * detail a refactor may rename freely, while the token is published outward to the orchestration
+ * definition and to every runbook that starts a task. Binding the lookup to the name keeps those two
+ * independent, and the pairing is ASSERTED rather than assumed -- the module's job-registration
+ * census builds a context over the seven configurations and fails the build when a declared token has
+ * no bean, when a bean answers to an undeclared name, or when two beans answer to one name.</p>
+ *
+ * <p>Assumptions: registration is not the same as a completed run, and what remains is external to
+ * this module rather than absent from it. A run needs the {@code ledger} and {@code account} schemas,
+ * the seeded {@code 'DEFAULT'} disclosure-group rows and the cross-schema grants that other contexts
+ * own; with no reachable database the process fails at startup mapping validation, naming the missing
+ * table. Argument handling is the one exception and runs with no database, no credential and no
+ * application context at all, because {@link #parseArguments} is called BEFORE the context is
+ * started -- which is why a malformed command line costs a usage diagnostic rather than a connection
+ * attempt. Trade-offs: publishing the closed token set as a constant here, instead of deriving it
+ * from the registered beans at run time, is what keeps that pre-context rejection possible and keeps
+ * a misspelled token distinguishable from an unregistered one; the accepted cost is the census test
+ * above, which exists so the two lists cannot drift apart unnoticed.</p>
  *
  * <h2>Contract one: the argument contract</h2>
  *
@@ -289,9 +303,10 @@ public class BatchApplication {
      * unscheduled jobs.
      *
      * <p>Each token is the name a job bean <em>must</em> register under, so this list is
-     * simultaneously the set of accepted arguments and the set of names looked up in the registry. It
-     * is a target contract: no bean carries any of these names yet, and the class-level
-     * documentation states what that does and does not mean for a run.</p>
+     * simultaneously the set of accepted arguments and the set of names looked up in the registry.
+     * All seven are carried by a registered bean today -- one {@code @Configuration} class per token
+     * in {@code com.carddemo.batch.job} -- and the class-level documentation states what a run still
+     * needs from other contexts once the lookup succeeds.</p>
      *
      * <p>Assumptions: the set is closed at seven and the tokens are byte-identical to the names the
      * charter of {@code com.carddemo.batch.job} requires its beans to register under. The
@@ -456,6 +471,24 @@ public class BatchApplication {
      * nothing joins them.</p>
      */
     public static final String RUN_ID_VARIABLE = "CARDDEMO_BATCH_RUN_ID";
+
+    /**
+     * The step name a failure notification carries when no step of the job ever failed.
+     *
+     * <p>Assumptions: a failure raised before any step ran, or outside every step, genuinely has no step
+     * name, and this token says so instead of substituting one that would read as real. The alternative
+     * considered was reusing the job's own token, which is shorter and needs no constant. It was rejected
+     * because the payload's documented use is to join its run identifier and step name to the durable
+     * step ledger row for that pair, and a job token in the step position joins to nothing while looking
+     * exactly like a value that would -- so a reader would conclude the ledger had lost a row. A token
+     * that is obviously not a step name sends the reader to the run's log lines, which is where the
+     * evidence for this class of failure actually is.</p>
+     *
+     * <p>Trade-offs: it is published rather than private so that the test asserting this substitution
+     * compares against the same value the production path emits, which is the same reason the tokens on
+     * the payload record itself are published.</p>
+     */
+    public static final String STEP_NAME_NO_STEP = "(no-step)";
 
     /**
      * The logging-context key the run identifier is published under.
@@ -645,9 +678,32 @@ public class BatchApplication {
             //       raised after the context is running is reported by no framework path, so a
             //       hard-failure tier without a trace would leave the failure-notification state with
             //       nothing to route on.
-            LOG.error("event=batch.job.failed code={} job={} businessDate={} fault={}",
+            // WHY : Refactoring Rationale: the throwable is NOT passed as a trailing argument. The
+            //       facade renders a trailing throwable with its own message, every cause's message and
+            //       the frames, and this is the generic boundary that fires for failures nobody
+            //       anticipated -- so the messages reaching it are composed by whichever library failed
+            //       and their content is unbounded by construction. A driver reports the statement it
+            //       could not run, a parser quotes the token it could not read: either can carry an
+            //       account identifier or a whole record. ThrowableDigest keeps the type chain and the
+            //       frames, which are facts about code and can hold no request value, and drops the
+            //       messages, which are the entire disclosure channel.
+            // WHY : Trade-offs: an operator loses the driver's own explanation of a failure and must
+            //       reproduce it with debug logging raised for the specific package. That is a scoped and
+            //       auditable act; the alternative is that every unanticipated failure logs whatever the
+            //       failing library chose to quote.
+            LOG.error("event=batch.job.failed code={} job={} businessDate={} fault={} failureDigest={}",
                     ERROR_CODE_JOB_FAILED, jobName, businessDate, failure.getClass().getName(),
                     failure);
+            // WHY : Assumptions: this path publishes with the no-step stand-in because it is reached
+            //       when the job could not be STARTED -- an instance already running, parameters the
+            //       job refuses, an instance that is not restartable -- or when a throwable escaped
+            //       outside every step, so there is no step execution to name. The context is tested
+            //       for null rather than assumed present because a startup failure leaves it unset,
+            //       and a startup failure is the one case where there is no producer to publish
+            //       through: nothing has been configured yet.
+            if (context != null) {
+                publishFailureNotification(context, jobName, STEP_NAME_NO_STEP, exitStatus);
+            }
         } catch (Error fatal) {
             // WHY : Refactoring Rationale: an Error is caught SEPARATELY, where a single catch of
             //       Throwable previously covered both. Catching it at all remains necessary and the
@@ -666,6 +722,17 @@ public class BatchApplication {
             //       reported hard failure with an unreported one.
             LOG.error("event=batch.job.fatal code={} job={} businessDate={} fault={}",
                     ERROR_CODE_FATAL, jobName, businessDate, fatal.getClass().getName(), fatal);
+            // WHY : Assumptions: NO failure notification is published on this path, and the omission is
+            //       deliberate rather than an oversight in the branch above. An Error means the RUNTIME
+            //       failed -- exhausted memory, a linkage fault, a stack overflow -- so the same
+            //       reasoning that keeps the framework's exit helper off this path keeps a network call
+            //       off it: after an Error the runtime may be unable to allocate the buffers a send
+            //       needs, and an attempt that itself failed would add a second unrelated fault to the
+            //       one record an operator has. Trade-offs: the cost is that the sink carries no message
+            //       for the most severe class of failure. It is accepted because the exit status still
+            //       reports the hard tier, which is the channel the orchestrator's catch route reads, and
+            //       because this branch's own log line names the fatal code that distinguishes a runtime
+            //       failure from a job failure.
             return clearContextAndReturn(exitStatus);
         }
         if (context == null) {
@@ -789,6 +856,12 @@ public class BatchApplication {
             JobExecution execution = operator.start(job, parameters);
             int exitStatus = exitStatusOf(execution);
             logJobOutcome(jobName, businessDate, execution, exitStatus);
+            // WHY : Assumptions: the notification is published from HERE, where the execution is still
+            //       in hand, because this is the only point at which the name of the step that actually
+            //       failed can be read. The caller sees the exit status alone, so a notification
+            //       published there would have to substitute a stand-in for every failure rather than
+            //       only for the ones with no step.
+            publishFailureNotification(context, jobName, failingStepNameOf(execution), exitStatus);
             return exitStatus;
         } catch (JobInstanceAlreadyCompleteException alreadyDone) {
             // WHY : Assumptions: a repeat of a business date that already completed is a no-op that
@@ -797,15 +870,24 @@ public class BatchApplication {
             //       so a state that had in fact succeeded before the failure downstream of it gets
             //       invoked a second time. Reporting a hard failure there would fail the chain on a
             //       step whose work is already committed and would make redrive unusable.
-            // WHY : Trade-offs: this branch is the ONLY restart authority currently operative, and the
-            //       granularity it offers is the business date rather than the step. The finer-grained
-            //       run ledger this module carries -- BatchStepLedger over batch.batch_run, keyed by
-            //       the run and step pair -- is authored but has no caller yet, because the job beans
-            //       that would call it are not authored either. So a repeat of a whole business date is
-            //       recognised here, while a mid-chain redrive of one state within a night is NOT yet
-            //       distinguishable from a first attempt at it. That is the weaker of the two
-            //       guarantees, it is the one that holds today, and stating it the other way round
-            //       would credit the module with a checkpoint it does not yet reach.
+            // WHY : Trade-offs: this branch is the COARSER of the module's two restart authorities, and
+            //       the granularity it offers is the business date rather than the step. The finer one
+            //       is BatchStepLedger over batch.batch_run, keyed by the run and step pair, and it
+            //       returns an already-COMPLETED step's recorded return code without running the step
+            //       body again. Refactoring Rationale: this comment previously said that ledger was
+            //       "authored but has no caller yet, because the job beans that would call it are not
+            //       authored either", and reported a mid-chain redrive of one state as NOT
+            //       distinguishable from a first attempt. Both halves are now false and were false
+            //       while the sentence still read that way: all seven job beans exist and every one of
+            //       them goes through the ledger -- PostTransactionsJob, PreflightDailyTransactionsJob,
+            //       CalculateInterestJob, BackupTransactionsJob and CombineTransactionsJob call runStep
+            //       directly, while ExportJob and ImportJob wrap their step through LedgerGuardedStep.
+            //       Understating a guarantee reads exactly as badly as overstating one: an operator
+            //       relying on this comment would have concluded a redrive re-runs committed work and
+            //       would have avoided the redrive the restart design exists to make safe. What this
+            //       branch still uniquely covers is a repeat of a whole business date whose job
+            //       INSTANCE already completed, which the step ledger cannot see because no step of it
+            //       is entered at all.
             // WHY : Refactoring Rationale: this branch now writes to the LOG as well, and previously
             //       wrote only to standard error. Standard error alone broke this class's own logging
             //       invariant in the one place it mattered most: the line carried no level, no
@@ -830,6 +912,112 @@ public class BatchApplication {
                     + alreadyDone.getMessage());
             return EXIT_STATUS_CLEAN;
         }
+    }
+
+    /**
+     * Publishes one failure notification to the terminal error sink, when a producer is configured.
+     *
+     * <p><b>Purpose.</b> This is the production call site the module's queue configuration was authored
+     * for. Refactoring Rationale: before it existed the configuration validated an address, framed a
+     * media type, bounded two source identifiers and built send requests that nothing sent -- the
+     * binding's only callers were its own tests -- so the orchestration's failure-notification state had
+     * a queue to watch and nothing ever arrived on it. One call here is what turns that from a described
+     * capability into a delivered one.</p>
+     *
+     * <p>Assumptions: the producer is looked up through a provider rather than injected, because this
+     * class is a static entry point that runs BEFORE any context exists and must keep working when the
+     * sink is not configured at all. The whole queue configuration is gated on the sink's address being
+     * supplied, so in a deployment that supplies no address there is no producer bean to inject and the
+     * lookup finds nothing. Alternatives Considered: requiring the bean and letting its absence fail the
+     * run. Rejected outright -- it would make a deployment that chose not to publish diagnostics unable
+     * to run a batch job at all, and it would fail it on the failure path, replacing a graded, reported
+     * outcome with an unreported one.</p>
+     *
+     * <p>Assumptions: only a tier that stops the chain is published, and the partition is evaluated
+     * through {@link BatchReturnCode#permitsDownstreamRun()} rather than by comparing against the failure
+     * constant. That is the same predicate the orchestration gate evaluates and the same one the payload
+     * record's constructor enforces, so this guard and that refusal cannot come to disagree about which
+     * tiers reach the sink. Restating the partition as an equality test here would put a second spelling
+     * of it one edit away from contradicting the first. The concrete consequence is that the warn tier is
+     * NOT published: the reference reaches it by design at {@code app/cbl/CBTRN02C.cbl:229-230}, where a
+     * non-zero reject count selects a code of four on a run that did its job correctly, and raising an
+     * operator for that spends the sink's credibility the first time it happens.</p>
+     *
+     * <p>Assumptions: the run identifier is carried as BOTH the run identifier and the correlation
+     * identity, and they are the same value by design rather than by omission. The entry point publishes
+     * this value into the logging context before the context is built, so every line the run emits
+     * carries it, and the sink's correlation attribute is bound to that same key -- which is what lets a
+     * reader move from one notification to the whole run's log stream with one value.</p>
+     *
+     * @param context the running application context, from which the producer is resolved if one is
+     *     configured; must not be {@code null}
+     * @param jobName the validated {@code --job=} token, resolved back to its enumerated form for the
+     *     payload; must not be {@code null} and must be one of {@link #JOB_NAMES}
+     * @param stepName the name of the step that failed, or {@link #STEP_NAME_NO_STEP} when the failure
+     *     belongs to no step; must not be {@code null} and must not be blank
+     * @param exitStatus the graded exit status for the run, published only when its tier stops the chain
+     */
+    // WHY : Assumptions: package-private rather than private, for the same reason logJobOutcome below
+    //       is. The two properties worth proving about this method -- that the warn tier is NOT
+    //       published and that a suppressed publication does not escape -- are invisible in the
+    //       returned status of either caller, so a test that drove it through main would assert
+    //       against a value that was already correct before this method existed.
+    static void publishFailureNotification(ConfigurableApplicationContext context,
+            String jobName, String stepName, int exitStatus) {
+        BatchReturnCode tier = BatchReturnCode.fromNumericValue(exitStatus);
+        if (tier.permitsDownstreamRun()) {
+            return;
+        }
+        // WHY : Trade-offs: the whole publication is wrapped, and the swallow here is deliberately
+        //       BROADER than the producer's own. The producer swallows a transport fault, but the two
+        //       steps ahead of it can also fail -- resolving the bean can raise a context fault while a
+        //       context is closing, and assembling the payload raises an argument fault if a value this
+        //       method supplied is refused. Both are on the failure path, where the exit status is the
+        //       only channel the orchestrator reads, so a throwable escaping here would replace a
+        //       graded, reported failure with an unreported one. Assumptions: the fault is reported as
+        //       its type chain and never as its message, because a message on this path is composed by
+        //       whatever refused the value.
+        try {
+            context.getBeanProvider(BatchErrorPublisher.class).ifAvailable(publisher ->
+                    publisher.publish(BatchErrorEvent.withoutAbendDetail(runIdentifier(), stepName,
+                            BatchJobName.resolve(jobName), tier, runIdentifier())));
+        } catch (RuntimeException suppressed) {
+            LOG.error("event=batch.error.notify-failed job={} step={} returnCode={} failure={}",
+                    jobName, stepName, exitStatus, ThrowableDigest.of(suppressed));
+        }
+    }
+
+    /**
+     * Names the step that failed, or reports that no step did.
+     *
+     * <p>Assumptions: the first step execution whose batch status is not {@code COMPLETED} is taken as
+     * the failure, rather than the last or every one of them. A job stops at its first failing step --
+     * nothing in this module declares a step that continues past a failure -- so the first non-completed
+     * step is the one that failed and any step after it never ran. Alternatives Considered: collecting
+     * every non-completed step name and joining them. Rejected because the payload carries ONE step name
+     * by contract, and a joined value in that position would be neither a step name nor a list a
+     * consumer could split reliably, while joining to the durable step ledger -- which holds a row per
+     * step of the run -- already gives a reader every step's outcome.</p>
+     *
+     * <p>Trade-offs: a job that completed every step and still reported a failure tier yields the
+     * no-step stand-in. That combination is reachable -- an execution can carry a failed exit status
+     * assembled after its last step -- and naming a completed step for it would be worse than admitting
+     * there is no failing step to name.</p>
+     *
+     * @param execution the finished job execution; must not be {@code null}
+     * @return the name of the first step whose batch status is not {@link BatchStatus#COMPLETED}, or
+     *     {@link #STEP_NAME_NO_STEP} when every step completed or none ran, never {@code null}
+     */
+    // WHY : Assumptions: package-private for the same reason as the method above. Which step a
+    //       notification names is not observable from anything either caller returns, so the
+    //       substitution rule can only be asserted by calling this directly.
+    static String failingStepNameOf(JobExecution execution) {
+        return execution.getStepExecutions().stream()
+                .filter(step -> step.getStatus() != BatchStatus.COMPLETED)
+                .map(StepExecution::getStepName)
+                .filter(name -> name != null && !name.isBlank())
+                .findFirst()
+                .orElse(STEP_NAME_NO_STEP);
     }
 
     /**

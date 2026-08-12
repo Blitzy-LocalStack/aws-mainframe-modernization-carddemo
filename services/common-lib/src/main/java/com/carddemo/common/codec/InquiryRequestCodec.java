@@ -83,6 +83,84 @@ public final class InquiryRequestCodec {
     public static final String FUNCTION_ACCOUNT_INQUIRY = "INQA";
 
     /**
+     * The classification reported for a request whose function field carries nothing.
+     *
+     * <p>Assumptions: an absent function is distinguished from an unrecognised one because they have
+     * different causes -- a producer that never filled the field against a producer that filled it with
+     * something this system does not serve -- and an operator diagnosing one is not looking for the
+     * other.</p>
+     */
+    public static final String FUNCTION_LABEL_BLANK = "blank";
+
+    /**
+     * The classification reported for a request whose function field is not one this system serves.
+     *
+     * <p>Assumptions: a fixed token and NOT the value itself. The field is four characters of wire content
+     * that no producer contract constrains, so it can carry a line terminator, a field delimiter or a
+     * forged event prefix; a journal line that echoed it would let a producer write its own log records.
+     * That is CWE-117, and the defence has to be that the value never reaches the line at all rather than
+     * that it is escaped on the way -- an escape is a property of one call site and can be omitted at the
+     * next.</p>
+     */
+    public static final String FUNCTION_LABEL_UNRECOGNISED = "unrecognised";
+
+    // Assumptions: the six widths below are the declared widths of the diagnostic group both reference
+    //     programs carry -- CODATE01.cbl physical lines 58 to 67 and COACCT01.cbl physical lines 58 to 67
+    //     declare the same nine members: a 25-character paragraph name, a gap, a 25-character return
+    //     message, a gap, a 2-digit condition code, a gap, a 5-digit reason code, a gap and a 48-character
+    //     queue name. They matter because a consumer of the error sink locates every value by OFFSET, so
+    //     each width is part of the wire contract and not a formatting preference: changing one shifts
+    //     every following field to a position no existing reader expects.
+    // Assumptions: they live HERE rather than in either consumer because the two reference programs
+    //     declare one identical group, and this class is already the single source of the request layout
+    //     and of the 1000-character framing the diagnostic is padded to. A per-consumer copy is the exact
+    //     failure mode this package exists to prevent, and it is not hypothetical on this contract: the two
+    //     inquiry consumers had already drifted apart on the reply's content-type attribute while each
+    //     documented its own value as the shared one.
+    /**
+     * Declared width of the diagnostic's reporting-paragraph field.
+     */
+    public static final int DIAGNOSTIC_PARAGRAPH_WIDTH = 25;
+
+    /**
+     * Declared width of the diagnostic's return-message field.
+     */
+    public static final int DIAGNOSTIC_MESSAGE_WIDTH = 25;
+
+    /**
+     * Declared width of each gap between diagnostic fields.
+     */
+    public static final int DIAGNOSTIC_GAP_WIDTH = 2;
+
+    /**
+     * Declared width of the diagnostic's condition-code field.
+     */
+    public static final int DIAGNOSTIC_CONDITION_CODE_WIDTH = 2;
+
+    /**
+     * Declared width of the diagnostic's reason-code field.
+     */
+    public static final int DIAGNOSTIC_REASON_CODE_WIDTH = 5;
+
+    /**
+     * Declared width of the diagnostic's queue-name field.
+     */
+    public static final int DIAGNOSTIC_QUEUE_NAME_WIDTH = 48;
+
+    /**
+     * The combined width of the diagnostic's positional prefix.
+     *
+     * <p>Assumptions: SUMMED from the field widths above rather than written as a number, so the prefix
+     * length and the fields that make it up cannot drift apart.</p>
+     */
+    public static final int DIAGNOSTIC_PREFIX_LENGTH =
+            DIAGNOSTIC_PARAGRAPH_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_MESSAGE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_CONDITION_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_REASON_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
+            + DIAGNOSTIC_QUEUE_NAME_WIDTH;
+
+    /**
      * The character both the request filler and the reply padding are filled with.
      */
     private static final char PAD = ' ';
@@ -205,18 +283,60 @@ public final class InquiryRequestCodec {
         }
 
         /**
-         * Renders this request for a diagnostic without disclosing the filler.
+         * Classifies the function field into one of a closed set of tokens safe to journal.
          *
-         * <p>Assumptions: the filler is 985 characters this flow never reads, and a producer may put anything
-         * in it. Rendering it would place unexamined wire content into a log line, so only the two fields
-         * this flow acts on are rendered -- and neither is cardholder data: a function code is a literal and
-         * the key is an internal account identifier.</p>
+         * <p>Purpose: a consumer wants to report WHICH kind of request arrived, and the field it would
+         * naturally report is four characters of unconstrained wire content. This method answers the
+         * question without echoing the content: the result is always one of {@link
+         * InquiryRequestCodec#FUNCTION_ACCOUNT_INQUIRY}, {@link InquiryRequestCodec#FUNCTION_LABEL_BLANK}
+         * or {@link InquiryRequestCodec#FUNCTION_LABEL_UNRECOGNISED}, all three of which are compile-time
+         * literals declared in this class.</p>
+         *
+         * <p>Alternatives Considered: sanitising the value at each log statement instead, by stripping
+         * control characters. Rejected on two grounds. It leaves the value itself in the record, so a
+         * producer still chooses what appears there and only its punctuation is constrained; and it makes
+         * the protection a property of every individual call site, so the next log line added is unprotected
+         * by default. A closed classification inverts that default -- the raw field is simply not available
+         * to a journal line unless a caller reaches past this method for it.</p>
+         *
+         * <p>Trade-offs: an operator diagnosing a producer that sends a wrong function code learns that it
+         * was wrong and not what it was. That is accepted because the two flows behave identically for every
+         * unrecognised value -- the account inquiry refuses them all with one message and the date inquiry
+         * answers them all alike -- so the specific bytes change no outcome, and a producer's own logs hold
+         * what it sent.</p>
+         *
+         * @return one of the three closed classification tokens, never {@code null}
+         */
+        public String functionLabel() {
+            if (this.isFunction(FUNCTION_ACCOUNT_INQUIRY)) {
+                return FUNCTION_ACCOUNT_INQUIRY;
+            }
+            return this.trimmedFunction().isEmpty() ? FUNCTION_LABEL_BLANK : FUNCTION_LABEL_UNRECOGNISED;
+        }
+
+        /**
+         * Renders this request for a diagnostic without disclosing either field's content.
+         *
+         * <p>Assumptions: the filler is 985 characters this flow never reads and a producer may put anything
+         * in it, so it is never rendered. Neither is the function field, whose four characters are equally
+         * unconstrained -- the classification stands in for it.</p>
+         *
+         * <p>Refactoring Rationale: this rendering carried the trimmed function code and the key verbatim,
+         * on the stated ground that "neither is cardholder data: a function code is a literal and the key is
+         * an internal account identifier". Both halves were wrong. The function code is a literal only when
+         * the producer sent the literal, and an arbitrary four characters reaching a journal line through a
+         * record's own rendering is CWE-117 by the shortest possible route. And the observability contract
+         * requires an account identifier to be OMITTED from a durable field rather than shortened, because
+         * the value's sensitivity does not depend on whether the system calls it internal. What a reader
+         * needs from a diagnostic is which kind of request it was and whether the key was usable, and both
+         * survive here.</p>
          *
          * @return the diagnostic rendering, never {@code null}
          */
         @Override
         public String toString() {
-            return "InquiryRequest[function=" + this.trimmedFunction() + ", key=" + this.key + "]";
+            return "InquiryRequest[function=" + this.functionLabel()
+                    + ", keyUsable=" + this.hasUsableKey() + "]";
         }
     }
 
@@ -284,5 +404,81 @@ public final class InquiryRequestCodec {
             padded.append(PAD);
         }
         return padded.toString();
+    }
+
+    /**
+     * Composes the diagnostic buffer in the positional shape both reference programs report failures through.
+     *
+     * <p>Purpose: this is the target form of the {@code 9000-ERROR} buffer -- {@code CODATE01.cbl} physical
+     * lines 405 to 425 and {@code COACCT01.cbl} physical line 501 both move the same nine-member diagnostic
+     * group into the message buffer, set the buffer length to 1000 and put to a separate error queue. The
+     * result is NOT framed here: a caller frames it with {@link #frame(String)} so that one framing rule
+     * serves the reply and the diagnostic alike.</p>
+     *
+     * <p>Assumptions: each field is left-justified, space-padded and truncated at its declared width, which
+     * is what a group move into a fixed picture does -- and it is why a return message longer than
+     * {@link #DIAGNOSTIC_MESSAGE_WIDTH} arrives as its leading characters rather than widening the field.</p>
+     *
+     * <p>Alternatives Considered: omitting the condition-code and reason-code intervals, which hold
+     * queue-manager values that have no counterpart in the target and are therefore unfillable. Rejected
+     * because omitting them shortens the prefix by nine characters and shifts the queue name behind them to
+     * an offset no reader of that sink expects. They are preserved and left blank instead, which keeps every
+     * other field where the baseline puts it and states the absence in the buffer itself.</p>
+     *
+     * <p>Trade-offs: the failure detail is appended AFTER the positional prefix, in space the baseline
+     * leaves blank, and it is truncated to what remains of the message length. Folding it into the
+     * return-message field instead would displace the baseline's own literal, so the choice is between
+     * losing the literal and using blank space; the blank space costs nothing a reader relies on. It is
+     * truncated rather than refused because {@link #frame(String)} refuses an over-long body, which is the
+     * right default for a reply a consumer decodes by offset and the wrong one here -- a long failure
+     * rendering would turn a report about one fault into a second, unrelated fault on the reporting path.</p>
+     *
+     * @param paragraph the reporting paragraph's name, or {@code null} to leave the field blank
+     * @param returnMessage the baseline's verbatim return message for this failure, or {@code null} to leave
+     *     the field blank
+     * @param queueName the configured queue name the failure concerns, or {@code null} to leave the field
+     *     blank
+     * @param detail the failure rendering appended after the positional prefix, or {@code null} to append
+     *     nothing; it must name no value that came off the wire
+     * @return the composed buffer, no longer than {@link #MESSAGE_LENGTH}, never {@code null}
+     */
+    public static String errorDiagnostic(String paragraph, String returnMessage, String queueName,
+            String detail) {
+
+        String prefix = fixed(paragraph, DIAGNOSTIC_PARAGRAPH_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + fixed(returnMessage, DIAGNOSTIC_MESSAGE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + blanks(DIAGNOSTIC_CONDITION_CODE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + blanks(DIAGNOSTIC_REASON_CODE_WIDTH)
+                + blanks(DIAGNOSTIC_GAP_WIDTH)
+                + fixed(queueName, DIAGNOSTIC_QUEUE_NAME_WIDTH);
+
+        String tail = detail == null ? "" : detail;
+        int room = MESSAGE_LENGTH - DIAGNOSTIC_PREFIX_LENGTH;
+        return prefix + fixed(tail, Math.min(tail.length(), room));
+    }
+
+    /**
+     * Renders a value left-justified in a fixed width, space-padded and truncated as a group move would.
+     *
+     * @param value the value, or {@code null} for an all-blank field
+     * @param width the declared field width
+     * @return the rendered field, exactly {@code width} characters, never {@code null}
+     */
+    private static String fixed(String value, int width) {
+        String text = value == null ? "" : value;
+        return text.length() >= width ? text.substring(0, width) : text + blanks(width - text.length());
+    }
+
+    /**
+     * Renders a run of spaces.
+     *
+     * @param width how many spaces
+     * @return the run, never {@code null}
+     */
+    private static String blanks(int width) {
+        return String.valueOf(PAD).repeat(width);
     }
 }

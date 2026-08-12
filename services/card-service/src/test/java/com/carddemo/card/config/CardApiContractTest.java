@@ -671,7 +671,7 @@ class CardApiContractTest {
      * named members the type does not declare.</p>
      */
     @Test
-    @DisplayName("the page envelope declares and requires exactly the shared envelope's five members")
+    @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
     void pageEnvelopeDeclaresExactlyTheSharedEnvelopeMembers() {
         Map<String, Object> page = mapping(mapping(mapping(contract, "components"), "schemas"),
                 "CardPage");
@@ -681,8 +681,7 @@ class CardApiContractTest {
         Map<String, Object> properties = (Map<String, Object>) page.get("properties");
         assertThat(required)
                 .as("every member the shared envelope always emits must be required")
-                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext",
-                        "hasPrevious");
+                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
         assertThat(properties.keySet())
                 .as("the required list and the declared properties must be the same set")
                 .containsExactlyInAnyOrderElementsOf(required);

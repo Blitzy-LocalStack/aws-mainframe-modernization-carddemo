@@ -40,7 +40,8 @@ import java.util.Objects;
  * @param submitted whether a run was accepted for execution; {@code false} for a deliberate
  *     cancellation and {@code true} otherwise
  * @param message a sentence for a person to read, at most the 78 characters the message field of the
- *     report-request map declares at {@code app/cpy-bms/CORPT00.CPY} L120; never {@code null}
+ *     report-request map declares at {@code app/cpy-bms/CORPT00.CPY} L120, or {@code null} on a
+ *     deliberate cancellation, which the reference answers with a cleared message line
  * @param submission the accepted run, or {@code null} when {@code submitted} is {@code false},
  *     because a cancelled request has no run to describe
  */
@@ -63,13 +64,41 @@ public record ReportSubmissionOutcome(
     /**
      * Validates the pairing of the outcome flag with the presence of a run description.
      *
-     * @throws NullPointerException if {@code message} is {@code null}
-     * @throws IllegalArgumentException if {@code message} exceeds its declared width, or if the flag
-     *     and the run description disagree
+     * @throws IllegalArgumentException if {@code message} is blank, if it exceeds its declared width,
+     *     or if the flag and the run description disagree
      */
     public ReportSubmissionOutcome {
-        Objects.requireNonNull(message, "message");
-        if (message.length() > MESSAGE_WIDTH) {
+        // WHY : Refactoring Rationale: a null message is ADMITTED, where an earlier revision refused
+        //       one, and the refusal was the reason a target-invented sentence existed at all. The
+        //       cancel branch at app/cbl/CORPT00C.cbl L480 to L483 performs INITIALIZE-ALL-FIELDS,
+        //       whose statement at L636 to L646 clears WS-MESSAGE along with every input field, and
+        //       then re-displays -- so the operator is shown a blank message line. The published
+        //       schema records the same thing, typing this member as string-or-null and saying "Null
+        //       on a deliberate cancellation". A constructor that refused null made that outcome
+        //       unrepresentable, so a sentence had to be written for it, and the sentence written was
+        //       not the reference's because the reference has none. Admitting null removes the cause
+        //       rather than the symptom.
+        // WHY : Alternatives Considered: representing the cleared line as the EMPTY string instead,
+        //       which is closer to the 78 spaces the screen field actually holds. Rejected because
+        //       the published schema names null and a client reads the schema, and because an empty
+        //       string and a cleared field are indistinguishable to a reader of the wire while null
+        //       and an empty string are not -- so the schema's choice is the one that survives being
+        //       read by something other than this code.
+        // WHY : Assumptions: null and blank are DIFFERENT states and only null is admitted. Blank is
+        //       what a fixed-width screen field holds once it has been cleared, and it would reach a
+        //       client as a message present and empty -- an empty line rather than no line -- which is
+        //       the same distinction the paragraph above draws against the empty string. It is refused
+        //       rather than normalised to null, because a caller passing spaces has a field it believes
+        //       it filled, and silently turning that into absence hides the mistake at the one boundary
+        //       able to report it. The reference draws the same line with the low-values sentinel on the
+        //       shared return message at app/cpy/CVCRD01Y.cpy L30.
+        if (message != null && message.isBlank()) {
+            throw new IllegalArgumentException("message must not be blank: the cancellation branch"
+                    + " carries no message at all, which is null, and a blank string of the screen"
+                    + " field's width is a message present and empty rather than absent");
+        }
+
+        if (message != null && message.length() > MESSAGE_WIDTH) {
             throw new IllegalArgumentException(
                     "message exceeds " + MESSAGE_WIDTH + " characters");
         }
@@ -93,27 +122,58 @@ public record ReportSubmissionOutcome(
     /**
      * Builds the outcome of an accepted run.
      *
+     * <p>Assumptions: the message stays MANDATORY on this factory even though the component now admits
+     * null, and the asymmetry is the point. The reference composes a sentence for a started run at
+     * {@code app/cbl/CORPT00C.cbl} L447 to L454 and moves the green attribute into the message colour, so
+     * a submitted outcome that carried none would be dropping a string the reference emits -- the mirror
+     * of the fault admitting null was needed to fix.
+     *
      * @param accepted the description of the accepted run; must not be {@code null}
-     * @param message the sentence a caller displays; must not be {@code null}
+     * @param message the sentence a caller displays, which the reference composes for this branch; must
+     *     not be {@code null}
      * @return an outcome reporting the run as submitted
      * @throws NullPointerException if either argument is {@code null}
-     * @throws IllegalArgumentException if {@code message} exceeds its declared width
+     * @throws IllegalArgumentException if {@code message} is blank or exceeds its declared width
      */
     public static ReportSubmissionOutcome accepted(
             ReportSubmissionResponse accepted, String message) {
         Objects.requireNonNull(accepted, "accepted");
+        Objects.requireNonNull(message, "message");
         return new ReportSubmissionOutcome(true, message, accepted);
     }
 
     /**
-     * Builds the outcome of a deliberate cancellation.
+     * Builds the outcome of a deliberate cancellation, which carries no sentence.
      *
-     * @param message the sentence a caller displays; must not be {@code null}
-     * @return an outcome reporting that nothing was submitted
-     * @throws NullPointerException if {@code message} is {@code null}
-     * @throws IllegalArgumentException if {@code message} exceeds its declared width
+     * <p>Assumptions: this factory takes no argument, and that is the whole of its contract. The
+     * reference's cancel branch at {@code app/cbl/CORPT00C.cbl} L480 to L483 clears the message line
+     * and re-displays, so there is no sentence to pass and no caller may supply one. A factory
+     * accepting a message would let one be invented at each call site, which is exactly what
+     * happened before this pair replaced the single one.</p>
+     *
+     * @return an outcome reporting that nothing was submitted and saying nothing about it
      */
-    public static ReportSubmissionOutcome cancelled(String message) {
-        return new ReportSubmissionOutcome(false, message, null);
+    public static ReportSubmissionOutcome cancelled() {
+        return new ReportSubmissionOutcome(false, null, null);
+    }
+
+    /**
+     * Builds the outcome of a turn on which the confirmation has not been answered yet.
+     *
+     * <p>Assumptions: this is a distinct factory from {@link #cancelled()} even though both produce
+     * the same two members, because the two outcomes differ in the one member that varies and
+     * collapsing them into one factory with a nullable argument would make an omitted argument mean
+     * "cancelled" by accident. The reference reaches this turn at L464 to L474 and composes a PROMPT
+     * naming the report, which is a question rather than a report of anything having happened.</p>
+     *
+     * @param prompt the reference's confirmation prompt, as the caller composed it; must not be
+     *     {@code null}, because a prompt that said nothing would leave the caller with no question
+     * @return an outcome reporting that nothing was submitted and carrying the prompt
+     * @throws NullPointerException if {@code prompt} is {@code null}
+     * @throws IllegalArgumentException if {@code prompt} exceeds its declared width
+     */
+    public static ReportSubmissionOutcome unanswered(String prompt) {
+        Objects.requireNonNull(prompt, "prompt");
+        return new ReportSubmissionOutcome(false, prompt, null);
     }
 }

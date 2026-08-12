@@ -46,6 +46,11 @@ from carddemo_migration.config import (
     parameter_path,
     role_for_schema,
 )
+from carddemo_migration.loaders.protected_columns import (
+    CARD_VERIFICATION_VALUE_PURPOSE,
+    CONTEXT_PURPOSE_KEY,
+    CUSTOMER_IDENTIFIER_PURPOSE,
+)
 
 # Assumptions: the Terraform module is located relative to this file rather than
 #   to the working directory, so the expectation holds however the suite is invoked.
@@ -429,6 +434,105 @@ def test_the_migrating_schemas_are_exactly_the_ones_with_a_migration_role() -> N
 
 
 @pytest.mark.parametrize("root", _ENVIRONMENT_ROOTS, ids=lambda path: path.name)
+def test_each_environment_root_grants_the_migration_task_its_envelope_key(root: Path) -> None:
+    """Assert both roots let the migration task draw envelope data keys for the columns it seals.
+
+    Purpose
+    -------
+    The loader seals three columns before writing them -- ``customers.ssn_encrypted``,
+    ``customers.govt_issued_id_encrypted`` and ``cards.cvv_encrypted`` -- by drawing a fresh
+    envelope data key per value from the Aurora key. The two key aliases arrive from parameters
+    both roots already publish, so a root that publishes the aliases and grants nothing produces a
+    load that fails closed on the FIRST card or customer record, as an access denial rather than as
+    a configuration error.
+
+    Parameters
+    ----------
+    root : Path
+        The `dev` or `prod` environment root directory.
+
+    Raises
+    ------
+    AssertionError
+        If the migration task's policy document omits the grant, omits either encryption-context
+        purpose the loader uses, or grants ``kms:Decrypt`` on the Aurora key -- which the loader
+        needs for nothing, because it publishes no decipher path at all.
+    """
+    main = root / "main.tf"
+    assert main.is_file(), f"the {root.name} root is missing at {main}"
+    terraform = main.read_text(encoding="utf-8")
+    document = terraform.split('data "aws_iam_policy_document" "data_migration_runtime"', 1)
+    assert len(document) == 2, (
+        f"the {root.name} root declares no data_migration_runtime policy document, so the "
+        f"migration task's privileges cannot be asserted"
+    )
+    # WHY : Assumptions: the document is bounded at the NEXT top-level block rather than read to
+    #   the end of the file, because every workload grant in this root lives in the same file and
+    #   an unbounded read would let the card workload's own Aurora-key statement satisfy an
+    #   assertion about the migration task's. The two are adjacent and near-identical, which is
+    #   exactly the confusion this bound removes.
+    # WHY : Assumptions: COMMENT LINES ARE STRIPPED before anything is matched, and that is not
+    #   tidiness -- it is what makes the assertions below mean what they say. The rationale beside
+    #   this grant necessarily quotes both encryption-context values in prose, so a check run over
+    #   the raw text was satisfied by the explanation of the grant rather than by the grant, and
+    #   passed with a purpose deleted from the condition. This is the second reading of the same
+    #   file for the same reason and the strip belongs to both.
+    body = "\n".join(
+        line
+        for line in document[1].split("\n}\n", 1)[0].splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+    assert "kms:GenerateDataKey*" in body, (
+        f"the {root.name} root must let the migration task draw an envelope data key; without it "
+        f"every CARDDATA and CUSTDATA load is refused by KMS on the first record"
+    )
+    assert "module.kms.aurora_key_arn" in body, (
+        f"the {root.name} root must grant that on the Aurora key, which is the key both published "
+        f"aliases resolve to"
+    )
+    # WHY : the condition VARIABLE is composed from the loader's own context key rather than
+    #   written out, on the same reasoning as the values below: the whole condition stops matching
+    #   if either half is renamed on one side only.
+    assert f"kms:EncryptionContext:{CONTEXT_PURPOSE_KEY}" in body, (
+        f"the {root.name} root must condition the grant on the encryption-context key the loader "
+        f"actually sets"
+    )
+    # WHY : the condition's value list is parsed and compared as a SET, rather than each value
+    #   being searched for anywhere in the document. The two purposes are read from the loader's own
+    #   module so a rename there fails this test, and the set comparison is what makes the failure
+    #   real in both directions: a missing purpose is a load that fails closed, and an extra one is
+    #   a grant over ciphertext this task has no business producing.
+    condition_values = re.findall(r"values\s*=\s*\[([^\]]*)\]", body)
+    assert condition_values, (
+        f"the {root.name} root declares no encryption-context condition on the migration task's "
+        f"envelope grant"
+    )
+    granted_purposes = {
+        value.strip().strip('"') for value in condition_values[-1].split(",") if value.strip()
+    }
+    assert granted_purposes == {CARD_VERIFICATION_VALUE_PURPOSE, CUSTOMER_IDENTIFIER_PURPOSE}, (
+        f"the {root.name} root conditions the migration task's envelope grant on "
+        f"{sorted(granted_purposes)}, where the loader seals under "
+        f"{sorted({CARD_VERIFICATION_VALUE_PURPOSE, CUSTOMER_IDENTIFIER_PURPOSE})}"
+    )
+    # WHY : the ABSENCE of a decrypt grant is asserted, and it is the one place this task's policy
+    #   is deliberately NARROWER than the card and account workloads' equivalent grants. The loader
+    #   publishes no decipher member -- a migration writes protected columns and never reads them
+    #   back -- so a decrypt grant would widen what a compromised migration task can do with
+    #   nothing using it.
+    aurora_decrypt_statements = [
+        fragment
+        for fragment in body.split("statement {")
+        if "module.kms.aurora_key_arn" in fragment and "kms:Decrypt" in fragment
+    ]
+    assert not aurora_decrypt_statements, (
+        f"the {root.name} root grants the migration task decrypt on the Aurora key; the loader "
+        f"publishes no decipher path, so nothing would use it"
+    )
+
+
+@pytest.mark.parametrize("root", _ENVIRONMENT_ROOTS, ids=lambda path: path.name)
 def test_each_environment_root_projects_the_migration_credential(root: Path) -> None:
     """Assert both environment roots inject the migration credential into migrating tasks.
 
@@ -479,6 +583,73 @@ def test_aws_client_is_the_modules_public_client_factory() -> None:
     #   endpoint between cases -- or a process picking up rotated credentials -- would get a fresh
     #   parameter-store client and a stale S3 client from the same call.
     assert hasattr(config.aws_client, "cache_clear")
+
+
+def test_the_service_error_code_reader_is_public() -> None:
+    """Export the service error-code reader, so a sibling module need not reach into a private name.
+
+    WHY : Refactoring Rationale: the reader was ``_error_code``, and
+    ``loaders.s3_stage._claim_generation`` -- reached from that module's PUBLIC
+    ``reserve_generation`` -- called it to recognise a generation-claim conflict. A public contract
+    in one module therefore rested on a private name in another, and the consequence of a rename
+    was specific rather than abstract: every concurrent claim conflict would have been re-raised
+    as a failure at the one moment two runs met. This is the second promotion of exactly this
+    shape in this module, after ``_aws_client``, and it is asserted the same way for the same
+    reason.
+
+    WHY : Assumptions: the private spelling is asserted ABSENT rather than left as an alias. Two
+    names for one function is how the private one comes back: a later edit reaches for whichever
+    it finds, and an alias makes both findable.
+    """
+    assert callable(config.error_code)
+    assert "error_code" in config.__all__
+    assert not hasattr(config, "_error_code")
+    # WHY : the reader's defensiveness is asserted here rather than only where it is used, because
+    #   it runs while another exception is already being handled -- an exception with no response
+    #   document must yield a code rather than raise, or the failure an operator needs to see is
+    #   replaced by one from the code that was reading it.
+    assert config.error_code(RuntimeError("no response document")) == ""
+    assert config.error_code(_ServiceError("PreconditionFailed")) == "PreconditionFailed"
+
+
+class _ServiceError(Exception):
+    """Minimal stand-in for an SDK client error carrying a service error code.
+
+    Purpose
+    -------
+    Give the error-code reader the one attribute shape it navigates, without importing botocore
+    into a suite that must run where the SDK is absent.
+
+    Parameters
+    ----------
+    code : str
+        The service error code to carry, as the SDK would place it.
+
+    Raises
+    ------
+    None
+        Construction stores the response document and validates nothing.
+    """
+
+    def __init__(self, code: str) -> None:
+        """Build an exception carrying one service error code.
+
+        Parameters
+        ----------
+        code : str
+            The service error code to carry.
+
+        Returns
+        -------
+        None
+            Stores the response document.
+
+        Raises
+        ------
+        None
+        """
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
 
 
 def test_aws_client_refuses_an_environment_that_names_no_region(

@@ -227,11 +227,19 @@ public class InternalApiSecurityConfig {
 
         // WHY : Refactoring Rationale: each matcher is bound to the METHOD its operation serves, where
         //   they were previously bound to a path alone. A path-only matcher claims every method at
-        //   that address, and the account prefix is served by TWO surfaces: the machine reads and the
-        //   end-user edit, separated by chain rather than by prefix. Claiming the end-user method here
-        //   demanded the internal read scope from a browser token, which a browser token never carries,
-        //   so the end-user update was unreachable -- a 403 with no explanation, and the kind of defect
-        //   a path-only matcher produces silently the moment a second method is mounted.
+        //   that address, and the account prefix is served by TWO surfaces -- the machine reads and the
+        //   end-user screens -- separated by chain rather than by prefix. When the end-user edit shared
+        //   the machine read's address, claiming its method here demanded the internal read scope from a
+        //   browser token, which a browser token never carries, so the update was unreachable: a 403
+        //   with no explanation.
+        // WHY : Trade-offs: that overlap no longer exists, because every operation on the account prefix
+        //   now sits on its own fixed sub-path -- the identifier had to leave the request line, so the
+        //   end-user read, edit and cross-reference walk each gained a segment of their own. The method
+        //   binding is KEPT anyway, as defence in depth: it costs one argument per matcher, and the
+        //   overlap it was written for returns the moment a second method is mounted on any of these
+        //   addresses, which is exactly the change a reader would not think to re-examine this chain
+        //   for. Removing it to reflect present addresses would trade a standing guarantee for a
+        //   tidier line.
         // WHY : Refactoring Rationale: every address in this group is now a POST on an explicit
         //   sub-path, where three of them were previously keyed GETs -- the account context read at
         //   /accounts/{accountId} and the customer probe at /customers/{customerId}, the latter claimed
@@ -303,7 +311,7 @@ public class InternalApiSecurityConfig {
     }
 
     /**
-     * The customer decision address, which {@link #CUSTOMER_READ_AUTHORITY} authorises.
+     * The customer decision addresses, which {@link #CUSTOMER_READ_AUTHORITY} authorises.
      *
      * <p>Assumptions: this family is the reason the scopes are split at all. The customer addresses reach a
      * record carrying a national identifier and a government-issued identifier, and only ONE of the two
@@ -315,12 +323,23 @@ public class InternalApiSecurityConfig {
      * mints, because the difference between confirming one row and exfiltrating a file is not a difference
      * of degree.</p>
      *
-     * @param matchers the builder the pattern is composed on; must not be {@code null}
-     * @return a matcher accepting exactly the customer decision address, never {@code null}
+     * <p>Refactoring Rationale: the nine-field screen display read joined this family rather than the
+     * customer-master one, and the placement IS the fix it was authored for. Its consumer had been reading
+     * display fields out of the existence check's bodiless response, so the fields rendered absent on every
+     * request; the two shapes available to it were that empty body and the whole record, and pointing it at
+     * the whole record would have required minting the master authority for a context that renders six
+     * fields. The display projection carries no encrypted identifier and no credit score, so it belongs on
+     * the side of this split that confirms a row rather than the side that reads a file.</p>
+     *
+     * @param matchers the builder each pattern is composed on; must not be {@code null}
+     * @return a matcher accepting exactly the two customer decision addresses, never {@code null}
      */
     private static RequestMatcher customerPaths(PathPatternRequestMatcher.Builder matchers) {
-        return matchers.matcher(HttpMethod.POST,
-                CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH);
+        return new OrRequestMatcher(
+                matchers.matcher(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH),
+                matchers.matcher(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH));
     }
 
     /**

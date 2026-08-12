@@ -93,10 +93,20 @@ import jakarta.validation.constraints.Size;
  * string {@code PASSWD} zero times, so that map has no field a credential could be written into. One
  * of the five reference screens already worked without it.
  *
- * <p>Assumptions: no credential is created anywhere on this path, and no subject reference is
- * accepted on it either. This service provisions the pool account itself and reads the subject back
- * from the provider's own response, so the subject is an OUTPUT of creating a user and never an input
- * to it; it appears on {@code UserResponse} and not here.
+ * <p>Assumptions: no credential is ACCEPTED on this path, and no subject reference is accepted on it
+ * either. This service provisions the pool account itself and reads the subject back from the
+ * provider's own response, so the subject is an OUTPUT of creating a user and never an input to it; it
+ * appears on {@code UserResponse} and not here.
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph said "no credential is CREATED anywhere on this path",
+ * and that was true when it was written and is no longer. One IS created -- the service generates a
+ * policy-compliant one-time value, supplies it to the pool as the created account's temporary password
+ * and hands it back once on {@code CreatedUserResponse} -- because an account created without one was
+ * an account whose credential the provider minted internally and sent nowhere, leaving nobody able to
+ * sign on to it. What this record's absence of a credential component still means, and the whole of
+ * what it means, is that a CALLER does not choose the value: an accepted credential would be one this
+ * boundary would have to validate against a policy it does not own, and one that would reach the
+ * request log of every intermediary between the caller and here.
  *
  * <h2>Why this record is not unified with the update payload</h2>
  *

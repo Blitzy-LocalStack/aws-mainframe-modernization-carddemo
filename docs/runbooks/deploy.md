@@ -271,6 +271,23 @@ environment variable. The API endpoint does not exist until the apply creates it
 supplies an empty list -- which yields `connect-src 'self'` and permits nothing -- and narrows it to
 the real origin after the apply, before the SPA is published.
 
+### The registry actions the deployment role needs
+
+`CARDDEMO_DEPLOY_ROLE_ARN` names a role this package does not create, so its policy is the
+operator's. Assumptions: beyond the Terraform permissions the apply itself needs, the workflow
+calls four registry action families directly and fails at the calling step without them:
+
+| Action | Which step needs it | Why |
+|---|---|---|
+| `ecr:GetAuthorizationToken` | image push, collector mirror | The `docker login` that precedes every push |
+| `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage` | image push, collector mirror | Writing the ten built images and the mirrored sidecar |
+| `ecr:DescribeImages` | image push, collector mirror | Reading back each pushed digest, and deciding whether the mirror tag already exists |
+| `ecr:DescribeImageScanFindings` | vulnerability gate | Reading the scan result the gate refuses a deployment on |
+
+Trade-offs: the last one is the newest and the easiest to omit, because nothing else in the run
+uses it. Without it the gate step fails with an access denial rather than passing quietly, which
+is the intended direction -- a gate that cannot read its evidence must not report a pass.
+
 ### The masking secret's value has a format the ETL enforces
 
 `mask_hmac_secret_arn` names a secret this configuration neither creates nor rotates, so its
@@ -791,7 +808,7 @@ Use [batch-operations.md](batch-operations.md) for batch execution and parity-or
 | CloudFront price class | Restricted. | Full configured class. |
 | Protection | Destructive iteration permitted. | Deletion protection and final snapshot required. |
 
-**Trade-offs**: Keeping topology identical means a dev validation exercises the same network and
+Trade-offs: keeping topology identical means a dev validation exercises the same network and
 service graph as prod. It does not prove prod capacity behavior, and scale-to-zero resume behavior
 is a dev-only characteristic.
 
@@ -799,7 +816,7 @@ is a dev-only characteristic.
 
 ## Idempotency
 
-**Refactoring Rationale**: Baseline jobs used several separate rerun devices: condition-code
+Refactoring Rationale: baseline jobs used several separate rerun devices: condition-code
 normalization, delete-if-exists preambles, and manual uncommented deletes, while some definitions
 had no rerun guard. Terraform plan/apply provides one convergence model for all resources; rerunning
 the same configuration produces no duplicate definition and requires no source edit.
@@ -813,7 +830,7 @@ generated or returned during apply and written to Secrets Manager. Tracked `terr
 contain non-secret sizing and retention only. `ui/.env.example` documents names without values, and
 state and local environment files are excluded from commits.
 
-**Refactoring Rationale**: The baseline published seed credentials with its deployment material.
+Refactoring Rationale: the baseline published seed credentials with its deployment material.
 Generate-at-apply plus managed retrieval makes the no-committed-secret constraint structural rather
 than dependent on a reviewer noticing a credential-shaped string.
 

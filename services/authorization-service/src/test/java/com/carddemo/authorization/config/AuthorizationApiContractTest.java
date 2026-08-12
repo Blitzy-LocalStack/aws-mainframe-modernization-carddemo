@@ -2,7 +2,9 @@ package com.carddemo.authorization.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.carddemo.authorization.dto.PendingAuthDetailResponse;
 import com.carddemo.authorization.dto.PendingAuthRowView;
+import com.carddemo.authorization.dto.PendingAuthSummaryView;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.GlobalExceptionHandler;
@@ -10,9 +12,14 @@ import com.carddemo.common.web.CorrelationIdFilter;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.SpecVersion;
 import java.io.InputStream;
+import java.lang.reflect.RecordComponent;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
@@ -100,6 +107,16 @@ class AuthorizationApiContractTest {
      * either of the first two would pass silently while asserting nothing at all.</p>
      */
     private static final String WITHDRAWN_PAGING_RULE = "sent together or not at all";
+
+    /**
+     * The four summary members that are composed from the customer master rather than stored on the segment.
+     *
+     * <p>Assumptions: they are named here rather than derived, because what makes them different from the
+     * sixteen beside them is their SOURCE and no property of the schema records that. Deriving them from the
+     * required list would make the assertion circular.</p>
+     */
+    private static final List<String> DISPLAY_MEMBERS =
+            List.of("customerName", "addressLine1", "addressLine2", "phoneNumber1");
 
     /**
      * Descends one level into a mapping, failing loudly when the shape is not what the caller assumed.
@@ -506,6 +523,171 @@ class AuthorizationApiContractTest {
         assertThat(published)
                 .as("a key no member of this module produces must not be published as one")
                 .doesNotContain("fraudAction");
+    }
+
+    /**
+     * Confirms the summary schema publishes exactly the members the summary view emits.
+     *
+     * <p>Purpose: the schema is CLOSED -- it declares {@code additionalProperties: false} -- so a member the
+     * view emits and the schema does not declare is not a documentation gap. It is a body the published
+     * document rejects, produced by the server that published it, which means a client validating responses
+     * refuses an answer the server considers correct and a client that does not validate silently accepts a
+     * shape it was never told about. Comparing the two SETS is the only durable guard, because the record
+     * head and the YAML are edited in different files.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because that was this context's state. The view emitted
+     * twenty members and the schema declared sixteen with the closed flag set, so the four customer display
+     * members -- {@code customerName}, {@code addressLine1}, {@code addressLine2} and
+     * {@code phoneNumber1} -- were forbidden by the document that described them. They were published rather
+     * than removed because the reference screen renders all four:
+     * {@code app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy} declares {@code CNAMEI} at L66,
+     * {@code ADDR001I} at L78, {@code ADDR002I} at L90 and {@code PHONE1I} at L96, and
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} composes them at L757 through L779.</p>
+     *
+     * <p>Assumptions: the comparison is EXACT in both directions rather than a containment check. A schema
+     * declaring a property the view cannot emit is the same class of disagreement seen from the other side:
+     * a client would provision for a member that never arrives, and the closed flag would not catch it.</p>
+     *
+     * <p>Assumptions: the four display members are additionally asserted to be OPTIONAL, because they are
+     * read from the account context rather than stored on this segment. A customer the master no longer holds
+     * yields a summary whose segment columns are all present and whose display members are absent, and a
+     * required display member would turn that neighbouring absence into a failure of this response.</p>
+     */
+    @Test
+    @DisplayName("the summary schema publishes exactly the members the summary view emits")
+    void summarySchemaPublishesExactlyTheViewMembers() {
+        Set<String> declared = mapping(schema("PendingAuthSummary"), "properties").keySet();
+        Set<String> emitted = Arrays.stream(PendingAuthSummaryView.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        assertThat(declared)
+                .as("a closed schema must declare every member the view emits, or the server's own document"
+                        + " rejects the server's own body")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+
+        assertThat(schema("PendingAuthSummary").get("additionalProperties"))
+                .as("the schema must stay closed, because that is what makes the comparison above binding")
+                .isEqualTo(Boolean.FALSE);
+
+        @SuppressWarnings("unchecked")
+        List<String> required = (List<String>) schema("PendingAuthSummary").get("required");
+        for (String display : DISPLAY_MEMBERS) {
+            assertThat(emitted)
+                    .as("the view must still emit display member %s, which the reference screen renders",
+                            display)
+                    .contains(display);
+            assertThat(required)
+                    .as("display member %s is read from a neighbouring context, so it must be optional",
+                            display)
+                    .doesNotContain(display);
+        }
+    }
+
+    /**
+     * Confirms the screen schema publishes exactly the members the screen record emits, and closes.
+     *
+     * <p>Purpose: the operation this schema serves published an unconstrained {@code type: object} with
+     * {@code additionalProperties: true} and no property at all, so the document said nothing whatever about
+     * the twenty-seven-member body the service returns. A client could not generate a type from it, could not
+     * validate a response against it, and had no way to know which members are always present -- and a member
+     * added or renamed on the server would have satisfied that schema exactly as well as the correct body
+     * did.</p>
+     *
+     * <p>Assumptions: the comparison is EXACT in both directions and the schema is asserted CLOSED, because
+     * either alone is weak. An exact comparison against an open schema still lets an undeclared member reach a
+     * client at run time; a closed schema whose member list has drifted rejects the server's own body.</p>
+     *
+     * <p>Assumptions: the required set is asserted as a whole rather than member by member, and it is asserted
+     * to be a SUBSET of the emitted members as well. A required name the record does not emit is a member a
+     * client would wait for and never receive, and no closed-schema check catches it.</p>
+     */
+    @Test
+    @DisplayName("the screen schema publishes exactly the members the screen record emits and is closed")
+    void screenSchemaPublishesExactlyTheScreenRecordMembers() {
+        Set<String> declared = mapping(schema("PendingAuthScreen"), "properties").keySet();
+        Set<String> emitted = Arrays.stream(PendingAuthDetailResponse.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        assertThat(declared)
+                .as("the screen projection must be described member for member, not as an open object")
+                .containsExactlyInAnyOrderElementsOf(emitted);
+        assertThat(schema("PendingAuthScreen").get("additionalProperties"))
+                .as("an open schema lets a member added on the server reach a client never told about it")
+                .isEqualTo(Boolean.FALSE);
+
+        @SuppressWarnings("unchecked")
+        List<String> required = (List<String>) schema("PendingAuthScreen").get("required");
+        assertThat(required)
+                .as("a required name the record cannot emit is a member a client waits for and never gets")
+                .isSubsetOf(emitted);
+        assertThat(required)
+                .as("the six chrome members are produced by this service, so all six are always present")
+                .contains("transactionName", "title01", "currentDate", "programName", "title02",
+                        "currentTime");
+        assertThat(required)
+                .as("these members project NOT NULL columns or always-resolving compositions")
+                .contains("cardNumber", "authResponse", "authResponseReason", "approvedAmount",
+                        "transactionId", "matchStatus", "fraudMark");
+        assertThat(required)
+                .as("the message line is null on this route, so it must not be required")
+                .doesNotContain("message");
+    }
+
+    /**
+     * Confirms the document uses no OpenAPI-3.0 nullability keyword anywhere.
+     *
+     * <p>Purpose: this document declares {@code openapi: 3.1.x}, and 3.1 REMOVED the {@code nullable}
+     * keyword in favour of a type union. A 3.1 reader treats {@code nullable} as an unrecognised extension
+     * keyword and ignores it, so a member declared nullable that way is published as NON-nullable while the
+     * server answers null for it -- and a conforming client validating responses rejects an ordinary success
+     * body. Nothing fails at build time, which is why this is asserted rather than reviewed.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because the following-authorization response declared
+     * {@code nullable: true} on its message member. It is now a {@code [string, 'null']} union. The whole
+     * document is walked rather than that one member re-asserted, because the defect is a habit rather than a
+     * typo and the next occurrence would be somewhere else.</p>
+     *
+     * <p>Assumptions: the walk descends through mappings AND sequences, because a schema can appear inside a
+     * {@code oneOf}, an {@code allOf} or a {@code parameters} list, and a walk over mappings alone would miss
+     * every one of those positions.</p>
+     */
+    @Test
+    @DisplayName("no OpenAPI-3.0 nullable keyword survives anywhere in the 3.1 document")
+    void noThreeZeroNullabilityKeywordSurvives() {
+        assertThat(String.valueOf(CONTRACT.get("openapi")))
+                .as("the assertion below is only meaningful because this document declares 3.1")
+                .startsWith("3.1");
+        assertThat(pathsDeclaring(CONTRACT, "nullable", ""))
+                .as("3.1 removed the nullable keyword, so a member using it is published non-nullable")
+                .isEmpty();
+    }
+
+    /**
+     * Collects the location of every occurrence of a key anywhere beneath a node.
+     *
+     * @param node the mapping, sequence or scalar to walk; may be {@code null}
+     * @param key the key to report occurrences of; must not be {@code null}
+     * @param path the slash-separated location of {@code node}, used to make a report legible
+     * @return the locations at which the key occurs, empty when it occurs nowhere, never {@code null}
+     */
+    private static List<String> pathsDeclaring(Object node, String key, String path) {
+        List<String> found = new java.util.ArrayList<>();
+        if (node instanceof Map<?, ?> mapping) {
+            for (Map.Entry<?, ?> entry : mapping.entrySet()) {
+                String child = path + "/" + entry.getKey();
+                if (key.equals(entry.getKey())) {
+                    found.add(child);
+                }
+                found.addAll(pathsDeclaring(entry.getValue(), key, child));
+            }
+        } else if (node instanceof List<?> sequence) {
+            for (int index = 0; index < sequence.size(); index++) {
+                found.addAll(pathsDeclaring(sequence.get(index), key, path + "[" + index + "]"));
+            }
+        }
+        return found;
     }
 
     /**

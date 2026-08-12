@@ -949,17 +949,15 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
         if (rows.isEmpty()) {
             return PageResponse.empty();
         }
-        // WHY : Assumptions: backward availability on a forward read is whether the caller supplied a
-        //       position, because the predicate is strictly beyond that position and the position names a
-        //       row the caller was already shown. It is NOT inferred from the leading boundary token,
-        //       which every page carrying rows supplies -- so the opening window reports nothing behind
-        //       it rather than advertising a window that would come back empty.
+        // WHY : Assumptions: no backward availability answer is published on a forward read either. What
+        //       this window owes a caller stepping back is the LEADING position, sealed below for backward
+        //       replay; whether a row waits there is the caller's own question, answered from the page
+        //       ordinal the reference keeps on the terminal side.
         return PageResponse.ofRows(
                 rows,
                 sealer.seal(cursorKeyOf(rows.get(0)), true),
                 sealer.seal(cursorKeyOf(rows.get(rows.size() - 1)), false),
-                furtherAhead,
-                openedLastKey != null);
+                furtherAhead);
     }
 
     /**
@@ -1039,20 +1037,21 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
             //       it can take from here is backward again -- there is nothing behind it to seal as a
             //       trailing key. Sealing it as trailing would issue a token the caller could only
             //       redeem forward, which would walk it away from the window it holds.
-            return PageResponse.ofFilteredEmpty(sealer.seal(openedFirstKey, true), null, false);
+            return PageResponse.ofFilteredEmpty(sealer.seal(openedFirstKey, true), null);
         }
 
         List<ReportLine> rows = new ArrayList<>(nearestFirst);
         Collections.reverse(rows);
-        // WHY : Assumptions: on a backward read the look-ahead row IS the answer to backward
-        //       availability -- it lies further back than the window -- so the read already performed
-        //       settles it and no second query is issued.
+        // WHY : Refactoring Rationale: the look-ahead row of this backward read is NOT published as a
+        //       backward availability answer, because the shared envelope carries the backward POSITION
+        //       and not that answer -- the reference programs settle the question from a page ordinal the
+        //       terminal holds between turns, so its migrated home is the client's navigation state. The
+        //       row is still read, because the window is trimmed from the same list.
         return PageResponse.ofRows(
                 rows,
                 sealer.seal(cursorKeyOf(rows.get(0)), true),
                 sealer.seal(cursorKeyOf(rows.get(rows.size() - 1)), false),
-                true,
-                furtherBehind);
+                true);
     }
 
     /**

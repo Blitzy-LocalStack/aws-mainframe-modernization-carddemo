@@ -195,8 +195,18 @@ and nothing else. ``psycopg``, ``boto3``, ``botocore``, the ``ebcdic`` distribut
 :mod:`carddemo_migration.config` are all excluded here and in all fourteen modules below, so this
 subpackage and every reader in it import and run on a bare checkout with no database driver, no
 AWS SDK and no credential configured. ``config`` may reach an AWS client, which is why it is named
-in that exclusion rather than left out of it by accident. Only ``loaders`` and ``verify``, which sit
-above this layer, may import a third-party client.
+in that exclusion rather than left out of it by accident.
+
+The guarantee is about THIS package and says nothing about the rest of the distribution, which is
+a narrowing: an earlier wording added that only ``loaders`` and ``verify`` may import a third-party
+client, and that was simply untrue -- ``config`` constructs the AWS clients and ``credentials``
+imports the database driver, both inside functions, and both are outside those two packages. A
+boundary
+claim is only worth stating where it holds, and where it holds here is that nothing on the
+copybook-and-readers path imports a service client at all, at module scope or inside a function.
+That is what makes the codecs exercisable against known-answer vectors on a bare checkout, and a
+codec defect is the one class of defect in this package that is silent -- it produces plausible
+numbers that are wrong -- so reproducing one in isolation is load-bearing rather than tidy.
 
 Two meanings of "EBCDIC"
 ------------------------
@@ -247,28 +257,36 @@ Assumptions:
     ``per-file-ignores`` table that deliberately does not exist. A zero-byte ``__init__.py`` --
     the reflex -- would fail that gate rather than merely be terse.
 Trade-offs:
-    **The fourteen modules below are NOT imported at package import, which is the opposite of what
-    the sibling ``copybook`` entry point does, and the two differ because their costs differ.**
-    Eager import there costs five standard-library-only modules and buys a single spelling for
-    every name. Eager import HERE would cost fourteen modules -- 781 kilobytes of source, measured
-    by summing the sizes of every ``.py`` in this directory except this one -- for a command-line
-    invocation that named ONE dataset, and that cost grows with every record added. Two things make
-    the lazy form affordable: the readers are standard-library-plus-``copybook``, so nothing heavier
-    hides behind the deferral, and :data:`DATASET_READERS` maps to module NAMES rather than to
-    modules, so the registry is inert and can be built without importing anything at all. The
-    accepted cost is real and is the reason the
-    lazy form is not free: a defect inside one reader -- a syntax error, a bad import -- now
-    surfaces on first ACCESS rather than at package import, which means a load that never touches
-    that reader no longer fails. Three things bound it, and they catch three different mistakes.
-    ``data-migration/tests/test_readers.py`` imports every reader by name, so a module broken
-    anywhere fails the suite rather than only a production run.
+    **The TWELVE readers are imported eagerly at package import, and nothing else is.** The two
+    support modules -- ``factory`` and ``source`` -- are resolved on first access, and in practice
+    they are bound anyway because every reader imports ``source``; the hook exists so that the
+    spelling ``readers.factory`` works whether or not something else has pulled it in.
+
+    The cost was measured rather than assumed: the twelve readers are 712 kibibytes of source, and
+    importing them takes ``import carddemo_migration.readers`` from the two-module copybook floor
+    to the full reader layer. Nothing HEAVIER hides behind them -- each is
+    standard-library-plus-``copybook``, so no database driver, no AWS SDK and no optional
+    distribution is pulled in, which is the property the "standard library only" section above
+    states and a child-interpreter probe in the suite checks.
+
+    Refactoring Rationale: an earlier revision deferred all fourteen and made
+    :data:`DATASET_READERS` map to module NAME strings so the registry could be built without
+    importing anything. Two things were wrong with that, and the second is why it changed. It cost
+    the dispatch mapping its usefulness: a caller holding a record name got a string back and
+    needed a second call to turn it into something callable, so the "dispatch mapping" dispatched
+    nothing. And it deferred every reader's import errors to first ACCESS, so a syntax error or a
+    bad import in a reader no consumer touched did not fail at all -- while the argument for the
+    deferral rested on a 781-kilobyte figure that included this file and the two support modules
+    every reader imports regardless. Importing the twelve is what lets :data:`DATASET_READERS` hold
+    the reader FUNCTIONS themselves, which is the contract this package's plan states, and it turns
+    a broken reader into an immediate ``ImportError`` from the package rather than a deferred
+    surprise. Were a reader ever to acquire a heavier dependency -- a service client, an optional
+    distribution at module scope -- this would stop being a cost decision and become a correctness
+    one, so the condition is named rather than left implicit. Three checks bound it from the other
+    side: ``data-migration/tests/test_readers.py`` invokes every dispatch value,
     ``data-migration/tests/test_package_surfaces.py`` asserts :data:`READER_MODULES` against this
-    directory's actual contents in BOTH directions, so a reader that is present on disk and absent
-    from this inventory fails too. And the closing check in this file asserts the registry's keys
-    against the layouts ``layouts`` declares, so a record left with no reader at all fails at
-    import. Were a reader ever to acquire a heavier dependency, the deferral would stop being a
-    cost decision and become a correctness one -- so the condition is named here rather than left
-    implicit.
+    directory's actual contents in BOTH directions, and the closing check in this file asserts the
+    registry's keys against the layouts ``layouts`` declares.
 Alternatives Considered:
     **Re-exporting each reader's own entry points at this level, flat, was evaluated and is
     impossible rather than merely undesirable.** It was measured over the twelve ``__all__``
@@ -281,14 +299,19 @@ Alternatives Considered:
     What is re-exported instead is the twelve reader MODULES under their stable names, which is a
     total surface with no collision: ``readers.account.record_key`` and ``readers.card.record_key``
     are both reachable and cannot be confused. The two support modules are published the same way,
-    so every module in this directory is reached by one spelling.
+    so every module in this directory is reached by one spelling. :data:`DATASET_READERS` then
+    carries the one entry point per reader that a dispatching caller actually wants -- the
+    whole-extract EBCDIC reader -- keyed by record name, where a flat re-export of those twelve
+    functions would have collided on nothing but would also have told a caller nothing about which
+    record each one reads.
 Alternatives Considered:
     **Relying on implicit module attributes instead of declaring :data:`__all__` was evaluated and
     rejected.** A surface that changes shape whenever a module gains a helper is not a contract,
     and ``cli.py`` declares a dependency on this exact file, so what it may import has to be
-    stated rather than discovered. The explicit list is also what makes the lazy resolution
-    checkable: ``__getattr__`` answers only names in the published set, so the declaration and the
-    resolver are verified against each other by the suite rather than by reading.
+    stated rather than discovered. The explicit list is also what makes the remaining lazy
+    resolution checkable: ``__getattr__`` answers only the two support-module names, both of which
+    are in the published set, so the declaration and the resolver are verified against each other
+    by the suite rather than by reading.
 Assumptions:
     **The registry is keyed on the caller's own dataset vocabulary, not on an internal one.**
     ``cli.py`` resolves its ``--dataset`` argument through ``layouts.layout()``, and
@@ -310,7 +333,8 @@ Assumptions:
     each of those assertions describes a working reader as broken. One place to learn what is not
     uniform is worth four restatements.
 Assumptions:
-    **Importing this package has no side effect beyond binding names and one in-memory check.**
+    **Importing this package has no side effect beyond binding names, importing the twelve readers
+    and one in-memory check.**
     The root ``carddemo_migration`` entry point imports no subpackage at all and promises exactly
     that, and a side effect here would break the promise transitively -- importing a reader to
     decode one local file must not configure logging, construct a client, read an environment
@@ -330,24 +354,41 @@ Refactoring Rationale:
 
 from __future__ import annotations
 
-# WHY : Trade-offs: this import block is the whole of it -- the standard library plus the two names
-#   from `layouts` that the registry below is built and checked against. None of this package's
-#   fourteen children is imported here, which is the reverse of what the sibling `copybook` entry
-#   point does, and the module docstring argues the cost both ways: eager there is five
-#   standard-library-only modules, eager here would be 781 kilobytes compiled to serve a caller who
-#   named one dataset. The two names taken from `layouts` are what make the registry checkable at
-#   import without importing a single reader.
-# WHY : Assumptions: `Mapping` is imported for annotation only and stays behind the type-checking
-#   guard, because `from __future__ import annotations` defers every annotation to a string. Taking
-#   it at run time would import `collections.abc` for a name nothing evaluates.
+# WHY : Trade-offs: the TWELVE readers are imported here, eagerly, and the two support modules are
+#   not -- the module docstring argues the cost and the two mistakes the earlier deferral made. The
+#   imports are written absolutely, from `carddemo_migration.readers`, including these imports of
+#   this package's own children: `TID252` bans the relative spelling, and the absolute form of a
+#   self-import resolves correctly because importing a submodule binds it on the partially
+#   initialised parent before the `from` clause is satisfied.
+# WHY : Assumptions: `importlib` is still imported, because `factory` and `source` remain resolved
+#   on first access and `reader_module` answers for a record whose reader is already bound. It is
+#   standard library, so it costs nothing an interpreter has not already paid.
+# WHY : Assumptions: `Mapping` and `Callable` are imported for annotation only and stay behind the
+#   type-checking guard, because `from __future__ import annotations` defers every annotation to a
+#   string. Taking them at run time would import `collections.abc` for names nothing evaluates.
 import importlib
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Final
 
 from carddemo_migration.copybook.layouts import EXPORT_HEADER_LAYOUT, base_master_names
+from carddemo_migration.readers import (
+    account,
+    card,
+    customer,
+    dalytran,
+    discgrp,
+    export_record,
+    tcatbal,
+    trancatg,
+    transaction,
+    trantype,
+    usrsec,
+    xref,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
-    from collections.abc import Mapping
+    import pathlib
+    from collections.abc import Callable, Iterator, Mapping
 
 # WHY : Alternatives Considered: the surface is DECLARED rather than left to whatever names happen
 #   to be bound, and the reasoning is in the module docstring above: a surface that changes shape
@@ -356,7 +397,14 @@ if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
 #   the resolver check each other rather than agreeing by coincidence.
 # WHY : Assumptions: the three constants come first and the fourteen module names follow in sorted
 #   order, matching how the sibling `copybook` package declares its own surface, so both entry
-#   points in this distribution read the same way.
+#   points in this distribution read the same way. `reader_module` sorts among them because it is a
+#   published callable rather than a constant.
+# WHY : Refactoring Rationale: `reader_module` was absent from this list while being public, used
+#   by `cli.py` and `verify/row_counts.py`, documented in the module docstring above, and added to
+#   `__dir__` by hand. A surface declared in two places disagreed in exactly the way that matters:
+#   `from carddemo_migration.readers import *` did not bring in the one callable a dispatching
+#   caller needs, and `__dir__` had to compensate for the omission rather than derive from the
+#   declaration.
 __all__ = [
     "DATASET_READERS",
     "READER_MODULES",
@@ -368,6 +416,7 @@ __all__ = [
     "discgrp",
     "export_record",
     "factory",
+    "reader_module",
     "source",
     "tcatbal",
     "trancatg",
@@ -397,14 +446,25 @@ __all__ = [
 #   derivable from the other. A caller deriving the module name from the layout name gets eight of
 #   twelve right, which is the worst possible outcome: it works in development against the records
 #   somebody tested and fails on the four nobody did.
-# WHY : Trade-offs: the values are module NAMES rather than imported modules or per-name callables,
-#   so this constant is inert and building it imports nothing. Per-name callables were considered
-#   specifically because they would make every value callable without importing anything either;
-#   they were rejected because `reader_module` already IS that one resolver, and a mapping of
-#   twelve partials of it would add twelve indirections that answer the same question the mapping
-#   plus the resolver answer between them. `reader_module` turns a name into a module at the moment
-#   a caller wants one, which is what keeps a single-dataset load from importing all fourteen
-#   modules in this package.
+# WHY : Refactoring Rationale: the values are the readers' whole-extract EBCDIC entry points --
+#   CALLABLES -- where an earlier revision made them module NAME strings so the mapping could be
+#   built without importing anything. That earlier form left the mapping unable to dispatch: a
+#   caller holding a record name received a string and had to make a second call to obtain
+#   something it could invoke, so "dispatch mapping" described a lookup table that dispatched
+#   nothing. The plan for this file states that every value is callable, and this is that.
+# WHY : Assumptions: the EBCDIC entry point is the one chosen, and it is chosen because it is the
+#   only entry point ALL TWELVE readers publish. `usrsec` ships in no ASCII form -- transcoding it
+#   would be another copy of a plaintext password -- and three of `export_record`'s five payload
+#   regimes are not characters in any code page, so neither has an ASCII path to name here. A
+#   mapping missing two of twelve entries would not be a dispatch table, and a mapping whose value
+#   was a PAIR of entry points would push the corpus choice onto every caller when the binary `.PS`
+#   extracts are what the cutover actually reads. Each reader's ASCII entry point stays reachable at
+#   its own module, which is the spelling the scenario tests already use.
+# WHY : Trade-offs: the values are bound FUNCTIONS rather than the modules that hold them, so a
+#   caller can invoke a value directly without knowing the entry point's name -- which differs per
+#   record: `read_ebcdic_accounts`, `read_ebcdic_card_xrefs`, `read_ebcdic_security_users`. The
+#   modules stay published under their own names for everything else a caller needs from one, and
+#   `reader_module` still answers "which module owns this record" for the two consumers that ask.
 # WHY : Assumptions: no record length, offset or field width appears in this mapping. Those belong
 #   to `carddemo_migration.copybook.layouts`, which every reader resolves them from, and a second
 #   copy here is exactly the drift single-sourcing exists to prevent -- the copy would keep
@@ -413,28 +473,38 @@ __all__ = [
 # WHY : Assumptions: MappingProxyType makes it read-only at run time, so a caller cannot redirect a
 #   record to a different reader by mutating a shared dict -- which would be a silent, global change
 #   to which decoder a dataset is read with.
-DATASET_READERS: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        "ACCOUNT": "account",
-        "CARD": "card",
-        "CUSTOMER": "customer",
-        "XREF": "xref",
-        "DALYTRAN": "dalytran",
-        "TRAN": "transaction",
-        "DISGROUP": "discgrp",
-        "TCATBAL": "tcatbal",
-        "SECUSER": "usrsec",
-        "TRANCAT": "trancatg",
-        "TRANTYPE": "trantype",
-        EXPORT_HEADER_LAYOUT.name: "export_record",
-    }
+DATASET_READERS: Final[Mapping[str, Callable[[pathlib.Path], Iterator[Mapping[str, object]]]]] = (
+    MappingProxyType(
+        {
+            "ACCOUNT": account.read_ebcdic_accounts,
+            "CARD": card.read_ebcdic_cards,
+            "CUSTOMER": customer.read_ebcdic_customers,
+            "XREF": xref.read_ebcdic_card_xrefs,
+            "DALYTRAN": dalytran.read_ebcdic_daily_transactions,
+            "TRAN": transaction.read_ebcdic_transactions,
+            "DISGROUP": discgrp.read_ebcdic_disclosure_groups,
+            "TCATBAL": tcatbal.read_ebcdic_category_balances,
+            "SECUSER": usrsec.read_ebcdic_security_users,
+            "TRANCAT": trancatg.read_ebcdic_transaction_categories,
+            "TRANTYPE": trantype.read_ebcdic_transaction_types,
+            EXPORT_HEADER_LAYOUT.name: export_record.read_ebcdic_export_records,
+        }
+    )
 )
 
 # WHY : Assumptions: the inventory is derived from the mapping above rather than written a second
 #   time, so a reader added to one is present in the other by construction. Sorting it makes the
 #   published order independent of the mapping's declaration order, which is the corpus order and
 #   is the wrong order for a name lookup.
-READER_MODULES: Final[tuple[str, ...]] = tuple(sorted(set(DATASET_READERS.values())))
+# WHY : Assumptions: each module name is read from its entry point's own `__module__` and reduced to
+#   the last dotted segment, which is what keeps this inventory derived now that the mapping holds
+#   functions rather than names. Reading `__module__` also makes the derivation self-correcting: an
+#   entry pointing at a function from the wrong module reports that module here, and
+#   `test_package_surfaces.py` compares this tuple against the directory's contents in both
+#   directions, so the mistake surfaces as a mismatch rather than as a reader nobody dispatches to.
+READER_MODULES: Final[tuple[str, ...]] = tuple(
+    sorted({reader.__module__.rsplit(".", 1)[-1] for reader in DATASET_READERS.values()})
+)
 
 # WHY : Assumptions: the two support modules are published in their own tuple rather than folded
 #   into READER_MODULES, because they are not readers and a caller iterating readers must not be
@@ -443,7 +513,13 @@ READER_MODULES: Final[tuple[str, ...]] = tuple(sorted(set(DATASET_READERS.values
 #   exercises the shared guards needs to reach them by name.
 SUPPORT_MODULES: Final[tuple[str, ...]] = ("factory", "source")
 
-_LAZY_MODULES: Final[frozenset[str]] = frozenset(READER_MODULES) | frozenset(SUPPORT_MODULES)
+# WHY : Refactoring Rationale: only the two SUPPORT modules are resolved lazily now. The twelve
+#   readers are imported at the top of this file, so they are already bound as attributes of this
+#   package and ordinary attribute lookup finds them without `__getattr__` being called at all --
+#   which is why they are removed from this set rather than left in it harmlessly: a set claiming to
+#   list what is resolved lazily and naming twelve names that never reach the resolver would be a
+#   third description of the import policy, disagreeing with the other two.
+_LAZY_MODULES: Final[frozenset[str]] = frozenset(SUPPORT_MODULES)
 
 
 def reader_module(layout_name: str) -> ModuleType:
@@ -466,8 +542,8 @@ def reader_module(layout_name: str) -> ModuleType:
     Returns
     -------
     ModuleType
-        The imported reader module. The import happens on the first call for a given name and is
-        cached by the interpreter thereafter, so repeated calls cost a dictionary lookup.
+        The reader module. It is already imported -- this package imports the twelve at import --
+        so the call is a registry lookup plus a ``sys.modules`` lookup.
 
     Raises
     ------
@@ -489,14 +565,19 @@ def reader_module(layout_name: str) -> ModuleType:
     #   reports only the missing key and would leave the caller to discover the valid set by
     #   reading this file.
     try:
-        module_name = DATASET_READERS[layout_name]
+        reader = DATASET_READERS[layout_name]
     except KeyError:
         raise KeyError(
             f"no reader owns layout {layout_name!r}; the layouts with a reader are"
             f" {sorted(DATASET_READERS)}. The derived layouts are readerless on purpose: each is"
             " produced by the migrated pipeline rather than shipped as an extract"
         ) from None
-    return importlib.import_module(f"{__name__}.{module_name}")
+    # WHY : Assumptions: the module is resolved from the registered CALLABLE's own `__module__`
+    #   rather than from a name string, so this function and the registry cannot disagree about
+    #   which module owns a record -- they read the same object. `import_module` on an
+    #   already-imported name is a `sys.modules` lookup, which is what makes reaching the module
+    #   this way no more expensive than holding a second mapping to it.
+    return importlib.import_module(reader.__module__)
 
 
 def __getattr__(name: str) -> ModuleType:
@@ -504,14 +585,15 @@ def __getattr__(name: str) -> ModuleType:
 
     Purpose
     -------
-    Let ``readers.account`` work after ``import carddemo_migration.readers`` alone, without this
-    package importing all fourteen of its modules to make that true.
+    Let ``readers.factory`` and ``readers.source`` work after ``import carddemo_migration.readers``
+    alone, without this package importing either to make that true. The twelve readers do not reach
+    here: they are imported at the top of this file, so ordinary attribute lookup finds them.
 
     Parameters
     ----------
     name : str
-        The attribute being looked up. Only the twelve reader modules and the two support modules
-        resolve; anything else is reported as missing.
+        The attribute being looked up. Only the two support-module names resolve; anything else is
+        reported as missing, including a reader name misspelled in a way ordinary lookup missed.
 
     Returns
     -------
@@ -532,8 +614,12 @@ def __getattr__(name: str) -> ModuleType:
     #   part of the public surface.
     # WHY : Assumptions: Python calls this only when ordinary attribute lookup has already failed,
     #   so a module already imported -- by this hook or by an explicit `from ... import` -- is found
-    #   in the package's namespace and never reaches here. That is what makes the import happen at
-    #   most once per module without any cache written here.
+    #   in the package's namespace and never reaches here. `import_module` binds the submodule as an
+    #   attribute of this package as a side effect, so the resolution happens at most once per
+    #   module with no cache written in this file: the binding IS the cache. That side effect is
+    #   what a lazily returned CLASS or FUNCTION would not have, which is why the sibling `loaders`
+    #   entry point -- whose surface is classes and functions -- writes its resolutions into its own
+    #   namespace explicitly and this hook does not need to.
     if name in _LAZY_MODULES:
         return importlib.import_module(f"{__name__}.{name}")
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -555,16 +641,23 @@ def __dir__() -> list[str]:
     Returns
     -------
     list[str]
-        The sorted contents of :data:`__all__` together with :func:`reader_module`.
+        The sorted contents of :data:`__all__`, which now includes :func:`reader_module`.
 
     Raises
     ------
     None
     """
-    # WHY : Assumptions: dir() is overridden because the lazy modules are absent from this
-    #   package's namespace until they are touched, so the default implementation would list a
-    #   different -- and shrinking -- surface depending on what a session had already imported.
-    return sorted([*__all__, "reader_module"])
+    # WHY : Refactoring Rationale: this derives from `__all__` ALONE, where it used to append
+    #   `reader_module` by hand because that name was missing from the declaration. Two statements
+    #   of one surface is what let them disagree; the name is in `__all__` now, so this hook has
+    #   nothing of its own to add and cannot drift from the contract again.
+    # WHY : Assumptions: dir() is overridden because the two support modules are absent from this
+    #   package's namespace until something imports them, so the default implementation would report
+    #   a surface that GROWS as a session proceeds -- importing a submodule binds it on the parent
+    #   package, so the default answer only ever gains names, never loses them. An earlier comment
+    #   here described that surface as SHRINKING, which is the opposite of what the import system
+    #   does and would have sent a reader looking for a name being removed.
+    return sorted(__all__)
 
 
 # WHY : Assumptions: the inventory is proven against the layouts module at IMPORT rather than only

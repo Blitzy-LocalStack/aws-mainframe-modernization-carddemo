@@ -123,21 +123,21 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * to 542, adding the amount at line 527 and {@code REWRITE} at line 528. The ensemble therefore
  * runs from line 467 to line 542 as three paragraphs, not one.
  *
- * <p>Refactoring Rationale: this block previously asserted that the inherited {@code save} covered
- * both paths -- an empty {@code Optional} from {@code findById} leading to a save that inserts,
- * mirroring line 510, and a present one to a save that updates, mirroring line 528 -- and that no
- * third member was therefore needed. That was measurably wrong, and wrong in the direction that
- * silently corrupts a money column. This entity's identifier is an embedded value that EVERY
- * constructor assigns, and the entity declares no version attribute, so the framework's newness test
- * reads a non-null identifier, concludes the instance is not new, and routes BOTH branches through
- * the provider's merge operation. One code path served two outcomes, and the provider decided insert
- * against update internally from a select it issued itself -- which is the same opacity this section
- * declines at the schema level, arriving through the framework instead. Worse, merge loses both
- * races: on the create path it finds a row a competing writer inserted and UPDATES it, discarding
- * that writer's amount instead of accumulating onto it, where the reference {@code WRITE} at line
- * 510 would have been refused; on the update path it finds the row gone and INSERTS it, recreating a
- * row a competing writer deleted, where the reference {@code REWRITE} at line 528 would have failed
- * its key check. Both leave a plausible row behind and raise nothing.
+ * <p>Refactoring Rationale: the two paths are DISTINCT write members and NOT one inherited
+ * {@code save}. Relying on {@code save} looks sufficient -- an empty {@code Optional} from
+ * {@code findById} leading to an insert that mirrors line 510, a present one to an update that
+ * mirrors line 528 -- and it is wrong in the direction that silently corrupts a money column. This
+ * entity's identifier is an embedded value that EVERY constructor assigns, and the entity declares
+ * no version attribute, so the framework's newness test reads a non-null identifier, concludes the
+ * instance is not new, and routes BOTH branches through the provider's merge operation. One code
+ * path would then serve two outcomes, with the provider deciding insert against update internally
+ * from a select it issued itself -- the same opacity this section declines at the schema level,
+ * arriving through the framework instead. Merge also loses both races: on the create path it finds a
+ * row a competing writer inserted and UPDATES it, discarding that writer's amount instead of
+ * accumulating onto it, where the reference {@code WRITE} at line 510 would be refused; on the update
+ * path it finds the row gone and INSERTS it, recreating a row a competing writer deleted, where the
+ * reference {@code REWRITE} at line 528 would fail its key check. Both leave a plausible row behind
+ * and raise nothing.
  *
  * <p>Assumptions: the two paths are therefore declared as two named members on
  * {@link TransactionCategoryBalanceWriter}, which this interface composes in, and {@code save} is
@@ -267,15 +267,14 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * column {@code V1__ledger.sql} does not create, so it would fail when a query ran rather than
  * degrade to unversioned behaviour.
  *
- * <p>Refactoring Rationale: this paragraph used to close by concluding that "no HTTP conflict
- * response originates from this interface", and that no longer follows. What the absent version
- * attribute rules out is the LOST-UPDATE guarantee -- two callers reading one balance and both
- * writing it -- and that limitation stands unchanged. It never ruled out the two conflicts the write
- * members do report, because neither of those compares a version: one refuses an insert whose key is
- * already taken and the other refuses an update whose row is gone. Both surface as HTTP 409 through
- * the shared advice, and the fragment's own documentation names each condition and the caller's
- * remedy for it. The charter's note on surfacing a stale-state conflict as 409 still describes the
- * records that carry a version attribute; it is simply no longer the only route to that status.
+ * <p>Assumptions: the absent version attribute does NOT mean that no HTTP conflict originates from
+ * this interface. What it rules out is the LOST-UPDATE guarantee -- two callers reading one balance
+ * and both writing it. It does not rule out the two conflicts the write members below report, because
+ * neither of those compares a version: one refuses an insert whose key is already taken and the other
+ * refuses an update whose row is gone. Both surface as HTTP 409 through the shared advice, and each
+ * member's own documentation names its condition and the caller's remedy. The charter's note on
+ * surfacing a stale-state conflict as 409 describes the records that carry a version attribute; this
+ * interface reaches the same status by a different route.
  *
  * <p>Alternatives Considered: no stereotype annotation is applied to this interface. Declaring one
  * is the alternative and is redundant here, because the repository infrastructure already creates a

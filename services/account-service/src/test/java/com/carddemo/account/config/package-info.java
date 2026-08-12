@@ -21,12 +21,25 @@
  * make the two comparable.</p>
  *
  * <p>Alternatives Considered: asserting the same rules by standing up an application context and issuing
- * one request per route, which is the stronger form. Rejected at this checkpoint for a reason specific to
- * it rather than for convenience: this context publishes no controller yet, so every request would answer
- * 404 from the handler mapping and the assertion would rest on distinguishing 403 from 404 -- a signal
- * that changes the moment the first controller lands. Asserting the installed decision object instead
- * gives a result that stays true afterwards, and {@code SecurityConfig.businessAccess()} exists precisely
- * so that object is addressable without a servlet container.</p>
+ * one request per route, which is the stronger form. Rejected because it would answer a DIFFERENT question
+ * from the one these classes ask. Asserting the installed decision object binds the rule table itself, so a
+ * route added later without an entry in it fails here; asserting a request per route binds only the routes
+ * the case list happens to name, and the omission this package exists to catch is by definition one nobody
+ * thought to name. {@code SecurityConfig.businessAccess()} exists precisely so that object is addressable
+ * without a servlet container, and the per-request form is covered where it belongs -- the api package
+ * mounts each controller and asserts its refusals against the deployed chain.</p>
+ *
+ * <p>Refactoring Rationale: the paragraph above previously rejected the per-request form on the ground that
+ * "this context publishes no controller yet", which stopped being true once the account, cross-reference
+ * and customer controllers landed. The rejection still holds, for the reason now recorded, but the reason
+ * had to be restated rather than left resting on a premise the package it describes had outgrown.</p>
+ *
+ * <p>Assumptions: a THIRD kind of configuration is held here as well, and it fails differently again.
+ * {@code InternalRouteClosureTest} compares this service's published contract against the listener rules in
+ * both Terraform environment roots -- two artifacts in two languages that no compiler, linter or test
+ * outside this class reads together. A rule narrower than the contract withdraws an operation silently: the
+ * caller receives a not-found from the load balancer that it cannot tell from a missing row, and this
+ * service logs nothing at all because no request ever arrives.</p>
  *
  * <p>Trade-offs: exercising the manager returned by {@code businessAccess()} binds the DECISION but not
  * the wiring of {@code anyRequest()} to it, which remains a single visible line in the chain builder. A

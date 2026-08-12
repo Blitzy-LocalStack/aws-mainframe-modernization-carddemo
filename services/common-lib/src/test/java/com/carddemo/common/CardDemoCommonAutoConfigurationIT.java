@@ -7,6 +7,7 @@ import com.carddemo.common.control.OnlineWriteGateInterceptor;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.RequestBodySizeFilter;
 import com.carddemo.common.web.CursorToken;
 import java.time.Clock;
 import java.time.Instant;
@@ -100,15 +101,23 @@ class CardDemoCommonAutoConfigurationIT {
             "/carddemo/dev/batch/online-writes-enabled";
 
     /**
-     * A servlet web context receives all four contributions.
+     * A servlet web context receives every contribution, including both filter registrations.
      *
-     * <p>Assumptions: the filter is asserted through its registration bean rather than as a bare
+     * <p>Assumptions: each filter is asserted through its registration bean rather than as a bare
      * filter bean, because the registration is what carries the order and the url pattern. Asserting
      * only that a filter exists would pass against a bare bean whose position in the chain is
      * whatever bean ordering produced.
+     *
+     * <p>Refactoring Rationale: this case asserted a SINGLE registration bean, which was true while
+     * the kernel contributed one filter and became wrong when it began bounding request bodies as
+     * well. The replacement asserts both by bean NAME and asserts the relationship between their two
+     * orders, which is the property that actually matters: the body bound renders a refusal carrying
+     * the correlation identity, and that identity does not exist until the filter ahead of it has
+     * published one. A pair of independent order assertions would pass for two filters ordered the
+     * wrong way round.</p>
      */
     @Test
-    @DisplayName("a servlet web context receives the clock, money module, filter and error advice")
+    @DisplayName("a servlet web context receives the clock, money module, both filters and the advice")
     void contributesEveryComponentToAWebContext() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
@@ -118,23 +127,73 @@ class CardDemoCommonAutoConfigurationIT {
                     assertThat(context).hasSingleBean(JacksonModule.class);
                     assertThat(context.getBean(JacksonModule.class)).isInstanceOf(MoneyModule.class);
                     assertThat(context).hasSingleBean(GlobalExceptionHandler.class);
-                    assertThat(context).hasSingleBean(FilterRegistrationBean.class);
+                    assertThat(context.getBeansOfType(FilterRegistrationBean.class))
+                            .containsOnlyKeys("carddemoCorrelationIdFilterRegistration",
+                                    "carddemoRequestBodySizeFilterRegistration");
 
-                    FilterRegistrationBean<?> registration =
-                            context.getBean(FilterRegistrationBean.class);
-                    assertThat(registration.getFilter()).isInstanceOf(CorrelationIdFilter.class);
-                    assertThat(registration.getOrder())
+                    FilterRegistrationBean<?> correlation = (FilterRegistrationBean<?>)
+                            context.getBean("carddemoCorrelationIdFilterRegistration");
+                    assertThat(correlation.getFilter()).isInstanceOf(CorrelationIdFilter.class);
+                    assertThat(correlation.getOrder())
                             .isEqualTo(CardDemoCommonAutoConfiguration.CORRELATION_FILTER_ORDER);
-                    assertThat(registration.getUrlPatterns()).containsExactly("/*");
+                    assertThat(correlation.getUrlPatterns()).containsExactly("/*");
+
+                    FilterRegistrationBean<?> bodyBound = (FilterRegistrationBean<?>)
+                            context.getBean("carddemoRequestBodySizeFilterRegistration");
+                    assertThat(bodyBound.getFilter()).isInstanceOf(RequestBodySizeFilter.class);
+                    assertThat(bodyBound.getOrder())
+                            .isEqualTo(CardDemoCommonAutoConfiguration.BODY_SIZE_FILTER_ORDER)
+                            .isGreaterThan(correlation.getOrder());
+                    assertThat(bodyBound.getUrlPatterns()).containsExactly("/*");
+                    assertThat(((RequestBodySizeFilter) bodyBound.getFilter()).maxBodyBytes())
+                            .as("an unnamed bound must fall back to the documented default rather"
+                                    + " than leaving the body unbounded")
+                            .isEqualTo(RequestBodySizeFilter.DEFAULT_MAX_BODY_BYTES);
                 });
+    }
+
+    /**
+     * A deployment-named bound replaces the default, and a non-positive one fails the context.
+     *
+     * <p>Assumptions: both halves are asserted in one case because they are one decision. The bound is
+     * configurable so that a deployment serving a larger legitimate body can raise it; the value being
+     * configurable is exactly what makes a nonsensical value reachable, and a bound of zero would
+     * refuse every write this system publishes while the context started successfully. Failing at
+     * assembly turns that into a startup failure naming the value.</p>
+     */
+    @Test
+    @DisplayName("a named request-body bound is applied, and a non-positive one fails the context")
+    void theRequestBodyBoundIsConfigurableAndValidated() {
+        new WebApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withPropertyValues(CardDemoCommonAutoConfiguration.MAX_REQUEST_BODY_BYTES_PROPERTY
+                        + "=4096")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    RequestBodySizeFilter filter = (RequestBodySizeFilter)
+                            ((FilterRegistrationBean<?>) context
+                                    .getBean("carddemoRequestBodySizeFilterRegistration"))
+                                    .getFilter();
+                    assertThat(filter.maxBodyBytes()).isEqualTo(4096L);
+                });
+
+        new WebApplicationContextRunner()
+                .withConfiguration(UNDER_TEST)
+                .withPropertyValues(CardDemoCommonAutoConfiguration.MAX_REQUEST_BODY_BYTES_PROPERTY
+                        + "=0")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure()
+                        .hasMessageContaining("maxBodyBytes"));
     }
 
     /**
      * A non-web context receives the two servlet-free contributions and neither servlet one.
      *
      * <p>Assumptions: this is the batch context's shape. It needs the same meter dimensions and the
-     * same exact-money mapper contract as an online service, and it has no request or response for a
-     * filter or an error advice to operate on. Asserting the ABSENCE is what proves the nested
+     * same exact-money mapper contract as an online service, and it has no request or response for
+     * either filter or the error advice to operate on. The absence assertion covers both filters,
+     * because both registrations live in the one nested configuration whose conditions are under
+     * test here. Asserting the ABSENCE is what proves the nested
      * conditions are evaluated from class-file metadata before the servlet return types are resolved:
      * if they were not, this context would fail to start rather than start without the two beans.
      */

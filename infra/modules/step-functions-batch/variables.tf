@@ -5,10 +5,11 @@
 #   The complete input contract of the `step-functions-batch` module -- the
 #   module that replaces the mainframe JCL/JES2 nightly job stream with the
 #   eleven-work-state `carddemo-daily-batch` state machine, a second and much
-#   smaller state machine for on-demand reports, one shared least-privilege
-#   execution role and one encrypted log group per machine. Anything absent
-#   from this file is a property of the two state machines fixed in main.tf
-#   rather than an environment choice.
+#   smaller state machine for on-demand reports, a third for the operator-invoked
+#   dataset export/import round trip, one shared least-privilege execution role
+#   and one encrypted log group per machine. Anything absent from this file is a
+#   property of the three state machines fixed in main.tf rather than an
+#   environment choice.
 #
 #   Reusable MODULE, never a Terraform root. Nothing is read from the ambient
 #   environment and nothing is generated inside the module: every input arrives
@@ -17,9 +18,10 @@
 #   terraform.tfvars files instead of hidden in this module body.
 #
 # Parameters:
-#   Nine groups, in declaration order: naming and tagging; ECS wiring; IAM;
+#   Ten groups, in declaration order: naming and tagging; ECS wiring; IAM;
 #   networking; data and notification; observability; function-backed states;
-#   seed-dataset staging; timing and resilience. Each block carries the `type`
+#   seed-dataset staging; timing and resilience; and the two ceilings of the
+#   operator-invoked dataset round trip. Each block carries the `type`
 #   and `description` that tflint's terraform_typed_variables and
 #   terraform_documented_variables rules require, and those descriptions are
 #   the text terraform-docs injects into README.md.
@@ -70,6 +72,14 @@
 #   The accepted cost is that adding a state means extending the default and
 #   its validation together.
 #
+#   Refactoring Rationale: the round trip's two states carry their ceilings in a
+#   SECOND map, `dataset_state_timeout_seconds`, rather than as two more keys in
+#   the eleven-name map above. Merging them would have widened that map's
+#   exactness check from eleven names to thirteen, and that check is what catches
+#   a missing or misspelled NIGHTLY ceiling -- the failure it exists to prevent.
+#   Two maps, each exact over its own machine's states, keeps both checks as
+#   strong as they were.
+#
 #   Trade-offs: `log_group_kms_key_arn` is nullable with a null default, where
 #   the encryption posture argues for requiring it. Customer-managed encryption
 #   at rest is a property this migration adds rather than preserves (every CICS
@@ -78,10 +88,11 @@
 #   usable rather than merely less encrypted; both roots do supply the key.
 #
 # Return values:
-#   None. A variables.tf declares no output. outputs.tf publishes the daily and
-#   ad-hoc state-machine identities separately, because
-#   infra/modules/eventbridge-scheduler starts an execution of the first and
-#   services/reporting-service starts an execution of the second.
+#   None. A variables.tf declares no output. outputs.tf publishes the daily,
+#   ad-hoc and dataset round-trip state-machine identities separately, because
+#   infra/modules/eventbridge-scheduler starts an execution of the first,
+#   services/reporting-service starts an execution of the second, and an operator
+#   or automation starts an execution of the third.
 #
 # Exceptions or errors:
 #   Omitting a required input stops the calling root with a
@@ -332,6 +343,39 @@ variable "reporting_container_name" {
   }
 }
 
+variable "authorization_task_definition_arn" {
+  description = "ARN of the authorization-service task definition the operator-invoked authorization-extract machine runs. Published by the authorization infra/modules/ecs-service instance and wired by the environment root. It is a fourth definition rather than a reuse of the batch one because the segment export reads authorization.pending_auth_summary and authorization.pending_auth_detail, and only the authorization context's database role may read them."
+
+  type = string
+
+  validation {
+    # Assumptions: validated separately from the other three so a malformed ARN is
+    #   attributed to the input that feeds the extract machine rather than to a
+    #   generic collection.
+    condition     = can(regex("^arn:[a-z0-9-]+:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/", var.authorization_task_definition_arn))
+    error_message = "authorization_task_definition_arn must be an ECS task-definition ARN of the form arn:<partition>:ecs:<region>:<account-id>:task-definition/<family>[:<revision>]."
+  }
+}
+
+# Assumptions: the authorization image serves an HTTP surface as well as these jobs,
+#   so its baked-in command is a server start and an unmatched override here does not
+#   run the wrong job -- it starts a long-lived server inside a synchronous run-task
+#   state, which then holds the state open until the state's own timeout expires. That
+#   is the same failure mode the reporting container name records, and it is the reason
+#   the name is passed rather than assumed.
+variable "authorization_container_name" {
+  description = "Name of the container inside the authorization-service task definition whose command the authorization-extract states override. The environment root passes the name published by the authorization ecs-service instance rather than an assumed literal, because an unmatched override starts the image's ordinary server command inside a state that waits for the task to stop."
+  type        = string
+  default     = "authorization"
+
+  validation {
+    # Trade-offs: existence cannot be checked from an ARN at plan time, but the
+    #   legal character set can, which is what prevents the server-start outcome.
+    condition     = can(regex("^[a-zA-Z0-9][a-zA-Z0-9_-]*$", var.authorization_container_name))
+    error_message = "authorization_container_name must be a container name of letters, digits, hyphens and underscores, beginning with a letter or digit."
+  }
+}
+
 # -----------------------------------------------------------------------------
 # IAM -- the roles the execution role may hand to ECS
 # -----------------------------------------------------------------------------
@@ -345,7 +389,7 @@ variable "reporting_container_name" {
 #   Both halves of each pair are needed -- the execution role pulls the image and
 #   writes the log stream, the task role is what the job authenticates as.
 variable "pass_role_arns" {
-  description = "IAM role ARNs the state-machine execution role is permitted to pass to ECS: the task role AND the task execution role of each of the batch, data-migration and reporting task definitions, six entries for three images. The environment root assembles the list from the ecs-service outputs it already holds; enumerating it is the least-privilege boundary of what either state machine may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole."
+  description = "IAM role ARNs the state-machine execution role is permitted to pass to ECS: the task role AND the task execution role of each of the batch, data-migration, reporting and authorization task definitions, eight entries for four images. The environment root assembles the list from the ecs-service outputs it already holds; enumerating it is the least-privilege boundary of what any of this module's state machines may run a task as, and omitting an entry fails at run-task with an access-denied error on iam:PassRole."
 
   type = list(string)
 
@@ -358,7 +402,7 @@ variable "pass_role_arns" {
     #   is another module's output, and the name says PASS because that is the
     #   action authorised -- one `iam:PassRole` statement whose Resource is
     #   exactly these ARNs.
-    # Assumptions: the arity is exactly six -- three task definitions, each
+    # Assumptions: the arity is exactly eight -- four task definitions, each
     #   needing both an execution role and a task role -- and DUPLICATES are
     #   permitted, so this is an exact-count check rather than a distinctness
     #   check: a caller may legitimately share one execution role across
@@ -366,8 +410,15 @@ variable "pass_role_arns" {
     #   the first nightly run-task with an access-denied error on iam:PassRole
     #   that names a role rather than this input, which is the most expensive
     #   place to discover it.
-    condition     = length(var.pass_role_arns) == 6 && alltrue([for r in var.pass_role_arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
-    error_message = "pass_role_arns must list exactly six IAM role ARNs -- the task role and the task execution role of each of the batch, data-migration and reporting task definitions -- each of the form arn:<partition>:iam::<account-id>:role/<name>. List a shared role once per slot it fills."
+    # Refactoring Rationale: the arity was six for three images and became eight
+    #   when the authorization task definition was added for the operator-invoked
+    #   extract machine. This exact-count check is what surfaced the omission: the
+    #   root was wired with eight entries and `terraform validate` refused it here,
+    #   naming this input, rather than the fourth image's run-task failing later on
+    #   iam:PassRole. That is precisely the trade the count was written for, so it
+    #   is raised with the arity rather than relaxed to a minimum.
+    condition     = length(var.pass_role_arns) == 8 && alltrue([for r in var.pass_role_arns : can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:role/", r))])
+    error_message = "pass_role_arns must list exactly eight IAM role ARNs -- the task role and the task execution role of each of the batch, data-migration, reporting and authorization task definitions -- each of the form arn:<partition>:iam::<account-id>:role/<name>. List a shared role once per slot it fills."
   }
 }
 
@@ -1134,3 +1185,122 @@ variable "adhoc_report_timeout_seconds" {
 #   concern, and splitting it across both modules would leave neither owning
 #   it.
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# Operator-invoked dataset round trip
+# -----------------------------------------------------------------------------
+
+variable "dataset_state_timeout_seconds" {
+  description = "Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state_timeout_seconds because that variable's validation asserts exactly the eleven names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling."
+  type        = map(number)
+
+  default = {
+    # Assumptions: the export reads five whole masters and the import re-reads
+    #   every record it wrote, so both are sized above the nightly backup rather
+    #   than at a per-record cost. They are equal because the two traverse the
+    #   same dataset once each -- the export writing it and the import splitting
+    #   it into six artefacts.
+    ExportDataset = 3600
+    ImportDataset = 3600
+  }
+
+  validation {
+    # Assumptions: the two names are fixed by main.tf's own definition and are
+    #   spelled here character for character, and BOTH directions are checked.
+    #   A missing key leaves that state without a ceiling; a key such as
+    #   "ExportDatasets" would apply cleanly while the export ran unbounded and
+    #   the operator believed a limit had been set. A map holds no duplicate
+    #   keys, so two keys that include both required names are exactly those
+    #   names -- which is why the count carries the second half of the test, as
+    #   Terraform has no symmetric-difference function.
+    condition = length(var.dataset_state_timeout_seconds) == 2 && length(setsubtract([
+      "ExportDataset",
+      "ImportDataset",
+    ], keys(var.dataset_state_timeout_seconds))) == 0
+    error_message = "dataset_state_timeout_seconds must hold exactly one entry for each of the two round-trip work states, named as main.tf spells them: ExportDataset, ImportDataset."
+  }
+
+  validation {
+    # Trade-offs: the same floor and ceiling the nightly work states carry, and
+    #   for the same reasons. A minute is the point below which a healthy task is
+    #   killed during its own start-up, which presents as an intermittent failure
+    #   rather than as a misconfiguration; six hours is the point past which a
+    #   timeout has stopped acting as a safety net.
+    condition     = alltrue([for t in values(var.dataset_state_timeout_seconds) : t >= 60 && t <= 21600 && floor(t) == t])
+    error_message = "Every value in dataset_state_timeout_seconds must be a whole number of seconds from 60 to 21600 inclusive."
+  }
+}
+
+variable "dataset_roundtrip_timeout_seconds" {
+  description = "Ceiling on a single dataset round-trip execution, applied at the top level of that state machine's definition. Separate from the two per-state ceilings because a per-state TimeoutSeconds does not bound an execution that stalls between states or inside the service's own bookkeeping."
+  type        = number
+  default     = 7800
+
+  validation {
+    # Assumptions: the floor is the SUM of the two per-state ceilings rather than
+    #   the larger of them, because the export and the import run in sequence --
+    #   a machine ceiling below their sum could expire while the import was still
+    #   inside its own allowance, which is the one failure a ceiling must not
+    #   cause. It is derived from the map rather than written as a literal so that
+    #   raising a state's own ceiling cannot leave this bound silently too low.
+    # Trade-offs: the ceiling of one day matches the ad-hoc report machine. An
+    #   execution permitted to sit longer than that has already lost the property
+    #   the bound exists to protect, and an operator round trip is not a workload
+    #   anyone waits a day for.
+    condition     = var.dataset_roundtrip_timeout_seconds <= 86400 && floor(var.dataset_roundtrip_timeout_seconds) == var.dataset_roundtrip_timeout_seconds && var.dataset_roundtrip_timeout_seconds >= var.dataset_state_timeout_seconds["ExportDataset"] + var.dataset_state_timeout_seconds["ImportDataset"]
+    error_message = "dataset_roundtrip_timeout_seconds must be a whole number of seconds, at most 86400, and at least the SUM of the ExportDataset and ImportDataset entries in dataset_state_timeout_seconds, because those two states run in sequence."
+  }
+}
+
+variable "authorization_state_timeout_seconds" {
+  description = "Per-state ceiling for the two work states of the operator-invoked authorization extract, keyed by state name: UnloadAuthorizations and LoadAuthorizations. Held in its own map for the reason dataset_state_timeout_seconds is, so that widening either map cannot weaken the other's exact-name check."
+  type        = map(number)
+
+  default = {
+    # Assumptions: the export walks every summary row and every authorization under
+    #   it, and the load re-reads every record it wrote, so the two traverse the same
+    #   segments once each and are sized equally. They sit below the dataset pair
+    #   because the authorization segments are a fraction of the transaction masters.
+    UnloadAuthorizations = 1800
+    LoadAuthorizations   = 1800
+  }
+
+  validation {
+    # Assumptions: BOTH directions are checked, as the dataset map records. A missing
+    #   key leaves that state unbounded; a misspelled one applies cleanly while the
+    #   state runs unbounded and the operator believes a limit was set. A map holds no
+    #   duplicate keys, so the count carries the second half of the test.
+    condition = length(var.authorization_state_timeout_seconds) == 2 && length(setsubtract([
+      "UnloadAuthorizations",
+      "LoadAuthorizations",
+    ], keys(var.authorization_state_timeout_seconds))) == 0
+    error_message = "authorization_state_timeout_seconds must hold exactly one entry for each of the two extract work states, named as main.tf spells them: UnloadAuthorizations, LoadAuthorizations."
+  }
+
+  validation {
+    # Trade-offs: the same floor and ceiling every other work state in this module
+    #   carries, and for the same reasons.
+    condition     = alltrue([for t in values(var.authorization_state_timeout_seconds) : t >= 60 && t <= 21600 && floor(t) == t])
+    error_message = "Every value in authorization_state_timeout_seconds must be a whole number of seconds from 60 to 21600 inclusive."
+  }
+}
+
+variable "authorization_extract_timeout_seconds" {
+  description = "Ceiling on a single authorization-extract execution, applied at the top level of that state machine's definition. Separate from the two per-state ceilings because a per-state TimeoutSeconds does not bound an execution that stalls between states."
+  type        = number
+  default     = 2100
+
+  validation {
+    # Assumptions: the floor is the LARGER of the two per-state ceilings rather than
+    #   their sum, which is where this bound differs from the dataset round trip's and
+    #   why it is not simply a copy of it. The export and the load are ALTERNATIVES
+    #   selected by the request's mode, never a sequence, so no execution can run both
+    #   and a floor at their sum would only permit an idle execution to sit twice as
+    #   long as any real one. It is derived from the map so that raising a state's own
+    #   ceiling cannot leave this bound silently too low.
+    # Trade-offs: the ceiling of one day matches the other two operator-facing
+    #   machines in this module.
+    condition     = var.authorization_extract_timeout_seconds <= 86400 && floor(var.authorization_extract_timeout_seconds) == var.authorization_extract_timeout_seconds && var.authorization_extract_timeout_seconds >= max(var.authorization_state_timeout_seconds["UnloadAuthorizations"], var.authorization_state_timeout_seconds["LoadAuthorizations"])
+    error_message = "authorization_extract_timeout_seconds must be a whole number of seconds, at most 86400, and at least the LARGER of the two entries in authorization_state_timeout_seconds, because the export and the load are alternatives rather than a sequence."
+  }
+}

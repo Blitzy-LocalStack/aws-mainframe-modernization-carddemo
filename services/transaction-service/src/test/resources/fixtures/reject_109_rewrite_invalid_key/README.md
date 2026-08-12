@@ -31,8 +31,18 @@ all-or-nothing.
 ## 1. Scenario intent
 
 One daily transaction that passes every validation gate, is taken down the posting path,
-and fails on the account rewrite. The reject that results carries reason code **109** and
-the message `ACCOUNT RECORD NOT FOUND`.
+and fails on the account rewrite. In the baseline that failure sets reason code **109** with
+the message `ACCOUNT RECORD NOT FOUND` into a field nothing then writes, and the transaction
+posts anyway. In the migration the whole post is discarded instead, and **no reject row is
+written** — the difference is registered as `D-POSTING-ATOMIC-NO-REJECT-109`, and section 4.1
+states what a test of these records must assert.
+
+Refactoring Rationale: this paragraph said "the reject that results carries reason code 109",
+and sections 2.2, 4.1 and 6 described a durable reason-109 row written from outside the
+rolled-back unit of work. No code writes such a row and none ever did: the register entry that
+described one is withdrawn, and the sentences that described it here are corrected below rather
+than left for a reader to reconcile against the code. What this folder witnesses is the
+ATOMICITY — the discarded partial writes — which is the half that shipped.
 
 This scenario has **no counterpart in the reference tree, no mirrored fixture and no
 expected-output master**, and that is stated plainly rather than glossed. Measured:
@@ -127,22 +137,32 @@ Nor does the paragraph stop the posting sequence. `PERFORM 2900-WRITE-TRANSACTIO
 line 442 follows the account `PERFORM` at line 441 unconditionally, so the transaction
 write at line 564 still executes with the reason field holding 109.
 
-The durable reject row and the discarded unit of work that sections 3, 4 and 6 describe are
-therefore **migrated behaviour**, and they are attributed to the migration throughout this
-document. They are not a reading of the baseline flow at lines 213 to 215, and no statement
-here should be taken as one. The baseline's own arrangement is cited as it stands.
+The discarded unit of work that sections 4 and 6 describe is therefore **migrated
+behaviour**, and it is attributed to the migration throughout this document. It is not a
+reading of the baseline flow at lines 213 to 215, and no statement here should be taken as
+one. The baseline's own arrangement is cited as it stands.
 
 **One design, stated once.** This folder describes exactly one target behaviour and no
-alternative: the three posting writes are discarded together **and** one reason 109 row is
-written. The row is written outside the rolled-back unit of work, because a row written
-inside it would be discarded by the same rollback it exists to explain. The pairing is not
-a preference between two readings -- discarding the writes without recording the event would
-leave an operator no way to learn that a record failed to post, and recording the event
-while leaving the writes would keep an inconsistency the data cannot explain. It is
-registered as `D-REJECT-109-DURABLE` in
-[`docs/architecture/cobol-to-service-traceability.md`](../../../../../../../docs/architecture/cobol-to-service-traceability.md),
-where the accepted cost is stated: the migrated reject stream carries a row the baseline's
-stream does not, on exactly the records whose account rewrite failed.
+alternative: the three posting writes are discarded together, and **nothing is written to the
+reject stream**. Reason 109 is as unreachable in the migration as it is in the baseline —
+`PostTransactionsJob` opens one transaction boundary for the pass and wraps the account write
+in no handler, so the failure propagates, everything rolls back and the step fails, while the
+reject writer is reached only from the validation branch. It is registered as
+`D-POSTING-ATOMIC-NO-REJECT-109` in
+[`docs/architecture/cobol-to-service-traceability.md`](../../../../../../../docs/architecture/cobol-to-service-traceability.md).
+
+Alternatives Considered: writing one reason-109 row from outside the rolled-back unit of work
+so the failure would be queryable from `ledger.transaction_rejects`. That was this folder's
+stated design for a time, under the withdrawn identifier `D-REJECT-109-DURABLE`, and it was
+never built. It is rejected on the three grounds the register records: a second transaction
+boundary would qualify the atomicity the same file exists to guarantee; a row the baseline's
+stream does not carry would break the byte-for-byte reject-stream comparison the golden
+masters make; and the event is not lost without it, because a failed step is visible as a
+failed state in the batch state machine carrying that step's own logged exception.
+Trade-offs: a reader of `ledger.transaction_rejects` therefore cannot find this failure
+there. That is accepted because the transaction is not posted either — there is no
+inconsistent row for a reject row to explain, which was the whole attraction of the durable
+design while the partial post still stood.
 
 ---
 
@@ -220,13 +240,17 @@ The assertion has three parts and all three are required:
    `00000000007 / 01 / 0001` still carries `+100.00`. It must never be found holding
    `604.77`, which is what `100.00 + 504.77` would produce had the update arm at line 526
    been allowed to stand.
-3. **The reject row is the only durable output.** One row in
-   `ledger.transaction_rejects`, shaped as section 6 sets out, and nothing else.
+3. **`ledger.transaction_rejects` gains no row either.** The failure produces no reject, so
+   the table holds exactly what it held before. An assertion that finds a reason-109 row is
+   describing the withdrawn design rather than the shipped one.
 
-**A test that checks the reject row but not the absence of the two partial writes leaves
-this folder's main purpose unproven.** It would confirm that a 109 is reported, which the
-sibling reject scenarios largely establish already, while saying nothing about the property
-that justifies the folder existing. Both halves are the assertion.
+**A test that asserts a reason-109 row instead of the absence of the two partial writes
+proves this folder's opposite.** The property that justifies the folder existing is that
+work already done is discarded, because this is the only scenario whose failure arrives after
+work has begun; a reject-row assertion says nothing about that, and the sibling reject
+scenarios already establish everything there is to establish about reporting a reject. All
+three parts above are absences, and that is the point: after this failure the two schemas
+read exactly as they did before it.
 
 Money in all three parts is exact fixed point end to end: `NUMERIC(11,2)` in the schema,
 `BigDecimal` at scale 2 in Java, and a string on the wire. A comparison that routes
@@ -262,16 +286,27 @@ the discriminating condition of this scenario is a property of the account file.
 
 ## 6. Expected outcome and the reject output contract
 
-**Outcome.** The transaction is not posted. One reject is produced, and the two partial
-writes named in section 4.1 are discarded rather than left standing.
+**Outcome.** The transaction is not posted, the two partial writes named in section 4.1 are
+discarded rather than left standing, and **no reject is produced**. The observable record of
+the failure is a failed batch step, not a row.
 
-**What this folder supplies to `ledger.transaction_rejects`:**
+**The shape reason 109 would take if anything ever wrote it** — stated because the reason-code
+column admits the value, which is a schema fact one test does assert, and because a reader
+needs to be able to tell that fact from a claim that a row exists:
 
-| Column | Value |
+| Column | Value it would carry |
 |---|---|
-| `reason_code SMALLINT` | `109` |
+| `reason_code SMALLINT` | `109` — admitted by the column's domain, written by nothing |
 | `reason_desc VARCHAR(76)` | `ACCOUNT RECORD NOT FOUND`, verbatim, character for character |
 | `raw_record CHAR(350)` | the 350 bytes of the `dailytran.txt` record, undecomposed, including the 26 spaces at positions 305 to 330 |
+
+Assumptions: the table above is a LAYOUT and not an expectation. `RejectReason`'s
+`isPersistedToRejectStream()` answers false for reason 109 alone,
+`TransactionRejectRecordMapper` declares the persisted reason-code domain as exactly
+{100, 101, 102, 103}, and `TransactionRejectRepositoryIT`'s
+`theColumnDomainAdmitsReasonOneHundredAndNineAlthoughTheReferenceWritePathNeverReachesIt`
+asserts the narrower fact its name states. The three sentences agree, and the layout is kept
+here so that the column definition below remains checkable.
 
 Measured in
 [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql): `raw_record` is
@@ -291,8 +326,8 @@ the field with `100`.
 
 The data area stays undecomposed on purpose, and folder index section 2.3 is the authority:
 the reject is an **output** of posting rather than an input to it, which is also why no
-scenario in this folder ships a reject fixture and why this document states the expected
-code and message in prose instead.
+scenario in this folder ships a reject fixture and why this document states the code and
+message in prose instead.
 
 **No graded outcome applies here.** The Maven and JUnit gates this module runs under are
 pass or fail. The reference suite's condition-code rubric belongs to that suite and its own

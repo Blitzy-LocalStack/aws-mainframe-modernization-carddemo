@@ -151,15 +151,7 @@ function maskedStatement(): Record<string, unknown> {
 /** Asserts report submission posts the request body to the published submission path. */
 async function submitsToThePublishedReportPath(): Promise<void> {
   nextStatus = HTTP_CREATED;
-  nextBody = {
-    executionArn: 'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
-    reportName: 'Monthly',
-    shortName: 'MONTHLY',
-    longName: 'Monthly Transaction Report',
-    startDate: '2022-07-01',
-    endDate: '2022-07-31',
-    submittedAt: '2022-07-18 22:10:31.000000',
-  };
+  nextBody = startedSubmissionBody();
   await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
   const request = onlyRequest();
   expect(request.method).toBe('post');
@@ -168,24 +160,48 @@ async function submitsToThePublishedReportPath(): Promise<void> {
 }
 
 /**
- * Asserts a created status is read as a started execution.
+ * Builds the body a started run answers with, shaped as the published contract shapes it.
+ *
+ * Refactoring Rationale: the three call sites below each stubbed this body inline and all three stubbed
+ * it FLAT, carrying the execution handle's members at the top level. That agreed with the client they
+ * were written against and with nothing else: `reporting-api.yaml` refs one `ReportSubmissionOutcome`
+ * from both the 200 and the 201, and that schema nests the handle under `submission` beside a boolean and
+ * a sentence. A fixture that reproduces the client's own mistake cannot detect it, so the shape is
+ * single-sourced here and taken from the document.
+ * @returns {Record<string, unknown>} The 201 body: the flag, the composed sentence, and the nested
+ *   handle.
+ */
+function startedSubmissionBody(): Record<string, unknown> {
+  return {
+    submitted: true,
+    message: 'Monthly report submitted for printing ...',
+    submission: {
+      executionArn: 'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
+      reportName: 'Monthly',
+      shortName: 'MONTHLY',
+      longName: 'Monthly Transaction Report',
+      startDate: '2022-07-01',
+      endDate: '2022-07-31',
+      submittedAt: '2022-07-18 22:10:31.000000',
+    },
+  };
+}
+
+/**
+ * Asserts a created status is read as a started execution whose handle is nested where it is published.
  *
  * Assumptions: the STATUS is what the outcome is asserted from, not a member of the body, because the
  * contract makes 201 normative for a started run. The baseline draws no such distinction at all -- the
  * declined branch of SUBMIT-JOB-TO-INTRDR sets the same flag a validation failure does -- so reading
  * the two outcomes apart is a documented improvement that only a status-driven assertion protects.
+ *
+ * Assumptions: the handle is reached through `submission` and the sentence is asserted beside it. Reading
+ * the handle from the body's own top level was what an earlier revision did, and it is the one reading
+ * this assertion exists to rule out.
  */
 async function readsAStartedExecutionFromTheCreatedStatus(): Promise<void> {
   nextStatus = HTTP_CREATED;
-  nextBody = {
-    executionArn: 'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
-    reportName: 'Monthly',
-    shortName: 'MONTHLY',
-    longName: 'Monthly Transaction Report',
-    startDate: '2022-07-01',
-    endDate: '2022-07-31',
-    submittedAt: '2022-07-18 22:10:31.000000',
-  };
+  nextBody = startedSubmissionBody();
   const outcome = await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
   expect(outcome.outcome).toBe('STARTED');
   if (outcome.outcome !== 'STARTED') {
@@ -194,24 +210,28 @@ async function readsAStartedExecutionFromTheCreatedStatus(): Promise<void> {
   expect(outcome.submission.executionArn).toBe(
     'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
   );
+  expect(outcome.message).toBe('Monthly report submitted for printing ...');
 }
 
-/** Asserts an ok status is read as a declined confirmation carrying the report that would have run. */
+/**
+ * Asserts an ok status is read as a declined confirmation that carries no sentence.
+ *
+ * Refactoring Rationale: the stubbed body carried a report name and both range bounds and the assertions
+ * read them back, which described a body the service has never emitted -- the published 200 carries
+ * `submitted`, `message` and `submission` and nothing else. The absent sentence is asserted as NULL
+ * rather than left unasserted, because the reference writes nothing on this branch at
+ * `app/cbl/CORPT00C.cbl` L480 to L483 and an invented sentence was removed from the handler for that
+ * reason; asserting null here is what keeps one from being reintroduced.
+ */
 async function readsADeclinedConfirmationFromTheOkStatus(): Promise<void> {
   nextStatus = HTTP_OK;
-  nextBody = {
-    submitted: false,
-    reportName: 'Monthly',
-    startDate: '2022-07-01',
-    endDate: '2022-07-31',
-  };
+  nextBody = { submitted: false, message: null, submission: null };
   const outcome = await submitTransactionReport({ monthly: 'X', confirm: 'N' });
   expect(outcome.outcome).toBe('DECLINED');
   if (outcome.outcome !== 'DECLINED') {
     throw new Error('the ok status must be read as a declined confirmation');
   }
-  expect(outcome.preview.submitted).toBe(false);
-  expect(outcome.preview.reportName).toBe('Monthly');
+  expect(outcome.message).toBeNull();
 }
 
 /**
@@ -222,7 +242,7 @@ async function readsADeclinedConfirmationFromTheOkStatus(): Promise<void> {
  * a direction alone would describe a position relative to nothing.
  */
 async function sendsTheRangeAndOmitsTheDirectionWithoutACursor(): Promise<void> {
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
   await listTransactionReportLines({ startDate: '2022-07-01', endDate: '2022-07-31' });
   const request = onlyRequest();
   expect(request.method).toBe('get');
@@ -232,7 +252,7 @@ async function sendsTheRangeAndOmitsTheDirectionWithoutACursor(): Promise<void> 
 
 /** Asserts a supplied cursor is sent under the published parameter name with its direction. */
 async function sendsTheCursorUnderThePublishedParameterName(): Promise<void> {
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
   await listTransactionReportLines({
     startDate: '2022-07-01',
     endDate: '2022-07-31',
@@ -309,9 +329,15 @@ async function refusesAnUnmaskedCardNumberInTheStatementResponse(): Promise<void
   await expect(generateStatement({ cardNumber: CARD_NUMBER })).rejects.toBeInstanceOf(RangeError);
 }
 
-/** Asserts the transactions read posts the selector to its own published target. */
+/**
+ * Asserts the transactions read posts the selector to its own published target.
+ *
+ * Assumptions: the stub carries all THREE published members rather than the rows alone. The body
+ * declares a true count and a truncation flag beside its window, and a fixture that omitted them would
+ * describe a body this operation does not answer with.
+ */
 async function sendsTheSelectorForTheTransactionsOperation(): Promise<void> {
-  nextBody = { items: [] };
+  nextBody = { items: [], transactionCount: 0, truncated: false };
   await listStatementTransactions({ cardNumber: CARD_NUMBER });
   const request = onlyRequest();
   expect(request.method).toBe('post');
@@ -333,6 +359,8 @@ async function refusesAnUnmaskedCardNumberInAnyTransactionRow(): Promise<void> {
       { cardNumber: MASKED_CARD_NUMBER, transactionId: '000000000000001' },
       { cardNumber: CARD_NUMBER, transactionId: '000000000000002' },
     ],
+    transactionCount: 2,
+    truncated: false,
   };
   await expect(listStatementTransactions({ cardNumber: CARD_NUMBER })).rejects.toBeInstanceOf(
     RangeError,
@@ -350,19 +378,11 @@ async function refusesAnUnmaskedCardNumberInAnyTransactionRow(): Promise<void> {
  */
 async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
   nextStatus = HTTP_CREATED;
-  nextBody = {
-    executionArn: 'arn:x',
-    reportName: 'Monthly',
-    shortName: 'MONTHLY',
-    longName: 'Monthly Transaction Report',
-    startDate: '2022-07-01',
-    endDate: '2022-07-31',
-    submittedAt: '2022-07-18 22:10:31.000000',
-  };
+  nextBody = startedSubmissionBody();
   await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
 
   nextStatus = HTTP_OK;
-  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false, hasPrevious: false };
+  nextBody = { items: [], firstKey: null, lastKey: null, hasNext: false };
   await listTransactionReportLines({ startDate: '2022-07-01', endDate: '2022-07-31' });
 
   nextBody = { bands: [] };
@@ -371,7 +391,7 @@ async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
   nextBody = maskedStatement();
   await generateStatement({ cardNumber: CARD_NUMBER });
 
-  nextBody = { items: [] };
+  nextBody = { items: [], transactionCount: 0, truncated: false };
   await listStatementTransactions({ cardNumber: CARD_NUMBER });
 
   expect(dispatched).toHaveLength(5);

@@ -240,8 +240,6 @@ Every figure above is measured, so every figure is re-measurable. Run from the
 repository root; all four commands are read-only.
 
 ```bash
-# WHAT: count the data rows of the two root-README component tables, skipping
-#       each table's heading, header and separator rows.
 # WHY : Assumptions: the data rows of each table run contiguously from the line
 #       given until the first non-pipe line, so the count terminates on the blank
 #       line that ends the table rather than on a fixed row count. The awk body
@@ -251,7 +249,6 @@ repository root; all four commands are read-only.
 awk 'NR>=271 { if (/^\|/) n++; else { print n; exit } }' README.md   # -> 24 online
 awk 'NR>=300 { if (/^\|/) n++; else { print n; exit } }' README.md   # -> 27 batch
 
-# WHAT: count the resource stanzas of the base CICS definition, then of all four.
 # WHY : Assumptions: the two scopes are counted with the same pattern against
 #       different file sets, which is what makes Population 2 and Population 3
 #       comparable rather than two unrelated measurements.
@@ -260,15 +257,12 @@ grep -c 'DEFINE MAPSET('      app/csd/CARDDEMO.CSD                   # -> 17
 cat app/csd/CARDDEMO.CSD app/app-*/csd/*.csd | grep -c 'DEFINE TRANSACTION('  # -> 25
 cat app/csd/CARDDEMO.CSD app/app-*/csd/*.csd | grep -c 'DEFINE MAPSET('       # -> 21
 
-# WHAT: count the base presentation layer -- mapset source files and screen fields.
 # WHY : Assumptions: the mapset file count and the base CSD's MAPSET stanza count
 #       are independent measurements of the same population, so their agreement at
 #       17 is a cross-check rather than a restatement.
 ls app/bms/*.bms | wc -l                                             # -> 17
 cat app/bms/*.bms | grep -c 'DFHMDF'                                 # -> 902
 
-# WHAT: partition the documented online transaction identifiers against the base
-#       CICS definition's, three ways.
 # WHY : Trade-offs: comparing the two as sets rather than as counts is what makes
 #       the discrepancy attributable to one named identifier instead of leaving a
 #       bare difference of one to be explained in prose.
@@ -281,8 +275,6 @@ comm -12 <(readme_ids) <(csd_ids app/csd/CARDDEMO.CSD) | wc -l        # -> 17 in
 comm -13 <(readme_ids) <(csd_ids app/csd/CARDDEMO.CSD)               # -> CDV1
 comm -23 <(readme_ids) <(csd_ids app/csd/CARDDEMO.CSD)               # -> the 7 extension ids
 
-# WHAT: show that the fraud-marking program is absent from both populations, and
-#       that a case-sensitive glob undercounts the authorization tree.
 # WHY : Assumptions: three of the eight source files in that tree use an uppercase
 #       .CBL suffix, so the two listings below differ by exactly those three. The
 #       second command is included precisely because it returns the WRONG figure.
@@ -510,14 +502,14 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
-| `common-lib` | 40 | none — it owns no schema |
-| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql` |
-| `account-service` | 39 | `V1__account.sql` |
+| `common-lib` | 43 | none — it owns no schema |
+| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql` |
+| `account-service` | 43 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
 | `card-service` | 23 | `V1__card.sql` |
-| `transaction-service` | 32 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
-| `reference-service` | 58 | `V1__reference.sql`, `V2__seed_reference.sql` |
-| `batch-service` | 52 | `V1__batch.sql` |
-| `authorization-service` | 55 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
+| `transaction-service` | 37 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
+| `reference-service` | 59 | `V1__reference.sql`, `V2__seed_reference.sql` |
+| `batch-service` | 60 | `V1__batch.sql` |
+| `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
 | `reporting-service` | 53 | none by design — it owns no table, only read-only views |
 
 Refactoring Rationale: this paragraph reported that "only `batch-service` and
@@ -526,13 +518,17 @@ other six modules did "not yet contain their controllers, services, repositories
 adapters". That was true of the tree it was written against and is now false of
 every one of the six. It is replaced by a measured table rather than by a corrected
 sentence, because a sentence of that shape has no way to be checked and this one
-survived six modules landing. The counts exclude package charters, which are
+survived six modules landing. The `auth-service` figure moved from 29 to 31 when the
+create path was made usable: a runtime-created user had a pool account with a
+credential nobody could learn, so provisioning now returns that credential in a
+`ProvisionedIdentity` value and the create operation answers with a
+`CreatedUserResponse` carrying it once. Two value types in, none out. The counts exclude package charters, which are
 documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib`
 asserts every count in this table against the module it names, so a figure here that
 drifts from the tree fails the build — which is what a countable claim in a document
 has to be to be worth stating.
 
-*Refactoring Rationale:* two figures moved, and each moved because a class was removed
+Refactoring Rationale: two figures moved, and each moved because a class was removed
 rather than because it had been miscounted. The `reference-service` figure went from 55
 to 54: that module carried TWO classes registered as consumers of one inquiry request
 queue, the duplicate registration was withdrawn and what remained of that class — a
@@ -544,7 +540,102 @@ so within the enclosing class the nested type shadowed it and nothing could reac
 described behaviour that could not occur, and it is deleted rather than reconciled,
 because the nested type is the one three tests and the controller's handler already name.
 
-*Refactoring Rationale:* `common-lib` reads 36 where it read 35. One class was added,
+Refactoring Rationale: `account-service` reads 41 where it read 39, and two classes account for it.
+The first is `com.carddemo.account.dto.CardXrefByAccountView`, and it exists because the
+ACCOUNT-keyed cross-reference lookup was answering with the CARD-keyed operation's
+response shape. That shape deliberately withholds the card number — right for a caller
+that supplied the card, and the one thing an account-keyed caller cannot do without,
+because the consuming context transcribes `READ-CXACAIX-FILE` at lines 576 to 604 of
+`app/cbl/COTRN02C.cbl` and the same read at line 414 of `app/cbl/COBIL00C.cbl`, both of
+which take `XREF-CARD-NUM` from the record and write the row they produce under it.
+Neither a posted transaction nor a bill payment could be written at all. Trade-offs: three
+published shapes now describe one stored row — this one unmasked for a machine,
+`CardXrefView` without the card number for the card-keyed caller, and `CardXrefResponse`
+masked for the browser page — which is duplication accepted on purpose, because collapsing
+them onto the widest would publish an unmasked primary account number to the end-user
+surface and collapsing them onto the narrowest would leave the ledger with no key to
+write.
+
+The second is `com.carddemo.account.dto.CustomerDisplayView`, and it exists because a neighbouring
+context's detail screen had nowhere to read its six display fields from — a cardholder's name,
+two address lines and a telephone number. Its client obtained them by deserialising the response
+of the customer EXISTENCE check, which answers 204 or 404 with no body at all by contract, so a
+bodiless answer deserialised to nothing and those fields rendered as absent on every request
+while nothing anywhere failed. Alternatives Considered: pointing that consumer at the
+body-bearing record read instead, which would have needed no new type. Rejected on least
+privilege — that operation answers with the whole record and is gated on
+`internal:customer-master.read`, a scope granted to no context because it reads a national
+identifier, a government-issued identifier and a credit score for any customer, so serving six
+fields under it would be exactly the escalation the scope split was introduced to prevent. The
+projection is served under the narrower decision-read scope the consumer already holds, and it
+carries no protected value at all: the two encrypted identifiers and the credit score are absent
+rather than masked, because a masked member is still a member a future consumer would begin
+reading.
+
+Refactoring Rationale: `transaction-service` reads 37 where it read 33. Four classes were added
+to `com.carddemo.transaction.dto`, and all four exist to correct one defect rather than to add a
+capability: both of that context's write operations answer a 200 and a 201 with two different bodies,
+and both were answering the 200 with the record the 201 publishes. The published `TransactionAddPreview`
+and `BillPaymentPreview` schemas each close themselves with `additionalProperties: false`, each
+requires a discriminator the posted record has no component for, and each forbids the identifier the
+posted record carries — bill pay additionally names its money member `payableBalance` where the posted
+record names the balance before a payment — so both 200 bodies were invalid against the contract their
+own status publishes, and a client generated from the document rejected them. The added classes are
+`TransactionAddPreview` and `BillPaymentPreview`, which are those two schemas member
+for member, and `TransactionAddOutcome` and `BillPaymentOutcome`, the sealed alternatives that let a
+service return either shape and a controller select the status from the shape it received rather than
+from a nullable member. The alternatives live beside the records because a `sealed` type's permitted
+subtypes must sit in its own package on the class path, and an unsealed interface in the adapter or
+service layer would invert the dependency the module's ArchUnit rules assert.
+
+Refactoring Rationale: five of the nine figures above are restated together — `common-lib` 40 to 43,
+`auth-service` 31 to 29, `account-service` 41 to 43, `reference-service` 58 to 59 and `batch-service`
+56 to 60 — and they are restated as one measurement rather than as five increments. Each moved for its
+own reason: the shared kernel gained the approved-origin check and the request-body bound; the auth
+context withdrew two classes when the temporary credential stopped travelling in a response body; the
+account context gained the revision token and the identifier cipher; the reference context gained its
+own data-source configuration; and the batch context gained the customer and card read seams the export
+needs, their two projections and the failure reporter. Assumptions: they are re-measured as a set
+because they moved at the same time and an increment applied to one figure while the others were left
+alone is how this table came to disagree with the tree in the first place — the paragraphs below record
+each earlier movement for the same reason, and none of them is retracted here.
+
+Refactoring Rationale: `common-lib` reads 41 where it read 40, and `transaction-service` reads 33
+where it read 32. Both movements come from one change: bill payment stopped settling the account
+balance over HTTP. `com.carddemo.transaction.repository.AccountBalanceRepository` is the added
+transaction-service class, and it issues the locked read and the reduction on the caller's own
+connection under a grant on one named table — because lines 233 and 235 of `app/cbl/COBIL00C.cbl`
+sit in ONE CICS task with no commit verb between them, and a remote write cannot enlist in a local
+transaction, so the previous arrangement left two states the baseline cannot produce: an account
+debited with no payment recorded, and a payment recorded that was never settled. The added
+common-lib class is `com.carddemo.common.security.ApprovedOriginPolicy`, which refuses a configured
+service-to-service base address that is not an approved absolute HTTPS origin. It is in the shared
+kernel rather than in the client that needed it because two other modules already carried a
+structurally identical private copy of the check and a third was about to add one; a check
+duplicated three times is one that gets strengthened in a single copy, and the copy that did not
+exist would have sent a minted internal token, and a primary account number, to whatever address a
+parameter file named.
+
+Refactoring Rationale: `common-lib` reads 41 where it read 40. One class was added,
+`com.carddemo.common.messaging.RethrowingDigestErrorHandler`. It is the error handler the three
+queue-consuming contexts publish as a bean, and it exists because the queue starter's own
+failure record logs the throwable as a trailing argument — which makes the logging facade
+render every exception message in the cause chain, and those messages are written by a JDBC
+driver, a codec or a validation library and can quote a request value verbatim. That record is
+now switched off by name in `carddemo-common-defaults.yml`, so a replacement had to exist: this
+one writes the chain of types and the frames with no message text, and then rethrows, because
+the starter installs its error-handler stage as a recovery step and a handler that returned
+normally would leave the message deleted rather than redelivered. It is in the shared kernel
+rather than in each of the three services for that last reason specifically — three copies of a
+control whose correctness turns on rethrowing is three chances for one of them to be edited
+into swallowing a failure. It sits in the existing `messaging` package rather than in a nested
+`messaging/listener` one because the shared kernel's root charter declares a closed inventory of
+a root and ten flat subpackages, and `SharedKernelInventoryTest` re-derives that table one level
+deep and treats a nested package as drift to expose rather than absorb; the `messaging` charter
+states the one exception instead, since three of its four types touch no message and this one
+does.
+
+Refactoring Rationale: `common-lib` reads 36 where it read 35. One class was added,
 `com.carddemo.common.messaging.QueueClientBudget`, which states the relationship a queue
 consumer's time bounds must satisfy against the visibility period of the message its handler
 holds. It is in the shared kernel rather than in a service because three services hold a
@@ -553,7 +644,7 @@ so a per-service copy of the rule would be three chances for one of them to be r
 the other two still claimed the guarantee. The count is restated rather than incremented,
 for the reason the paragraph below gives.
 
-*Refactoring Rationale:* `reference-service` reads 54 where it read 55. Two classes
+Refactoring Rationale: `reference-service` reads 54 where it read 55. Two classes
 were withdrawn from that module and one was added, and each removal is a defect
 closed rather than a capability dropped. A second queue consumer declared
 `@SqsListener` on the same request queue as `DateInquiryMessageListener`, so identical
@@ -566,7 +657,7 @@ The count is restated rather than left to drift because
 each build, which is what turned a stale count into a failing test instead of a
 sentence a reader would have believed.
 
-*Refactoring Rationale:* `reference-service` reads 57 where it read 56. One class was
+Refactoring Rationale: `reference-service` reads 57 where it read 56. One class was
 added, `com.carddemo.reference.mapper.UsStateMapper`, the state-side counterpart of the
 area-code mapper the paragraph above describes. Assumptions: it is recorded here as an
 addition and not as a correction, because nothing in the tree was miscounted — the
@@ -576,7 +667,7 @@ conversion than the delivered routes reach; the duplication and the caller posit
 stated outright in that class's own header and in its package charter's roster rather
 than being left for a reader to infer from a count in this table.
 
-*Refactoring Rationale:* `reference-service` reads 58 where it read 57. One class was
+Refactoring Rationale: `reference-service` reads 58 where it read 57. One class was
 added, `com.carddemo.reference.mapper.UsStateZipPrefixMapper`, the third and last of the
 three per-entity lookup mappers, standing to the state-and-postal-prefix combination as
 the two classes the paragraphs above describe stand to the state code and the area code.
@@ -592,7 +683,71 @@ allow-list condition standing over the whole `PIC X(4)` field at `app/cpy/CSLKPC
 L1072 to L1073 and by the edit at `app/cbl/COACTUPC.cbl` L2537 to L2542, which assembles
 the value by concatenation and only then tests the assembled whole.
 
-*Refactoring Rationale:* `batch-service` reads 52 where it read 51. One class was added,
+Refactoring Rationale: `batch-service` reads 56 where it read 52. Four classes were
+added together, because none of them is useful without the other three: the read-only
+projections `com.carddemo.batch.domain.Customer` and `com.carddemo.batch.domain.Card`,
+and the narrow interfaces `com.carddemo.batch.repository.CustomerRepository` and
+`CardRepository` that walk them. They exist because `ExportJob` emitted three of the
+reference's five export record types and could emit no more without them: the encoder
+already handled all five views of `app/cpy/CVEXPORT.cpy` and the `SELECT` grants already
+existed, so the missing piece was exactly an entity and a repository for
+`account.customers` and `card.cards`. Assumptions: only this column moves. Neither
+projection owns a schema or contributes a migration — both tables belong to
+`account-service` and `card-service` respectively — and both decline to map the columns
+those owners store enciphered, which is registered as a divergence in
+`cobol-to-service-traceability.md` rather than left to inference. Trade-offs: this module
+now maps tables in four schemas it does not own rather than three, which widens the
+read surface it must keep in step with two more owning migrations; what it buys is a
+branch-migration dataset that carries every record type the reference's does, where a
+three-type file imported as structurally complete and renumbered the records it did
+carry.
+
+*⚠️ Refactoring Rationale:* `reference-service` still reads 58, and the figure is
+restated rather than left alone because the composition behind it changed in both
+directions at once. One class was added,
+`com.carddemo.reference.service.AddressLookupService`, and one was deleted,
+`com.carddemo.reference.mapper.LookupMapper`. The addition closes a layering
+violation review reported: `AddressLookupController` injected three repositories and
+carried the whole keyset selection for three browses inline — a four-way query choice
+per browse on the paging direction and the classification filter, the walk bound, the
+in-memory reversal of a backward page, the envelope assembly and three verbatim "NOT
+found" refusals — in the layer the AAP's ports-and-adapters rule states reaches no
+store. The deletion closes the duplication the three paragraphs above each recorded
+and none resolved: those paragraphs describe three per-entity lookup mappers as
+conversions "the delivered routes do not reach", because the routes reached
+`LookupMapper` instead. Every one of those three sentences is now false. The new
+service injects the three per-entity beans, so each is the sole implementation of its
+conversion and none is unreached, and the static class that was reached is gone. The
+pair that survived is the pair carrying the cited-baseline rulings about why each of
+these keys crosses at its declared width. Assumptions: a net-zero movement is the
+easiest kind to leave undocumented, since the one figure a build can check does not
+move — which is precisely why it is written down here.
+
+Refactoring Rationale: `batch-service` reads 56 where it read 52. Four classes were
+added — `com.carddemo.batch.domain.Customer` with
+`com.carddemo.batch.repository.CustomerRepository`, and
+`com.carddemo.batch.domain.Card` with `com.carddemo.batch.repository.CardRepository` —
+and unlike the additions above this one closes a defect rather than extending a roster.
+The export job re-expresses `app/cbl/CBEXPORT.cbl`, which reads five masters and writes
+five record types; this module held an entity for three of them, so the customer and
+card phases logged a heading, reported a count of zero and emitted nothing. That
+shortfall was undetectable downstream, because the five record types share one sequence
+counter and the import dispatcher at `app/cbl/CBIMPORT.cbl` L272 to L286 accepts a
+three-type file as structurally complete — so a dataset missing two whole record types
+reconciled cleanly and published as though whole. Both entities are `@Immutable`
+read-only projections over the narrow `Repository` base, which is the shape
+`DisclosureGroup` already uses in this module for a table another context owns.
+Assumptions: no grant work was required. `data-migration/sql/V0__schemas_and_roles.sql`
+L1093 already granted the batch role usage on the `account` and `card` schemas, L1168
+`SELECT` on every table in `account` and L1206 `SELECT` on every table in `card`, so
+only the Java seam was outstanding. Trade-offs: three protected fields are exported
+redacted rather than in clear — the national identifier at `app/cpy/CVEXPORT.cpy` L36,
+the government-issued identifier at L37 and the card verification value at L96 — because
+they are stored as enciphered envelopes this module's task role holds no decrypt right
+for, and acquiring that right in order to write them into an object-store artefact is
+refused rather than merely unimplemented.
+
+Refactoring Rationale: `batch-service` reads 52 where it read 51. One class was added,
 `com.carddemo.batch.config.SqsConfig`, which completes the three-class roster its
 configuration package charter has always declared and which §0.4.1.2 of the technical
 specification scopes to this module and to `authorization-service` alone. It is recorded
@@ -603,6 +758,54 @@ Assumptions: it adds no schema, no migration and no queue resource, so only this
 moves; the queues, their dead-letter queues and their encryption keys belong to
 `infra/modules/sqs`, and the class is property-gated so a task whose selected job has
 nothing to report starts and exits without it.
+
+Refactoring Rationale: `reference-service` reads 59 where it read 58. One class was
+added, `com.carddemo.reference.config.DataSourceConfig`, and this is the one module of
+the eight that had been missing it. §0.4.1.2 of the technical specification states that
+"every one of the eight service modules has the identical internal shape" and lists
+`config/DataSourceConfig.java` in that shape, so its absence here was a gap in the
+delivered shape rather than a local decision — and two artifacts in the module had
+already been written as though the class were present, its entry point naming it as the
+owner of "the connection pool and the `reference` search path" and its
+`application.yml` naming it beside the pin. It is recorded as an addition and not as a
+correction: 58 was accurate for the tree it was measured against. Assumptions: it adds
+no schema, no migration and no queue resource, so only this column moves. What it adds
+over the declaration in `application.yml` is a startup comparison of the schema the
+server reports through `current_schema()` against `spring.flyway.default-schema` — two
+independent keys, which is what makes the comparison able to fail — so the module now
+proves its schema pin took effect rather than only that it was requested.
+Refactoring Rationale: `batch-service` reads 53 where it read 52, and before that 52
+where it read 51. The first addition was `com.carddemo.batch.config.SqsConfig`, which
+completes the three-class roster its configuration package charter has always declared
+and which §0.4.1.2 of the technical specification scopes to this module and to
+`authorization-service` alone. The second is `com.carddemo.batch.service`
+`.BatchErrorPublisher`, and it is worth distinguishing from the first: that class supplied
+the address, the media type and the send shape, and nothing sent anything, so the
+configuration was reachable only from tests and the terminal error sink never received a
+message. The producer is the caller, and the entry point invokes it once per failed run
+from the point where the job name, the run identifier, the correlation identity and the
+graded return code are all in hand. Both are recorded as additions rather than as
+corrections, because nothing was miscounted — each figure was accurate for the tree it
+was measured against. Assumptions: neither adds a schema, a migration or a queue resource,
+so only this column moves; the queues, their dead-letter queues and their encryption keys
+belong to `infra/modules/sqs`, and the configuration is property-gated so a deployment
+that publishes no sink address starts and exits without any of it.
+
+Refactoring Rationale: the three most recent additions are
+`com.carddemo.batch.service.BatchStepLedgerWriter`,
+`com.carddemo.batch.service.BatchFailureReporter` and
+`com.carddemo.batch.config.SqsBatchFailureReporter`, and each closes a defect rather than
+extending a feature. The writer performs every ledger transition in a transaction
+independent of the step's, because a failure record saved inside the failing transaction
+was rolled back by the failure it existed to record — so a hard-failed run left no failed
+row at all. The other two are the port and the adapter of the terminal error sink: the
+configuration above had been declared, validated and logged since the row read 52, and
+nothing in the module ever called it, so the sink the messaging design provisions stayed
+empty however a night ended while the startup line reported publishing as enabled.
+Assumptions: none of the three adds a schema, a migration or a queue resource, so again
+only this column moves. `V1__batch.sql` gains one column — `attempt`, which the writer's
+re-open transition counts — and that is a change to a migration this row already names
+rather than a new migration for it to list.
 
 
 ## The eight bounded contexts
@@ -682,7 +885,7 @@ groups whose claim drives authorization everywhere else.
 | Responsibilities | Account view and update, customer read, and card cross-reference lookup including the by-account access path. Also serves account inquiry over the message-queue equivalent |
 | Source programs | `COACTVWC` (view), `COACTUPC` (update), `CBACT01C` (account read), `CBACT03C` (cross-reference read), `CBCUS01C` (customer read), `COACCT01` (inquiry, from `app/app-vsam-mq`) |
 | Owned schema | `account` |
-| Owned tables | `accounts`, `customers`, `card_xref` |
+| Owned tables | `accounts`, `customers`, `card_xref`, plus `inquiry_reply_ledger` — which derives from no copybook and exists so a redelivered inquiry request is answered once |
 | Baseline data | `ACCTDAT` L1, `CUSTDAT` L50, `CCXREF` L37 and the `CXACAIX` alternate-index path L63, all in `app/csd/CARDDEMO.CSD` |
 | Synchronous dependencies | `reference-service`, for the seeded phone area-code, state and state/ZIP-prefix lookups that address validation reads |
 | Target asynchronous dependencies | Consume the dedicated account-inquiry request queue and publish to the shared inquiry reply queue — see [`messaging-contracts.md`](messaging-contracts.md) |
@@ -744,20 +947,30 @@ its wording could have revealed that.
 | Owned schema | `ledger` |
 | Owned tables | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` |
 | Baseline data | `TRANSACT` L76 in `app/csd/CARDDEMO.CSD`, plus the batch alternate-index path over the transaction file |
-| Synchronous dependencies | `account-service`, through `com.carddemo.transaction.service.RestAccountContextClient` — it reads **and updates** account-owned records over that context's published surface, which is what bill payment requires. **No hop to `reference-service` is authored** |
+| Synchronous dependencies | `account-service`, through `com.carddemo.transaction.service.RestAccountContextClient` — a **read only**, of the card cross-reference. **No hop to `reference-service` is authored** |
 | Asynchronous dependencies | None |
 
-*WHY (Refactoring Rationale).* This row previously recorded a synchronous dependency
-on **`reference-service`, "for transaction-type and category validation."** No such
-client exists in this module, and the dependency it omitted is the one that does: the
-only class in `transaction-service` that performs an outbound HTTP call is
-`RestAccountContextClient`, and it is bound to `carddemo.account-context.base-url`.
-The row therefore named an edge that is absent and omitted an edge that is present —
-so a reader tracing the request path, sizing a timeout budget, or deciding which
-contexts must be reachable from this one would have had both directions wrong. It
-also mattered for the internal-identity split: this context mints a token for
-`account-service`, and a dependency table that does not show the edge makes that key
-look unnecessary.
+Refactoring Rationale:  This row previously described the `account-service` hop
+as reading **"and updating"** account-owned records. It no longer updates anything. Bill
+payment's balance change is now a LOCAL statement against `account.accounts`, issued by
+`com.carddemo.transaction.repository.AccountBalanceRepository` under the narrowly scoped
+grants `data-migration/sql/V0__schemas_and_roles.sql` §4b gives `carddemo_ledger`, so the
+ledger insert and the balance decrement commit or roll back as one unit as AAP §0.4.1.3
+requires. Describing the balance change as an HTTP call was the more dangerous direction
+of error: it implied the two writes were separately committed across a network boundary,
+which is exactly the partial-posting state the AAP forbids, and it would have led a
+reader to look for a saga or a compensating reversal that deliberately does not exist.
+The surviving hop is a cross-reference lookup, which is a read.
+
+Assumptions: the edge above is read from the client classes rather than from the
+design intent. The only class in `transaction-service` that performs an outbound HTTP
+call is `RestAccountContextClient`, bound to `carddemo.account-context.base-url`; this
+context holds no reference-service client at all. Naming an absent edge, or omitting a
+present one, gives the wrong answer to three separate questions — tracing the request
+path, sizing a timeout budget, and deciding which contexts must be reachable from this
+one — and it obscures the internal-identity split, because this context mints a token
+for `account-service` and a table that hides the edge makes that key look
+unnecessary.
 
 `transaction_rejects` preserves the baseline reject-record contract as a raw
 fixed-width column plus a reason code and reason description, so the reject stream
@@ -795,7 +1008,7 @@ documented business rule fails silently.
 | Source programs | `CBTRN01C` (preflight), `CBTRN02C` (posting), `CBACT04C` (interest), `CBEXPORT` and `CBIMPORT` (round-trip) |
 | Owned schema | `batch` — the durable step ledger plus the job-repository tables |
 | Owned tables | `batch_run`, plus the batch framework's own job-repository tables |
-| Synchronous dependencies | None on another context's HTTP surface. Jobs are argument-driven and receive their parameters, including the business date, from the orchestrator. It does reach four schemas directly under the scoped database grants described below, which is a database dependency rather than a service hop and is why no client class appears in this module |
+| Synchronous dependencies | None on another context's HTTP surface. Jobs are argument-driven and receive their parameters, including the business date, from the orchestrator. It does reach three schemas outside its own directly — `ledger`, `account` and `reference` — under the scoped database grants described below, which is a database dependency rather than a service hop and is why no client class appears in this module. Refactoring Rationale: this counted four, because the role also held an unused `SELECT` on `card`; that grant was removed after `app/cbl/CBTRN01C.cbl` was found to open `CARD-FILE` at `:309` and close it at `:417` without ever reading it, and naming the three schemas rather than counting them keeps the claim checkable |
 | Asynchronous dependencies | None inbound: it is invoked by the orchestrator rather than by a queue, and it registers no listener. Outbound it is publish-only, sending a failed step's notification to the one terminal error sink through `com.carddemo.batch.config.SqsConfig`, which is property-gated so a job with nothing to report needs no queue |
 | Cross-schema access | **Scoped write grants on `ledger.*` and `account.*` only** — see below |
 
@@ -804,13 +1017,16 @@ baseline's injected-date behaviour and with it the reproducibility that
 golden-master comparison depends on. `batch_run` is designed to give each step an
 idempotency key, so that a resumed step which already completed becomes a no-op; the
 baseline has no checkpoint contract at all — its only restart directive is commented
-out — so this is documented as an addition rather than as a port. Trade-offs: the table
-and its repository are landed, but the idempotency is **not operative yet**, because the
-only class that reads or writes the ledger has no production caller while this service's
-`Job` beans remain unauthored. The guarantee that does hold today is coarser: the
-business date is an identifying job parameter, so a repeat of a whole business date is
-recognised, while a resumed step within one night is not yet distinguishable from a first
-attempt at it. The state-by-state mapping lives in
+out — so this is documented as an addition rather than as a port. That idempotency is
+operative: `BatchStepLedger` reads the run identifier paired with the step name before
+running a step body and replays the recorded return code instead when the row is already
+`COMPLETED`, and all seven `Job` beans — `preflightDailyTransactions`,
+`postTransactions`, `calculateInterest`, `backupTransactions`, `combineTransactions`,
+`exportDataset` and `importDataset` — run their steps through it, six by injecting the
+ledger and `importDataset` through the shared ledger-guarded step builder. Two
+guarantees therefore hold together: the business date is an identifying job parameter,
+so a repeat of a whole business date is recognised, and a resumed step within one night
+is distinguishable from a first attempt at it. The state-by-state mapping lives in
 [`batch-orchestration.md`](batch-orchestration.md).
 
 ### `authorization-service`
@@ -825,16 +1041,15 @@ attempt at it. The state-by-state mapping lives in
 | Synchronous dependencies | `account-service`, through `com.carddemo.authorization.service.RestAccountContextClient` — the three reads `COPAUA0C` performs against the cross-reference, account and customer files (`5100-READ-XREF-RECORD`, `5200-READ-ACCT-RECORD`, `5300-READ-CUST-RECORD`) become calls on the context that owns those records |
 | Asynchronous dependencies | Consumes the authorization request queue in order per opaque card group until the explicit dead-letter quarantine boundary; publishes replies through a transactional outbox — see `docs/architecture/messaging-contracts.md` |
 
-*WHY (Refactoring Rationale).* This row recorded synchronous dependencies as
-**"None."** That was wrong, and it was the most consequential of the three dependency
-errors in this catalogue, because this context's synchronous edge is **on the
-authorization decision path**: `RestAccountContextClient` distinguishes a 404 (the
-record is absent, which the baseline treats as a decision input) from any other
-failure (which becomes `AccountContextUnavailableException` so the message is
-redelivered rather than an authorization being declined that the account might
-deserve). Recording "None" hid a dependency whose *availability* changes authorization
-outcomes, and it made the account-service edge invisible to anyone reasoning about
-blast radius or about why this context mints an internal token at all.
+Assumptions: this context's synchronous edge is **on the authorization decision
+path**, which is why it is recorded rather than treated as incidental.
+`RestAccountContextClient` distinguishes a 404 (the record is absent, which the
+baseline treats as a decision input) from any other failure (which becomes
+`AccountContextUnavailableException` so the message is redelivered rather than an
+authorization being declined that the account might deserve). Recording "None" here
+would hide a dependency whose *availability* changes authorization outcomes, and would
+make the account-service edge invisible to anyone reasoning about blast radius or about
+why this context mints an internal token at all.
 
 This is the only target context that consolidates two different baseline
 datastores. The pending-authorization segments and the fraud table are designed as
@@ -850,10 +1065,22 @@ its columns are specified in
 token from its send-attempt counter and widens the latter, and
 `V3__authorization_outbox_fifo_identities.sql`, which renames the outbox's two
 first-in-first-out identity columns to `order_group_id` and `deduplication_id`,
-together with 49 non-`package-info.java` main-source classes — the count tabulated
+together with 57 non-`package-info.java` main-source classes — the count tabulated
 for it earlier in this document.
 
-*Refactoring Rationale:* the third migration is recorded here as well because the
+Refactoring Rationale: this sentence read "49" while claiming to restate the count
+tabulated above, which then said 55, and the true figure is now 57. Two movements are
+folded into that correction and both are recorded rather than silently absorbed. The
+first is this checkpoint's own: `com.carddemo.authorization.task.ExtractStore` and
+`com.carddemo.authorization.task.UnloadAuthorizationsTask` were added to give the
+segment export a destination and an invocation path, taking 55 to 57. The second is a
+drift that was already present — a sentence that names a figure AND says it is the same
+figure as a table's is two statements, and only the table's was being kept current, so
+the prose had been six behind before this checkpoint touched it. It is stated as one
+number in one place now, and the mechanical check that guards the table is the reason
+the table itself was right.
+
+Refactoring Rationale: the third migration is recorded here as well because the
 columns it renames were named for a mechanism that no longer exists. They held keyed
 tokens derived from the card number and the transaction identifier; §0.4.1.8 of the
 technical specification freezes the reply queue's `MessageGroupId` as `card_num` and
@@ -864,7 +1091,7 @@ editing an applied migration changes its checksum and fails Flyway validation on
 database that already ran it; `RENAME COLUMN` is a catalogue-only change, so the
 dependent partial index follows automatically and no table is rewritten.
 
-*Refactoring Rationale:* the second migration is recorded here as well as in the table
+Refactoring Rationale: the second migration is recorded here as well as in the table
 above because a review found the outbox's single `attempts` column carrying three
 unrelated events: the publisher's claim transition, a recorded send failure, and the
 retirement of an expired row that was never sent. Its value therefore answered no
@@ -1058,7 +1285,7 @@ table above -- so the table describes both the contract and the delivered set.
 | Schema | Owning context | Written by | Read by |
 |---|---|---|---|
 | `auth` | `auth-service` | `auth-service` | `auth-service` |
-| `account` | `account-service` | `account-service`, **and `batch-service` under scoped grants** | `account-service`, `reporting-service` (views) |
+| `account` | `account-service` | `account-service`, **and `batch-service` and `transaction-service` under scoped grants** | `account-service`, `reporting-service` (views) |
 | `card` | `card-service` | `card-service` | `card-service`, `batch-service` (`SELECT` only, line 1206), `reporting-service` (views) |
 | `ledger` | `transaction-service` | `transaction-service`, **and `batch-service` under scoped grants** | `transaction-service`, `reporting-service` (views) |
 | `reference` | `reference-service` | `reference-service` | `reference-service`, **`batch-service`** (`SELECT`, for the disclosure-group rates interest accrual reads), `reporting-service` (views) |
@@ -1066,30 +1293,36 @@ table above -- so the table describes both the contract and the delivered set.
 | `authorization` | `authorization-service` | `authorization-service` | `authorization-service` |
 | `reporting` | `reporting-service` | nothing — **no table, no write path** | `reporting-service`, `SELECT`-only, through the views held here |
 
-*WHY (Refactoring Rationale) on the `reference` row.* This row previously recorded the
-`reference` schema as read by **`account-service` and `transaction-service`**, and
-omitted **`batch-service`**. All three parts were wrong, and the source of the error is
-the same confusion the synchronous-dependency table carried: it recorded an HTTP
-dependency as though it were a database grant. `account-service` does read reference
-data, but **over HTTP** through `RestReferenceAddressLookup` — it holds no grant on the
-schema, which is the whole point of the boundary. `transaction-service` neither holds a
-grant nor calls the reference context at all. `batch-service` genuinely does read the
-schema directly, under `GRANT SELECT ON ALL TABLES IN SCHEMA reference TO
-carddemo_batch`. The corrected row is checkable against
+Assumptions: the `reference` row records **database grants**, not HTTP dependencies,
+and the two are easy to conflate. `account-service` does read reference data, but
+**over HTTP** through `RestReferenceAddressLookup` — it holds no grant on the schema,
+which is the whole point of the boundary. `transaction-service` neither holds a grant
+nor calls the reference context at all. `batch-service` reads the schema directly,
+under `GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_batch`. The row is
+checkable against
 [`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql),
 where the only roles granted `USAGE` plus `SELECT` on `reference` are
 `carddemo_reference`, `carddemo_batch` and `carddemo_reporting_owner`. Listing a
-context in this table that holds no grant is the more dangerous direction of error: it
-suggests a database-level coupling that the schema deliberately forbids, and it would
-lead a reader to believe a boundary is weaker than it is.
+context here that holds no grant is the more dangerous direction of error: it suggests
+a database-level coupling that the schema deliberately forbids, and it would lead a
+reader to believe a boundary is weaker than it is.
+
+Refactoring Rationale: on the `account` row, this row previously named
+`batch-service` as the only cross-context writer of the `account` schema. A second one is
+now authored: `transaction-service` holds `USAGE` on `account` plus `SELECT, UPDATE` on
+`account.accounts` and nothing else, from
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+§4b, so that bill payment's ledger insert and balance decrement are one commit. Assumptions:
+the grant is deliberately narrower than the batch one -- one table, two verbs, no
+`INSERT` and no `DELETE` -- and it exists for the same reason, which the section below
+states in full: the reference commits the pair as a single unit of work, and splitting it
+would publish partial-posting states the golden masters would correctly flag.
 
 ### The exception: `batch-service` cross-schema write grants
 
 `batch-service` runs against the single database cluster using a dedicated
 database role that holds **narrowly-scoped cross-schema write grants on
-`ledger.*` and `account.*` only**. It is the one deliberate departure from
-database-per-service purity in the whole design, and it exists for one specific
-reason.
+`ledger.*` and `account.accounts` only**. It exists for one specific reason.
 
 > Trade-offs: **a scoped grant, rather than a saga, for the posting unit of
 > work.** Transaction posting commits **three** writes as a single unit of work:
@@ -1117,6 +1350,38 @@ that would let a caller reach those schemas through it. The per-column derivatio
 of every table named above is in
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
 
+### The second exception: `transaction-service` on `account.accounts`
+
+`transaction-service` holds one further cross-schema grant, and it is narrower than the
+batch one in every dimension: **`USAGE` on `account` plus `SELECT` and `UPDATE` on
+`account.accounts` alone**, from
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+§4b. No `INSERT`, no `DELETE`, no other table, and no schema-wide form.
+
+> Trade-offs: **a scoped grant, rather than an HTTP call, for the bill-payment unit of
+> work.** `app/cbl/COBIL00C.cbl` writes the transaction and reduces the account balance
+> inside one CICS unit of work, so the two either both happen or neither does. Reaching
+> the balance over `account-service`'s published surface — which is what this context
+> did before — put the two writes in two separate commits on two sides of a network
+> boundary, so a failure between them left a posted payment against an unreduced
+> balance, or a reduced balance with no ledger row to explain it. AAP §0.4.1.3 sanctions
+> exactly this remedy for exactly this reason and names the alternatives it rejects:
+> a **saga** and a **transactional outbox with a compensating reversal**, both rejected
+> because they make those intermediate states observable where the baseline has none.
+> The accepted cost is a second deployable holding write authority in a schema it does
+> not own. It is bounded by the grant naming one table and two verbs, by the balance
+> statement being relative (`curr_bal = curr_bal - :amount`) rather than an absolute
+> assignment computed from a stale read, and by that statement also advancing the row's
+> `version` column so a concurrent `account-service` edit is refused rather than
+> silently overwritten.
+>
+> Assumptions: **this precedent does not generalise.** It is admissible here because the
+> reference itself commits the pair atomically. A cross-schema write introduced for
+> convenience, or for a pair the baseline commits separately, has no such warrant.
+
+The card cross-reference read that bill payment also performs stays on the HTTP seam,
+because it is a lookup rather than a write and nothing about it needs to share a commit.
+
 
 ## Cross-service dependency rules
 
@@ -1129,7 +1394,7 @@ context:
 | From | To | Client | What it reads |
 |---|---|---|---|
 | `account-service` | `reference-service` | `com.carddemo.account.service.RestReferenceAddressLookup` | The seeded phone area-code, state and state/ZIP-prefix lookups that address validation reads |
-| `transaction-service` | `account-service` | `com.carddemo.transaction.service.RestAccountContextClient` | Account-owned records, **read and updated**, as bill payment requires |
+| `transaction-service` | `account-service` | `com.carddemo.transaction.service.RestAccountContextClient` | The card cross-reference, **read only** — bill payment's balance change is a local statement, not a call |
 | `authorization-service` | `account-service` | `com.carddemo.authorization.service.RestAccountContextClient` | The cross-reference, account and customer records `COPAUA0C` reads |
 
 So `reference-service` is called by **one** context, not two; `account-service` is
@@ -1148,19 +1413,15 @@ identities described in
 `account-service`'s internal filter chain. The dependency edges above and those two
 identities are the same fact seen from two directions, and they must be read together.
 
-*WHY (Refactoring Rationale).* This passage asserted that "`account-service` **and
-`transaction-service`** are to read reference data from `reference-service`, and
-**nothing else calls across a context boundary** in the request path" — and then, two
-sentences later, correctly named `RestAccountContextClient` in **both**
-`com.carddemo.transaction.service` and `com.carddemo.authorization.service`. The
-paragraph therefore contradicted itself inside its own body: the rule forbade the very
-edges the evidence sentence enumerated, and it credited `transaction-service` with a
-reference hop it does not have while denying it the account hop it does. That is why
-the error survived review — the passage contained its own refutation, so a reader
-skimming either half alone would find it self-consistent. Replacing the prose rule
-with an enumerated table makes the count checkable against the three client classes
-rather than against a sentence, and removes the possibility of the rule and the
-evidence drifting apart again.
+Alternatives Considered: stating this boundary as a prose rule — "these two services
+read reference data and nothing else calls across a context boundary in the request
+path" — rather than as the enumerated table above. Rejected because a prose rule of that
+shape can contradict its own evidence sentence and still read as self-consistent to
+anyone skimming either half: `RestAccountContextClient` is declared in **both**
+`com.carddemo.transaction.service` and `com.carddemo.authorization.service`, so a rule
+forbidding cross-context calls would forbid the very edges the evidence enumerates. An
+enumerated table makes the count checkable against the three client classes rather than
+against a sentence, so the rule and the evidence cannot drift apart.
 
 > Alternatives Considered: no circuit breaker is fitted. A circuit breaker
 > was considered and is **deliberately omitted from the target design**. The only

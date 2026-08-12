@@ -8,11 +8,14 @@ import com.carddemo.common.validation.FieldValidationFlag;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Verifies the response shape's message-off latch and the two published contracts it is held to.
@@ -319,5 +322,66 @@ class ApiErrorTest {
         assertThat(emitted.abend().abendReason().trim()).isEmpty();
         assertThat(emitted.message()).isEqualTo(GlobalExceptionHandler.MESSAGE_INTERNAL);
         assertThat(emitted.status()).isEqualTo(ApiError.INTERNAL_SERVER_ERROR_STATUS);
+    }
+
+    /**
+     * Confirms a serialised field entry carries exactly the three members every contract declares.
+     *
+     * <p>Purpose: two consumers close this object — {@code FieldError} in
+     * {@code services/reporting-service/src/main/resources/openapi/reporting-api.yaml} sets
+     * {@code additionalProperties: false} and {@code FieldError} in {@code ui/src/api/types.ts}
+     * declares three properties and no index signature — so a fourth emitted member is not a cosmetic
+     * difference but a response a strict client refuses. The entry carries two derived Java members
+     * beside its three components, and one of them, {@code isError}, matches the bean convention for a
+     * boolean property; without the suppression on it the serialiser emitted {@code error} as a fourth
+     * key. This case is what keeps the emitted key set and the published key set the same set.</p>
+     *
+     * <p>Assumptions: the assertion is written as an EXACT key set rather than as an absence test for
+     * the one member that drifted. An absence test would pass for any future derived member with a
+     * bean-style name, which is the same defect arriving under a different key; comparing the whole
+     * set makes any addition fail here, where a contract change belongs, rather than at a client.</p>
+     */
+    @Test
+    @DisplayName("a serialised field entry carries exactly field, state and message")
+    void aSerialisedFieldEntryCarriesOnlyItsThreeDeclaredMembers() {
+        ApiError.FieldError entry = new ApiError.FieldError(
+                "startDateMonth", FieldValidationFlag.BLANK, "Start Date - Month can NOT be empty");
+
+        ObjectMapper mapper = JsonMapper.builder().build();
+
+        // WHY : Assumptions: the emitted tree is walked for its property names rather than bound back
+        //       into a map, because binding to a raw map would introduce an unchecked conversion in a
+        //       reactor that reports one as a compiler note, and a name walk answers the only question
+        //       this case asks. The names are collected into a list so the assertion can compare the
+        //       whole set at once.
+        List<String> emitted = new ArrayList<>();
+        mapper.readTree(mapper.writeValueAsString(entry)).propertyNames().forEach(emitted::add);
+
+        assertThat(emitted)
+                .as("the wire object is closed by two published contracts, so it may carry no"
+                        + " member either of them omits")
+                .containsExactlyInAnyOrder("field", "state", "message");
+    }
+
+    /**
+     * Confirms the two derived members stay reachable from Java after being taken off the wire.
+     *
+     * <p>Assumptions: suppressing a member from serialisation must not remove it, because both derived
+     * members have Java callers — the constructor's own guard reads the error predicate, and the blank
+     * marker is the literal asterisk {@code app/cpy/CSSETATY.cpy} lines 23 to 25 additionally write
+     * into a blank field. This case states that the suppression is about the wire alone.</p>
+     */
+    @Test
+    @DisplayName("the derived members remain callable from Java")
+    void theDerivedMembersRemainCallableFromJava() {
+        ApiError.FieldError blank = new ApiError.FieldError(
+                "endDateYear", FieldValidationFlag.BLANK, "End Date - Year can NOT be empty");
+        ApiError.FieldError notOk = new ApiError.FieldError(
+                "endDateYear", FieldValidationFlag.NOT_OK, "End Date - Not a valid Year");
+
+        assertThat(blank.isError()).isTrue();
+        assertThat(notOk.isError()).isTrue();
+        assertThat(blank.screenMarker()).isEqualTo(FieldValidationFlag.BLANK_SCREEN_MARKER);
+        assertThat(notOk.screenMarker()).isEqualTo(FieldValidationFlag.NO_SCREEN_MARKER);
     }
 }

@@ -178,7 +178,7 @@ class CardFixtureContractTest {
         boolean hasNext = read.size() > size;
         List<String> page = hasNext ? read.subList(0, size) : read;
         return PageResponse.ofRows(
-                page, seal(page.get(0)), seal(page.get(page.size() - 1)), hasNext, afterKey != null);
+                page, seal(page.get(0)), seal(page.get(page.size() - 1)), hasNext);
     }
 
     /**
@@ -206,8 +206,7 @@ class CardFixtureContractTest {
         List<String> trimmed = descending.size() > size ? descending.subList(0, size) : descending;
         List<String> page = new ArrayList<>(trimmed);
         page.sort(Comparator.naturalOrder());
-        return PageResponse.ofRows(page, seal(page.get(0)), seal(page.get(page.size() - 1)), true,
-                descending.size() > size);
+        return PageResponse.ofRows(page, seal(page.get(0)), seal(page.get(page.size() - 1)), true);
     }
 
     /**
@@ -644,7 +643,7 @@ class CardFixtureContractTest {
         List<String> keys = pageCorpusKeys();
         List<String> onePage = keys.subList(0, contractedPageSize());
 
-        assertThatThrownBy(() -> PageResponse.ofRows(onePage, keys.get(0), keys.get(6), true, false))
+        assertThatThrownBy(() -> PageResponse.ofRows(onePage, keys.get(0), keys.get(6), true))
                 .isInstanceOf(IllegalArgumentException.class);
 
         // WHY : Assumptions: the positive direction is asserted beside the negative one so that the
@@ -652,7 +651,7 @@ class CardFixtureContractTest {
         //       these arguments -- the identical call with the same two keys sealed is accepted.
         assertThatCode(
                 () -> PageResponse.ofRows(
-                        onePage, seal(keys.get(0)), seal(keys.get(6)), true, false))
+                        onePage, seal(keys.get(0)), seal(keys.get(6)), true))
                 .doesNotThrowAnyException();
     }
 

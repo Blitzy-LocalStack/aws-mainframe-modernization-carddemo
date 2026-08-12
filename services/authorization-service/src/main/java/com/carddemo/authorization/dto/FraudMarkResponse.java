@@ -234,10 +234,9 @@ public record FraudMarkResponse(
     /**
      * The expression the outcome flag has to match in full.
      *
-     * <p>Refactoring Rationale: the domain is ONE character and previously it was two. Admitting the
-     * reference program's failure value {@code 'F'} on this body described a response that says the
-     * write FAILED inside a status that says the request SUCCEEDED, which is a contradiction no client
-     * can resolve: a caller branching on the status code would record a fraud report that was never
+     * <p>Assumptions: the domain is ONE character. Admitting the reference program's failure value
+     * {@code 'F'} on this body would describe a response saying the write FAILED inside a status
+     * saying the request SUCCEEDED, which is a contradiction no client can resolve: a caller branching on the status code would record a fraud report that was never
      * persisted, and a caller branching on this member would ignore a 2xx. The reference has no such
      * ambiguity to preserve because it has no status code -- {@code cbl/COPAUS1C.cbl} L255 to L258
      * tests {@code WS-FRD-UPDT-SUCCESS} and, when it does not hold, moves the failure sentence into

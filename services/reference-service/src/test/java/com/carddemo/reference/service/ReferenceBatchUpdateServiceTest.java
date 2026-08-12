@@ -120,6 +120,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.common.codec.CopybookLayout;
@@ -143,6 +144,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -276,7 +278,192 @@ class ReferenceBatchUpdateServiceTest {
     @BeforeEach
     void setUp() {
         this.types = mock(TransactionTypeRepository.class);
-        this.service = new ReferenceBatchUpdateService(this.types);
+        this.service = new ReferenceBatchUpdateService(this.types, mock(PlatformTransactionManager.class));
+    }
+
+    /**
+     * The three stored scenarios whose bytes had no executable consumer, driven through the service.
+     *
+     * <p>Purpose: each scenario directory beneath {@code fixtures/batch_reference_update} carries a
+     * committed record file and a README stating exactly what those bytes are meant to do. For three of
+     * them -- the commentary branch, the add-then-delete round trip and the in-place update -- nothing
+     * executed against the file, and each README said so outright: "no consumer resolves this scenario's
+     * path", "a case binding these two rows - [planned]". A record file that nothing loads by its own path
+     * can be edited into something wrong with every test still passing, which is a fixture that documents
+     * a behaviour instead of pinning one. These cases bind the bytes to the outcome sequence their own
+     * README declares, so the two can no longer part company silently.</p>
+     *
+     * <p>Assumptions: the bytes come from the stored file through the shared loader, never composed here.
+     * Composing them would re-assert what {@code maintenanceRecord} already builds elsewhere in this class
+     * and would leave the committed file exactly as unbound as it was.</p>
+     *
+     * <p>Trade-offs: these cases read from the class path, so they can fail for a packaging reason rather
+     * than a behavioural one -- the same trade the soft-reject case above accepts. The loader asserts each
+     * file's exact size and line terminators before slicing, so a packaging fault reports as one.</p>
+     */
+    @Nested
+    @DisplayName("on the stored scenario fixtures")
+    class OnTheStoredScenarioFixtures {
+
+        /**
+         * The commentary fixture reports its first row ignored and applies the valid row behind it.
+         *
+         * <p>Assumptions: the two facts asserted are the two its README calls the likeliest misreadings.
+         * A commented row is a SUCCESS and not a refusal, so the run-level return code stays clean; and it
+         * touches no table at all, which is asserted as the repository seeing exactly one lookup -- the
+         * one the second row needs -- rather than two.
+         *
+         * <p>Assumptions: the second row exists to prove the reader ADVANCED past the first. Without it a
+         * commented row and a reader that stopped dead would produce the same single outcome.
+         *
+         * <p>It takes no parameter and returns no value.
+         *
+         * @throws IOException if the stored fixture cannot be read to its end
+         */
+        @Test
+        @DisplayName("report the commented row ignored and apply the record behind it")
+        void reportTheCommentedRowIgnoredAndApplyTheRecordBehindIt() throws IOException {
+            when(types.findByTypeCd(SEEDED_TYPE_CD))
+                    .thenReturn(Optional.of(new TransactionType(SEEDED_TYPE_CD, SEEDED_DESCRIPTION)));
+
+            ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
+                    new ByteArrayInputStream(storedFixtureRecords("commented_line", 2)));
+
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::action)
+                    .as("the COMMENT outcome is followed by the UPDATE one, in stream order")
+                    .containsExactly(ReferenceBatchUpdateService.RecordAction.COMMENT,
+                            ReferenceBatchUpdateService.RecordAction.UPDATE);
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::typeCode)
+                    .as("each row is identified by the code its own bytes carry")
+                    .containsExactly("03", SEEDED_TYPE_CD);
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::message)
+                    .as("both texts are carried verbatim from the baseline under rule T8")
+                    .containsExactly("IGNORING COMMENTED LINE", "RECORD UPDATED SUCCESSFULLY");
+            assertThat(result.outcomes())
+                    .allMatch(ReferenceBatchUpdateService.RecordOutcome::succeeded);
+            assertThat(result.anyRejected())
+                    .as("classifying a commented row as a refusal would raise the aggregate on clean input")
+                    .isFalse();
+            assertThat(result.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
+            assertThat(result.processedCount()).isEqualTo(2);
+
+            // WHY : Assumptions: the commented row's non-effect is asserted as an ABSENCE of persistence
+            //       interaction rather than as an outcome value, because an outcome saying COMMENT while a
+            //       statement had still been issued would satisfy every assertion above. One lookup and one
+            //       flush-through-save is exactly what the second row alone requires.
+            verify(types).findByTypeCd(SEEDED_TYPE_CD);
+            verify(types).saveAndFlush(any(TransactionType.class));
+            verifyNoMoreInteractions(types);
+        }
+
+        /**
+         * The delete fixture adds an unseeded code and then removes that same code.
+         *
+         * <p>Assumptions: the fixture is two rows and not one, and its README explains why at length: every
+         * seeded type has at least one child category, and the migration declares the child foreign key
+         * {@code ON DELETE RESTRICT}, so a delete aimed at any seeded code is refused. Code {@code 08}
+         * appears in neither seed file, so adding it first makes the row exist and its having no categories
+         * leaves the foreign key nothing to refuse. A case that asserted a delete of a seeded code would be
+         * asserting something the schema forbids.
+         *
+         * <p>Assumptions: the dispatch coverage this directory expects is therefore the ordered set
+         * {@code {A, D}} and not {@code {D}} alone, which is the point its README makes outright so that a
+         * reader counting one action per directory does not remove the row that makes the delete succeed.
+         *
+         * <p>It takes no parameter and returns no value.
+         *
+         * @throws IOException if the stored fixture cannot be read to its end
+         */
+        @Test
+        @DisplayName("add the unseeded code and then delete that same code")
+        void addTheUnseededCodeAndThenDeleteIt() throws IOException {
+            String unseeded = "08";
+            String description = "Fixture Delete Candidate";
+            when(types.insertType(unseeded, description)).thenReturn(1);
+            when(types.findByTypeCd(unseeded))
+                    .thenReturn(Optional.of(new TransactionType(unseeded, description)));
+
+            ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
+                    new ByteArrayInputStream(storedFixtureRecords("delete_record", 2)));
+
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::action)
+                    .as("an applied ADD is followed by an applied DELETE on the same code")
+                    .containsExactly(ReferenceBatchUpdateService.RecordAction.ADD,
+                            ReferenceBatchUpdateService.RecordAction.DELETE);
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::typeCode)
+                    .containsExactly(unseeded, unseeded);
+            assertThat(result.outcomes())
+                    .extracting(ReferenceBatchUpdateService.RecordOutcome::message)
+                    .as("the specific result is one row inserted and then one row removed")
+                    .containsExactly("RECORD INSERTED SUCCESSFULLY", "RECORD DELETED SUCCESSFULLY");
+            assertThat(result.outcomes())
+                    .allMatch(ReferenceBatchUpdateService.RecordOutcome::succeeded);
+            assertThat(result.anyRejected()).isFalse();
+            assertThat(result.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
+
+            // WHY : Assumptions: the removal is verified as a real delete of the row the lookup returned,
+            //       because an outcome reporting DELETE while nothing was removed is the shape this
+            //       scenario exists to rule out -- and it is the shape a refused foreign key would take if
+            //       the refusal were swallowed.
+            verify(types).insertType(unseeded, description);
+            verify(types).delete(new TransactionType(unseeded, description));
+        }
+
+        /**
+         * The update fixture replaces one seeded description in place and inserts nothing.
+         *
+         * <p>Assumptions: the single row is asserted to take the UPDATE arm rather than the insert arm, and
+         * the distinction is the one its README calls the cleanest check on the scenario: an insert of a
+         * code the seed does not hold would add a row, which is the business of the add fixture instead.
+         * Here the code is seeded, the lookup finds it, and the description it carries afterwards is the
+         * one the fixture's bytes supply.
+         *
+         * <p>It takes no parameter and returns no value.
+         *
+         * @throws IOException if the stored fixture cannot be read to its end
+         */
+        @Test
+        @DisplayName("replace the seeded description in place and insert nothing")
+        void replaceTheSeededDescriptionInPlace() throws IOException {
+            String seeded = "03";
+            TransactionType stored = new TransactionType(seeded, "Credit");
+            when(types.findByTypeCd(seeded)).thenReturn(Optional.of(stored));
+
+            ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
+                    new ByteArrayInputStream(storedFixtureRecords("update_record", 1)));
+
+            assertThat(result.outcomes()).hasSize(1);
+            ReferenceBatchUpdateService.RecordOutcome applied = result.outcomes().get(0);
+            assertThat(applied.action())
+                    .isEqualTo(ReferenceBatchUpdateService.RecordAction.UPDATE);
+            assertThat(applied.typeCode()).isEqualTo(seeded);
+            assertThat(applied.succeeded()).isTrue();
+            assertThat(applied.message()).isEqualTo("RECORD UPDATED SUCCESSFULLY");
+            assertThat(result.anyRejected()).isFalse();
+            assertThat(result.returnCode())
+                    .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
+
+            // WHY : Assumptions: the description carried by the row handed to the write is asserted, not
+            //       merely that a write happened. The fixture's whole payload is that description, so a
+            //       write that persisted the value already stored would leave every assertion above true
+            //       while the fixture's bytes had made no difference at all.
+            assertThat(stored.getDescription())
+                    .as("the row is updated in place with the description the fixture supplies")
+                    .isEqualTo("Credit memo posted to cardholder");
+            verify(types).saveAndFlush(stored);
+
+            // WHY : Assumptions: the insert path is verified as NEVER reached. An implementation that
+            //       inserted on a found key would leave eight rows where the migration seeds seven, and
+            //       that is the one failure the outcome value alone cannot distinguish.
+            verify(types, never()).insertType(anyString(), anyString());
+        }
     }
 
     /**
@@ -688,7 +875,7 @@ class ReferenceBatchUpdateServiceTest {
             when(types.findByTypeCd("02")).thenReturn(Optional.of(new TransactionType("02", "Payment")));
 
             ReferenceBatchUpdateService.BatchUpdateResult result = service.apply(
-                    new ByteArrayInputStream(storedFixtureRecords("invalid_type_soft_reject", 2)));
+                    new ByteArrayInputStream(storedFixtureRecords("invalid_type_abend", 2)));
 
             assertThat(result.processedCount())
                     .as("both rows are read, so the run does not stop on the first refusal")
@@ -1340,17 +1527,25 @@ class ReferenceBatchUpdateServiceTest {
     class OnTheReachOfTheTranscription {
 
         /**
-         * The service declares one constructor taking the type repository and nothing else.
+         * The service declares one constructor taking the type repository and the transaction manager.
          *
          * <p>Assumptions: asserting the whole declared collaborator set is what makes the category table's
          * absence provable. A case that merely refrained from stubbing a category repository would pass whether
          * or not one were injected, whereas a constructor carrying a second repository fails this and has to be
          * reasoned about -- which is the behaviour wanted from a guard on scope.
          *
+         * <p>⚠️ Refactoring Rationale: the expected set gained the transaction manager, and the guard is
+         * NARROWED rather than weakened to accommodate it. What this case exists to forbid is a second
+         * TABLE, so the assertion below still names exactly one repository type and would still fail on a
+         * category repository. The manager is admitted because it is not a table: it is what opens the
+         * per-record unit of work each write now runs inside, replacing an annotation that a
+         * self-invocation prevented from ever taking effect -- so before it was injected the first insert
+         * of any run failed on a modifying statement executed with no transaction open.
+         *
          * <p>It takes no parameter and returns no value.
          */
         @Test
-        @DisplayName("take the type repository as its only collaborator")
+        @DisplayName("take the type repository as its only data collaborator")
         void takeTheTypeRepositoryAsItsOnlyCollaborator() {
             Constructor<?>[] declared = ReferenceBatchUpdateService.class.getDeclaredConstructors();
 
@@ -1358,7 +1553,12 @@ class ReferenceBatchUpdateServiceTest {
                     .as("a second constructor could admit a collaborator this program has no declaration for")
                     .hasSize(1);
             assertThat(declared[0].getParameterTypes())
-                    .as("line 54 declares the type table alone, so one repository is the whole set")
+                    .as("line 54 declares the type table alone, so one repository plus the boundary the"
+                            + " writes are opened against is the whole set")
+                    .containsExactly(TransactionTypeRepository.class, PlatformTransactionManager.class);
+            assertThat(declared[0].getParameterTypes())
+                    .as("no second table is reachable from this program")
+                    .filteredOn(parameter -> parameter.getName().endsWith("Repository"))
                     .containsExactly(TransactionTypeRepository.class);
         }
 
@@ -1393,6 +1593,36 @@ class ReferenceBatchUpdateServiceTest {
             assertThat(ReferenceBatchUpdateService.class.getAnnotation(Transactional.class))
                     .as("a class-level declaration would reach both methods above by inheritance")
                     .isNull();
+        }
+
+        /**
+         * No method of the service declares a transaction, because a self-invoked annotation cannot work.
+         *
+         * <p>⚠️ Refactoring Rationale: this case is the guard against the defect being reintroduced, and it
+         * is stated over EVERY declared method rather than over the three the sibling case above names.
+         * {@code applyOne} previously carried {@code @Transactional(propagation = REQUIRES_NEW)} and was
+         * reached only by {@code apply(MaintenanceActionBatchRequest)} calling it on {@code this}. A
+         * self-invocation does not pass through the transactional proxy, so the annotation opened nothing
+         * while making the source read as though it opened one per action, and the first insert of any
+         * batch failed on a modifying statement executed outside a transaction. Every boundary this class
+         * needs is now opened by a {@code TransactionTemplate}, which needs no proxy and is therefore
+         * correct from a self-invocation and from a direct call by a test alike.
+         *
+         * <p>Assumptions: the absence is asserted rather than the template's presence, because the
+         * template is a private field and its propagation is exercised by the container-backed integration
+         * test. What is checkable here, and worth checking, is that no annotation has come back -- an
+         * annotation and the template together would open two nested units of work per write.
+         *
+         * <p>It takes no parameter and returns no value.
+         */
+        @Test
+        @DisplayName("declare no transactional annotation on any method, the proxy being unreachable")
+        void declareNoTransactionalAnnotationAnywhere() {
+            assertThat(ReferenceBatchUpdateService.class.getDeclaredMethods())
+                    .as("a self-invoked @Transactional opens no transaction and hides that it opens none")
+                    .allSatisfy(method -> assertThat(method.getAnnotation(Transactional.class))
+                            .as("method " + method.getName() + " declares a transaction it cannot get")
+                            .isNull());
         }
 
         /**

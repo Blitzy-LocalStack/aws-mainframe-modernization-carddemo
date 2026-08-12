@@ -37,21 +37,35 @@
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>What this package holds, and which contract each mapping is bound to</h2>
  *
- * <p>Eight entity types belong here and no ninth; with this charter that makes nine compilation
+ * <p>Ten entity types belong here and no eleventh; with this charter that makes eleven compilation
  * units. Each mapping is listed with the schema-qualified table it targets and the baseline
  * record that fixes its field set.
  *
- * <p>Assumptions: nine is this package's contract as the migration plan assigns it and also a
- * measurement of the directory, because all eight entities have landed -- {@code BatchRun},
+ * <p>Assumptions: eleven is this package's contract as the migration plan assigns it and also a
+ * measurement of the directory, because all ten entities have landed -- {@code BatchRun},
  * {@code Account}, {@code CardXref}, {@code DisclosureGroup}, {@code Transaction},
- * {@code DailyTransaction}, {@code TransactionCategoryBalance} and {@code TransactionReject} -- so
- * nothing in the roster below is planned. The roster stays closed at eight, which is what keeps the
- * question "which entity owns this table" with a definite answer.
+ * {@code DailyTransaction}, {@code TransactionCategoryBalance}, {@code TransactionReject},
+ * {@code Customer} and {@code Card} -- so nothing in the roster below is planned. The roster stays
+ * closed at ten, which is what keeps the question "which entity owns this table" with a definite
+ * answer.
  *
- * <p>Refactoring Rationale: this passage recorded that two of the eight entities were still planned,
- * naming {@code TransactionCategoryBalance} and {@code TransactionReject}, and that the directory
- * held seven compilation units. Both have landed and the count is now nine, so the passage is
- * replaced rather than annotated. It mattered more here than a stale count usually would, because
+ * <p>Refactoring Rationale: the roster stood at eight and was CLOSED at eight, and that closure was
+ * the direct cause of a data-integrity defect rather than a documentation slip. {@code CBEXPORT}
+ * reads five masters and this module could reach only three of them, so the branch-migration export
+ * emitted a dataset whose customer and card phases reported a count of zero on every run while the
+ * import dispatcher accepted the three-type file as structurally complete. The closure had been
+ * reasoned from the PREFLIGHT program, which opens six files and reads three -- sound for preflight
+ * and not extensible to a program that reads all five. {@code Customer} and {@code Card} are
+ * therefore added as read-only projections and the roster is reopened to ten. Assumptions: both are
+ * projections of tables another context owns, which is not new in this package -- seven of the ten
+ * already are -- and both are mapped immutable so the read-only posture is structural rather than
+ * conventional.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of this passage recorded that two of the then-eight
+ * entities were still planned, naming {@code TransactionCategoryBalance} and
+ * {@code TransactionReject}, and that the directory held seven compilation units. Both landed, so
+ * that passage was replaced rather than annotated. It mattered more here than a stale count usually
+ * would, because
  * the roster below pairs each entity with a schema-qualified table and a normative copybook: a
  * reader who took an entity for absent would have had both the table and the record layout in hand
  * and could reasonably have authored a duplicate under a different name, which is the one outcome a
@@ -68,6 +82,20 @@
  *       {@code V1__batch.sql}, which also declares the uniqueness constraint over the run and
  *       step pair that makes the row an idempotency key.</dd>
  *
+ *   <dt>{@code Customer} into {@code account.customers}, from {@code app/cpy/CVCUS01Y.cpy}</dt>
+ *   <dd>The 500-byte customer record, walked in key order by the export alone -- the first phase of
+ *       the reference export at {@code app/cbl/CBEXPORT.cbl:260}, emitting one {@code 'C'} record per
+ *       customer -- and never written here, by any job in this module. Declared {@code @Immutable}, so
+ *       no write path exists at any layer. Sixteen of its eighteen fields are mapped: the national
+ *       identifier at {@code app/cpy/CVCUS01Y.cpy:17} and the government-issued identifier at line 18
+ *       are stored enciphered by the owning service and are deliberately unmapped, which is a
+ *       registered divergence recorded on the type itself. Assumptions: both hold envelopes sealed
+ *       under the Aurora customer-managed key, this module holds no decrypt grant for that key and
+ *       must not acquire one, and an unmapped field cannot be selected -- so the omission is what
+ *       makes the missing grant unnecessary rather than merely unexercised. The export carries a
+ *       redacted constant in each of the two spans, which keeps every following field of the exported
+ *       record at its declared offset.</dd>
+ *
  *   <dt>{@code Account} into {@code account.accounts}, from {@code app/cpy/CVACT01Y.cpy}</dt>
  *   <dd>The 300-byte account record. Read by all three migrated batch programs and rewritten by
  *       two of them, so it is the most contended mapping in the package and the one that carries
@@ -77,6 +105,21 @@
  *   <dd>The 50-byte card cross-reference, three fields and a filler. It resolves a card number
  *       to an account and a customer, and it is reached by two different keys rather than one --
  *       see the boundaries section.</dd>
+ *
+ *   <dt>{@code Card} into {@code card.cards}, from {@code app/cpy/CVACT02Y.cpy}</dt>
+ *   <dd>The 150-byte card record, walked in key order by the export alone -- the fifth phase of the
+ *       reference export at {@code app/cbl/CBEXPORT.cbl:513}, emitting one {@code 'D'} record per card
+ *       and NOT {@code 'C'}, which belongs to the customer view -- and never written here. Declared
+ *       {@code @Immutable}, and the ONLY mapping in this package that reaches the {@code card} schema
+ *       at all; the grant admitting it is {@code SELECT} only, at
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1268}. Five of its six fields are mapped:
+ *       the verification value at {@code app/cpy/CVACT02Y.cpy:7} is stored enciphered by the owning
+ *       service and is deliberately unmapped, under the same registered divergence as the two customer
+ *       identifiers above, and with one addition -- a verification value is sensitive authentication
+ *       data that may not be retained after authorisation at all, so the export writes a redacted
+ *       constant into that span and the import does the same rather than carrying a value into a
+ *       durable artefact. It is not to be confused with {@code CardXref}, which maps a different table
+ *       in a different schema.</dd>
  *
  *   <dt>{@code DisclosureGroup} into {@code reference.disclosure_groups}, from
  *       {@code app/cpy/CVTRA02Y.cpy}</dt>
@@ -106,6 +149,7 @@
  *       reject contract</dt>
  *   <dd>The one mapping whose contract is not a single copybook. The reject record is a rejected
  *       daily transaction carried whole, followed by a numeric reason and its description.</dd>
+ *
  * </dl>
  *
  * <p>Assumptions: the 430 figure is derived rather than assumed, and it is corroborated twice
@@ -141,20 +185,26 @@
  *       {@code DisclosureGroup} by its three-part key, and writes {@code Transaction} and
  *       {@code Account}.</li>
  *   <li>{@code app/cbl/CBEXPORT.cbl} and {@code app/cbl/CBIMPORT.cbl} -- the export and import
- *       round trip. These are named for completeness and then set aside: they move a 500-byte
- *       packed-decimal record through flat-file codecs in {@code com.carddemo.common.codec}, and
- *       no entity in this package participates. A reader looking for an export mapping here will
- *       not find one, and none is missing.</li>
+ *       round trip, which moves a 500-byte packed-decimal record through flat-file codecs in
+ *       {@code com.carddemo.common.codec}. The EXPORT direction reads five masters and so consumes
+ *       five mappings from this package -- {@code Customer}, {@code Account}, {@code CardXref},
+ *       {@code Transaction} and {@code Card} -- writing one record per row and none of them back.
+ *       Refactoring Rationale: this bullet previously said that no entity in this package
+ *       participates and that none was missing. That was true of an earlier revision in which two of
+ *       the five export phases were held open for want of exactly the two mappings now present, and
+ *       it is corrected rather than deleted because a reader who believed it would conclude the
+ *       export needs no mapping at all. The IMPORT direction still consumes none: it decodes into
+ *       ordered field maps and separates the dataset by discriminator without persisting a row.</li>
  * </ul>
  *
  * <h2>The schema-ownership boundary</h2>
  *
- * <p><b>{@code batch.batch_run} is the only table this module owns.</b> The other seven
+ * <p><b>{@code batch.batch_run} is the only table this module owns.</b> The other nine
  * mappings target tables owned elsewhere: {@code ledger} belongs to {@code transaction-service},
- * {@code account} to {@code account-service} and {@code reference} to
- * {@code reference-service}. This module reaches them through a narrowly-scoped database grant
+ * {@code account} and {@code card} to {@code account-service} and {@code card-service}, and
+ * {@code reference} to {@code reference-service}. This module reaches them through a narrowly-scoped database grant
  * held by a dedicated role, and through nothing else. Reading this package as though it owned
- * eight tables is the single most consequential misreading available here, which is why the
+ * ten tables is the single most consequential misreading available here, which is why the
  * boundary is stated before any mapping detail rather than after it.</p>
  *
  * <p>Assumptions: the grant graph is not created here, and neither are the tables. The schemas,
@@ -163,11 +213,11 @@
  * {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql} creates
  * {@code batch} objects and only {@code batch} objects, and issues no grant, no revoke, no role
  * and no schema of its own. <b>This package declares mappings only, and creates, alters or seeds
- * no other service's schema.</b> The tables, columns, types and indexes those seven mappings
+ * no other service's schema.</b> The tables, columns, types and indexes those nine mappings
  * describe are created by the owning services' own migrations, so an annotation here describes a
  * shape that already exists rather than requesting one that does not.</p>
  *
- * <p><b>The seven granted-table mappings are consequently DDL-passive.</b> None of them declares
+ * <p><b>The nine granted-table mappings are consequently DDL-passive.</b> None of them declares
  * {@code @Table(indexes = ...)}, none declares {@code @Table(uniqueConstraints = ...)}, and none
  * names a key generation strategy that implies sequence or identity DDL. Hibernate is never
  * permitted to emit DDL in this module: schema evolution is Flyway's, and the JPA setting is at
@@ -196,12 +246,15 @@
  *
  * <h2>Why the mappings are local rather than borrowed</h2>
  *
- * <p>Seven of the eight tables mapped here already have an entity somewhere else in the reactor,
+ * <p>Nine of the ten tables mapped here already have an entity somewhere else in the reactor,
  * so declaring a second mapping over the same table looks like duplication and has to be
- * justified as something other than that.</p>
+ * justified as something other than that. Assumptions: the ratio moved from seven-of-eight to
+ * nine-of-ten when the customer and card projections landed, and both of those are borrowed tables,
+ * so the one exception remains {@code BatchRun} over the single table this module owns.</p>
  *
- * <p>Alternatives Considered: a Maven dependency on {@code transaction-service} and
- * {@code account-service}, so that their existing entities could be reused directly. Rejected on
+ * <p>Alternatives Considered: a Maven dependency on {@code transaction-service},
+ * {@code account-service} and {@code card-service}, so that their existing entities could be reused
+ * directly. Rejected on
  * two independent grounds. A service module importing another service module's {@code domain}
  * package is forbidden outright, and the prohibition belongs to the layering rules the
  * {@code architecture-rules} Surefire execution in {@code services/pom.xml} selects by the simple
@@ -255,9 +308,9 @@
  * right to. Keeping the commit atomic needs no coordinator at all, which makes it both the
  * lower-risk option and the one that preserves observable behaviour.</p>
  *
- * <p>Assumptions: the write set is closed and the grant is what closes it. Of the eight mappings
- * here, {@code DisclosureGroup} is read-only from this module, and {@code DailyTransaction} is an
- * input stream that no job in this package writes. A mapping in this package that acquired a
+ * <p>Assumptions: the write set is closed and the grant is what closes it. Of the ten mappings
+ * here, {@code DisclosureGroup}, {@code Customer} and {@code Card} are read-only from this module,
+ * and {@code DailyTransaction} is an input stream that no job in this package writes. A mapping in this package that acquired a
  * write path into {@code reference} would be reaching outside the granted set, and would fail on
  * a permission error rather than on anything that names the design mistake.</p>
  *
@@ -405,9 +458,9 @@
  *
  * <h2>What this package exposes, and why every column decision is parity-observable</h2>
  *
- * <p>What consumers get from this package is seven mappings over tables another service owns and
+ * <p>What consumers get from this package is nine mappings over tables another service owns and
  * one entity over the table this module owns. What makes that a stricter contract than it sounds
- * is that five of the eight land directly on a committed expectation file, so a column type,
+ * is that five of the ten land directly on a committed expectation file, so a column type,
  * length or scale chosen wrongly here does not merely misbehave -- it fails a byte comparison.
  * Under {@code tests/golden/posting/} the pairings are: {@code Account} against
  * {@code acctdat.expected}, {@code Transaction} against {@code tranfile.expected},
@@ -493,17 +546,39 @@
  *
  * <h2>Boundaries this package does not cross</h2>
  *
- * <p><b>There is no {@code Customer} mapping and no {@code Card} mapping, and neither is
- * missing.</b> The absence is a scoping decision taken from the baseline rather than an oversight,
- * and it is easy to reach the opposite conclusion by reading only the file section of the
- * preflight program. {@code app/cbl/CBTRN01C.cbl} opens six files, at lines 157 to 162, and
- * closes the same six, at lines 188 to 193, so a reader counting open statements concludes that
- * six records are in play. The loop body at lines 164 to 186 tells a different story: the only
- * read statements in the entire program are at line 203 for the daily transaction, line 229 for
- * the cross-reference and line 243 for the account. The customer, card and posted-transaction
- * files are opened and closed without a single record ever being read from any of them. Mapping
- * three tables this module never reads would have created three write paths that no grant covers
- * and no job uses.</p>
+ * <p><b>The {@code Customer} and {@code Card} mappings exist for the export job and for nothing
+ * else, and no job in the posting, interest or preflight chain reads either.</b> The distinction
+ * matters because it is easy to reach the wrong conclusion in either direction here. Reading only
+ * the file section of the preflight program suggests both are needed when they are not:
+ * {@code app/cbl/CBTRN01C.cbl} opens six files, at lines 157 to 162, and closes the same six, at
+ * lines 188 to 193, so a reader counting open statements concludes that six records are in play.
+ * The loop body at lines 164 to 186 tells a different story -- the only read statements in the
+ * entire program are at line 203 for the daily transaction, line 229 for the cross-reference and
+ * line 243 for the account, so the customer, card and posted-transaction files are opened and
+ * closed without a single record ever being read from any of them. Nothing in that chain justifies
+ * either mapping.</p>
+ *
+ * <p>Refactoring Rationale: this passage previously concluded from that reading that there was no
+ * {@code Customer} mapping and no {@code Card} mapping and that neither was missing. The premise was
+ * sound and the conclusion was too broad, because it reasoned from the preflight program alone over
+ * a package four jobs draw on. The export job's contract is set by
+ * {@code app/cbl/CBEXPORT.cbl}, which writes <b>five</b> record types -- customer, account,
+ * cross-reference, transaction and card -- and a Java export that emitted three of them produced an
+ * artefact a conforming importer would read as an export with two of its five types missing, while
+ * reconciling its own counts and reporting a clean run. Closing that gap needs a read seam per type,
+ * which is what these two mappings are. They are declared {@code @Immutable}, they carry no write
+ * path, and they deliberately omit every protected column, so the narrow reading the previous
+ * passage was protecting -- that this package acquires no write path a grant does not cover -- still
+ * holds exactly.</p>
+ *
+ * <p>Assumptions: both mappings omit their schema's protected columns rather than mapping and
+ * ignoring them. {@code account.customers.ssn_encrypted} and
+ * {@code account.customers.govt_issued_id_encrypted} and {@code card.cards.cvv_encrypted} hold
+ * envelopes sealed under the Aurora customer-managed key, and this module holds no decrypt grant
+ * for that key and must not acquire one; a field that is not mapped cannot be selected, so the
+ * omission is what makes the absence of the grant unnecessary rather than merely unused. The export
+ * artefact carries a redacted constant in each of those three spans, which keeps every following
+ * field at its declared offset.</p>
  *
  * <p>Assumptions: {@code TransactionCategoryBalance} is read in key order, and the ordering is
  * part of the contract rather than an incidental property of the storage.

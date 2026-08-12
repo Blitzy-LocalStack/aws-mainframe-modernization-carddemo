@@ -231,7 +231,7 @@ graph TB
 > `authorization-service` → `account-service` (each a `RestAccountContextClient`). The
 > delivered edges are enumerated with the operations they carry in
 > [`service-catalog.md`](../architecture/service-catalog.md#cross-service-dependency-rules).
-> *WHY (Assumption made explicit):* the heading above this diagram reads "the
+> Assumptions: the heading above this diagram reads "the
 > dependencies between them," which a reader can reasonably take as a statement of what
 > exists rather than of what is decided. Labelling the diagram's status here keeps the
 > design intent this ADR owns from being read as a delivered-state claim it does not
@@ -539,12 +539,14 @@ though, and the difference is per responsibility rather than uniform — the
 which capabilities are implemented and which are still targets.
 
 Refactoring Rationale: this paragraph read "All nine candidate responsibilities are
-delivered". That holds for the two folded ones and does not hold across all nine —
-the batch and posting responsibility has no `Job` bean behind it yet — so a single
-"delivered" spanning the whole set converted a boundary statement into a completion
-claim it was never making. The sentence is now about assignment, which is what a
-boundary decision actually establishes, and completion is deferred to the one table
-that tracks it so the two cannot disagree.
+delivered". "Delivered" spanning the whole set converted a boundary statement into a
+completion claim it was never making, and the gap it papered over has since narrowed
+rather than closed: every responsibility is now implemented in code, and none of the
+eight boundaries has been exercised against a live provisioned environment, because
+applying the infrastructure against a real account is an operator action outside this
+scope. The sentence is therefore about assignment, which is what a boundary decision
+actually establishes, and completion is deferred to the one table that tracks it so
+the two cannot disagree.
 
 ### Folding a transport in does not remove the transport
 
@@ -580,29 +582,33 @@ program.
 
 `batch-service` connects to the one cluster as a **dedicated database role whose
 only cross-schema write grants are `INSERT` and `UPDATE` across `ledger` and
-`UPDATE` on `account.accounts`**. The unit of work is therefore to be **a single
-ACID commit**, expressed as one transaction boundary in the posting job rather than
-as a distributed protocol.
+`UPDATE` on `account.accounts`**. The unit of work is therefore **a single ACID
+commit**, expressed as one transaction boundary in the posting job rather than as a
+distributed protocol.
 
-Assumptions: the two halves of that sentence are at different stages, and the
-difference is stated here rather than left for a reader to discover. The **grant** is
-landed and checkable today — it is in
+Assumptions: both halves of that sentence have landed, and each is checkable
+separately rather than on trust. The **grant** is in
 [`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 section 4, and the matrix below reproduces it action by action. The **transaction
-boundary** is not: `services/batch-service/src/main/java/com/carddemo/batch/job/`
-holds no `Job` bean yet, and the module's own entry point says so in as many words,
-so no posting job currently opens that boundary. This section therefore describes a
-target the grant has been provisioned for, and the wording is future tense on purpose
-wherever the code does not yet exist. What is decided, and what this ADR is for, is
-that the boundary will be one local transaction rather than a saga — and that
-decision is what the grant already encodes.
+boundary** is declared in `PostTransactionsJob`, which builds its tasklet with the
+caller's `PlatformTransactionManager` so that the pass — and therefore the ledger
+insert, the category-balance write and the account update — commits as one, and the
+sibling business-rule services deliberately annotate no method `@Transactional` so
+that the job file stays the single owner of that boundary. It is asserted by
+`PostingUnitOfWorkIT`, which proves the cross-schema writes commit together and roll
+back together against a real database. What is decided, and what this ADR is for, is
+that the boundary is one local transaction rather than a saga — and that decision is
+what the grant encodes and what the integration test now demonstrates.
 
-Refactoring Rationale: the previous wording said `batch-service` "runs against the
-one cluster" and that the unit of work "therefore remains a single ACID commit,
-expressed as one transaction boundary in the posting job". Both verbs asserted a
-running implementation, and the posting job they attribute the boundary to does not
-exist. It also described the grant as covering "the `ledger` and `account` schemas
-only", which reads as two whole schemas when the `account` half is one named table.
+Refactoring Rationale: this section previously said the boundary did not exist yet and
+that "no posting job currently opens" it, on the ground that the module held no `Job`
+bean. That was true when it was written and is not true now: the module registers
+seven job beans, one per published `--job=` token. The wording is corrected to the
+present tense and paired with the specific test that establishes it, because a
+deliberate exception to schema-per-service purity is exactly the kind of claim a
+reader should be able to check rather than accept. An earlier revision also described
+the grant as covering "the `ledger` and `account` schemas only", which reads as two
+whole schemas when the `account` half is one named table.
 An ADR that reports a target as delivered is worse than one that reports nothing,
 because the reader most likely to rely on it is the one deciding whether the work is
 still to do.
@@ -639,7 +645,7 @@ sections 4 and 5.
 
 | Principal | Kind | Own schema | `ledger` | `account` | `card` | `reference` | `reporting` |
 |---|---|---|---|---|---|---|---|
-| `carddemo_batch` | service, `LOGIN` | `batch`: `SELECT, INSERT, UPDATE` on all tables, sequences, `CREATE` revoked | `USAGE` + **`SELECT, INSERT, UPDATE` on all tables** + sequences + future defaults | `USAGE` + `SELECT` on all tables; `UPDATE` revoked schema-wide, then **re-granted on `account.accounts` alone** | `USAGE` + `SELECT` only | `USAGE` + `SELECT` only | — |
+| `carddemo_batch` | service, `LOGIN` | `batch`: `SELECT, INSERT, UPDATE` on all tables, sequences, `CREATE` revoked | `USAGE` + **`SELECT, INSERT, UPDATE` on all tables** + sequences + future defaults | `USAGE` + `SELECT` on all tables; `UPDATE` revoked schema-wide, then **re-granted on `account.accounts` alone** | — | `USAGE` + `SELECT` only | — |
 | `carddemo_reporting` | service, `LOGIN` | none it can read — see decision 4 | all privileges revoked, table and schema level | revoked | revoked | revoked | `USAGE` + `SELECT` on the 7 views; `CREATE` revoked; `card_grouping_key` revoked by name |
 | `carddemo_reporting_owner` | owner, **`NOLOGIN`** | owns `reporting` | `USAGE` + `SELECT` on all tables | `USAGE` + `SELECT` | `USAGE` + `SELECT` | `USAGE` + `SELECT` | owns the table and all 7 views |
 | `carddemo_auth`, `carddemo_account`, `carddemo_card`, `carddemo_ledger`, `carddemo_reference`, `carddemo_authorization` | service, `LOGIN` | `SELECT, INSERT, UPDATE` on all tables of its own schema, sequences, `CREATE` revoked | — | — | — | — | — |
@@ -660,7 +666,7 @@ Refactoring Rationale: this section previously read "The grant is narrow — two
 schemas, and write access only where a write actually occurs … every other context
 reads and writes only its own schema". Each clause was wrong in a different
 direction, which is why the matrix replaces the prose rather than trimming it.
-`carddemo_batch` reaches **four** schemas, not two — it reads `card` and `reference`
+`carddemo_batch` reaches **three** schemas, not two — it reads `reference`
 as well. Write access is **not** confined to where a write occurs: the `ledger`
 grant is `ON ALL TABLES` plus a future-table default, so it covers
 `ledger.daily_transactions`, which posting only reads. And "every other context"
@@ -668,6 +674,25 @@ overstated the isolation by omitting `carddemo_reporting_owner`'s four-schema re
 A privilege claim carried as an adjective cannot be checked; a matrix naming
 principal, schema and action can be diffed against the SQL, which is what this ADR
 needs a reader to be able to do.
+
+Refactoring Rationale: the `carddemo_batch` row's `card` cell read
+`USAGE` + `SELECT` only, and this section counted the role's reach as four schemas.
+Both were reduced to three when the grant itself was removed from
+`V0__schemas_and_roles.sql`. The grant had been justified on the reading that
+pre-posting validation reads the card master, and that reading does not survive the
+baseline: `app/cbl/CBTRN01C.cbl` opens `CARD-FILE` at `:309` and closes it at
+`:417` without ever issuing a READ, its three reads being the daily feed at `:203`,
+the cross-reference at `:229` and the account at `:243` — and the cross-reference is
+`CVACT03Y`, which `batch-service` maps to `account.card_xref` under the `account`
+grant this matrix already lists. Trade-offs: an unused `SELECT` on the schema
+holding the primary account number and the card verification value is not a
+harmless surplus, so the grant went rather than the row. This also brings the matrix
+into line with the plan's data-ownership section, which scopes the cross-schema
+exception to `ledger.*` and `account.*`; a standing `card` read was the one entry
+here that had no counterpart in that specification.
+[`CrossSchemaPrivilegeContractTest`](../../services/common-lib/src/test/java/com/carddemo/common/architecture/CrossSchemaPrivilegeContractTest.java)
+now fails the build if a schema is granted to a service role that the service's own
+`search_path` does not name, so this row cannot silently reacquire a fourth schema.
 
 Assumptions: the schema-wide `ledger` grant is deliberate and is **not** narrowed to
 the three tables posting writes. The target design fixes that shape — the plan's own
@@ -1016,17 +1041,17 @@ is delivered.
 ### Honest boundary — what this record does not establish
 
 All eight contexts exist as Maven modules that **build and whose tests run**, and the
-infrastructure that would host them is defined and statically checked. That is not the
-same as all eight being functionally complete, and the difference is set out below
-rather than left inside the word "authored".
+infrastructure that would host them is defined and statically checked. Neither of those
+is the same as a boundary having been exercised where it will actually run, and the
+difference is set out claim by claim below rather than left inside one adjective.
 
 | Claim | Status |
 |---|---|
 | Eight modules build; the reactor is green; each module's unit tests run | **Established.** `mvn -B clean verify` across the aggregator |
 | Each context owns exactly one schema, and the grants match this record | **Established**, and checkable against `V0__schemas_and_roles.sql` and the per-service `V1__*.sql` migrations |
 | Cross-context domain imports fail the build | **Established** by the architecture test in the shared module |
-| Posting is one ACID transaction over three writes | **Not yet implemented.** The grant that permits it is provisioned, but `batch-service` holds no `Job` bean, so no code opens that transaction. The decision is recorded; the implementation is a target |
-| The account context's update endpoint | **Not yet implemented.** The request and response contracts are authored and each declares its own pending status; no route, no OpenAPI operation and no update service exist |
+| Posting is one ACID transaction over three writes | **Implemented.** The grant is provisioned, `PostTransactionsJob` builds its tasklet with the caller's transaction manager so the three writes commit as one, and `PostingUnitOfWorkIT` proves they commit and roll back together against a real database |
+| The account context's update endpoint | **Implemented.** `POST /api/v1/accounts/update` is routed, published in `account-api.yaml`, and served by `AccountUpdateService`; the optimistic-conflict path returns 409 |
 | The account context's reference address lookups | **Implemented.** `RestReferenceAddressLookup` satisfies the port with bounded timeouts and is registered as a bean, and the reference context publishes the three lookups it reads |
 | Any boundary load-tested or benchmarked against a live provisioned environment | **Not established at all.** Applying the infrastructure against a live account is an operator action outside this scope |
 
@@ -1039,12 +1064,14 @@ assertion.
 Refactoring Rationale: this section previously said the eight contexts were "authored
 and statically validated: the modules build, their tests run", and left it there. The
 sentence was true of every module and was read as though it were true of every
-capability, which it is not — and the gap it hid was the largest one in the record,
-namely that the posting transaction this ADR's central exception exists to permit has
-no code behind it yet. Splitting the paragraph into a claim-by-claim table costs some
-brevity and buys the one thing a status statement is for: a reader can tell which
-rows are safe to build on. The table also has to be maintained as rows land, which is
-a real cost, and it is preferred to a single adjective that goes stale invisibly.
+capability, which it was not — the gap it hid was the largest one in the record, namely
+that the posting transaction this ADR's central exception exists to permit had no code
+behind it. Splitting the paragraph into a claim-by-claim table costs some brevity and
+buys the one thing a status statement is for: a reader can tell which rows are safe to
+build on. The maintenance cost is real and has now been paid twice — the posting row
+and the account-update row have both moved from target to implemented, each paired with
+the specific test or route that establishes it — which is precisely the upkeep a single
+adjective would have skipped while going stale invisibly.
 
 ## Consequences
 

@@ -14,7 +14,7 @@
 #   run. The write-only provider argument sends it to Secrets Manager without
 #   recording it in Terraform state.
 #
-# Ownership boundary -- read this before consolidating anything:
+# Ownership boundary:
 #   This module owns DATABASE and application credentials. It does NOT own the
 #   Cognito seed-user secrets. infra/modules/cognito creates the user pool, the
 #   carddemo-admin and carddemo-user groups, and the seed users, and writes each
@@ -90,34 +90,46 @@
 #     Generating the value at apply time is what makes it structural: a value
 #     that cannot be supplied cannot be committed. The same reasoning is
 #     recorded from the input side in variables.tf.
-#   - Refactoring Rationale: ephemeral generation plus secret_string_wo replaces
-#     the former random_password resource, whose result was retained in every
-#     historical state version.
-#   - Alternatives Considered: this module previously PACKAGED AND CREATED a
-#     Python rotation Lambda, with its own execution role, inline policy, log
-#     group, invoke permission and source archive. That was removed. Rotation of
-#     a SECRET VALUE is not this module's remit -- the only rotation this
-#     infrastructure package owns anywhere is KMS KEY rotation, which belongs to
-#     infra/modules/kms and its four customer-managed keys -- and owning a
-#     function here dragged eight cross-module coordinates into the input
-#     contract (cluster ARN, RDS-managed master secret ARN, writer endpoint,
-#     port, database name, a log-group key, a log retention value and an IAM
-#     permissions boundary) plus a third Terraform provider to build the
-#     deployment package. A root that wants rotation now supplies the function's
-#     ARN through `rotation_lambda_arn`, which is where the boundary of this
-#     module's remit actually falls: an alternating-user rotation function needs
-#     Data API access to the cluster and read access to the RDS-managed master
-#     secret, and the ROOT holds both.
+#   - Alternatives Considered: a managed random_password resource whose result is
+#     retained in state. Rejected: every historical state version would then hold
+#     the credential, which is the exposure ephemeral generation plus
+#     secret_string_wo exists to close.
+#   - Alternatives Considered: packaging a rotation Lambda here, with its own
+#     execution role, inline policy, log group, invoke permission and source
+#     archive. Rejected: rotation of a SECRET VALUE is not this module's remit --
+#     the only rotation this infrastructure package owns anywhere is KMS KEY
+#     rotation, which belongs to infra/modules/kms and its four customer-managed
+#     keys -- and owning a function here would drag eight cross-module coordinates
+#     into the input contract (cluster ARN, RDS-managed master secret ARN, writer
+#     endpoint, port, database name, a log-group key, a log retention value and an
+#     IAM permissions boundary) plus a third Terraform provider to build the
+#     deployment package. A root that wants rotation supplies the function's ARN
+#     through `rotation_lambda_arn`, which is where the boundary of this module's
+#     remit actually falls: an alternating-user rotation function needs Data API
+#     access to the cluster and read access to the RDS-managed master secret, and
+#     the ROOT holds both.
 #   - Alternatives Considered: two further inputs, a PEM certificate and its
 #     private key, were also removed. They existed so this module could copy the
 #     pair into two Secrets Manager entries, which made a reusable module a
 #     second custodian of private-key material; `sensitive = true` on them
 #     changed only how a plan RENDERED the value, not whether a tfvars file or a
-#     state file could hold it. The material now stops at aws_acm_certificate in
-#     the calling root -- the service purpose-built to custody a private key,
-#     which accepts it once and never re-exports it -- so there is no second copy
-#     for this module to hold. Relying on both roots continuing to pass null was
-#     rejected as a convention rather than a control.
+#     state file could hold it. There is now no material to stop anywhere: each
+#     online task mints its own listener key pair and self-signed certificate at
+#     startup (config/docker/generate-listener-material.sh), and the load
+#     balancer's certificate is an ACM ARN the operator imported out of band and
+#     passes as alb_certificate_arn. Relying on both roots continuing to pass
+#     null was rejected as a convention rather than a control.
+#   - Refactoring Rationale: this entry said the material "now stops at
+#     aws_acm_certificate in the calling root -- the service purpose-built to
+#     custody a private key, which accepts it once and never re-exports it".
+#     That described an intermediate arrangement in which both roots generated
+#     the pair with the tls provider and imported it; every one of those
+#     resources is deleted, the tls provider requirement is removed from both
+#     roots, and the imported certificate was unreachable in any case because
+#     alb_certificate_arn is non-nullable with no default, so no listener could
+#     select it. The sentence is corrected rather than deleted because the
+#     question it answers -- who holds the private key -- is the one a reader
+#     comes to this header for.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -195,11 +207,11 @@ locals {
   configure_rotation = var.rotation_lambda_arn != null && var.rotation_automatically_after_days != null
 
   # WHY : Trade-offs: one classification tag is worth its cost because Secrets
-  #       Manager offers no other grouping. A task role that needs "every
-  #       database credential" must either enumerate ARNs -- which then needs
-  #       editing every time the role inventory changes -- or match a tag
-  #       condition, and only publishing the tag makes the second option
-  #       available. It is also what separates these entries from the
+  #       Manager offers no other grouping. A principal that needs "every
+  #       database credential" -- the schema-bootstrap identity is the one that
+  #       genuinely does -- must either enumerate ARNs, which then needs editing
+  #       every time the role inventory changes, or match a tag condition, and
+  #       only publishing the tag makes the second option available. It is also what separates these entries from the
   #       infra/modules/cognito seed-user secrets described in the header, which
   #       share this account, this region and this name prefix. This module
   #       grants no policy itself and deliberately does not; see the rejections
@@ -237,11 +249,13 @@ locals {
 #
 # WHY : Alternatives Considered: ONE secret holding every service credential as
 #       a single JSON document, which is fewer resources and one name to
-#       remember. Rejected on least privilege. A task role can be granted
+#       remember. Rejected on least privilege. A principal can be granted
 #       `GetSecretValue` on a secret or not at all -- there is no way to scope
 #       the grant to one key inside a document -- so a shared secret would give
 #       every service read access to every other service's credential. The
-#       target posture is one narrowly scoped grant per task role, and the
+#       target posture is one narrowly scoped grant per task EXECUTION role,
+#       which is the identity ECS uses to resolve a container definition's
+#       `secrets` block before the container starts, and the
 #       schema privileges behind these roles are themselves deliberately
 #       separated per bounded context, so a shared secret would hand back at the
 #       credential layer exactly the separation the database layer was built to
@@ -288,16 +302,15 @@ resource "aws_secretsmanager_secret" "service" {
   #       legible in a connection string and in a runbook; naming it here is what
   #       lets an operator tell which of eight near-identical entries they are
   #       looking at, using a field that `DescribeSecret` returns unencrypted.
-  # WHY : Refactoring Rationale: the second sentence previously read "subsequent
-  #       values are managed by the rotation Lambda". No rotation Lambda exists.
-  #       This module implements no rotation, as variables.tf states at length, and
-  #       neither environment root supplies a rotation ARN, so both leave the hook
-  #       null and no rotation schedule is attached. The sentence described a
-  #       control that ships nowhere, in the one field DescribeSecret returns
-  #       unencrypted -- which is exactly where an operator would read it and stop
-  #       looking. It is replaced with what actually happens to a subsequent value:
-  #       nothing does, until an operator re-issues it. The re-issue procedure and
-  #       the risk accepted for a static credential are recorded in
+  # WHY : Assumptions: the description states that the value is STATIC rather than
+  #       attributing subsequent values to a rotation function, because no rotation
+  #       function exists. This module implements no rotation, as variables.tf
+  #       states at length, and neither environment root supplies a rotation ARN,
+  #       so both leave the hook null and no schedule is attached. Trade-offs: this
+  #       field is the one DescribeSecret returns unencrypted, so it is where an
+  #       operator reads and stops looking -- naming a control that ships nowhere
+  #       here would be more misleading than saying nothing. The re-issue procedure
+  #       and the risk accepted for a static credential are recorded in
   #       docs/adr/ADR-002-compute-platform.md.
   description = "Login credential for the ${each.key} database role in the ${var.environment} CardDemo stack. Initial value is generated ephemerally and never written to Terraform state. The value is STATIC: no rotation is configured for this stack, so it changes only when an operator re-issues it."
 
@@ -352,12 +365,12 @@ resource "aws_secretsmanager_secret_version" "service" {
   #       literal is shared by every one of them. The procedure and the risk
   #       accepted for a static credential are recorded in
   #       docs/adr/ADR-002-compute-platform.md.
-  # WHY : Refactoring Rationale: this rationale previously added "and one that
-  #       overwrites whatever a rotation function has since put in place". That
-  #       clause presupposed a rotation function. There is none: this module
-  #       implements no rotation, as variables.tf states, and neither environment
-  #       root supplies one, so nothing has since put anything in place and an
-  #       increment overwrites only the value this module itself wrote.
+  # WHY : Assumptions: an increment overwrites only the value this module itself
+  #       wrote, so the paragraph above scopes the cost to exactly that. Nothing
+  #       else writes these entries: the module implements no rotation, as
+  #       variables.tf states, and neither environment root supplies a rotation
+  #       function, so there is no externally-managed value for an increment to
+  #       displace.
   secret_string_wo_version = 1
 }
 
@@ -407,33 +420,35 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 #   expiry, and com.carddemo.account.config.InternalApiSecurityConfig verifies it
 #   with the framework's own NimbusJwtDecoder on an earlier-ordered filter chain
 #   whose security matcher names exact method-and-path pairs and nothing else,
-#   enumerated in InternalApiSecurityConfig.internalPaths(). Its
-#   key material is the internal-identity entry the environment roots create and
-#   inject into exactly THREE task definitions as
-#   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY: authorization and transaction, which
-#   each MINT a token through their own InternalIdentityConfig, and account, which
-#   VERIFIES it. The key is symmetric, so the verifying side holds the same value
-#   the signing sides do -- which is why the holder count is three rather than the
-#   two callers, and why no further holder may be added: any additional holder
-#   could mint a token the account context accepts on its internal reads.
-#
-#   Refactoring Rationale: this sentence said "exactly those two task
-#   definitions", counting the signing pair and silently omitting the verifier,
-#   while the environment roots gate the same secret on three names. An
-#   understated trust inventory is the dangerous direction to be wrong in: a
-#   reader auditing who can mint an internally-trusted token would have checked
-#   two task definitions and stopped.
+#   enumerated in InternalApiSecurityConfig.internalPaths(). Its key material is
+#   TWO internal-identity entries the environment roots create, one per minting
+#   caller, and each entry reaches exactly TWO task definitions:
+#   CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY goes to authorization,
+#   which MINTS with it, and to account, which VERIFIES; and
+#   CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY goes to transaction and to
+#   account on the same footing. The keys are symmetric, so a verifier holds the
+#   same value its signer does, which is why account holds BOTH and why no third
+#   holder may be added to either: any additional holder could mint a token the
+#   account context accepts on its internal reads. Alternatives Considered: one
+#   shared entry for both callers. Rejected -- with shared bytes each caller can
+#   mint as the other, so splitting scopes or checking subjects buys nothing.
+#   infra/modules/ecs-service asserts each membership as its own biconditional, so
+#   a third workload receiving either key, or a listed workload missing it, fails
+#   the plan rather than the audit. Assumptions: the withdrawn single-key name
+#   CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY is in no image, no gate and neither
+#   environment root, and docs/architecture/security-and-identity.md asserts that
+#   absence executably rather than in prose -- so a reader who finds the old name
+#   in a comment describing the withdrawal cannot mistake it for a live variable.
 #
 # Assumptions: the withdrawn form's one advantage is not lost. It bound the
 #   method and the path INTO the signature, so a captured credential could not be
 #   replayed against another operation. The surviving form asserts the same
 #   property on the verifying side instead: its token is accepted only on the
 #   exact pairs that chain matches, so a replay elsewhere reaches a chain that
-#   knows nothing about it and is refused. The count was dropped from this
-#   sentence rather than raised when the customer scan and the customer record
-#   read were matched on that chain -- the replay argument rests on the matcher
-#   being EXACT, not on how many pairs it names, and a number here would go stale
-#   on the next route while the argument would not. What is gained in exchange is that
+#   knows nothing about it and is refused. This paragraph deliberately names no
+#   count of matched pairs -- the replay argument rests on the matcher being
+#   EXACT, not on how many pairs it names, so a number here would go stale on the
+#   next route while the argument would not. What is gained in exchange is that
 #   expiry, length and signature checking are the framework's audited code rather
 #   than this repository's.
 #
@@ -447,8 +462,10 @@ resource "aws_secretsmanager_secret_rotation" "service" {
 # Ownership exclusions.
 # Assumptions: environment roots that instantiate this module own provider,
 #   backend, region, KMS wiring, and sibling composition.
-# Refactoring Rationale: IAM grants stay with consuming task roles, while this
-#   module creates only credential values and Secrets Manager resources.
+# Refactoring Rationale: IAM grants stay with the consuming principals -- each
+#   workload's task EXECUTION role for injected credentials, and the
+#   schema-bootstrap identity for the whole set -- while this module creates only
+#   credential values and Secrets Manager resources.
 # Alternatives Considered: KMS data lookups, hard-coded/example credentials,
 #   provisioners, and local command hooks are excluded because they duplicate
 #   naming authority or risk exposing generated values in source or apply logs.

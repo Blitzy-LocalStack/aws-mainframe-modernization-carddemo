@@ -24,12 +24,17 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminAddUse
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminCreateUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminDeleteUserRequest;
-import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminRemoveUserFromGroupRequest;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.MessageActionType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.NotAuthorizedException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoundException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.UserType;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.DeleteSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceExistsException;
+import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
 /**
  * Asserts that the identity a new user row is bound to is created by this service and never chosen by a
@@ -86,14 +91,42 @@ class CognitoUserProvisioningServiceTest {
     /** The subject the substituted provider mints, standing in for the value the real one assigns. */
     private static final UUID SUBJECT = UUID.fromString("3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
 
+    /**
+     * The managed-secret name prefix under test.
+     *
+     * <p>Assumptions: it carries no trailing separator, because the service supplies its own -- so a prefix
+     * that ended in one would produce a doubled separator and the assertions below would catch it.</p>
+     */
+    private static final String SECRET_PREFIX = "carddemo/dev/auth";
+
+    /** The customer-managed key a created credential entry is expected to name. */
+    private static final String SECRET_KMS_KEY_ARN =
+            "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-4000-8000-000000000000";
+
+    /** The temporary-password length under test, inside the admitted range and not its default. */
+    private static final int PASSWORD_LENGTH = 20;
+
+    /**
+     * The expected credential-entry name for {@link #USER_ID}.
+     *
+     * <p>Assumptions: the digest is written out rather than recomputed by the test with the same expression
+     * the service uses. A test that recomputed it would pass for any naming scheme the service happened to
+     * implement, including one that leaked the identifier; a literal is what pins the scheme.</p>
+     */
+    private static final String EXPECTED_SECRET_NAME =
+            SECRET_PREFIX + "/runtime-user/215c33b0d43d5eb833ece113f8c6660d";
+
     /** The substituted provider whose calls are captured; re-created before each test. */
     private CognitoIdentityProviderClient provider;
 
-    /** The subject under test, bound to the substituted provider and the two group names. */
+    /** The substituted managed-secret client whose calls are captured; re-created before each test. */
+    private SecretsManagerClient secrets;
+
+    /** The subject under test, bound to the substituted clients and the configured values. */
     private CognitoUserProvisioningService service;
 
     /**
-     * Re-creates the substituted provider and the subject before each test.
+     * Re-creates the substituted clients and the subject before each test.
      *
      * <p>Assumptions: a fresh substitute per test is what keeps the no-interaction assertions meaningful. A
      * shared substitute would carry the previous test's calls, so the assertion that an out-of-domain type
@@ -102,7 +135,9 @@ class CognitoUserProvisioningServiceTest {
     @BeforeEach
     void setUp() {
         this.provider = mock(CognitoIdentityProviderClient.class);
-        this.service = new CognitoUserProvisioningService(this.provider, POOL_ID, ADMIN_GROUP, USER_GROUP);
+        this.secrets = mock(SecretsManagerClient.class);
+        this.service = new CognitoUserProvisioningService(this.provider, this.secrets, POOL_ID,
+                ADMIN_GROUP, USER_GROUP, SECRET_PREFIX, SECRET_KMS_KEY_ARN, PASSWORD_LENGTH);
     }
 
     /**
@@ -170,24 +205,36 @@ class CognitoUserProvisioningServiceTest {
      * Verifies an administrator row's account is created with the three attributes and joins the
      * administrator group.
      *
-     * <p>Assumptions: the suppression and the absent temporary credential are asserted explicitly because
-     * dropping either is a silent change in behaviour rather than a failure a reader would notice. The pool
-     * declares no email or phone attribute, so there is no address a delivered message could reach.</p>
+     * <p>Assumptions: the suppression and the PRESENCE of a temporary credential are asserted together,
+     * because the two are one decision and either alone is wrong. Suppression is required by the pool's
+     * schema, which declares no email and no phone attribute, so there is no address a delivered message
+     * could reach; and once delivery is suppressed the temporary credential is the only thing that makes
+     * the account reachable, because the value the pool would otherwise generate is sent nowhere.
+     * Refactoring Rationale: this case asserted the temporary credential was ABSENT, which pinned the
+     * defect -- an account nobody could sign into.</p>
      */
     @Test
     @DisplayName("an administrator row's account carries the three attributes and joins the admin group")
     void anAdministratorRowsAccountJoinsTheAdministratorGroup() {
         stubSuccessfulCreate();
 
-        UUID subject = this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+        ProvisionedIdentity provisioned = this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
                 CognitoUserProvisioningService.USER_TYPE_ADMIN);
 
-        assertThat(subject).isEqualTo(SUBJECT);
+        assertThat(provisioned.subject()).isEqualTo(SUBJECT);
+        // WHY : Assumptions: the returned pair names the managed entry the credential was published to
+        //       and never the credential, so an administrator is told where to collect it while the
+        //       value stays in the store. The name is derived, so it is asserted against the same
+        //       derivation the service publishes rather than against a copied literal.
+        assertThat(provisioned.credentialSecretName())
+                .isEqualTo(this.service.credentialSecretName(USER_ID));
+        assertThat(provisioned.credentialSecretName())
+                .isNotEqualTo(capturedCreate(AdminCreateUserRequest::temporaryPassword));
         assertThat(capturedCreate(AdminCreateUserRequest::userPoolId)).isEqualTo(POOL_ID);
         assertThat(capturedCreate(AdminCreateUserRequest::username)).isEqualTo(USER_ID);
         assertThat(capturedCreate(AdminCreateUserRequest::messageAction))
                 .isEqualTo(MessageActionType.SUPPRESS);
-        assertThat(capturedCreate(AdminCreateUserRequest::temporaryPassword)).isNull();
+        assertThat(capturedCreate(AdminCreateUserRequest::temporaryPassword)).isNotNull();
         // WHY : Assumptions: the attributes are asserted in exact order and exact membership, not merely
         //       "contains". The seed bootstrap sends these same three, so an extra or renamed attribute here
         //       would leave a runtime-created account and a seeded one describable by different attribute
@@ -300,7 +347,7 @@ class CognitoUserProvisioningServiceTest {
                 attribute(CognitoUserProvisioningService.ATTRIBUTE_SUBJECT, SUBJECT.toString())));
 
         UUID subject = this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
-                CognitoUserProvisioningService.USER_TYPE_USER);
+                CognitoUserProvisioningService.USER_TYPE_USER).subject();
 
         assertThat(subject).isEqualTo(SUBJECT);
     }
@@ -378,8 +425,8 @@ class CognitoUserProvisioningServiceTest {
      * its own write committed.</p>
      */
     @Test
-    @DisplayName("a membership failure after creation propagates, so the caller knows to withdraw")
-    void aMembershipFailureAfterCreationPropagates() {
+    @DisplayName("a membership failure after creation withdraws the account and propagates")
+    void aMembershipFailureAfterCreationWithdrawsAndPropagates() {
         stubSuccessfulCreate();
         when(this.provider.adminAddUserToGroup(any(AdminAddUserToGroupRequest.class)))
                 .thenThrow(NotAuthorizedException.builder().message("refused").build());
@@ -387,6 +434,80 @@ class CognitoUserProvisioningServiceTest {
         assertThatThrownBy(() -> this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
                 CognitoUserProvisioningService.USER_TYPE_ADMIN))
                 .isInstanceOf(NotAuthorizedException.class);
+
+        verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
+        verify(this.secrets, never()).createSecret(any(CreateSecretRequest.class));
+    }
+
+    /**
+     * Verifies a create response describing no subject withdraws the account it had just made.
+     *
+     * <p>Assumptions: this is the second of the two post-create failures and it is asserted separately
+     * because it fails at a different statement. The membership case fails at a provider call, so a handler
+     * wrapping only the provider calls would catch it; this one fails while READING the create response, so
+     * it catches a handler drawn one statement too narrowly.</p>
+     */
+    @Test
+    @DisplayName("a response describing no subject withdraws the account rather than orphaning it")
+    void aResponseWithNoSubjectWithdrawsTheAccount() {
+        when(this.provider.adminCreateUser(any(AdminCreateUserRequest.class)))
+                .thenReturn(responseWith(attribute("given_name", FIRST_NAME)));
+
+        assertThatThrownBy(() -> this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER))
+                .isInstanceOf(IllegalStateException.class);
+
+        verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
+    }
+
+    /**
+     * Verifies a failed credential publication withdraws the account, so no unreachable one survives.
+     *
+     * <p>Assumptions: an account whose credential could not be published is exactly the condition the
+     * handover exists to prevent -- it can authenticate and nobody can obtain the value that would let them.
+     * Leaving it would also make the identifier unusable, because a later create meets the pool's
+     * duplicate-username condition, which this service deliberately does not translate into a client-facing
+     * conflict.</p>
+     */
+    @Test
+    @DisplayName("a failed credential publication withdraws the account it was published for")
+    void aFailedCredentialPublicationWithdrawsTheAccount() {
+        stubSuccessfulCreate();
+        when(this.secrets.createSecret(any(CreateSecretRequest.class)))
+                .thenThrow(NotAuthorizedException.builder().message("refused").build());
+
+        assertThatThrownBy(() -> this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER))
+                .isInstanceOf(NotAuthorizedException.class);
+
+        verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
+    }
+
+    /**
+     * Verifies a failed withdrawal is attached to the original failure rather than substituted for it.
+     *
+     * <p>Assumptions: the caller asked why provisioning failed, and a cleanup failure reported in place of
+     * that would make a transient provider fault with clean cleanup indistinguishable from a genuine orphan.
+     * The suppressed exception is what carries the second fact to a handler that logs the whole throwable.</p>
+     */
+    @Test
+    @DisplayName("a failed withdrawal is suppressed onto the provisioning failure, not substituted for it")
+    void aFailedWithdrawalIsSuppressedOntoTheProvisioningFailure() {
+        stubSuccessfulCreate();
+        NotAuthorizedException membershipRefused =
+                NotAuthorizedException.builder().message("membership refused").build();
+        NotAuthorizedException withdrawalRefused =
+                NotAuthorizedException.builder().message("withdrawal refused").build();
+        when(this.provider.adminAddUserToGroup(any(AdminAddUserToGroupRequest.class)))
+                .thenThrow(membershipRefused);
+        when(this.provider.adminDeleteUser(any(AdminDeleteUserRequest.class)))
+                .thenThrow(withdrawalRefused);
+
+        assertThatThrownBy(() -> this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER))
+                .isSameAs(membershipRefused)
+                .satisfies(raised -> assertThat(raised.getSuppressed())
+                        .containsExactly(withdrawalRefused));
     }
 
     /**
@@ -446,18 +567,26 @@ class CognitoUserProvisioningServiceTest {
     }
 
     /**
-     * Verifies no provisioning call carries a credential or a contact attribute.
+     * Verifies the account's attributes carry no credential and no contact route.
      *
-     * <p>Assumptions: the absence of a credential is asserted because its presence is the defect the
-     * migration of this record is undoing -- {@code app/cpy/CSUSR01Y.cpy} L21 stores an eight-character
-     * password in the clear and {@code app/cbl/COUSR02C.cbl} L169 writes it back onto a screen. Neither a
-     * temporary password on the request nor an email attribute may reappear here, because either would put a
-     * credential, or a route to one, back on an outbound path in the one service whose purpose is that
-     * credentials stop travelling.</p>
+     * <p>Assumptions: the three attributes are the whole of what the pool's schema declares, and a credential
+     * must never travel as one of them. That is the defect the migration of this record is undoing --
+     * {@code app/cpy/CSUSR01Y.cpy} L21 stores an eight-character password in the clear and
+     * {@code app/cbl/COUSR02C.cbl} L169 writes it back onto a screen -- so a password among the ATTRIBUTES
+     * would be a value stored on the identity rather than a one-time value the pool forces to be replaced.
+     * An email or phone attribute is refused for a different reason: neither exists in the pool's schema, so
+     * either would fail the call, and adding one would add a field the reference record has no analogue
+     * for.</p>
+     *
+     * <p>Refactoring Rationale: this case previously also asserted that the request carried NO temporary
+     * password, and that assertion was withdrawn because it pinned the defect rather than the contract. With
+     * delivery suppressed and no temporary password, the pool generates a value and delivers it nowhere, so
+     * the account could never be signed in to at all. The temporary password is now required and is asserted
+     * by the cases below; what remains here is that no credential travels as an ATTRIBUTE.</p>
      */
     @Test
-    @DisplayName("no provisioning call carries a credential or a contact attribute")
-    void noProvisioningCallCarriesACredentialOrContactAttribute() {
+    @DisplayName("the account's attributes carry no credential and no contact route")
+    void theAccountAttributesCarryNoCredentialOrContactRoute() {
         stubSuccessfulCreate();
 
         this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
@@ -467,177 +596,176 @@ class CognitoUserProvisioningServiceTest {
         assertThat(attributes).hasSize(3);
         assertThat(attributes).extracting(AttributeType::name)
                 .doesNotContain("email", "phone_number", "password");
-        assertThat(capturedCreate(AdminCreateUserRequest::temporaryPassword)).isNull();
-    }
-    /**
-     * Verifies a promotion removes the ordinary-user membership before adding the administrator one.
-     *
-     * <p>Assumptions: the ORDER is asserted and not merely the pair of calls, because the order is the whole
-     * security content of the method. Adding before removing would leave the identity holding both groups for
-     * the width of one provider call, and a token minted in that window would carry administrative authority
-     * -- including during the demotion whose purpose is to withdraw it. An in-order verification is the only
-     * assertion that fails when someone reorders the two statements.</p>
-     */
-    @Test
-    @DisplayName("a promotion removes the user group before it adds the administrator group")
-    void aPromotionRemovesTheUserGroupBeforeAddingTheAdministratorGroup() {
-        AuthorityReassignment reassignment = this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_USER,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN);
-
-        InOrder order = inOrder(this.provider);
-        order.verify(this.provider).adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
-        order.verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build());
-        order.verifyNoMoreInteractions();
-
-        assertThat(reassignment.userId()).isEqualTo(USER_ID);
-        assertThat(reassignment.previousUserType())
-                .isEqualTo(CognitoUserProvisioningService.USER_TYPE_USER);
-        assertThat(reassignment.currentUserType())
-                .isEqualTo(CognitoUserProvisioningService.USER_TYPE_ADMIN);
-        assertThat(reassignment.providerMutated()).isTrue();
     }
 
     /**
-     * Verifies a demotion removes the administrator membership before adding the ordinary-user one.
+     * Verifies the account is created with a temporary password, so its owner can actually be handed one.
      *
-     * <p>Assumptions: this direction is asserted separately rather than parameterised with the one above,
-     * because the two groups are held in two different fields and a transposition would leave one direction
-     * correct and the other silently reversed. A single parameterised case reading both group names from the
-     * same accessor could not detect that.</p>
+     * <p>Assumptions: TEMPORARY and not permanent is the property being asserted, and the SDK expresses that
+     * by which builder member carries the value -- {@code temporaryPassword} places the account in its
+     * force-change state, so the value buys one sign-in and is inert afterwards. That is what makes storing
+     * it acceptable at all, and a permanent password would make the stored value the person's real
+     * credential.</p>
      */
     @Test
-    @DisplayName("a demotion removes the administrator group before it adds the user group")
-    void aDemotionRemovesTheAdministratorGroupBeforeAddingTheUserGroup() {
-        this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN,
+    @DisplayName("the account is created with a temporary password of the configured length")
+    void theAccountIsCreatedWithATemporaryPassword() {
+        stubSuccessfulCreate();
+
+        this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
                 CognitoUserProvisioningService.USER_TYPE_USER);
 
-        InOrder order = inOrder(this.provider);
-        order.verify(this.provider).adminRemoveUserFromGroup(AdminRemoveUserFromGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build());
-        order.verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
-        order.verifyNoMoreInteractions();
+        assertThat(capturedCreate(AdminCreateUserRequest::temporaryPassword))
+                .as("suppressed delivery with no temporary password leaves an account nobody can sign into")
+                .isNotNull()
+                .hasSize(PASSWORD_LENGTH);
+        assertThat(capturedCreate(AdminCreateUserRequest::messageAction))
+                .isEqualTo(MessageActionType.SUPPRESS);
     }
 
     /**
-     * Verifies a reassignment to the type already held is refused before any provider call.
+     * Verifies the generated password draws from all four character classes.
      *
-     * <p>Assumptions: refusal rather than a silent success is asserted because the two are
-     * indistinguishable from a return value and completely different in meaning. A caller asking to move an
-     * authority to where it already stands has confused a no-op with a move, and answering it with a
-     * fabricated success would let that confusion reach the column assignment that follows.</p>
+     * <p>Assumptions: every class is asserted present rather than the value merely being asserted long
+     * enough. Including all four is what lets one generator satisfy any policy that requires a SUBSET of
+     * them, and a value that happened to omit a class would be refused by the pool at the create call -- so
+     * the failure it produces is an intermittent create, which no caller can act on and no timing-free test
+     * would reproduce.</p>
      */
     @Test
-    @DisplayName("a reassignment whose two types are equal is refused and calls the provider not at all")
-    void aReassignmentWhoseTypesAreEqualIsRefused() {
-        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("must differ");
+    @DisplayName("the generated password carries a lower case, an upper case, a digit and a symbol")
+    void theGeneratedPasswordDrawsFromEveryCharacterClass() {
+        stubSuccessfulCreate();
 
-        verifyNoInteractions(this.provider);
+        this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER);
+
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        assertThat(generated).containsPattern("[a-z]").containsPattern("[A-Z]")
+                .containsPattern("[0-9]").containsPattern("[!#%*+:=?@^_~-]");
     }
 
     /**
-     * Verifies an out-of-domain type is refused before the removal that would otherwise strip a membership.
+     * Verifies the credential is published to a derived entry, encrypted with the configured key.
      *
-     * <p>Assumptions: BOTH type arguments are validated before the first call, so a well-formed source and a
-     * malformed target still touch nothing. Validating the target only when its turn came would leave an
-     * identity groupless on every mistyped request, which is the one failure mode a refusal is supposed to
-     * prevent.</p>
+     * <p>Assumptions: the entry NAME is asserted against a literal, and the payload is asserted to pair the
+     * identifier with the very password the create call carried. The pairing is what makes a retrieved value
+     * usable -- a holder must be able to tell which identity it opens -- and asserting it against the
+     * captured create argument is what proves the stored value is the one the pool accepted rather than a
+     * second generated value.</p>
      */
     @Test
-    @DisplayName("an out-of-domain target type strips no membership")
-    void anOutOfDomainTargetTypeStripsNoMembership() {
-        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_USER, "X"))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("the credential is published to the derived entry under the configured key")
+    void theCredentialIsPublishedToTheDerivedEntry() {
+        stubSuccessfulCreate();
 
-        verifyNoInteractions(this.provider);
+        this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER);
+
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        ArgumentCaptor<CreateSecretRequest> published =
+                ArgumentCaptor.forClass(CreateSecretRequest.class);
+        verify(this.secrets).createSecret(published.capture());
+        assertThat(published.getValue().name()).isEqualTo(EXPECTED_SECRET_NAME);
+        assertThat(published.getValue().kmsKeyId()).isEqualTo(SECRET_KMS_KEY_ARN);
+        assertThat(published.getValue().secretString())
+                .isEqualTo("{\"username\":\"" + USER_ID + "\",\"password\":\"" + generated + "\"}");
+        assertThat(published.getValue().description())
+                .as("a description is readable without decrypting the value, so it names no identity")
+                .doesNotContain(USER_ID);
     }
 
     /**
-     * Verifies a failed addition restores the membership that was removed, and reports the original failure.
+     * Verifies the entry's name discloses neither the identifier nor the password.
      *
-     * <p>Assumptions: the restored group is asserted to be the SOURCE group, which is what returns the
-     * identity to the state it held before the call. Re-adding the target instead would complete the move the
-     * provider had just refused, and asserting only that some add happened would not tell the two apart.</p>
+     * <p>Assumptions: this is asserted separately from the name literal above because the two would fail for
+     * different reasons. The literal catches a change of scheme; this catches a scheme that still looks
+     * derived while embedding the value it was meant to hide -- for instance a prefix plus the identifier
+     * plus a digest.</p>
      */
     @Test
-    @DisplayName("a failed addition puts the removed membership back and reports the original failure")
-    void aFailedAdditionPutsTheRemovedMembershipBack() {
-        NotAuthorizedException refused =
-                NotAuthorizedException.builder().message("provider refused").build();
-        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build()))
-                .thenThrow(refused);
+    @DisplayName("the credential entry's name discloses neither the identifier nor the password")
+    void theCredentialEntryNameDisclosesNothing() {
+        stubSuccessfulCreate();
 
-        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_USER,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN))
-                .isSameAs(refused);
+        this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER);
 
-        verify(this.provider).adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build());
-        assertThat(refused.getSuppressed()).isEmpty();
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        ArgumentCaptor<CreateSecretRequest> published =
+                ArgumentCaptor.forClass(CreateSecretRequest.class);
+        verify(this.secrets).createSecret(published.capture());
+        assertThat(published.getValue().name()).doesNotContain(USER_ID).doesNotContain(generated)
+                .startsWith(SECRET_PREFIX + "/runtime-user/");
     }
 
     /**
-     * Verifies a compensation that itself fails is attached to the propagated failure rather than replacing
-     * it.
+     * Verifies an entry that already exists is written to rather than treated as a conflict.
      *
-     * <p>Assumptions: the suppressed exception is the assertion, because it is the only channel through which
-     * the second failure reaches a caller at all. A caller is told why the reassignment did not happen, which
-     * is what it asked about; the fact that an identity is now groupless is carried alongside rather than
-     * instead, so neither failure is lost and the common case stays distinguishable from the rare one.</p>
+     * <p>Assumptions: the name is derived from the identifier, so this condition means the identifier has
+     * been provisioned before -- a retry, or a create following a delete. The value that works is the one the
+     * pool has just accepted, so the entry must carry it; refusing would leave a stale value that opens
+     * nothing while the account waits for a credential nobody can collect.</p>
      */
     @Test
-    @DisplayName("a failed compensation is suppressed onto the original failure, not substituted for it")
-    void aFailedCompensationIsSuppressedOntoTheOriginalFailure() {
-        NotAuthorizedException refused =
-                NotAuthorizedException.builder().message("provider refused the promotion").build();
-        UserNotFoundException gone =
-                UserNotFoundException.builder().message("account vanished").build();
-        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(ADMIN_GROUP).build()))
-                .thenThrow(refused);
-        when(this.provider.adminAddUserToGroup(AdminAddUserToGroupRequest.builder()
-                .userPoolId(POOL_ID).username(USER_ID).groupName(USER_GROUP).build()))
-                .thenThrow(gone);
+    @DisplayName("an existing credential entry is written to, which is what makes a retry idempotent")
+    void anExistingCredentialEntryIsWrittenTo() {
+        stubSuccessfulCreate();
+        when(this.secrets.createSecret(any(CreateSecretRequest.class)))
+                .thenThrow(ResourceExistsException.builder().message("exists").build());
 
-        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_USER,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN))
-                .isSameAs(refused);
+        this.service.provision(USER_ID, FIRST_NAME, LAST_NAME,
+                CognitoUserProvisioningService.USER_TYPE_USER);
 
-        assertThat(refused.getSuppressed()).containsExactly(gone);
+        String generated = capturedCreate(AdminCreateUserRequest::temporaryPassword);
+        ArgumentCaptor<PutSecretValueRequest> written =
+                ArgumentCaptor.forClass(PutSecretValueRequest.class);
+        verify(this.secrets).putSecretValue(written.capture());
+        assertThat(written.getValue().secretId()).isEqualTo(EXPECTED_SECRET_NAME);
+        assertThat(written.getValue().secretString()).contains(generated);
     }
 
     /**
-     * Verifies a failure of the removal itself leaves nothing to compensate.
+     * Verifies withdrawing discards the credential entry before it deletes the account.
      *
-     * <p>Assumptions: no add of any kind is expected, and that is asserted rather than assumed. A
-     * compensation issued when the removal never succeeded would ADD a membership the identity may not have
-     * held, which on the administrator group is a grant of authority in response to a failure.</p>
+     * <p>Assumptions: the ORDER is asserted rather than only the pair of calls. A failure between the two
+     * leaves whichever half has not run, and the two halves are not equivalent: an entry outliving its
+     * account holds a value that opens nothing and is overwritten by the next create, whereas an account
+     * outliving its entry holds a credential nobody can collect -- the exact condition the handover exists to
+     * prevent. Discarding first is what makes the survivable failure the one that survives.</p>
      */
     @Test
-    @DisplayName("a failed removal adds no membership, because nothing was taken away")
-    void aFailedRemovalAddsNoMembership() {
-        NotAuthorizedException refused =
-                NotAuthorizedException.builder().message("provider refused").build();
-        when(this.provider.adminRemoveUserFromGroup(any(AdminRemoveUserFromGroupRequest.class)))
-                .thenThrow(refused);
+    @DisplayName("withdrawing discards the credential entry before deleting the account")
+    void withdrawDiscardsTheCredentialBeforeDeletingTheAccount() {
+        this.service.withdraw(USER_ID);
 
-        assertThatThrownBy(() -> this.service.reassignGroup(USER_ID,
-                CognitoUserProvisioningService.USER_TYPE_ADMIN,
-                CognitoUserProvisioningService.USER_TYPE_USER))
-                .isSameAs(refused);
+        ArgumentCaptor<DeleteSecretRequest> discarded =
+                ArgumentCaptor.forClass(DeleteSecretRequest.class);
+        InOrder ordered = inOrder(this.secrets, this.provider);
+        ordered.verify(this.secrets).deleteSecret(discarded.capture());
+        ordered.verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
+        assertThat(discarded.getValue().secretId()).isEqualTo(EXPECTED_SECRET_NAME);
+        assertThat(discarded.getValue().forceDeleteWithoutRecovery())
+                .as("a scheduled deletion reserves the derived name and would make the identifier "
+                        + "unusable for the whole recovery window")
+                .isTrue();
+    }
 
-        verify(this.provider, never()).adminAddUserToGroup(any(AdminAddUserToGroupRequest.class));
+    /**
+     * Verifies withdrawing treats an absent credential entry as success.
+     *
+     * <p>Assumptions: this is what makes the withdrawal safe on every cleanup path. The failure being
+     * compensated may have preceded the publication, so the entry may never have existed, and a caller
+     * generally cannot tell.</p>
+     */
+    @Test
+    @DisplayName("withdrawing an identifier with no credential entry is treated as success")
+    void withdrawTreatsAnAbsentCredentialEntryAsSuccess() {
+        when(this.secrets.deleteSecret(any(DeleteSecretRequest.class)))
+                .thenThrow(ResourceNotFoundException.builder().message("absent").build());
+
+        this.service.withdraw(USER_ID);
+
+        verify(this.provider).adminDeleteUser(any(AdminDeleteUserRequest.class));
     }
 }

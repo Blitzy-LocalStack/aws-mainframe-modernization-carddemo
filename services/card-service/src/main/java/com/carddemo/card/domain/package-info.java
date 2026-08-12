@@ -5,30 +5,25 @@
  * cannot be a plain Java type -- the enciphered card verification value and the attribute converter
  * that is its only route to and from the column.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored this charter</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every type name below describes this package's <b>target contract</b> as the
- * migration plan assigns it. The directory now holds <b>four</b> compilation units -- this charter,
- * {@code Card}, {@code EncryptedCvv} and {@code EncryptedCvvConverter} -- so the entity named
- * throughout is present rather than planned, while the sibling <i>packages</i> named further down
- * are still a mixture of authored and planned. The context root charter at
- * {@code com.carddemo.card} draws the same distinction for the same reason; this paragraph is the
- * one place a reader of this file has to look to tell a target from a measurement.</p>
+ * <p>Four compilation units sit in this directory -- this charter, {@code Card},
+ * {@code EncryptedCvv} and {@code EncryptedCvvConverter} -- and every type name and count below is a
+ * measurement of it. The marker line is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which counts the {@code .java} files beside this charter and holds the figures to them, so a fifth
+ * type arriving without an entry here fails the build rather than quietly falsifying this
+ * paragraph:</p>
  *
- * <p>Refactoring Rationale: this paragraph previously stated that "at the checkpoint that authored
- * this one the directory holds this file alone". That was already untrue when it was written --
- * {@code Card} was tracked beside it -- and the arrival of the two encryption types made it more
- * wrong rather than differently wrong. It is restated as a measurement of the directory
- * ({@code ls} over this package) because a charter that understates its own inventory teaches the
- * next author that the package is empty and that a new type needs no reconciliation against the
- * closed-set rule stated below.</p>
+ * <pre>
+ * this directory: 4 java files = 3 classes + 1 charter
+ * </pre>
  *
- * <p>Alternatives Considered: withholding this charter until the entity it governs exists. Rejected,
- * because the charter is what the author of that entity works from -- which physical column each
- * baseline field lands on, what may not be imported, and what the closed set of types here is -- so
- * writing it last would leave the package with no stated contract across exactly the interval in
- * which one is needed. The cost accepted is that its inventory reads as present tense unless the
- * distinction is declared, which is what the paragraph above exists to declare.</p>
+ * <p>Assumptions: the seven sibling packages this charter names -- {@code api}, {@code config},
+ * {@code dto}, {@code mapper}, {@code repository}, {@code service} and the context root -- are all
+ * present too, so every cross-reference below reaches code a reader can open. What the closed-set
+ * rule buys is stated at its own heading rather than here: it tells the author of a new type whether
+ * this package is where it belongs.</p>
  *
  * <h2>Purpose</h2>
  *

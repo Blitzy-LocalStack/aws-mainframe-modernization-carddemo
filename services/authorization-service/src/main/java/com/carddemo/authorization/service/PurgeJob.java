@@ -522,16 +522,16 @@ public class PurgeJob {
      * so a page this run is deleting from never carries entities whose state predates the window. The
      * lost update this arrangement once used a pessimistic lock for is closed elsewhere and differently:
      * the four counters are reversed by ONE statement computed in the database rather than by mutating a
-     * loaded entity, which is why {@code PendingAuthSummaryRepository} holds no locking read at all and
-     * records why taking one would be concurrency machinery the reference system does not have.
+     * loaded entity, which is why {@code PendingAuthSummaryRepository} declares no locking read at all
+     * and records why taking one would be concurrency machinery the reference system does not have.
      *
      * <p>Alternatives Considered: keeping the walk's own entity page and reversing those instances
      * directly, which is one read fewer. Rejected because it makes the deletion decision depend on
      * counters read before the window began, and the row is being deleted from underneath that snapshot
      * by this very run.
      *
-     * <p>Assumptions: a key the walk returned whose summary the locking read cannot find is SKIPPED and
-     * contributes nothing, rather than ending the window or being counted as read. The row was removed
+     * <p>Assumptions: a key the walk returned whose summary the individual read cannot find is SKIPPED
+     * and contributes nothing, rather than ending the window or being counted as read. The row was removed
      * between the two reads, by a concurrent purge of the same window or by an operator, and the
      * reference walk would simply never have returned it; counting a summary this run did not process
      * would overstate the statistics the run reports. The position still advances past the missing key,

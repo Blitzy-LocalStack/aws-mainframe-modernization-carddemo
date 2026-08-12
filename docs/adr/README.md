@@ -198,10 +198,10 @@ What these records claim, and what they do not:
   needs credentials and remote state, so it runs only as an **operator-triggered,
   conditional** job (`workflow_dispatch` with `run_plan` selected), and no change is
   gated on it. `terraform apply` against a live account is an operator action outside
-  this scope. *WHY (Refactoring Rationale):* `plan` was previously listed inline with
-  the four credential-free gates, which read as though all five run alike on every
-  change. They do not, and the difference is the load-bearing one: the four are
-  credential-free and gating, while `plan` requires credentials and is opt-in, so
+  this scope. Assumptions: `plan` is listed apart from the four credential-free gates
+  rather than inline with them, because listing all five together reads as though they
+  run alike on every change. They do not, and the difference is the load-bearing one:
+  the four are credential-free and gating, while `plan` requires credentials and is opt-in, so
   citing it as routine validation overstates what has actually been exercised against
   a backend. [`.github/workflows/infra-ci.yml`](../../.github/workflows/infra-ci.yml)
   draws exactly this distinction in its own header — every static gate is gating, the

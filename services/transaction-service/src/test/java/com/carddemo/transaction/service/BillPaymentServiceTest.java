@@ -3,19 +3,25 @@ package com.carddemo.transaction.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.BillPaymentPreview;
+import com.carddemo.transaction.dto.BillPaymentOutcome;
 import com.carddemo.transaction.dto.BillPaymentRequest;
 import com.carddemo.transaction.dto.BillPaymentResponse;
 import com.carddemo.transaction.mapper.BillPaymentMapper;
+import com.carddemo.transaction.repository.AccountBalanceRepository;
 import com.carddemo.transaction.repository.TransactionRepository;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
@@ -24,6 +30,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -35,6 +42,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.data.domain.Limit;
 
 /**
@@ -94,12 +102,14 @@ import org.springframework.data.domain.Limit;
  * for the opposite reason -- it holds an ORDER of evaluation, which a real converter cannot help
  * establish -- so the two are complementary rather than redundant.</p>
  *
- * <p>Assumptions: the two collaborators that ARE mocked are the ones that leave this module.
- * {@link TransactionRepository} is mocked because its reads and its write belong to the persistence
- * layer and are proved against a real engine by the integration class in the sibling
- * {@code repository} package. {@link AccountContextClient} is mocked because what it reaches is a
- * different bounded context over HTTP; resolving it for real would fail for a reason belonging to that
- * context rather than to the paragraph under test.</p>
+ * <p>Assumptions: the three collaborators that ARE mocked are the ones that reach outside this class.
+ * {@link TransactionRepository} and {@link AccountBalanceRepository} are mocked because their reads and
+ * their writes belong to the persistence layer and are proved against a real engine by the integration
+ * classes in the sibling {@code repository} package -- {@code BillPaymentUnitOfWorkIT} in particular,
+ * which is where the single-commit property is established rather than asserted from stand-ins.
+ * {@link AccountContextClient} is mocked because what it reaches is a different bounded context over
+ * HTTP; resolving it for real would fail for a reason belonging to that context rather than to the
+ * paragraph under test.</p>
  *
  * <p>Trade-offs: the extension form used here applies strict stubbing, so a stubbing no case exercises
  * fails the build. That cost is accepted because several cases below assert a NEGATIVE -- that no
@@ -108,21 +118,32 @@ import org.springframework.data.domain.Limit;
  *
  * <h2>Assumptions: two crossings of the account boundary, and they stay distinguishable</h2>
  *
- * <p>Assumptions: this screen reaches records the account context owns TWICE and the two crossings are
- * not the same kind of operation, so they are asserted separately and are recorded here as distinct
- * lest a later reader unify them. The cross-reference read at line 408 and the account master read at
- * line 343 are LOOKUPS whose answers this class then decides on. The balance change standing for the
- * rewrite at line 379 is a WRITE that must stand or fall with the ledger row, which is why it is
- * issued last and why its refusal propagates. Both travel through the one outbound port
- * {@link AccountContextClient}, and the reason they share a port rather than a mechanism is recorded
- * on the production class: this service connects as the ledger role, and
- * {@code data-migration/sql/V0__schemas_and_roles.sql} grants that role usage on the {@code ledger}
- * schema alone, so schema-qualified statements against {@code account.accounts} on this module's own
- * entity manager would not resolve at run time. The cross-schema grants that script does carry are
- * issued to the batch role and justified there by the nightly programs.</p>
+ * <p>Assumptions: this screen reaches records the account context owns THREE times, by two different
+ * mechanisms, and the split is asserted rather than left to be inferred. The cross-reference read at
+ * line 408 travels over {@link AccountContextClient}, the REST seam, because it is a LOOKUP whose
+ * answer this class then decides on and it needs no lock. The account master read at line 343 and the
+ * balance rewrite at line 379 travel over {@link AccountBalanceRepository}, two schema-qualified
+ * statements on this module's own entity manager, because they must stand or fall with the ledger
+ * insert -- lines 233 and 235 sit inside ONE syncpoint in the baseline, so a payment recorded against
+ * an unchanged balance and a reduced balance with no payment to show for it are both unreachable
+ * there.</p>
  *
- * <p>Alternatives Considered: a circuit breaker in front of that port. Rejected because the hop is
- * in-network to a service behind an internal load balancer and both of its timeouts are bounded by
+ * <p>⚠️ Refactoring Rationale: an earlier form of this note recorded the opposite arrangement and its
+ * reasoning, and the reasoning is withdrawn here rather than deleted, because a reader meeting the two
+ * forms needs to know which is current and why. It said the balance change travelled over the same REST
+ * seam, and justified that by observing that this service connects as the ledger role while
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} granted that role privileges inside the
+ * {@code ledger} schema alone. The observation was true; the conclusion drawn from it -- that a local
+ * statement was therefore impossible -- was not, because the script is a migration artefact that can
+ * carry another grant. Section 4b now grants the ledger role {@code USAGE} on {@code account} plus
+ * {@code SELECT} and {@code UPDATE} on {@code account.accounts} and nothing else, which AAP section
+ * 0.4.1.3 sanctions for exactly this case: a genuinely multi-record unit of work that a saga would
+ * fragment into observable partial states the baseline cannot produce. The seam form also addressed
+ * {@code POST /api/v1/accounts/payments}, a route account-service never published, so every confirmed
+ * payment failed on it -- a defect no amount of ordering could have hidden.</p>
+ *
+ * <p>Alternatives Considered: a circuit breaker in front of the surviving seam. Rejected because the hop
+ * is in-network to a service behind an internal load balancer and both of its timeouts are bounded by
  * configuration, so a stalled dependency already surfaces as a refused request within seconds. A
  * breaker would add a state machine that can refuse a call the dependency would have served, which is
  * a new failure mode in exchange for none removed. No resilience library is introduced, and the case
@@ -191,28 +212,51 @@ class BillPaymentServiceTest {
     /** An eleven digit account identifier, at the width the account key declares. */
     private static final String ACCOUNT_ID = "00000000011";
 
+    /**
+     * The same identifier as the balance statements bind it, being a number rather than characters.
+     *
+     * <p>Assumptions: {@code account.accounts.account_id} is {@code BIGINT} at line 215 of
+     * account-service's {@code V1__account.sql}, while the request component carries eleven digit
+     * characters, so the class under test parses before it binds. Stubbing by the character form would
+     * stub a call it never makes, and every balance would then read as absent.</p>
+     */
+    private static final long ACCOUNT_KEY = 11L;
+
     /** The card number the cross-reference resolves for that account, at its declared width. */
     private static final String CARD_NUMBER = "4111111111111111";
 
     /** The outstanding balance every paying case settles, chosen to be neither zero nor round. */
     private static final Money PAYABLE_BALANCE = Money.of("1250.75");
 
-    /** The highest identifier the ledger already holds, at the sixteen character declared width. */
-    private static final String HIGHEST_STORED_ID = "0000000000000041";
+    /** The value the database's own allocator answers with on every paying case below. */
+    private static final long ALLOCATED_NUMBER = 42L;
 
-    /** The identifier one above it, which the derivation must produce. */
+    /** That allocated value at the sixteen character declared width, which the row must carry. */
     private static final String DERIVED_ID = "0000000000000042";
 
-    /** The identifier an empty ledger must produce, being the zero sentinel plus one. */
+    /** The allocator's first value on a freshly provisioned ledger. */
+    private static final long FIRST_ALLOCATED_NUMBER = 1L;
+
+    /** That first value at the declared width, which is the identifier the first payment takes. */
     private static final String FIRST_ID = "0000000000000001";
 
     /** The reads and the write of the owned ledger table, stood in for by a mock. */
     @Mock
     private TransactionRepository transactions;
 
-    /** The outbound port onto the account-owned cross-reference, balance and balance change. */
+    /** The outbound port onto the account-owned cross-reference, and nothing else. */
     @Mock
     private AccountContextClient accounts;
+
+    /**
+     * The two statements over {@code account.accounts} that read the balance and reduce it.
+     *
+     * <p>Assumptions: this is a separate stand-in from {@link #accounts} because it is a separate
+     * mechanism, and keeping them separate is what lets the cases below assert that the refused turn
+     * touches NEITHER while the paying turn touches both in a fixed order.</p>
+     */
+    @Mock
+    private AccountBalanceRepository accountBalances;
 
     /**
      * The record and response boundary, held REAL because the eight literals are its contract.
@@ -228,29 +272,59 @@ class BillPaymentServiceTest {
      * Builds the service over freshly created stand-ins before every case.
      *
      * <p>Assumptions: the service is rebuilt rather than shared because it is constructed around its
-     * four collaborators, and one retained across cases would hold the previous case's stubbings. The
+     * five collaborators, and one retained across cases would hold the previous case's stubbings. The
      * class under test keeps no mutable instance state of its own, so rebuilding it costs nothing.</p>
      */
     @BeforeEach
     void setUp() {
         this.billPaymentMapper = new BillPaymentMapper();
-        this.service = new BillPaymentService(this.transactions, this.accounts, this.billPaymentMapper,
-                PINNED_CLOCK);
+        this.service = new BillPaymentService(this.transactions, this.accounts, this.accountBalances,
+                this.billPaymentMapper, PINNED_CLOCK);
     }
 
     /**
-     * Stubs the account master read that stands for the reference's read for update.
+     * Stubs the LOCKING account master read, which is the paying turn's read.
      *
-     * <p>Assumptions: the port answers with a present balance, which is the normal arm of
-     * {@code READ-ACCTDAT-FILE} at line 343 of {@code app/cbl/COBIL00C.cbl}. Absence and failure are
-     * different answers on this port and are stubbed by the cases that assert them.</p>
+     * <p>Assumptions: the statement answers with a present balance, which is the normal arm of
+     * {@code READ-ACCTDAT-FILE} at line 343 of {@code app/cbl/COBIL00C.cbl}. That read carries the
+     * {@code UPDATE} option at line 351, so the paying turn takes the row lock the rewrite at line 379
+     * consumes; absence and failure are different answers and are stubbed by the cases asserting them.
+     * </p>
      *
-     * @param balance the outstanding balance the account context is to report, of type {@link Money};
+     * @param balance the outstanding balance the row is to report, of type {@link Money}; must not be
+     *     {@code null}
+     */
+    private void stubLockedBalanceRead(Money balance) {
+        when(this.accountBalances.lockCurrentBalance(ACCOUNT_KEY)).thenReturn(Optional.of(balance));
+    }
+
+    /**
+     * Stubs the UNLOCKED account master read, which is the reporting turn's read.
+     *
+     * <p>Assumptions: the turn that only reports a balance takes no lock, because this transaction spans
+     * a whole HTTP request rather than ending at a screen as the CICS task does. Stubbing the two reads
+     * through separate helpers is what lets a case assert which of the two the class under test chose.
+     * </p>
+     *
+     * @param balance the outstanding balance the row is to report, of type {@link Money}; must not be
+     *     {@code null}
+     */
+    private void stubUnlockedBalanceRead(Money balance) {
+        when(this.accountBalances.findCurrentBalance(ACCOUNT_KEY)).thenReturn(Optional.of(balance));
+    }
+
+    /**
+     * Stubs the balance reduction, reporting the one affected row a successful statement reports.
+     *
+     * <p>Assumptions: the statement answers with a COUNT rather than with nothing, and the count matters:
+     * the class under test refuses anything other than one, which is how the reference's line 391
+     * not-found status is expressed through a SQL update. Reporting one here is the normal arm.</p>
+     *
+     * @param amount the amount the reduction is expected to be asked to subtract, of type {@link Money};
      *     must not be {@code null}
      */
-    private void stubBalanceRead(Money balance) {
-        when(this.accounts.findAccountBalance(ACCOUNT_ID))
-                .thenReturn(Optional.of(new AccountContextClient.AccountBalance(ACCOUNT_ID, balance)));
+    private void stubBalanceReduction(Money amount) {
+        when(this.accountBalances.reduceCurrentBalance(ACCOUNT_KEY, amount)).thenReturn(1);
     }
 
     /**
@@ -265,15 +339,23 @@ class BillPaymentServiceTest {
     }
 
     /**
-     * Stubs the highest-key read the identifier derivation issues, and reports the derived key free.
+     * Stubs the identifier allocation, and reports the resulting key as not yet taken.
      *
-     * @param highestStored the highest identifier the ledger is to report, of type {@link String}, or
-     *     {@code null} to report an empty ledger as the end-of-file arm of line 487 does
-     * @param derived the identifier the derivation is expected to produce, of type {@link String},
-     *     reported as not yet taken so the write proceeds; must not be {@code null}
+     * <p>⚠️ Refactoring Rationale: this helper used to stub a highest-key READ, because the class under
+     * test used to derive the identifier by reading the maximum stored key and adding one -- a literal
+     * transcription of lines 212 to 217 that is unsafe once more than one task can run it at a time. The
+     * database's own allocator replaces that read, so what is stubbed here is a single answered value
+     * rather than a stored maximum. The taken-key stub survives unchanged, because the reference's
+     * duplicate branches at lines 533 and 534 remain reachable for identifiers the ETL loaded or a batch
+     * job composed.</p>
+     *
+     * @param allocated the value the allocator is to answer with, of type {@code long}, being the number
+     *     the class under test then renders at the declared width
+     * @param derived the identifier that value renders as, of type {@link String}, reported as not yet
+     *     taken so the write proceeds; must not be {@code null}
      */
-    private void stubIdentifierDerivation(String highestStored, String derived) {
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.ofNullable(highestStored));
+    private void stubIdentifierAllocation(long allocated, String derived) {
+        when(this.transactions.allocateTransactionId()).thenReturn(allocated);
         when(this.transactions.existsById(derived)).thenReturn(false);
     }
 
@@ -286,8 +368,10 @@ class BillPaymentServiceTest {
      * faithful stand-in.</p>
      */
     private void stubWriteEchoesTheRow() {
-        when(this.transactions.save(any(Transaction.class))).thenAnswer(call -> call.getArgument(0));
+        when(this.transactions.saveAndFlush(any(Transaction.class)))
+                .thenAnswer(call -> call.getArgument(0));
     }
+
 
     /**
      * Stubs every collaborator the confirmed payment path consults, in one call.
@@ -296,10 +380,11 @@ class BillPaymentServiceTest {
      *     must not be {@code null}
      */
     private void stubConfirmedPaymentPath(Money balance) {
-        stubBalanceRead(balance);
+        stubLockedBalanceRead(balance);
         stubCardResolution();
-        stubIdentifierDerivation(HIGHEST_STORED_ID, DERIVED_ID);
+        stubIdentifierAllocation(ALLOCATED_NUMBER, DERIVED_ID);
         stubWriteEchoesTheRow();
+        stubBalanceReduction(balance);
     }
 
     /**
@@ -314,8 +399,48 @@ class BillPaymentServiceTest {
      */
     private Transaction storedRow() {
         ArgumentCaptor<Transaction> written = ArgumentCaptor.forClass(Transaction.class);
-        verify(this.transactions).save(written.capture());
+        verify(this.transactions).saveAndFlush(written.capture());
         return written.getValue();
+    }
+
+    /**
+     * Submits a payment and narrows the answer to the PAID shape, failing if it is the preview shape.
+     *
+     * <p>⚠️ Refactoring Rationale: the entry point answers with the sealed
+     * {@link BillPaymentOutcome} rather than with one record, because a paying turn and a reporting turn
+     * publish two closed schemas carrying different members. The narrowing lives in a helper rather than
+     * being cast at each call site so that a case which expected a payment and received a preview fails
+     * with a sentence naming that, instead of with a class-cast trace the reader has to interpret.</p>
+     *
+     * @param request the submission to make, of type {@link BillPaymentRequest}; must not be {@code null}
+     * @return the {@link BillPaymentResponse} the paying branch answers with; never {@code null}
+     */
+    private BillPaymentResponse paidAnswerTo(BillPaymentRequest request) {
+        BillPaymentOutcome answer = this.service.payBalanceInFull(request);
+        assertThat(answer)
+                .as("a confirmed, payable submission answers with the acknowledgement shape")
+                .isInstanceOf(BillPaymentResponse.class);
+        return (BillPaymentResponse) answer;
+    }
+
+    /**
+     * Submits a payment and narrows the answer to the PREVIEW shape, failing if money moved.
+     *
+     * <p>Assumptions: narrowing by type is itself an assertion here, and the load-bearing one. A turn
+     * that was meant to report and instead paid would otherwise be caught only by whichever member the
+     * case went on to inspect, and the two shapes share the {@code paid} and {@code returnMessage}
+     * members, so several cases would pass against a payment they never intended.</p>
+     *
+     * @param request the submission to make, of type {@link BillPaymentRequest}; must not be {@code null}
+     * @return the {@link BillPaymentPreview} a reporting or refused branch answers with; never
+     *     {@code null}
+     */
+    private BillPaymentPreview previewAnswerTo(BillPaymentRequest request) {
+        BillPaymentOutcome answer = this.service.payBalanceInFull(request);
+        assertThat(answer)
+                .as("a turn that pays nothing answers with the preview shape, carrying no identifier")
+                .isInstanceOf(BillPaymentPreview.class);
+        return (BillPaymentPreview) answer;
     }
 
     /**
@@ -325,12 +450,12 @@ class BillPaymentServiceTest {
      * what preserves the reference's arithmetic at line 234. Capturing it is therefore how the
      * subtraction form becomes observable from outside the class.</p>
      *
-     * @return the {@link Money} amount the account context was asked to reduce the balance by; never
+     * @return the {@link Money} amount the reduction statement was asked to subtract; never
      *     {@code null}
      */
     private Money subtractedAmount() {
         ArgumentCaptor<Money> reduced = ArgumentCaptor.forClass(Money.class);
-        verify(this.accounts).applyPayment(anyString(), reduced.capture());
+        verify(this.accountBalances).reduceCurrentBalance(anyLong(), reduced.capture());
         return reduced.getValue();
     }
 
@@ -359,14 +484,14 @@ class BillPaymentServiceTest {
         stubConfirmedPaymentPath(PAYABLE_BALANCE);
 
         BillPaymentResponse acknowledgement =
-                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
+                paidAnswerTo(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
         assertThat(acknowledgement.paid())
                 .as("a confirmed payment reports itself as paid")
                 .isTrue();
         assertThat(acknowledgement.transactionId()).isEqualTo(DERIVED_ID);
         assertThat(storedRow().getTranId()).isEqualTo(DERIVED_ID);
-        verify(this.accounts).applyPayment(ACCOUNT_ID, PAYABLE_BALANCE);
+        verify(this.accountBalances).reduceCurrentBalance(ACCOUNT_KEY, PAYABLE_BALANCE);
     }
 
     /**
@@ -396,7 +521,7 @@ class BillPaymentServiceTest {
         stubConfirmedPaymentPath(PAYABLE_BALANCE);
 
         BillPaymentResponse acknowledgement =
-                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
+                paidAnswerTo(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
         assertThat(acknowledgement.currentBalance())
                 .as("the pre-payment balance is reported, not the balance left after the payment")
@@ -482,12 +607,12 @@ class BillPaymentServiceTest {
 
         this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
-        InOrder ordered = inOrder(this.transactions, this.accounts);
-        ordered.verify(this.accounts).findAccountBalance(ACCOUNT_ID);
+        InOrder ordered = inOrder(this.transactions, this.accounts, this.accountBalances);
+        ordered.verify(this.accountBalances).lockCurrentBalance(ACCOUNT_KEY);
         ordered.verify(this.accounts).findCardXrefByAccountId(ACCOUNT_ID);
-        ordered.verify(this.transactions).findMaxTranId();
-        ordered.verify(this.transactions).save(any(Transaction.class));
-        ordered.verify(this.accounts).applyPayment(ACCOUNT_ID, PAYABLE_BALANCE);
+        ordered.verify(this.transactions).allocateTransactionId();
+        ordered.verify(this.transactions).saveAndFlush(any(Transaction.class));
+        ordered.verify(this.accountBalances).reduceCurrentBalance(ACCOUNT_KEY, PAYABLE_BALANCE);
     }
 
     /**
@@ -663,38 +788,41 @@ class BillPaymentServiceTest {
     }
 
     /**
-     * The identifier is derived as one above the highest key already stored, by a maximum-key read.
+     * The identifier comes from the database's own allocator, and no browse analogue is touched.
      *
-     * <p>This pins lines 212 to 217 of {@code app/cbl/COBIL00C.cbl}. Line 212 moves high values into
-     * the key, line 213 starts a browse at line 441, line 214 reads BACKWARD once at line 472, line 215
-     * ends the browse at line 501, line 216 moves the key it landed on into the numeric work field and
-     * line 217 adds one.</p>
+     * <p>This pins lines 212 to 217 of {@code app/cbl/COBIL00C.cbl} and what replaces them. Line 212
+     * moves high values into the key, line 213 starts a browse at line 441, line 214 reads BACKWARD once
+     * at line 472, line 215 ends the browse at line 501, line 216 moves the key it landed on into the
+     * numeric work field and line 217 adds one.</p>
      *
      * <p>Assumptions: that sequence is a maximum-key probe for identifier generation and is not a page
      * of a list, and the distinction is measurable rather than interpretive: the program contains no
      * {@code READNEXT} paragraph at all, so nothing can step forward from where the backward read
-     * landed. Starting from high values and reading backward once therefore reaches exactly the highest
-     * key and stops. The faithful target expression is a single highest-key query -- ordering by the
-     * key descending and taking one row -- which is the degenerate case of the same key ordering the
-     * paged browse uses, so no positional skipping enters anywhere. Calling it a page would also
-     * mislead a reader into expecting boundary keys and an availability flag, none of which this screen
-     * has: the reference declares no PF7 and no PF8.</p>
+     * landed. Calling it a page would also mislead a reader into expecting boundary keys and an
+     * availability flag, none of which this screen has -- the reference declares no PF7 and no PF8. The
+     * three paging members are therefore asserted untouched, named individually as well as covered by
+     * the catch-all, because a failure against a named member says WHICH browse analogue appeared.</p>
      *
-     * <p>Assumptions: the three paging members are named individually as well as covered by the
-     * catch-all, because a failure against a named member says WHICH browse analogue appeared, whereas
-     * a catch-all alone reports only that something extra was called.</p>
+     * <p>⚠️ Refactoring Rationale: the probe is NOT transcribed literally, and this case asserts the
+     * substitute rather than the original. A read-then-add is indivisible in the reference because CICS
+     * serialised this program and the capture program inside one region; it is not indivisible across two
+     * Fargate tasks behind a load balancer, where both read the same maximum, both add one, and the loser
+     * is refused a payment for a reason it did nothing to cause. The maximum-key read is therefore
+     * asserted UNTOUCHED alongside the paging members, and the allocator asserted used, so that a
+     * regression back to the racing form fails here rather than in production under load.</p>
      */
     @Test
-    @DisplayName("the identifier comes from a highest-key read, and no paging member is touched")
-    void theIdentifierComesFromAHighestKeyRead() {
+    @DisplayName("the identifier comes from the allocator, and no browse or paging member is touched")
+    void theIdentifierComesFromTheAllocator() {
         stubConfirmedPaymentPath(PAYABLE_BALANCE);
 
         this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
-        verify(this.transactions).findMaxTranId();
+        verify(this.transactions).allocateTransactionId();
         assertThat(storedRow().getTranId())
-                .as("line 216 takes the highest key and line 217 adds one")
+                .as("the allocated value rendered at the sixteen character declared width")
                 .isEqualTo(DERIVED_ID);
+        verify(this.transactions, never()).findMaxTranId();
         verify(this.transactions, never()).findAllByOrderByTranIdAsc(any(Limit.class));
         verify(this.transactions, never())
                 .findByTranIdGreaterThanOrderByTranIdAsc(anyString(), any(Limit.class));
@@ -703,35 +831,51 @@ class BillPaymentServiceTest {
     }
 
     /**
-     * An empty ledger yields identifier one, by way of the end-of-file sentinel.
+     * A freshly provisioned ledger yields identifier one, zero-padded to the declared width.
      *
      * <p>This pins the end-of-file arm of {@code READPREV-TRANSACT-FILE}, lines 487 and 488 of
-     * {@code app/cbl/COBIL00C.cbl}, together with line 217. When the backward read finds no record the
-     * program moves ZEROS into the key at line 488 rather than leaving the high values it set at line
-     * 212, and line 217 then adds one -- so the first payment written to an empty ledger takes
-     * identifier one and not zero.</p>
+     * {@code app/cbl/COBIL00C.cbl}, together with line 217, and records what carries it now. When the
+     * backward read finds no record the program moves ZEROS into the key at line 488 rather than leaving
+     * the high values it set at line 212, and line 217 then adds one -- so the first payment written to
+     * an empty ledger takes identifier one and not zero.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the sentinel arm has NO counterpart in the class under test and this
+     * case asserts the observable behaviour rather than the mechanism. The allocator's own migration,
+     * {@code V2__ledger_transaction_id_allocator.sql}, positions the sequence past whatever the cutover
+     * extract loaded, so its first value on an unseeded ledger is one and on a seeded one is above every
+     * identifier that extract carries. Transcribing the zero sentinel as well would add a second source
+     * for the same number and let the two disagree.</p>
+     *
+     * <p>Assumptions: the target reaches the same value by a different route, and the agreement is the
+     * point. {@code V2__ledger_transaction_id_allocator.sql} declares {@code START WITH 1} and advances
+     * the sequence to {@code coalesce(max, 0) + 1}, so a fresh ledger allocates one; the arrangement
+     * below therefore names {@code BillPaymentService.FIRST_TRANSACTION_ID} rather than a literal, so the
+     * case reads as the claim that the two mechanisms agree rather than as a repeated constant.</p>
      *
      * <p>Assumptions: the value is asserted at the sixteen character declared width with its leading
      * zeros intact. {@code TRAN-ID} is {@code PIC X(16)} at line 5 of {@code app/cpy/CVTRA05Y.cpy}, a
-     * character field, while the work field the value is derived through is numeric, so the derived
-     * number is re-padded to that width. A numeric identifier would drop the leading zeros the stored
-     * form carries and would key on a value the reference never forms.</p>
+     * character field, while the allocator answers with a number, so the answered value is padded to
+     * that width. A numeric identifier would drop the leading zeros the stored form carries and would
+     * key on a value the reference never forms.</p>
      */
     @Test
-    @DisplayName("an empty ledger yields identifier one, zero-padded to sixteen characters")
-    void anEmptyLedgerYieldsTheFirstIdentifier() {
-        stubBalanceRead(PAYABLE_BALANCE);
+    @DisplayName("a fresh ledger yields identifier one, zero-padded to sixteen characters")
+    void aFreshLedgerYieldsTheFirstIdentifier() {
+        stubLockedBalanceRead(PAYABLE_BALANCE);
         stubCardResolution();
-        stubIdentifierDerivation(null, FIRST_ID);
+        stubIdentifierAllocation(FIRST_ALLOCATED_NUMBER, FIRST_ID);
         stubWriteEchoesTheRow();
+        stubBalanceReduction(PAYABLE_BALANCE);
 
         BillPaymentResponse acknowledgement =
-                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
+                paidAnswerTo(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
         assertThat(acknowledgement.transactionId())
-                .as("the zero sentinel of line 488 plus the increment of line 217 gives one")
+                .as("the allocator's first value, padded to the declared width")
                 .isEqualTo(FIRST_ID);
-        assertThat(Long.parseLong(FIRST_ID)).isEqualTo(BillPaymentService.FIRST_TRANSACTION_ID);
+        assertThat(Long.parseLong(FIRST_ID))
+                .as("padding is presentation only; the allocated number itself is one")
+                .isEqualTo(FIRST_ALLOCATED_NUMBER);
     }
 
     /**
@@ -753,20 +897,20 @@ class BillPaymentServiceTest {
      * </p>
      */
     @Test
-    @DisplayName("a failed highest-key read reports the uppercase browse-failure sentence")
-    void aFailedHighestKeyReadReportsTheBrowseFailureSentence() {
-        stubBalanceRead(PAYABLE_BALANCE);
+    @DisplayName("a failed identifier allocation reports the uppercase browse-failure sentence")
+    void aFailedAllocationReportsTheBrowseFailureSentence() {
+        stubLockedBalanceRead(PAYABLE_BALANCE);
         stubCardResolution();
-        when(this.transactions.findMaxTranId())
-                .thenThrow(new IllegalStateException("the ledger could not be read"));
+        when(this.transactions.allocateTransactionId())
+                .thenThrow(new IllegalStateException("the allocator could not be read"));
 
         assertThatThrownBy(
                 () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("Unable to lookup Transaction...");
 
-        verify(this.transactions, never()).save(any(Transaction.class));
-        verify(this.accounts, never()).applyPayment(anyString(), any(Money.class));
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
+        verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any(Money.class));
     }
 
     /**
@@ -791,10 +935,14 @@ class BillPaymentServiceTest {
      * "payment cancelled" being the obvious candidate. Transformation rule T8 admits only strings the
      * reference emits, and the reference emits none on this branch.</p>
      *
-     * <p>Assumptions: the account IS read on this branch even though nothing is paid, because line 181
-     * raises the flag that line 197 re-tests, so the nothing-to-pay advisory is skipped as well. That is
-     * why a refused payment on an account with nothing outstanding is answered with silence rather than
-     * with the advisory.</p>
+     * <p>⚠️ Refactoring Rationale: the account is NOT read on this branch, and an earlier form of this
+     * case both stubbed the read and asserted that it happened. The claim behind that was that line 181
+     * raises the flag line 197 re-tests, so the advisory is skipped -- which is true and is asserted
+     * below -- but it does not follow that the read occurs: only lines 177 and 184 reach
+     * {@code READ-ACCTDAT-FILE} at line 343, and this branch is line 178. Reading here also made the
+     * branch FAIL where the baseline cannot: an unknown identifier was answered 404 and an account-context
+     * outage 500, where the reference clears the screen and says nothing either time. The read is
+     * therefore asserted ABSENT, which is the assertion the body alone cannot make.</p>
      *
      * @param refusal the spelling of refusal this case offers, of type {@code String}, being the upper
      *     case form of line 178 or the lower case form of line 179
@@ -803,10 +951,7 @@ class BillPaymentServiceTest {
     @ValueSource(strings = {"N", "n"})
     @DisplayName("a refused confirmation emits no sentence, unlike the capture screen's shared arm")
     void aRefusedConfirmationEmitsNoSentence(String refusal) {
-        stubBalanceRead(PAYABLE_BALANCE);
-
-        BillPaymentResponse answer =
-                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, refusal));
+        BillPaymentPreview answer = previewAnswerTo(new BillPaymentRequest(ACCOUNT_ID, refusal));
 
         assertThat(answer.returnMessage())
                 .as("lines 178 to 181 move nothing into the message field")
@@ -815,9 +960,18 @@ class BillPaymentServiceTest {
                 .as("the capture screen's prompt must not leak onto this screen's refusal")
                 .isNotEqualTo("Confirm to add this transaction...");
         assertThat(answer.paid()).isFalse();
-        assertThat(answer.transactionId()).isNull();
-        verify(this.transactions, never()).save(any(Transaction.class));
-        verify(this.accounts, never()).applyPayment(anyString(), any(Money.class));
+        assertThat(answer.accountId()).isEqualTo(ACCOUNT_ID);
+
+        // WHY : Assumptions: the absent balance is asserted, not merely unexamined. CLEAR-CURRENT-SCREEN
+        //       at line 180 blanks the display fields, so a body carrying a balance would show a figure
+        //       the baseline has just removed from view.
+        assertThat(answer.payableBalance()).isNull();
+
+        // WHY : Assumptions: BOTH account mechanisms are asserted completely untouched, which is what
+        //       makes this the refusal branch rather than a reporting branch that happens to say nothing.
+        verifyNoInteractions(this.accountBalances);
+        verifyNoInteractions(this.accounts);
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
     }
 
     /**
@@ -844,8 +998,8 @@ class BillPaymentServiceTest {
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage("Invalid value. Valid values are (Y/N)...");
 
-        verify(this.accounts, never()).findAccountBalance(anyString());
-        verify(this.transactions, never()).save(any(Transaction.class));
+        verifyNoInteractions(this.accountBalances);
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
     }
 
     /**
@@ -873,17 +1027,19 @@ class BillPaymentServiceTest {
     @ValueSource(strings = {"0.00", "-25.00"})
     @DisplayName("a balance at exactly zero, and one below it, both take the nothing-to-pay branch")
     void aBalanceAtExactlyZeroTakesTheNothingToPayBranch(String balanceText) {
-        stubBalanceRead(Money.of(balanceText));
+        stubLockedBalanceRead(Money.of(balanceText));
 
-        BillPaymentResponse answer =
-                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
+        BillPaymentPreview answer = previewAnswerTo(new BillPaymentRequest(ACCOUNT_ID, "Y"));
 
         assertThat(answer.returnMessage())
                 .as("line 201's advisory, reached inclusively at zero")
                 .isEqualTo("You have nothing to pay...");
         assertThat(answer.paid()).isFalse();
-        verify(this.transactions, never()).save(any(Transaction.class));
-        verify(this.accounts, never()).applyPayment(anyString(), any(Money.class));
+        assertThat(answer.payableBalance())
+                .as("the reporting turn carries the balance it read, however small")
+                .isEqualTo(Money.of(balanceText));
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
+        verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any(Money.class));
     }
 
     /**
@@ -910,21 +1066,21 @@ class BillPaymentServiceTest {
     @Test
     @DisplayName("a ten-integer-digit balance is refused, not truncated into the nine-digit amount")
     void aTenIntegerDigitBalanceIsRefusedRatherThanTruncated() {
-        stubBalanceRead(Money.of("1234567890.99"));
+        stubLockedBalanceRead(Money.of("1234567890.99"));
         stubCardResolution();
-        when(this.transactions.findMaxTranId()).thenReturn(Optional.of(HIGHEST_STORED_ID));
+        when(this.transactions.allocateTransactionId()).thenReturn(ALLOCATED_NUMBER);
 
         assertThatThrownBy(
                 () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
                 .as("the narrower picture of CVTRA05Y.cpy line 10 bounds the assignment")
                 .isInstanceOf(ArithmeticException.class);
 
-        verify(this.transactions, never()).save(any(Transaction.class));
-        verify(this.accounts, never()).applyPayment(anyString(), any(Money.class));
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
+        verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any(Money.class));
     }
 
     /**
-     * The account read-for-update lock is load-bearing here, so its protection is carried across.
+     * The account read-for-update lock is load-bearing here, so it is reproduced rather than replaced.
      *
      * <p>This registers the OPPOSITE ruling to the sibling detail-screen case about the same CICS
      * option. The account read supplies {@code UPDATE} at line 351 of {@code app/cbl/COBIL00C.cbl},
@@ -941,38 +1097,78 @@ class BillPaymentServiceTest {
      * decided by whether a write follows it, and the sibling case that pins the detail screen asserts
      * the converse of this one.</p>
      *
-     * <p>Assumptions: what carries the protection here is the SHAPE of the change operation rather than
-     * a lock this module can take, because the row belongs to the account context and this service holds
-     * no privilege on its schema. The operation is handed the amount to reduce BY and returns nothing,
-     * so the owner performs the arithmetic against the value as it then stands. An operation that
-     * accepted a computed balance instead would reintroduce exactly the window the reference's lock
-     * closes: a balance that moved between the read and the write would be overwritten rather than
-     * adjusted. The parameter shape is therefore asserted, and it is asserted by name and type so that
-     * widening it later fails this case.</p>
+     * <p>⚠️ Refactoring Rationale: the lock is now REPRODUCED rather than substituted for, and an earlier
+     * form of this case asserted the substitute. That form reasoned that the row belongs to the account
+     * context and this service holds no privilege on its schema, so the protection had to come from the
+     * SHAPE of a remote change operation -- handed the amount to reduce by, so that the owner performed
+     * the arithmetic against the then-current value. The shape argument was sound as far as it went and it
+     * did not go far enough: it protected the ARITHMETIC and not the DECISION. The inclusive test at line
+     * 198 is taken on the value this side read, so a balance that moved between the read and the change
+     * could be paid on a stale verdict, and no parameter shape can close that. Section 4b of
+     * {@code data-migration/sql/V0__schemas_and_roles.sql} now grants the privilege the earlier note took
+     * as fixed, so the read is issued with {@code SELECT ... FOR UPDATE} and the reduction consumes that
+     * lock inside the same transaction -- lock acquired, lock used, exactly as lines 351 and 379 have
+     * it.</p>
+     *
+     * <p>Assumptions: the reduction's parameter shape is asserted anyway, because it still carries the
+     * arithmetic. It is handed the amount to subtract rather than a computed balance, so the statement
+     * expresses line 234's {@code COMPUTE ACCT-CURR-BAL = ACCT-CURR-BAL - TRAN-AMT} as a relative change,
+     * which transformation rule T4 requires. It answers with an affected-row COUNT rather than with
+     * nothing, because a statement that changed no row has not applied the payment and the class under
+     * test must be able to tell.</p>
      */
     @Test
-    @DisplayName("the load-bearing update lock: the change carries an amount, not a computed balance")
-    void theLoadBearingUpdateLockIsCarriedAcrossAsAnAmountChange() {
-        Method change = null;
-        for (Method declared : AccountContextClient.class.getMethods()) {
-            if ("applyPayment".equals(declared.getName())) {
-                change = declared;
-            }
-        }
+    @DisplayName("the load-bearing update lock is reproduced: locking read, then relative reduction")
+    void theLoadBearingUpdateLockIsReproducedAsALockingReadAndRelativeReduction() {
+        Method locking = declaredOn(AccountBalanceRepository.class, "lockCurrentBalance");
+        Method reduction = declaredOn(AccountBalanceRepository.class, "reduceCurrentBalance");
 
-        assertThat(change)
-                .as("the port must declare the balance change the rewrite at line 379 stands for")
-                .isNotNull();
-        assertThat(change.getParameterTypes())
+        assertThat(locking.getReturnType())
+                .as("the locking read reports absence, so it answers with an optional")
+                .isEqualTo(Optional.class);
+        assertThat(reduction.getParameterTypes())
                 .as("an amount to subtract, never a balance to assign")
-                .containsExactly(String.class, Money.class);
-        assertThat(change.getReturnType())
-                .as("the change answers with nothing, so no caller can mistake it for a lookup")
-                .isEqualTo(void.class);
+                .containsExactly(long.class, Money.class);
+        assertThat(reduction.getReturnType())
+                .as("an affected-row count, so a change that touched nothing is detectable")
+                .isEqualTo(int.class);
+
+        // WHY : Assumptions: the two balance-carrying members are asserted ABSENT from the REST seam,
+        //       which is the regression this case is shaped to catch. Re-adding either would compile, pass
+        //       every behavioural case that stubbed it, and silently split the commit back into two.
+        assertThat(AccountContextClient.class.getMethods())
+                .extracting(Method::getName)
+                .as("the seam carries no balance read and no remote payment")
+                .doesNotContain("findAccountBalance", "applyPayment");
 
         stubConfirmedPaymentPath(PAYABLE_BALANCE);
         this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
-        verify(this.accounts).applyPayment(ACCOUNT_ID, PAYABLE_BALANCE);
+
+        verify(this.accountBalances).lockCurrentBalance(ACCOUNT_KEY);
+        verify(this.accountBalances, never()).findCurrentBalance(anyLong());
+        verify(this.accountBalances).reduceCurrentBalance(ACCOUNT_KEY, PAYABLE_BALANCE);
+    }
+
+    /**
+     * Resolves one public member of a type by name, failing the case if it is absent.
+     *
+     * <p>Assumptions: a helper is used rather than a stream inline because the absence of the member is
+     * itself a meaningful failure -- the whole point of the cases that call it -- and a null returned
+     * quietly would surface later as a dereference with no sentence attached.</p>
+     *
+     * @param owner the type to search, of type {@link Class}; must not be {@code null}
+     * @param name the member name to resolve, of type {@link String}; must not be {@code null}
+     * @return the single {@link Method} of that name; never {@code null}
+     */
+    private static Method declaredOn(Class<?> owner, String name) {
+        Method found = null;
+        for (Method declared : owner.getMethods()) {
+            if (name.equals(declared.getName())) {
+                found = declared;
+            }
+        }
+        assertThat(found).as("%s must declare %s", owner.getSimpleName(), name).isNotNull();
+        return found;
     }
 
     /**
@@ -981,9 +1177,7 @@ class BillPaymentServiceTest {
      * <p>Assumptions: the baseline relies on the implicit CICS task-end syncpoint -- no explicit
      * {@code EXEC CICS SYNCPOINT} verb appears in any of the four programs this context migrates -- and
      * the Java expresses the same unit of work as an explicit {@code @Transactional} boundary. This case
-     * asserts that there is exactly ONE such boundary and that it is the public entry point, which is
-     * what makes the write at line 233 and the balance change at line 235 of
-     * {@code app/cbl/COBIL00C.cbl} indivisible in the way the ending task made them indivisible.</p>
+     * asserts that there is exactly ONE such boundary and that it is the public entry point.</p>
      *
      * <p>Assumptions: a boundary declared on a narrower inner member would be silently ineffective, and
      * that is the failure this case is shaped to catch. The boundary is applied by a proxy, so a call
@@ -992,6 +1186,18 @@ class BillPaymentServiceTest {
      * because it is invisible in review and only shows up as a half-applied payment. Counting the
      * boundaries and naming the one that carries it is therefore the assertion, not merely checking that
      * one exists somewhere.</p>
+     *
+     * <p>Trade-offs: what this case establishes is the DECLARATION and nothing more, and saying so is the
+     * point. Counting an annotation proves that one boundary is declared on the entry point; it cannot
+     * prove that both effects are enrolled in it, because that depends on which connection each effect is
+     * issued on, and a mock records a call without issuing anything at all. An earlier revision of this
+     * class claimed the stronger property from this assertion while the balance change was a remote HTTP
+     * call that no local boundary could ever have enrolled -- so the claim was false and the case that
+     * carried it read as though it had been checked. The enrolment is asserted where it can be:
+     * {@code BillPaymentAtomicityIT} drives the real service against a real engine and reads both tables
+     * back afterwards, once with the balance change refused by the engine after the payment row has been
+     * flushed, and once with an enclosing transaction failing after a payment that had succeeded -- which
+     * are the two directions half-applied state could take.</p>
      *
      * <p>Assumptions: the annotation is matched by simple name rather than by type, so this case holds
      * whichever transaction annotation the class carries and does not require that annotation on the
@@ -1031,18 +1237,22 @@ class BillPaymentServiceTest {
     }
 
     /**
-     * A refused balance change propagates, so the row written before it cannot stand alone.
+     * A failed balance change propagates, and the row had already been written when it did.
      *
      * <p>This pins the residual arm of {@code UPDATE-ACCTDAT-FILE}, lines 396 to 399 of
      * {@code app/cbl/COBIL00C.cbl}, where a response other than normal or not-found raises the error
      * flag and moves {@code 'Unable to Update Account...'}.</p>
      *
-     * <p>Assumptions: propagating rather than returning a status is what makes the ordering protective
-     * instead of merely faithful. The change is issued last, inside the one boundary, so a refusal here
-     * discards the ledger row written at line 233 and the state the reference cannot produce -- a
-     * recorded payment beside an unchanged balance -- is unreachable. This case therefore asserts BOTH
-     * that the failure escapes and that the write had already happened, since a failure raised before
-     * the write would satisfy the first claim while proving nothing about the second.</p>
+     * <p>Assumptions: propagating rather than returning a status is what discards the row. The change is
+     * issued last, inside the one boundary, so a failure here leaves the transaction to roll back the
+     * payment row written before it. This case therefore asserts BOTH that the failure escapes and that
+     * the write had already been issued, since a failure raised before the write would satisfy the first
+     * claim while proving nothing about the second.</p>
+     *
+     * <p>Trade-offs: the ROLLBACK itself is not observable from here and this case does not claim it. Both
+     * collaborators are stand-ins, so nothing was written that could be undone and Mockito's record of the
+     * call order is all that a verification can read. That property is asserted against a real engine in
+     * {@code BillPaymentAtomicityIT}, which is the only place it can be: rollback is a database outcome.</p>
      *
      * <p>Assumptions: the sentence carried is this operation's own and not the read's. Line 399 differs
      * from the read's sentence at line 368, and the two are not merged.</p>
@@ -1050,10 +1260,18 @@ class BillPaymentServiceTest {
     @Test
     @DisplayName("a refused balance change propagates, undoing the row written before it")
     void aRefusedBalanceChangePropagatesAndUndoesTheRow() {
-        stubConfirmedPaymentPath(PAYABLE_BALANCE);
-        org.mockito.Mockito.doThrow(new AccountContextClient.AccountContextUnavailableException(
-                        "the balance change was refused", null))
-                .when(this.accounts).applyPayment(anyString(), any(Money.class));
+        stubLockedBalanceRead(PAYABLE_BALANCE);
+        stubCardResolution();
+        stubIdentifierAllocation(ALLOCATED_NUMBER, DERIVED_ID);
+        stubWriteEchoesTheRow();
+
+        // WHY : Assumptions: the refusal is expressed as a data-access failure rather than as a zero
+        //       count, because the two arms of the reference's residual branch reach line 399 by
+        //       different routes and both must raise. The count arm is asserted by the sibling
+        //       evaluation-order case, so the two together cover both.
+        when(this.accountBalances.reduceCurrentBalance(ACCOUNT_KEY, PAYABLE_BALANCE))
+                .thenThrow(new org.springframework.dao.DataAccessResourceFailureException(
+                        "the balance change was refused"));
 
         assertThatThrownBy(
                 () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
@@ -1062,33 +1280,27 @@ class BillPaymentServiceTest {
 
         // WHY : Assumptions: confirming the write ALREADY happened is what gives the escape above its
         //       meaning. A failure raised before the write would satisfy the assertion above while
-        //       proving nothing about rollback, because there would have been nothing to roll back. The
-        //       pair together says the boundary had a written row in hand when the refusal reached it.
-        verify(this.transactions)
-                .save(any(Transaction.class));
+        //       proving nothing about ordering, because there would have been nothing to discard.
+        verify(this.transactions).saveAndFlush(any(Transaction.class));
     }
 
     /**
-     * The two crossings of the account boundary stay distinguishable, and no breaker guards either.
+     * A balance change that matched no row is answered as an absent account, not as a failure.
      *
-     * <p>Assumptions: this screen reaches account-owned records TWICE by operations of two different
-     * kinds, and the distinction is recorded here so a later reader does not unify them. The
-     * cross-reference read standing for line 408 of {@code app/cbl/COBIL00C.cbl} and the account master
-     * read standing for line 343 are LOOKUPS: each answers with a value or with a documented absence,
-     * which is why both report through an optional and why this class then decides what to do. The
-     * balance change standing for the rewrite at line 379 is a WRITE: it answers with nothing, is issued
-     * last and its refusal propagates. Asserting the return shapes is how that difference is held --
-     * a lookup that answered with nothing could not report absence, and a write that answered with a
-     * value would invite a caller to branch on it instead of relying on the boundary.</p>
+     * <p>Assumptions: the REST seam now serves the cross-reference and NOTHING else, so the two members
+     * it declares are both lookups keyed differently over one record, and both answer through an optional
+     * because either may report a documented absence. That is asserted as a CLOSED set rather than as two
+     * present members, which is what makes a balance-carrying member re-added to the seam fail here.</p>
      *
-     * <p>Alternatives Considered: a circuit breaker in front of either crossing. Rejected because the
+     * <p>Alternatives Considered: a circuit breaker in front of the seam. Rejected because the
      * hop is in-network to a service behind an internal load balancer with both timeouts bounded by
      * configuration, so a stalled dependency already surfaces as a refused request within seconds. A
      * breaker would add a state machine that can refuse a call the dependency would have served, which
      * is a new failure mode in exchange for none removed. A retry is rejected on a separate ground: a
-     * retry of a payment is a retry of money movement, and the port offers no idempotency key that would
+     * retry of a payment is a retry of money movement, and the seam offers no idempotency key that would
      * make one safe. Neither is declared, and the absence is asserted by name so that introducing one
-     * silently is not possible.</p>
+     * silently is not possible. The balance statements are covered by the same sweep, and a retry there
+     * would be worse still -- a re-issued relative reduction subtracts twice.</p>
      *
      * <p>Assumptions: the resilience annotations are matched by simple name rather than by type,
      * precisely because no resilience library is on this module's classpath -- which is the condition
@@ -1096,20 +1308,29 @@ class BillPaymentServiceTest {
      * confirm.</p>
      */
     @Test
-    @DisplayName("two crossings, two operation shapes, and no breaker or retry on either")
-    void theTwoAccountCrossingsStayDistinguishableAndUnguarded() {
-        // WHY : Trade-offs: the size assertion accompanies the filter because a filter that matched
-        //       nothing would otherwise satisfy the per-element check vacuously. Renaming either lookup
-        //       on the port would empty the selection, and without the count this case would then go
-        //       green having examined no member at all -- the specific way a filtered assertion rots.
+    @DisplayName("a seam of two lookups only, and no breaker or retry anywhere on the payment path")
+    void theAccountCrossingsStayDistinguishableAndUnguarded() {
+        // WHY : Trade-offs: the seam's members are asserted as an exact set rather than filtered for the
+        //       two expected names. A filter would go green having examined nothing if both were renamed,
+        //       and -- the reason it matters here -- it would also pass with a third, balance-carrying
+        //       member sitting beside them, which is precisely the regression this case exists to catch.
         assertThat(AccountContextClient.class.getMethods())
-                .filteredOn(declared -> "findAccountBalance".equals(declared.getName())
-                        || "findCardXrefByAccountId".equals(declared.getName()))
-                .as("both lookups report absence, so both answer with an optional")
+                .as("the seam declares exactly the two cross-reference lookups")
                 .hasSize(2)
-                .allSatisfy(lookup -> assertThat(lookup.getReturnType()).isEqualTo(Optional.class));
+                .allSatisfy(lookup -> {
+                    assertThat(lookup.getName()).startsWith("findCardXrefBy");
+                    assertThat(lookup.getReturnType()).isEqualTo(Optional.class);
+                });
+
+        assertThat(AccountBalanceRepository.class.getMethods())
+                .filteredOn(declared -> declared.getName().endsWith("CurrentBalance"))
+                .as("two reads report absence through an optional, and the change reports a row count")
+                .hasSize(3);
 
         for (Method declared : AccountContextClient.class.getMethods()) {
+            assertUnguarded(declared);
+        }
+        for (Method declared : AccountBalanceRepository.class.getDeclaredMethods()) {
             assertUnguarded(declared);
         }
         for (Method declared : BillPaymentService.class.getDeclaredMethods()) {

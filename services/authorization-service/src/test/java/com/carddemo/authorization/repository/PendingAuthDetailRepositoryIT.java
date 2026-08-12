@@ -262,6 +262,21 @@ class PendingAuthDetailRepositoryIT {
     /** Account used by the pivot-pair and expiry assertions. */
     private static final long PIVOT_ACCOUNT = 10_000_000_210L;
 
+    /**
+     * A limit large enough to return every child each of these cases stores.
+     *
+     * <p>Assumptions: the cases that use this one store one, two or three authorizations beneath a
+     * single account and are asserting a COLUMN's stored value or a walk's ORDER, not a page boundary,
+     * so they need the whole set back in one answer. A generous limit says that directly.
+     *
+     * <p>Refactoring Rationale: these four reads called an unpaged overload of the same query, which has
+     * been removed along with the last production caller that took every child of an account in one
+     * unbounded answer. Naming a limit here is what keeps those assertions on the surviving signature
+     * rather than keeping a production method alive for tests -- the direction this repository's own
+     * paging rationale already argues for.
+     */
+    private static final Limit WHOLE_CHILD_SET = Limit.of(100);
+
     // WHY : Assumptions: this identifier is NOT free to choose. It is the account the recorded
     //       parent summary image carries, and the year-boundary children are documented as pairing
     //       with that parent, so the pairing is read out of the image rather than restated as a
@@ -1354,7 +1369,8 @@ class PendingAuthDetailRepositoryIT {
                 "TXN000000000021")));
 
         PendingAuthDetail stored = read(() -> repository
-                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(DECODED_KEY_ACCOUNT)).get(0);
+                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(DECODED_KEY_ACCOUNT,
+                        WHOLE_CHILD_SET)).get(0);
 
         assertThat(stored.getId().getAuthDate()).as("the stored date is the inverted value")
                 .isEqualTo(24_100);
@@ -1396,7 +1412,8 @@ class PendingAuthDetailRepositoryIT {
         saveAll(List.of(entity(fields, PIVOT_ACCOUNT, authDate, authTime, "TXN000000000020")));
 
         PendingAuthDetail stored = read(() -> repository
-                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(PIVOT_ACCOUNT)).get(0);
+                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(PIVOT_ACCOUNT,
+                        WHOLE_CHILD_SET)).get(0);
         assertThat(stored.getId().getAuthTime()).as("the column holds the inverted value")
                 .isEqualTo(1_000);
         assertThat(stored.getId().getAuthDate()).as("and its date").isEqualTo(24_100);
@@ -1811,7 +1828,7 @@ class PendingAuthDetailRepositoryIT {
                         text(yearStart, "PA-TRANSACTION-ID"))));
 
         List<PendingAuthDetail> both = read(() -> repository
-                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(parentAccount));
+                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(parentAccount, WHOLE_CHILD_SET));
         assertThat(both.stream().map(row -> row.getId().getAuthDate()).toList())
                 .as("the newer year first").containsExactly(24_001, 23_365);
     }
@@ -2224,7 +2241,7 @@ class PendingAuthDetailRepositoryIT {
                         text(abovePivot, "PA-TRANSACTION-ID"))));
 
         List<PendingAuthDetail> stored = read(() -> repository
-                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(PIVOT_ACCOUNT));
+                .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(PIVOT_ACCOUNT, WHOLE_CHILD_SET));
         assertThat(stored.stream().map(PendingAuthDetail::getCardExpiryDate).toList())
                 .as("newest first, each expiry four bare characters")
                 .containsExactly("1299", "0826");

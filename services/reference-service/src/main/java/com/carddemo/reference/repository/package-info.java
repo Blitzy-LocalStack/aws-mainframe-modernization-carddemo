@@ -268,8 +268,9 @@
  * <h2>The envelope these queries feed</h2>
  *
  * <p>Assumptions: the published shape is {@code com.carddemo.common.web.PageResponse}, a record with
- * exactly four components in this order: the rows, the leading boundary token, the trailing boundary
- * token, and the further-page flag. It is owned by the shared kernel and is not to be changed from
+ * exactly five components in this order: the rows, the leading boundary token, the trailing boundary
+ * token, the further-page flag and the earlier-page flag. It is owned by the shared kernel and is not
+ * to be changed from
  * here. Four properties of it govern how these queries are written, and each is a property a caller
  * would otherwise guess at:</p>
  *
@@ -281,20 +282,33 @@
  *       and compare <b>key values</b>, and sealing belongs to the layer that assembles the
  *       envelope.</li>
  *   <li>The trailing token names the last row returned, as ruled above.</li>
- *   <li>There is <b>no backward-availability component</b>, and none is to be added.</li>
+ *   <li>There <b>is</b> a backward-availability component, and it is settled by a read rather than
+ *       derived from the leading token.</li>
  *   <li>There is <b>no page-size component and no total of any kind</b>.</li>
  * </ul>
  *
- * <p>Assumptions: the absent backward-availability component is grounded in the baseline rather than
- * chosen, and this is the evidence for it: <b>the baseline never computes backward availability at
+ * <p>Refactoring Rationale: this charter previously ruled that the envelope had <b>no</b>
+ * backward-availability component and that a caller should derive one from the presence of the leading
+ * token. The envelope now carries the component, and the derivation it replaced was unsound in one
+ * direction: every page that returns rows names its own leading row, so a caller following the
+ * derivation was told an earlier page existed on the <b>opening</b> page as well, and stepping back
+ * from there yields nothing. The baseline evidence below is retained unchanged, because none of it was
+ * wrong -- it establishes that there was nothing to port, which is why the component is settled the
+ * same way forward availability is rather than transcribed.</p>
+ *
+ * <p>Assumptions: <b>the baseline never computes backward availability at
  * all.</b> Paragraph {@code 8100-READ-BACKWARDS} asserts a further page unconditionally at physical
  * line 1738, before it has read a single row, with no surplus fetch anywhere in the paragraph -- which
  * is sound, because arriving at a page by stepping back from one further on already proves that a page
  * further on exists. Whether a step further back is possible comes from the screen counter instead:
  * {@code WS-CA-SCREEN-NUM} is decremented at physical line 784 immediately before the paragraph is
  * invoked at lines 785 to 786, and a first-page condition over that counter is what suppresses the
- * step. There was consequently nothing to port, so nothing was invented; a caller derives backward
- * availability from the presence of the leading token together with its own position.</p>
+ * step. A screen counter is not available to a stateless handler, so the migrated form answers the
+ * same question the way it answers the forward one: a surplus row read in the direction of travel on a
+ * backward walk, and on a forward walk whether the caller arrived by cursor at all -- an opening
+ * forward request reports no earlier page. Both answers are settled by the layer that assembles the
+ * envelope, which is the layer that issued the walk; these queries supply only the surplus row that
+ * makes the answer available.</p>
  *
  * <h2>Bounding a walk: what may be used, and what may not</h2>
  *

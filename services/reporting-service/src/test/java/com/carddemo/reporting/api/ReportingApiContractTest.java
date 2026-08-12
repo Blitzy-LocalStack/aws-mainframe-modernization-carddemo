@@ -2,11 +2,17 @@ package com.carddemo.reporting.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.carddemo.common.web.CursorToken;
+import com.carddemo.reporting.api.ReportController;
 import com.carddemo.reporting.config.OpenApiConfig;
+import com.carddemo.reporting.dto.StatementTransactionCollection;
+import com.carddemo.reporting.service.ReportExecutionService;
+import com.carddemo.reporting.service.StatementService;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.security.SecurityScheme;
 import java.io.InputStream;
 import java.lang.reflect.Method;
+import java.lang.reflect.RecordComponent;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -354,6 +360,139 @@ class ReportingApiContractTest {
             }
         }
         return identifiers;
+    }
+
+    /**
+     * Asserts the two paging facets this document publishes are the runtime's own, exactly.
+     *
+     * <p>Refactoring Rationale: the review found BOTH of them wrong, in opposite directions, and both
+     * failures were invisible to a compiler because one side of each is a value in a document. The
+     * direction enumeration declared {@code previous} while the handler compared against
+     * {@code "prev"}, so a conforming backward request was processed as forward, opened the caller's
+     * leading position under the forward binding, and was answered with an opaque refusal of a cursor
+     * this service had itself just issued -- there was no request a client could send to page backward
+     * at all. And the cursor schema declared {@code maxLength: 512} with no pattern, twice the width
+     * the sealer accepts and admitting any string whatever, so a body this document called valid was
+     * refused by the service. Both are now read from the runtime rather than restated.</p>
+     *
+     * <p>Assumptions: the enumeration is asserted as an EQUALITY against the handler's two constants
+     * rather than as a containment. A containment check would pass for a document that published a
+     * third value the handler refuses, which is the same class of disagreement in the other
+     * direction.</p>
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the direction enumeration and the cursor facets are the runtime's own values")
+    void thePagingFacetsAreTheRuntimeValues() throws Exception {
+        Map<String, Object> schemas = mapping(mapping(contractRoot(), "components"), "schemas");
+
+        Map<String, Object> direction = mapping(schemas, "PageDirection");
+        assertThat(direction.get("enum"))
+                .as("the published direction domain must be the two values the handler compares")
+                .isEqualTo(List.of(ReportController.NEXT_DIRECTION,
+                        ReportController.PREVIOUS_DIRECTION));
+        assertThat(direction.get("default"))
+                .as("an absent direction means forward, and the document must say which value that is")
+                .isEqualTo(ReportController.NEXT_DIRECTION);
+
+        Map<String, Object> cursor = mapping(schemas, "CursorToken");
+        assertThat(cursor.get("maxLength"))
+                .as("a published width above %s admits a token the sealer refuses",
+                        CursorToken.MAX_TOKEN_LENGTH)
+                .isEqualTo(CursorToken.MAX_TOKEN_LENGTH);
+        assertThat(cursor.get("pattern"))
+                .as("the published shape must be the sealer's own, so a contract-valid token is one"
+                        + " the service can open")
+                .isEqualTo("^" + CursorToken.SEALED_SHAPE_PATTERN + "$");
+    }
+
+    // WHY : Assumptions: the sentence is held to the PUBLISHED CATALOGUE rather than merely to itself.
+    //       The contract states that every message this operation may carry is reproduced verbatim from
+    //       the reference and lists them, because the browser client copies those strings into its own
+    //       catalogue -- so a sentence the service raises that is not on the list is a message no client
+    //       has been written to display. An earlier revision raised "exactly one of monthly, yearly or
+    //       custom must be selected but 0 were", which was authored in this repository and appears nowhere
+    //       in the list; nothing detected that, because neither side referred to the other.
+    // WHY : Refactoring Rationale: this case exists because three paragraphs of the contract asserted
+    //       that the response ceiling was declared as maxItems on this array while the document declared
+    //       no maxItems anywhere. Nothing detected it: the ceiling lived in a Java constant, the claim
+    //       lived in prose, and no test read one against the other -- so a generated client bounded
+    //       nothing, and a reader auditing the bound found only the claim that it existed.
+    //       Assumptions: the member list is read from the RECORD by reflection rather than written out
+    //       here. A list written here would be a third statement of the same fact and would agree with
+    //       the document while both disagreed with the record.
+    /**
+     * Asserts the statement-transaction body publishes the record's members and the service's own bound.
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the statement-transaction body publishes the record's members and the service's bound")
+    void theStatementTransactionBodyPublishesItsBound() throws Exception {
+        Map<String, Object> schemas = mapping(mapping(contractRoot(), "components"), "schemas");
+        Map<String, Object> collection = mapping(schemas, "StatementTransactionCollection");
+
+        List<String> components = new ArrayList<>();
+        for (RecordComponent component : StatementTransactionCollection.class.getRecordComponents()) {
+            components.add(component.getName());
+        }
+
+        assertThat(mapping(collection, "properties").keySet())
+                .as("a published member the record omits is a value a client waits for and never"
+                        + " receives, and the reverse is a value it discards")
+                .containsExactlyInAnyOrderElementsOf(components);
+
+        List<String> required = new ArrayList<>();
+        for (Object entry : (List<?>) collection.get("required")) {
+            required.add(String.valueOf(entry));
+        }
+        assertThat(required)
+                .as("a count a caller cannot rely on being present cannot be used to detect truncation")
+                .containsExactlyInAnyOrderElementsOf(components);
+
+        assertThat(collection.get("additionalProperties")).isEqualTo(false);
+        assertThat(mapping(mapping(collection, "properties"), "items").get("maxItems"))
+                .as("the published ceiling must be the one the service applies, otherwise the document"
+                        + " promises a bound nothing enforces or hides one that is enforced")
+                .isEqualTo(StatementService.MAX_RESPONSE_TRANSACTIONS);
+    }
+
+    /**
+     * Asserts that the zero-mark refusal sentence is one the contract publishes for this operation.
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the zero-mark refusal sentence is in the contract's published message catalogue")
+    void theZeroMarkRefusalIsPublished() throws Exception {
+        assertThat(contractText())
+                .as("a refused submission must carry a message the published catalogue lists")
+                .contains("'" + ReportExecutionService.MESSAGE_NO_REPORT_TYPE_SELECTED + "'");
+    }
+
+    // WHY : Assumptions: the document is asserted NOT to promise exclusivity, by searching for the phrase
+    //       that promised it. The reference resolves the first marked type and refuses nothing, so a
+    //       document telling a client that exactly one mark is permitted describes a refusal the service
+    //       does not make -- and a client written against it would refuse the request locally, reproducing
+    //       the defect on the other side of the wire where no fix to this service could reach it.
+    /**
+     * Asserts that the submission contract states precedence rather than exclusivity.
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the submission contract states report-type precedence, not exclusivity")
+    void theSubmissionContractStatesPrecedence() throws Exception {
+        String document = contractText();
+
+        assertThat(document)
+                .as("the reference accepts more than one mark and runs the first")
+                .doesNotContain("Exactly one of the three type selectors")
+                .doesNotContain("Exactly one of monthly, yearly and custom");
+        assertThat(document)
+                .as("the precedence order must be stated where a client can read it")
+                .contains("monthly, yearly, custom");
     }
 
     /**

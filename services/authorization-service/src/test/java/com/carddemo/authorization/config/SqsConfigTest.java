@@ -7,6 +7,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import com.carddemo.common.messaging.RethrowingDigestErrorHandler;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.authorization.config.SqsConfig.FifoQueueNamingContract;
 import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.service.AuthorizationRequestListener;
@@ -20,20 +25,27 @@ import io.awspring.cloud.sqs.listener.FifoSqsComponentFactory;
 import io.awspring.cloud.sqs.listener.ListenerMode;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.listener.SqsContainerOptions;
+import io.awspring.cloud.sqs.listener.ListenerExecutionFailedException;
+import io.awspring.cloud.sqs.listener.SqsHeaders;
 import io.awspring.cloud.sqs.listener.StandardSqsComponentFactory;
 import io.awspring.cloud.sqs.listener.acknowledgement.AcknowledgementOrdering;
 import io.awspring.cloud.sqs.listener.acknowledgement.ImmediateAcknowledgementProcessor;
 import io.awspring.cloud.sqs.listener.acknowledgement.handler.AcknowledgementMode;
+import io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.lang.reflect.Constructor;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.convert.DurationStyle;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.support.MessageBuilder;
 import org.yaml.snakeyaml.Yaml;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -80,6 +92,31 @@ class SqsConfigTest {
 
     /** The packaged configuration document the per-phase shutdown budget is declared in. */
     private static final String BASE_CONFIGURATION = "/application.yml";
+
+    /** The transport identifier the failure-record cases expect to see named. */
+    private static final String TRANSPORT_MESSAGE_ID = "d3f4a1b2-0000-4000-8000-000000000001";
+
+    /**
+     * A failure message composed of the kind of material a record must withhold.
+     *
+     * <p>Assumptions: this stands in for both shapes the real thing takes -- a transport fault composes
+     * an endpoint and credential material into its message, and a validation fault composes field
+     * values -- so a case asserting this string is absent is asserting that neither shape leaks.</p>
+     */
+    private static final String FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED =
+            "connect failed to https://sqs.example.invalid using key AKIAEXAMPLEKEY";
+
+    /**
+     * The card number the request queue groups by, which is therefore the group identifier.
+     *
+     * <p>Assumptions: this value being a primary account number is the whole reason a record must not
+     * name the group identifier, so the cases set it as the group header and then assert its absence.</p>
+     */
+    private static final String GROUPING_CARD_NUMBER = "4111111111111111";
+
+    /** A payload standing in for the request record, which carries protected values by contract. */
+    private static final String PAYLOAD_THAT_MUST_NOT_BE_RECORDED =
+            GROUPING_CARD_NUMBER + ",TXN000000000001,000000012345";
 
     /**
      * Builds the container options that result from applying the customizer to a real factory.
@@ -614,6 +651,274 @@ class SqsConfigTest {
     }
 
     /**
+     * Confirms a recorded listener failure is still re-raised, and re-raised as the same failure.
+     *
+     * <p>Assumptions: identity is asserted rather than type, because the container's error stage turns a
+     * handler's normal completion into a SUCCESS carrying the message and would then acknowledge and
+     * delete it. A handler that logged and returned would pass a type assertion on nothing at all, so
+     * the case asserts that the very instance handed in comes back out.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a recorded listener failure is re-raised as the same instance, never swallowed")
+    void aRecordedListenerFailureIsReRaised() {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        RuntimeException fault = new IllegalArgumentException(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+
+        assertThatThrownBy(() -> handler.handle(deliveryWith(TRANSPORT_MESSAGE_ID, "2"), fault))
+                .as("returning normally here would acknowledge a message whose transaction rolled back")
+                .isSameAs(fault);
+    }
+
+    /**
+     * Confirms the failure record names the transport and withholds the payload, the group and the text.
+     *
+     * <p>Assumptions: the group identifier is asserted absent because it IS the card number -- the
+     * request queue is grouped by card to preserve per-card ordering -- so a record naming it would
+     * write cardholder data into the log stream. The failure's own message is asserted absent for the
+     * same class of reason: a transport fault composes endpoint and credential material into it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a failure record names the transport identity and never the group, payload or text")
+    void aFailureRecordWithholdsEveryProtectedValue() {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        RuntimeException fault = new IllegalStateException(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+
+        List<String> recorded = recordsFrom(Level.ERROR, () ->
+                assertThatThrownBy(() -> handler.handle(deliveryWith(TRANSPORT_MESSAGE_ID, "4"), fault))
+                        .isSameAs(fault));
+
+        assertThat(recorded).hasSize(1);
+        assertThat(recorded.get(0))
+                .contains(RethrowingDigestErrorHandler.EVENT)
+                .contains("source=" + SqsConfig.LISTENER_SOURCE)
+                .contains("messageId=" + TRANSPORT_MESSAGE_ID)
+                .contains("receiveCount=4")
+                .contains(IllegalStateException.class.getName())
+                .doesNotContain(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED)
+                .doesNotContain(GROUPING_CARD_NUMBER)
+                .doesNotContain(PAYLOAD_THAT_MUST_NOT_BE_RECORDED);
+    }
+
+    /**
+     * Confirms a deliberate window deferral is not recorded as a fault, yet is still re-raised.
+     *
+     * <p>Assumptions: the deferral is constructed reflectively. Its constructor is deliberately
+     * package-private so that nothing outside the listener can fabricate one, and widening it to let a
+     * test call it would remove that protection for the benefit of this case alone.</p>
+     *
+     * <p>Assumptions: the capture runs at DEBUG so both a deferral record and a fault record would be
+     * visible, which is what lets the case assert that the fault record is absent rather than merely
+     * filtered out by the level.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws ReflectiveOperationException if the deferral cannot be constructed, which fails the case
+     *     rather than skipping it, because a case that could not raise the condition proved nothing
+     */
+    @Test
+    @DisplayName("a window deferral is recorded as a deferral and never as a fault")
+    void aWindowDeferralIsNotRecordedAsAFault() throws ReflectiveOperationException {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        RuntimeException deferral = newWindowDeferral();
+
+        List<String> recorded = recordsFrom(Level.DEBUG, () ->
+                assertThatThrownBy(() -> handler.handle(deliveryWith(TRANSPORT_MESSAGE_ID, "1"),
+                        deferral)).isSameAs(deferral));
+
+        assertThat(recorded).hasSize(1);
+        assertThat(recorded.get(0))
+                .as("an expected control outcome recorded as a fault reports a healthy service as failing")
+                .contains(SqsConfig.EVENT_WINDOW_DEFERRED)
+                .contains("messageId=" + TRANSPORT_MESSAGE_ID)
+                .doesNotContain(RethrowingDigestErrorHandler.EVENT);
+    }
+
+    /**
+     * Confirms a checked failure is wrapped rather than swallowed, and an error is re-raised untouched.
+     *
+     * <p>Assumptions: both arms are asserted in one case because they are one decision -- the handler
+     * signature declares no checked exception, so the only two ways out are to wrap or to swallow, and
+     * swallowing is what acknowledges a rolled-back message. The error arm proves the wrap is reached by
+     * elimination and not by catching everything.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a checked failure is wrapped and an error is re-raised, so neither is swallowed")
+    void neitherACheckedFailureNorAnErrorIsSwallowed() {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        Throwable checked = new IOException(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+        Error error = new StackOverflowError();
+
+        // WHY : ⚠️ Assumptions: the wrapper is the STARTER's own ListenerExecutionFailedException, not a
+        //       plain IllegalStateException. The shared handler wraps a checked failure in the type the
+        //       container's own pipeline raises, which keeps the failure attributable to the message it
+        //       arrived with -- the wrapper carries that message -- and it carries a fixed literal of its
+        //       own so nothing from the failure's text reaches a log through it.
+        assertThatThrownBy(() -> handler.handle(deliveryWith(TRANSPORT_MESSAGE_ID, "1"), checked))
+                .isInstanceOf(ListenerExecutionFailedException.class)
+                .hasMessage(RethrowingDigestErrorHandler.CHECKED_FAILURE_WRAPPER_MESSAGE)
+                .hasCauseReference(checked);
+        assertThatThrownBy(() -> handler.handle(deliveryWith(TRANSPORT_MESSAGE_ID, "1"), error))
+                .isSameAs(error);
+    }
+
+    /**
+     * Confirms the collection form records every delivery and re-raises, rather than refusing the call.
+     *
+     * <p>Assumptions: this form is unreachable while the listener takes a single message, and the case
+     * exists precisely because that could change. The interface declares both methods {@code default}
+     * with bodies that throw {@link UnsupportedOperationException}, so an implementation that inherited
+     * this one would substitute a complaint about itself for every real failure the moment the listener
+     * switched to batch delivery.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the collection form records every delivery and re-raises, and never refuses the call")
+    void theCollectionFormRecordsEveryDeliveryAndReRaises() {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        RuntimeException fault = new IllegalStateException(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+        List<Message<Object>> batch = List.of(deliveryWith("first-delivery", "2"),
+                deliveryWith("second-delivery", "3"));
+
+        List<String> recorded = recordsFrom(Level.ERROR, () ->
+                assertThatThrownBy(() -> handler.handle(batch, fault))
+                        .as("a refusal here would replace every real failure with a complaint about the "
+                                + "handler")
+                        .isSameAs(fault));
+
+        // WHY : ⚠️ Refactoring Rationale: ONE record is expected for the batch, naming EVERY delivery in
+        //       its identifier and redelivery-count fields, where this case previously expected one record
+        //       per delivery. One failure with one throwable is one event -- that is the shared handler's
+        //       rule and it is what keeps a failure count queryable without knowing which overload the
+        //       container called -- and the property this case exists for is unchanged: every message in
+        //       the failed batch is named, so none of them is unfindable when it reaches the dead-letter
+        //       queue.
+        assertThat(recorded).hasSize(1);
+        assertThat(recorded.get(0))
+                .contains(RethrowingDigestErrorHandler.EVENT)
+                .contains("source=" + SqsConfig.LISTENER_SOURCE)
+                .contains("messageId=first-delivery,second-delivery")
+                .contains("receiveCount=2,3")
+                .contains("messageCount=2")
+                .doesNotContain(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+    }
+
+    /**
+     * Confirms an absent transport header degrades the record and never the handling.
+     *
+     * <p>Assumptions: the receive count is a system attribute the container requests rather than one
+     * this context sets, so its absence has to be survivable. A handler that dereferenced it would
+     * replace the failure it was called about with a null reference, and the container would then be
+     * told about the wrong fault entirely.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an absent transport header degrades the record and leaves the failure re-raised")
+    void anAbsentTransportHeaderDegradesOnlyTheRecord() {
+        ErrorHandler<Object> handler = new SqsConfig().authorizationListenerErrorHandler();
+        RuntimeException fault = new IllegalStateException(FAILURE_TEXT_THAT_MUST_NOT_BE_RECORDED);
+        Message<Object> bare = MessageBuilder.withPayload((Object) "unused").build();
+
+        List<String> recorded = recordsFrom(Level.ERROR,
+                () -> assertThatThrownBy(() -> handler.handle(bare, fault)).isSameAs(fault));
+
+        assertThat(recorded).hasSize(1);
+        // WHY : ⚠️ Assumptions: what degrades is the REDELIVERY COUNT alone. The identifier field still
+        //       carries a value, because a message assembled without transport headers still carries the
+        //       framework's own identifier and the shared handler falls back to it -- which is the right
+        //       behaviour for a record whose purpose is to be findable. The count has no such fallback and
+        //       renders as the stable token instead of as the string "null".
+        assertThat(recorded.get(0))
+                .contains("receiveCount=(unknown)")
+                .contains("messageId=" + bare.getHeaders().getId())
+                .doesNotContain("messageId=null");
+    }
+
+    /**
+     * Builds a delivery carrying the transport headers a failure record reads, and nothing a record may
+     * disclose.
+     *
+     * <p>Assumptions: the group header is populated even though no assertion wants it recorded, because
+     * a case that omitted it could not prove the handler withholds it. The payload is populated for the
+     * same reason.</p>
+     *
+     * @param transportId the transport's identifier for the delivery; must not be {@code null}
+     * @param receiveCount how many times the transport reports having delivered it; must not be
+     *     {@code null}
+     * @return a delivery with the message identifier, receive count and group identifier set, never
+     *     {@code null}
+     */
+    private static Message<Object> deliveryWith(String transportId, String receiveCount) {
+        return MessageBuilder.withPayload((Object) PAYLOAD_THAT_MUST_NOT_BE_RECORDED)
+                .setHeader(SqsHeaders.MessageSystemAttributes.MESSAGE_ID, transportId)
+                .setHeader(SqsHeaders.MessageSystemAttributes.SQS_APPROXIMATE_RECEIVE_COUNT,
+                        receiveCount)
+                .setHeader(SqsHeaders.MessageSystemAttributes.SQS_MESSAGE_GROUP_ID_HEADER,
+                        GROUPING_CARD_NUMBER)
+                .build();
+    }
+
+    /**
+     * Constructs the listener's window deferral without widening its constructor.
+     *
+     * @return a deferral naming an arbitrary window generation, never {@code null}
+     * @throws ReflectiveOperationException if the deferral's constructor cannot be reached, which fails
+     *     the calling case rather than letting it pass having raised nothing
+     */
+    private static RuntimeException newWindowDeferral() throws ReflectiveOperationException {
+        Constructor<AuthorizationRequestListener.WindowClosedException> constructor =
+                AuthorizationRequestListener.WindowClosedException.class
+                        .getDeclaredConstructor(long.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(7L);
+    }
+
+    /**
+     * Captures what the class under test records at or above a level while an action runs.
+     *
+     * <p>Assumptions: the level is raised for the duration and restored afterwards, and the previous
+     * level is restored even when it was {@code null} -- which is not "no level" but "inherit from the
+     * parent", so substituting a concrete default would leave the logger pinned where it had been
+     * inheriting.</p>
+     *
+     * @param level the level to capture at; must not be {@code null}
+     * @param action the action whose records are wanted, run inside the capture; must not be
+     *     {@code null}
+     * @return the formatted records in the order they were emitted, never {@code null}
+     */
+    private static List<String> recordsFrom(Level level, Runnable action) {
+        // WHY : ⚠️ Refactoring Rationale: the appender attaches to the SHARED handler's logger, where it
+        //       previously attached to this configuration class's. The record is written by
+        //       com.carddemo.common.messaging.RethrowingDigestErrorHandler, which three services now share
+        //       -- the redaction, the digest and the rethrow rules exist once rather than once per service
+        //       -- and its logger is named for itself so one name covers every listener in the fleet. The
+        //       listener is identified by the source field on the line instead, which every case below
+        //       asserts. Capturing this class's logger silently captured NOTHING once the handler moved.
+        Logger configLogger =
+                (Logger) LoggerFactory.getLogger(RethrowingDigestErrorHandler.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        configLogger.addAppender(captured);
+        Level previousLevel = configLogger.getLevel();
+        configLogger.setLevel(level);
+        try {
+            action.run();
+            return captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+        } finally {
+            configLogger.detachAppender(captured);
+            captured.stop();
+            configLogger.setLevel(previousLevel);
+        }
+    }
+
+    /**
      * Builds a stub client-builder configurer that supplies just enough for a builder to build.
      *
      * <p>Assumptions: the region and credentials are literals with no reachable endpoint behind them.
@@ -675,4 +980,53 @@ class SqsConfigTest {
     private static Map<String, Object> asMap(Object node) {
         return (Map<String, Object>) node;
     }
+
+    /**
+     * The context publishes the shared listener error handler, so a failed delivery is still recorded.
+     *
+     * <p>Purpose: the queue starter's own failure record is switched off by NAME in
+     * {@code carddemo-common-defaults.yml}, because it renders the throwable as a trailing argument and the
+     * logging facade then prints every exception message in the cause chain -- text written by a driver, a
+     * codec or a validation library, which on this queue can quote a request value verbatim. The
+     * suppression is unconditional, so deleting this bean would not leave a quieter log: it would leave the
+     * framework's record with nothing in front of it and no replacement behind it.</p>
+     *
+     * <p>Refactoring Rationale: the handler's own behaviour -- the message-free rendering and the rethrow
+     * that keeps the queue's redrive contract intact -- is asserted once, in the shared kernel's
+     * {@code RethrowingDigestErrorHandlerTest}. What this case asserts is the part that can only be wrong
+     * HERE: that this context publishes it at all, and publishes it under the type the starter's factory
+     * method looks the context up by. A handler declared as its concrete type would compile and would never
+     * be installed.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws ReflectiveOperationException if the bean method cannot be found under the name the
+     *     starter's context lookup depends on, which is the deletion this case exists to report
+     */
+    @Test
+    @DisplayName("the context publishes the shared listener error handler under the starter's own type")
+    void theContextPublishesTheSharedListenerErrorHandler() throws ReflectiveOperationException {
+        java.lang.reflect.Method bean = SqsConfig.class.getDeclaredMethod("authorizationListenerErrorHandler");
+
+        assertThat(bean.getReturnType())
+                .as("the starter looks the context up by %s; a bean declared as its concrete type is"
+                        + " created and then never installed",
+                        io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler.class.getName())
+                .isEqualTo(io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler.class);
+        assertThat(bean.isAnnotationPresent(org.springframework.context.annotation.Bean.class))
+                .as("without @Bean the method is ordinary code and the handler is never registered")
+                .isTrue();
+        assertThat(bean.getAnnotations())
+                .as("a condition would let the one record of a failed delivery be absent whenever"
+                        + " something else happened to publish an error handler first")
+                .noneMatch(annotation -> annotation.annotationType().getName()
+                        .startsWith("org.springframework.boot.autoconfigure.condition."));
+        assertThat(new SqsConfig().authorizationListenerErrorHandler())
+                .isInstanceOf(com.carddemo.common.messaging.RethrowingDigestErrorHandler.class);
+        assertThat(SqsConfig.LISTENER_SOURCE)
+                .as("the source is the only field distinguishing this listener's failures from another"
+                        + " service's in one log stream")
+                .isEqualTo("auth.request");
+    }
+
 }

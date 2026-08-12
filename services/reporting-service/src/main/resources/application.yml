@@ -1287,6 +1287,14 @@ carddemo:
       #       topology setting, so it belongs in the base document where both
       #       profile overlays inherit one layout and artifacts stay at the same
       #       place in every environment.
+      #       (4) Assumptions: this value is only the PREFIX. Everything that
+      #       distinguishes one report from another is appended below it by
+      #       ReportArtifactPublisher as further partitions -- dt= for the run
+      #       date, type= for the report type and from=/to= for the two range
+      #       bounds -- so "the same report over the same date range" in (2) means
+      #       the same type over the same bounds and nothing else. An earlier
+      #       revision appended only the run date, which made the nightly report
+      #       and any requested period ending on that date share one key.
       report-prefix: reports/transaction-detail/
       statement-prefix: statements/
 

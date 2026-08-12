@@ -1,8 +1,7 @@
 package com.carddemo.transaction.service;
 
-import com.carddemo.common.money.Money;
+import com.carddemo.common.security.ApprovedOriginPolicy;
 import com.carddemo.common.security.InternalServiceToken;
-import java.math.BigDecimal;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Map;
@@ -16,7 +15,15 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 /**
- * Reads and updates account-owned records over the account context's published HTTP surface.
+ * Reads the account-owned card cross-reference over the account context's published HTTP surface.
+ *
+ * <p>Refactoring Rationale: this client also read the account master and posted the payment screen's
+ * balance change, and both have been withdrawn. The seam's own charter records why in full: the balance
+ * change and the payment row are one unit of work, an HTTP call cannot join this side's transaction, and
+ * the address the change was posted to was never declared by the callee. Both concerns are now issued by
+ * {@code com.carddemo.transaction.repository.AccountBalanceRepository} inside the payment's own transaction.
+ * What remains here are the two cross-reference reads, which write nothing and which no commit depends
+ * on.</p>
  *
  * <p>Purpose: this is the only implementation of {@link AccountContextClient} that runs in a deployed
  * environment. It exists as its own class rather than as a lambda in a configuration method because it
@@ -34,6 +41,15 @@ import org.springframework.web.client.RestClientException;
  * read hold a request thread for as long as the operating system's own timeout allows, which on a screen
  * the operator is waiting at is indistinguishable from a hang.</p>
  *
+ * <p>Refactoring Rationale: the configured origin is VALIDATED before the client is built, through the
+ * shared kernel's {@link com.carddemo.common.security.ApprovedOriginPolicy}. An earlier revision accepted
+ * the value verbatim and then attached a freshly minted machine token to every request sent to it, so a
+ * base address changed after review -- to plain HTTP, to an unapproved host, to an address carrying user
+ * information -- would have received a live internal credential and, on the card-keyed lookup, a primary
+ * account number. The check is shared rather than written here because two sibling clients already carried
+ * a private copy of it, and a check duplicated three times is a check that gets strengthened in one
+ * copy.</p>
+ *
  * <p>Alternatives Considered: composing the lookup path with the card number in it, which reads more
  * directly than a request body does. Rejected because a card number in a path is a card number in an
  * access log, and access-log storage is the one destination the masking applied at the API edge does not
@@ -41,6 +57,15 @@ import org.springframework.web.client.RestClientException;
  */
 @Component
 public class RestAccountContextClient implements AccountContextClient {
+
+    /**
+     * The configuration prefix this seam's two address properties sit under.
+     *
+     * <p>Assumptions: the prefix is named once and both the base address and the approved origin are read
+     * from it, so the two cannot come to sit under different prefixes. Every refusal the shared policy
+     * raises names its property from this value.</p>
+     */
+    public static final String ACCOUNT_CONTEXT_PROPERTY_PREFIX = "carddemo.account-context";
 
     /** The account context's cross-reference lookup, which takes its key in a request body. */
     public static final String PATH_CARD_XREF_LOOKUP = "/api/v1/card-xrefs/lookup";
@@ -58,35 +83,21 @@ public class RestAccountContextClient implements AccountContextClient {
     public static final String PATH_CARD_XREF_BY_ACCOUNT = "/api/v1/card-xrefs/lookup-by-account";
 
     /**
-     * The account context's account master read, which takes its key in a request body.
-     *
-     * <p>Refactoring Rationale: was {@code /api/v1/accounts/{accountId}} as a {@code GET}; it is now the
-     * published {@code POST} lookup, for the reason recorded above. The account context's contract moved
-     * with it, so this is a change of shape on both sides rather than a client working around a server.</p>
-     */
-    public static final String PATH_ACCOUNT = "/api/v1/accounts/lookup";
-
-    /**
-     * The account context's balance-reducing payment operation, which takes its key in its request body.
-     *
-     * <p>Refactoring Rationale: was {@code /api/v1/accounts/{accountId}/payments}. This one was ALREADY a
-     * {@code POST} carrying a body, so the identifier was in the target for no reason at all -- the body it
-     * needed was already there and the amount was already in it. Moving the identifier alongside the
-     * amount removes the disclosure at no cost whatsoever.</p>
-     */
-    public static final String PATH_ACCOUNT_PAYMENT = "/api/v1/accounts/payments";
-
-    /**
      * The address prefix of the cross-reference family, which the cross-reference read scope authorises.
      *
-     * <p>Assumptions: each prefix is DERIVED from a path constant above rather than written again, by removing
-     * the final segment. Writing them as literals would let the two drift, and the symptom of a drift is a
-     * refusal on one operation while every other one keeps working.</p>
+     * <p>Assumptions: the prefix is DERIVED from the path constant above rather than written again, by
+     * removing the final segment. Writing it as a literal would let the two drift, and the symptom of a
+     * drift is a refusal on one operation while every other one keeps working.</p>
+     *
+     * <p>Refactoring Rationale: there is ONE prefix here where there were two. The account family's prefix
+     * and the two addresses under it -- an account master read and a balance-reducing payment -- have been
+     * withdrawn. The payment address was never published by the account context at all: it had no
+     * controller, no operation in the committed contract, no internal route and no write scope, so every
+     * bill payment that reached it was answered 404 and reported as a dependency failure. The read was
+     * withdrawn with it because the balance is now read locally, under a named grant, so that it can be
+     * locked across the decision and reduced in the same transaction as the ledger row.</p>
      */
     private static final String CARD_XREF_PATH_PREFIX = parentOf(PATH_CARD_XREF_LOOKUP);
-
-    /** The address prefix of the account family, which the account read scope authorises. */
-    private static final String ACCOUNT_PATH_PREFIX = parentOf(PATH_ACCOUNT);
 
     /**
      * Removes the final segment of a path, yielding the family prefix its siblings share.
@@ -102,16 +113,13 @@ public class RestAccountContextClient implements AccountContextClient {
     private static final String FIELD_CARD_NUMBER = "cardNumber";
 
     /**
-     * The request member every account-keyed call carries the account identifier in.
+     * The request member the account-keyed cross-reference read carries the account identifier in.
      *
      * <p>Assumptions: the spelling matches the {@code accountId} property of the account context's
-     * published {@code AccountLookupRequest} schema, and one constant serves all three account-keyed
-     * calls so they cannot disagree about it.</p>
+     * published request schema for that address, so the two sides name the field with one literal rather
+     * than with two strings that happen to agree.</p>
      */
     private static final String FIELD_ACCOUNT_ID = "accountId";
-
-    /** The request member the payment operation keys its amount on. */
-    private static final String FIELD_AMOUNT = "amount";
 
     /** The configured client, built once at construction with both timeouts already applied. */
     private final RestClient client;
@@ -137,14 +145,34 @@ public class RestAccountContextClient implements AccountContextClient {
      * @param machineIdentity the minter of the short-lived credential presented on every request; must
      *     not be {@code null}
      * @param baseUrl the origin the account context is served at, never {@code null}
+     * @param approvedOrigin the origin the base address is required to equal, defaulting to the base
+     *     address itself so a deployment that configures only one value still gets every shape check
      * @param connectTimeoutMillis how long to wait for the connection, in milliseconds
      * @param readTimeoutMillis how long to wait for the response, in milliseconds
+     * @throws IllegalStateException if the configured address is absent, is not an absolute HTTPS origin
+     *     free of user information, path, query and fragment, or is not the approved origin
      */
     public RestAccountContextClient(RestClient.Builder builder,
             InternalServiceToken machineIdentity,
             @Value("${carddemo.account-context.base-url}") String baseUrl,
+            @Value("${carddemo.account-context.approved-origin:${carddemo.account-context.base-url:}}")
+            String approvedOrigin,
             @Value("${carddemo.account-context.connect-timeout-ms:2000}") long connectTimeoutMillis,
             @Value("${carddemo.account-context.read-timeout-ms:3000}") long readTimeoutMillis) {
+
+        // WHY : Assumptions: the address is validated BEFORE the builder is touched, so a misconfigured
+        //       deployment fails to start rather than starting and sending a token somewhere. The clauses
+        //       name what is at risk on THIS seam: the card-keyed lookup carries a primary account number
+        //       in its request body, and every request carries a minted internal credential.
+        ApprovedOriginPolicy.require(ACCOUNT_CONTEXT_PROPERTY_PREFIX, baseUrl, approvedOrigin,
+                new ApprovedOriginPolicy.Sensitivity(
+                        "the cross-reference lookup this client makes carries a primary account number and"
+                                + " every request carries a minted internal credential, so there is no safe"
+                                + " default address to fall back to",
+                        "the lookup body carries a primary account number and every request carries a"
+                                + " minted internal credential",
+                        "an unapproved destination receives a live internal credential, and a card-keyed"
+                                + " lookup hands it a primary account number in the same request"));
 
         // WHY : Assumptions: the request factory is built over the platform HTTP client so that the
         //       connect timeout is applied by the client and the read timeout by the factory. Setting
@@ -208,14 +236,17 @@ public class RestAccountContextClient implements AccountContextClient {
         if (path.startsWith(CARD_XREF_PATH_PREFIX)) {
             return InternalServiceToken.SCOPE_CARD_XREF_READ;
         }
-        if (path.startsWith(ACCOUNT_PATH_PREFIX)) {
-            return InternalServiceToken.SCOPE_ACCOUNT_READ;
-        }
-        // WHY : Assumptions: there is no customer branch here, and its absence is the point rather than an
-        //   omission. This context reads no customer record, so it is not permitted to carry the customer
-        //   scope at all -- the closed table in InternalServiceToken withholds it -- and a branch that
-        //   returned it would raise from the minter instead of from here, naming the scope rather than the
-        //   address. Raising here names the address, which is what a reader adding one needs to see.
+        // WHY : Refactoring Rationale: there is ONE branch here where there were two, and the account
+        //   branch was the defect this method's own note warned about in the abstract. It mapped a prefix to
+        //   the account READ scope, and one of the addresses under that prefix was a balance-reducing
+        //   WRITE -- so a write was authorised by a read scope, and the token minted for it would have
+        //   authorised every account read in the callee. Both addresses are withdrawn: the balance is read
+        //   and reduced locally now, under a grant on one named table.
+        // WHY : Assumptions: there is no customer branch here either, and its absence is the point rather
+        //   than an omission. This context reads no customer record, so it is not permitted to carry the
+        //   customer scope at all -- the closed table in InternalServiceToken withholds it -- and a branch
+        //   that returned it would raise from the minter instead of from here, naming the scope rather than
+        //   the address. Raising here names the address, which is what a reader adding one needs to see.
         throw new IllegalStateException("no internal scope is declared for '" + path
                 + "'; every address this client calls must be assigned one, because the account context"
                 + " authorises each family of addresses by its own scope");
@@ -235,7 +266,14 @@ public class RestAccountContextClient implements AccountContextClient {
                     .body(Map.of(FIELD_CARD_NUMBER, cardNumber))
                     .retrieve()
                     .body(CardXrefView.class);
-            return Optional.ofNullable(view).map(CardXrefView::toCardXref);
+            // WHY : Refactoring Rationale: the card number comes from the REQUEST and not from the answer,
+            //       because the answer does not carry one -- the account context's card-keyed lookup
+            //       publishes the account and customer identifiers only, deliberately, so a primary account
+            //       number is not echoed back over a seam that already knows it. An earlier revision read a
+            //       cardNumber member off this response; the member does not exist in the published schema,
+            //       so it arrived null on every successful call and the value written into the ledger row
+            //       would have been absent.
+            return Optional.ofNullable(view).map(read -> read.toCardXref(cardNumber));
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
@@ -253,12 +291,12 @@ public class RestAccountContextClient implements AccountContextClient {
     @Override
     public Optional<CardXref> findCardXrefByAccountId(String accountId) {
         try {
-            CardXrefView view = this.client.post()
+            CardXrefByAccountView view = this.client.post()
                     .uri(PATH_CARD_XREF_BY_ACCOUNT)
                     .body(Map.of(FIELD_ACCOUNT_ID, accountId))
                     .retrieve()
-                    .body(CardXrefView.class);
-            return Optional.ofNullable(view).map(CardXrefView::toCardXref);
+                    .body(CardXrefByAccountView.class);
+            return Optional.ofNullable(view).map(CardXrefByAccountView::toCardXref);
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
@@ -268,82 +306,70 @@ public class RestAccountContextClient implements AccountContextClient {
     }
 
     /**
-     * {@inheritDoc}
+     * The account context's card-keyed cross-reference answer, declared in full.
      *
-     * @param accountId {@inheritDoc}
-     * @return {@inheritDoc}
+     * <p>Refactoring Rationale: EVERY published member is declared, including {@code customerId}, which
+     * this context does not use. An earlier revision declared a two-member subset and recorded that "the
+     * deserialiser is configured to ignore the rest" -- which was false and is the reason this is
+     * corrected rather than trimmed: {@code application.yml} sets
+     * {@code spring.jackson.deserialization.fail-on-unknown-properties} to true, deliberately, so an
+     * undeclared member does not get ignored, it fails the conversion. Every successful lookup was
+     * therefore turned into a dependency failure and answered 500. Declaring the closed shape is what
+     * makes the strict setting safe, and the setting is what makes a shape change visible.</p>
+     *
+     * <p>Assumptions: this shape carries NO card number, and its absence is the account context's
+     * deliberate choice rather than an omission -- the caller keyed the read on a card number, so echoing
+     * it back would put a primary account number in a response for no reader. The seam record is completed
+     * from the request instead.</p>
+     *
+     * @param accountId the account identifier the entry names
+     * @param customerId the customer identifier the entry names, declared so the strict deserialiser
+     *     admits it and unused by this context
      */
-    @Override
-    public Optional<AccountBalance> findAccountBalance(String accountId) {
-        try {
-            AccountView view = this.client.post()
-                    .uri(PATH_ACCOUNT)
-                    .body(Map.of(FIELD_ACCOUNT_ID, accountId))
-                    .retrieve()
-                    .body(AccountView.class);
-            return Optional.ofNullable(view)
-                    .map(read -> new AccountBalance(accountId, Money.of(read.currentBalance())));
-        } catch (HttpClientErrorException.NotFound absent) {
-            return Optional.empty();
-        } catch (RestClientException failure) {
-            throw new AccountContextUnavailableException("account read did not answer", failure);
+    private record CardXrefView(Long accountId, Long customerId) {
+
+        /**
+         * Converts the wire shape into the seam's own record, completing it with the card that was asked
+         * about.
+         *
+         * @param requestedCardNumber the card number this lookup was keyed on, which is the value the
+         *     entry is keyed by; must not be {@code null}
+         * @return the seam record, never {@code null}
+         */
+        private CardXref toCardXref(String requestedCardNumber) {
+            // WHY : Assumptions: the identifier is rendered back to digit characters rather than carried as
+            //       a number, because the seam record declares it as characters so a leading zero survives.
+            //       The account context publishes it as a JSON number because its column is BIGINT; the
+            //       screen contract on this side is an eleven-character field.
+            return new CardXref(String.valueOf(this.accountId), requestedCardNumber);
         }
     }
 
     /**
-     * {@inheritDoc}
+     * The account context's account-keyed cross-reference answer, declared in full.
      *
-     * @param accountId {@inheritDoc}
-     * @param paymentAmount {@inheritDoc}
+     * <p>Assumptions: this is a DIFFERENT shape from the card-keyed one above and is declared separately
+     * rather than shared, because the account context publishes a card number on this operation and not on
+     * that one. The two are separate schemas in the committed contract for the same reason: a caller that
+     * keyed on an account does not know the card, so the answer has to carry it, while a caller that keyed
+     * on a card already has it.</p>
+     *
+     * @param accountId the account identifier the read was keyed on
+     * @param customerId the customer identifier the entry names, declared so the strict deserialiser admits
+     *     it and unused by this context
+     * @param cardNumber the card number the entry is keyed by, which this context writes into the ledger
+     *     row as its key
      */
-    @Override
-    public void applyPayment(String accountId, Money paymentAmount) {
-        try {
-            // WHY : Assumptions: the amount is sent as the quoted decimal string the shared money type
-            //       serialises to rather than as a JSON number, because a JSON number is parsed into a
-            //       binary double by most clients and this value is a balance. Transformation rule T3
-            //       forbids the money path leaving exact fixed point at any hop, and a request body is a
-            //       hop.
-            this.client.post()
-                    .uri(PATH_ACCOUNT_PAYMENT)
-                    .body(Map.of(
-                            FIELD_ACCOUNT_ID, accountId,
-                            FIELD_AMOUNT, paymentAmount.amount().toPlainString()))
-                    .retrieve()
-                    .toBodilessEntity();
-        } catch (RestClientException failure) {
-            throw new AccountContextUnavailableException("account payment was not applied", failure);
-        }
-    }
-
-    /**
-     * The subset of the account context's cross-reference shape this seam reads.
-     *
-     * <p>Assumptions: only the two members this context needs are declared, and the deserialiser is
-     * configured to ignore the rest. Declaring the whole shape would couple this file to every future
-     * addition the account context makes to it.</p>
-     *
-     * @param accountId the account identifier the entry names, as digit characters
-     * @param cardNumber the card number the entry is keyed by, as digit characters
-     */
-    private record CardXrefView(String accountId, String cardNumber) {
+    private record CardXrefByAccountView(Long accountId, Long customerId, String cardNumber) {
 
         /**
          * Converts the wire shape into the seam's own record.
          *
-         * @return the seam record carrying the same two values, never {@code null}
+         * @return the seam record carrying the account identifier as characters and the card number as
+         *     published, never {@code null}
          */
         private CardXref toCardXref() {
-            return new CardXref(this.accountId, this.cardNumber);
+            return new CardXref(String.valueOf(this.accountId), this.cardNumber);
         }
-    }
-
-    /**
-     * The subset of the account context's account shape this seam reads.
-     *
-     * @param currentBalance the current balance as an exact decimal, deserialised from the quoted string
-     *     the account context emits
-     */
-    private record AccountView(BigDecimal currentBalance) {
     }
 }

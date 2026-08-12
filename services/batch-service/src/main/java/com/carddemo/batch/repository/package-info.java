@@ -46,30 +46,23 @@
  * written convention every block here follows is {@code docs/CODE_DOCUMENTATION_STANDARD.md},
  * cited by path and never restated.</p>
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every inventory, interface name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, and each entry additionally
- * states whether it is <b>AUTHORED</b> or <b>PLANNED</b> as of the latest revision of this file.
- * The migration lands its artifacts in plan order, so a count below is a target total rather than
- * a measurement of the directory, while the per-entry marker is a measurement and is expected to
- * move as files land.</p>
+ * <p>Eleven compilation units sit in this directory: this charter and the ten Spring Data interfaces
+ * enumerated below, each marked LANDED against the directory beside it. The marker line is
+ * re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so an eleventh interface arriving without an entry here fails the build:</p>
  *
- * <p>Refactoring Rationale: every entry below once read PLANNED unconditionally, on the reasoning
- * that this charter was authored before any interface beside it. That stopped being true the
- * moment the first interface landed, and a blanket marker cannot record the difference: with
- * {@code BatchRunRepository} present in this directory the inventory described a package that no
- * longer existed, and a reader could not tell the two states apart without listing the directory
- * themselves -- which is exactly the work a charter exists to save. The markers are therefore
- * per-entry, so a landed interface and a genuinely future one read differently.</p>
+ * <pre>
+ * this directory: 11 java files = 10 classes + 1 charter
+ * </pre>
  *
- * <p>Alternatives Considered: withholding this charter until every interface it governs exists.
- * Rejected, because the charter is what the authors of those interfaces work from -- which type
- * belongs here, which may not, and what the closed set is -- so writing it last would leave the
- * package with no stated contract during exactly the interval in which one is needed. The cost of
- * authoring it first is that its inventory reads as present tense unless the distinction is
- * declared, which is what the per-entry markers above are for; they are the single place a reader
- * has to look to tell a target from a measurement.</p>
+ * <p>Refactoring Rationale: this section carried a prose sentence and no marker line, and the prose
+ * had twice been left behind by the directory. The marker is the mechanically re-measured form, so
+ * the count can no longer drift silently; the figure it carries is the measured eleven rather than
+ * the eight the earlier roster closed at, because {@code CustomerRepository} and
+ * {@code CardRepository} landed with the export job's customer and card phases.</p>
  *
  * <h2>Why data access is an interface here and was a file verb there</h2>
  *
@@ -106,27 +99,45 @@
  * both disciplines are visible in one place and neither is implied by a declaration made
  * elsewhere.</p>
  *
- * <h2>The eight interfaces, and what does not belong here</h2>
+ * <h2>The ten interfaces, and what does not belong here</h2>
  *
- * <p>Eight interfaces belong here and no ninth; with this charter that makes nine compilation
+ * <p>Ten interfaces belong here and no eleventh; with this charter that makes eleven compilation
  * units at the target. Each is listed with the schema-qualified table it reaches and the access
  * discipline that table is reached with, because the discipline is the part a caller cannot infer
  * from the name.</p>
  *
- * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL EIGHT are, so the roster
+ * <p>Refactoring Rationale: the roster stood at eight and was closed at eight, and reopening it to ten
+ * is a correction of substance rather than of arithmetic. {@code CBEXPORT} reads five masters and this
+ * package could reach only three of them, so the branch-migration export published a dataset whose
+ * customer and card phases were empty on every run. {@code CustomerRepository} and
+ * {@code CardRepository} are therefore added as ordered read-only walks and appear in the roster
+ * below.</p>
+ *
+ * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL TEN are, so the roster
  * and the directory now hold the same set. Two earlier revisions both understated it. The first marked
  * every entry PLANNED, including {@code BatchRunRepository} whose file was already present, so a reader
  * consulting the roster to learn whether the step ledger had an interface was told it did not. The second
  * corrected that to THREE and left five marked PLANNED, three of which -- the feed, the ledger and the
  * reject stream -- were already present as well. Both understatements had the same cause: the count was
- * written from what the checkpoint had just added rather than measured against the directory. It is
- * measured now, and it is re-measured whenever a file is added.</p>
+ * written from what the checkpoint had just added rather than measured against the directory. The
+ * third closed the roster at eight while {@code ExportJob} still needed two more, which is a
+ * different failure from the first two and worth separating: the count matched the directory
+ * exactly, and the DIRECTORY was short. It is measured now, and it is re-measured whenever a file is
+ * added.</p>
+ *
+ * <p>Refactoring Rationale: the roster was consequently REOPENED from eight to ten.
+ * {@code CustomerRepository} and {@code CardRepository} were added because {@code ExportJob} emitted
+ * three of the reference's five export record types and could emit no more without them: the encoder
+ * already handled all five views and the {@code SELECT} grants already existed, so the interfaces and
+ * their two entities were the whole of the shortfall. Both are read-only walks on the narrow
+ * {@code Repository} base, so the module's write set is unchanged -- see the grant ruling below,
+ * which now has to admit the {@code card} schema it previously said carried no privilege at all.</p>
 
  *
  * <p>Assumptions: the last two to arrive, {@code AccountRepository} and {@code CardXrefRepository}, came
  * with the jobs that read them rather than with a service, which is what the earlier revisions predicted:
  * the account master and the cross-reference are read by the posting job and by the interest accrual, and
- * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the eight now has at
+ * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the ten now has at
  * least one production caller, and each caller is a job or a service in this module rather than a
  * test.</p>
  *
@@ -140,16 +151,26 @@
  *       pair, declared by
  *       {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql} and mirrored
  *       on the {@code BatchRun} mapping, so a duplicate insert is refused by the database rather
- *       than by a prior read. Trade-offs: the repository and its table are landed, but the
- *       idempotency they describe is <b>not operative yet</b>, because the only class that reads or
- *       writes them -- {@code BatchStepLedger} in the sibling service package -- has no production
- *       caller while the job beans remain unauthored. Two consequences are worth recording here
- *       rather than at the call site that does not exist: the restart guarantee that actually holds
- *       today is the coarser one Spring Batch gives from the identifying business-date job
- *       parameter, and the same uniqueness constraint named above will <i>reject</i> the retry
- *       insert that {@code BatchStepLedger} performs after a failed attempt unless the caller
- *       removes the terminal row first, which is the caller-side obligation its own comment
- *       records and which no caller yet discharges.</dd>
+ *       than by a prior read.
+ *       <p>Refactoring Rationale: this entry said "the idempotency they describe is <b>not operative
+ *       yet</b>, because the only class that reads or writes them ... has no production caller while
+ *       the job beans remain unauthored", and it went on to warn that the uniqueness constraint would
+ *       reject a retry insert "unless the caller removes the terminal row first". Every clause of that
+ *       has expired, and understating a restart guarantee is not a safe error -- a reader planning a
+ *       recovery would have concluded that a mid-chain redrive re-ran committed work and would have
+ *       rebuilt a guarantee that already holds. Measured at this revision: all seven job beans exist,
+ *       every step of every one of them runs through {@code BatchStepLedger}, and the idempotency IS
+ *       operative at step granularity. The warning about the retry insert is withdrawn for a different
+ *       reason -- the insert it described no longer happens at all. A failed or abandoned row is now
+ *       RE-OPENED in place by {@code BatchStepLedgerWriter}, with the {@code attempt} column counting
+ *       the attempt, so one row per run and step is the shape rather than the obstacle, and no caller
+ *       has any row-removal obligation to discharge.</p>
+ *       <p>Assumptions: the coarser guarantee named in that old text still holds and is complementary
+ *       rather than superseded. Spring Batch refuses a repeat of a business date that already
+ *       completed, before any step runs, because the date is an identifying job parameter; the ledger
+ *       filters a redriven execution of one run step by step beneath it. Both are needed: the first
+ *       cannot distinguish which steps of a night finished, and the second cannot recognise a whole
+ *       night being submitted twice.</p></dd>
  *
  *   <dt>{@code DailyTransactionRepository} into {@code ledger.daily_transactions}</dt>
  *   <dd>LANDED. Read-only from this module, and reached by an ordered forward walk rather than by
@@ -185,6 +206,21 @@
  *       byte for byte against a committed expectation file; it is never re-read by the run that
  *       produced it.</dd>
  *
+ *   <dt>{@code CustomerRepository} into {@code account.customers}</dt>
+ *   <dd>LANDED. Strictly read-only, and reached by ONE access path: an ordered walk of the whole
+ *       table in customer-identifier order, returned as a {@code Stream} so the export job consumes
+ *       it a row at a time. That single member is a measurement rather than a minimum --
+ *       {@code app/cbl/CBEXPORT.cbl:35-39} opens the file {@code ACCESS MODE IS SEQUENTIAL} and
+ *       {@code :260} reads it to end of file to emit one {@code 'C'} record per customer, and no
+ *       other program in this module opens it at all. The program that reads customers BY KEY,
+ *       {@code app/cbl/CBCUS01C.cbl}, is migrated to {@code account-service}, which owns the table
+ *       and declares that path there. Assumptions: no write method belongs here, and the reason is a
+ *       grant rather than a convention -- the grant on {@code account} carries {@code UPDATE} on
+ *       {@code account.accounts} alone, so a write through this interface would fail at the database.
+ *       Assumptions: the entity this is typed on omits the two protected columns entirely, so no
+ *       query reachable through this interface can select an enciphered envelope this module holds no
+ *       key grant to open.</dd>
+ *
  *   <dt>{@code AccountRepository} into {@code account.accounts}</dt>
  *   <dd>LANDED. A keyed read and an update. This is the most contended table the module touches:
  *       all three migrated batch programs read it and two of them rewrite it, so it is the one
@@ -213,12 +249,30 @@
  *       CARDINALITY as much as in key, which is why the interface enumerates them rather than
  *       leaving a reader to infer them from three method names.</dd>
  *
+ *   <dt>{@code CardRepository} into {@code card.cards}</dt>
+ *   <dd>LANDED. Strictly read-only, and the <b>only</b> interface here that reaches the
+ *       {@code card} schema -- which is why the grant ruling below names that schema at all. One
+ *       access path: an ordered walk of the whole table in card-number order, returned as a
+ *       {@code Stream}, from {@code app/cbl/CBEXPORT.cbl:59-63} and the read at {@code :513} that
+ *       emits one {@code 'D'} record per card. Assumptions: the grant admitting it is {@code SELECT}
+ *       on all tables in that schema at
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1268} -- read only, with no write
+ *       counterpart anywhere, so the read-only discipline here is enforced by the database and not
+ *       only by this charter, and the entity omits {@code cvv_encrypted} for the same reason the
+ *       customer entity omits its two. Assumptions: it is not the same table as
+ *       {@code CardXrefRepository} above, and the similar names are the reason that is said out loud
+ *       -- that one reaches {@code account.card_xref}, a three-column tie between a card number, an
+ *       account and a customer, and this one reaches the card master itself. The by-account path over
+ *       {@code idx_cards_account_id} is deliberately absent: it is the {@code CARDAIX} alternate
+ *       index, and the programs that use it are migrated to {@code card-service}.</dd>
+ *
  *   <dt>{@code DisclosureGroupRepository} into {@code reference.disclosure_groups}</dt>
  *   <dd>LANDED. Strictly read-only: an interest-rate lookup on the three-part key of account
  *       group, transaction type and transaction category. No write method belongs here under any
  *       circumstances, and the reason is a grant rather than a convention -- see the schema
  *       ruling below, which extends this module no write privilege on {@code reference} at
  *       all.</dd>
+ *
  * </dl>
  *
  * <p><b>What does not belong in this package.</b> No repository implementation class. No
@@ -242,17 +296,30 @@
  * <p>Two absences a reader will otherwise wonder about are recorded here rather than left to be
  * rediscovered.</p>
  *
- * <p>Assumptions: <b>no customer repository and no card repository.</b> The preflight program
- * looks as though it needs both, because it opens six files in succession at
- * {@code app/cbl/CBTRN01C.cbl:157-162} -- the customer file at line 158, the card file at line 160
- * and the transaction file at line 162 among them. Its processing loop at
- * {@code app/cbl/CBTRN01C.cbl:164-186} then reads only three: the daily feed at line 166, the
- * cross-reference at line 172 and the account at line 176. The customer, card and transaction
- * files are opened, held and closed again at {@code app/cbl/CBTRN01C.cbl:189-193} without ever
- * being read. A repository for either would therefore have no caller. The grant graph settles it
- * independently: the migration plan extends this module cross-schema write access on
- * {@code ledger} and {@code account} only, so there is no privilege on the {@code card} schema
- * for a card repository to use even if one were written.</p>
+ * <p>Refactoring Rationale: <b>this passage argued that no customer repository and no card
+ * repository belonged here, and both now exist.</b> The argument it made is preserved because it is
+ * still correct about the program it was reasoned from, and it is worth reading beside what it got
+ * wrong. What it said: the preflight program looks as though it needs both, because it opens six
+ * files in succession at {@code app/cbl/CBTRN01C.cbl:157-162} -- the customer file at line 158, the
+ * card file at line 160 and the transaction file at line 162 among them -- while its processing loop
+ * at {@code app/cbl/CBTRN01C.cbl:164-186} reads only three: the daily feed at line 166, the
+ * cross-reference at line 172 and the account at line 176. The customer, card and transaction files
+ * are opened, held and closed again at {@code app/cbl/CBTRN01C.cbl:189-193} without ever being read,
+ * so a repository for either would have no caller <b>in preflight</b>.</p>
+ *
+ * <p>Refactoring Rationale: where it went wrong was in generalising one program's file usage to the
+ * whole module. {@code app/cbl/CBEXPORT.cbl} reads FIVE masters -- customer at {@code :260}, account
+ * at {@code :329}, cross-reference at {@code :393}, transaction at {@code :448} and card at
+ * {@code :513} -- so the export job is exactly the caller the passage concluded did not exist, and
+ * its absence made the export publish a dataset whose customer and card phases were empty. The
+ * second half of the old argument was wrong on a checkable fact: it asserted this module holds no
+ * privilege on the {@code card} schema, whereas
+ * {@code data-migration/sql/V0__schemas_and_roles.sql:1268} grants it {@code SELECT} on every table
+ * in {@code card} and {@code :1215} grants the same on {@code account}. The privilege it needed was
+ * already there; only the Java seam was missing. Assumptions: what remains true is the narrower
+ * statement -- this module holds no WRITE privilege on {@code card} or {@code reference} -- which is
+ * why both new interfaces are ordered read-only walks over the narrow base type and both mappings
+ * are immutable.</p>
  *
  * <p>Assumptions: <b>no wrapper around the Spring Batch job repository.</b> The framework supplies
  * its own, and its tables live in the {@code batch} schema alongside this module's own table --
@@ -264,15 +331,15 @@
  * framework did, and {@code batch.batch_run} records what the invoking state machine needs in
  * order to decide whether a redriven step has already happened.</p>
  *
- * <h2>Why this package reaches three schemas it does not own</h2>
+ * <h2>Why this package reaches four schemas it does not own</h2>
  *
- * <p>Seven of the eight interfaces target a table another bounded context owns. That is the single
+ * <p>Nine of the ten interfaces target a table another bounded context owns. That is the single
  * most consequential fact about this package, so it is stated before any query detail rather than
  * after it: {@code ledger} belongs to {@code transaction-service}, {@code account} to
- * {@code account-service} and {@code reference} to {@code reference-service}. This module reaches
- * them against the one database cluster under a dedicated role holding narrowly-scoped
- * cross-schema write grants on {@code ledger} and {@code account}, read access on
- * {@code reference}, and nothing beyond that. The migration plan records this at its section
+ * {@code account-service}, {@code card} to {@code card-service} and {@code reference} to
+ * {@code reference-service}. This module reaches them against the one database cluster under a
+ * dedicated role holding narrowly-scoped cross-schema write grants on {@code ledger} and
+ * {@code account}, read access on {@code reference} and {@code card}, and nothing beyond that. The migration plan records this at its section
  * 0.4.1.3 as <b>the one documented exception to database-per-service purity in the entire
  * migration</b>, which makes it a bounded concession and not a pattern to copy.</p>
  *
@@ -310,19 +377,20 @@
  *
  * <p>Trade-offs: the accepted cost is that this package maps tables it does not own, so the owning
  * service's migration is normative and this one declares nothing about their shape. No interface
- * here contributes a table, an index or a constraint for {@code ledger}, {@code account} or
- * {@code reference}. The authorities are
+ * here contributes a table, an index or a constraint for {@code ledger}, {@code account},
+ * {@code card} or {@code reference}. The authorities are
  * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql} for
  * {@code ledger}, {@code services/account-service/src/main/resources/db/migration/V1__account.sql}
- * for {@code account}, and {@code reference-service}'s own
+ * for {@code account}, {@code services/card-service/src/main/resources/db/migration/V1__card.sql}
+ * for {@code card}, and {@code reference-service}'s own
  * {@code V1__reference.sql} for {@code reference}. A query here that names something those files
  * do not declare is this package's defect and never theirs.</p>
  *
  * <p>Trade-offs: the grant is also the boundary that keeps the concession bounded, which is why it
  * is worth stating what it does not include. It carries no privilege on the {@code card},
  * {@code auth} or {@code authorization} schemas, and no write privilege on {@code reference}. The
- * eight interfaces above are therefore not merely the set that has been written; they are close to
- * the set that <b>could</b> be written, because a ninth reaching an ungranted schema would fail at
+ * ten interfaces above are therefore not merely the set that has been written; they are close to
+ * the set that <b>could</b> be written, because an eleventh reaching an ungranted schema would fail at
  * the database rather than compile and quietly widen the exception.</p>
  *
  * <h2>No native SQL: every query binds to a declared property name</h2>
@@ -421,15 +489,15 @@
  *       resumption rather than for reading in convenient chunks. A redriven state-machine
  *       execution restarts a step that may already have processed part of its input, and a
  *       continuation finder is what turns the key it resumes from back into the remainder of the
- *       walk. Where that key is <b>stored</b> is stated below, because it is not stored where an
- *       earlier revision of this charter said it was.</li>
+ *       walk. Where that key is <b>stored</b> is stated below, because the obvious guess -- this
+ *       module's own step ledger -- is the wrong one.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the continuation key is held in the framework's own step
+ * <p>Assumptions: the continuation key is held in the framework's own step
  * {@code ExecutionContext} -- persisted by the configured {@code JobRepository} in its
  * {@code BATCH_STEP_EXECUTION_CONTEXT} table and restored into the same step on a restart -- and
- * <b>not</b> in {@code batch.batch_run}, which an earlier revision of this paragraph asserted. That
- * assertion was checkable and false: {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql}
+ * <b>not</b> in {@code batch.batch_run}. That distinction is checkable rather than stylistic:
+ * {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql}
  * declares exactly seven columns on that table -- {@code id}, {@code run_id}, {@code step_name},
  * {@code status}, {@code started_at}, {@code finished_at} and {@code return_code} -- and the
  * {@code BatchRun} mapping beside it maps those seven and no eighth, so no column exists that could
@@ -457,10 +525,13 @@
  *
  * <h2>The two ordered-walk contracts this package defines</h2>
  *
- * <p>Two of the eight interfaces expose an ordered walk, and in both cases the ordering is part of
+ * <p>Four of the ten interfaces expose an ordered walk, and in every case the ordering is part of
  * the contract rather than a convenience. A walk in a different order still returns every row and
  * still produces output a comparison rejects, so each ordering is recorded here with the evidence
- * that settles it.</p>
+ * that settles it. Assumptions: the two added by the customer and card projections are the simplest
+ * of the four -- each orders by its own single-column primary key, which is the record-key order the
+ * reference's sequential read produces -- and each records that reasoning on its own method rather
+ * than here, because neither needed a multi-source argument to settle it.</p>
  *
  * <p><b>The category-balance walk orders by account identifier, then transaction type code, then
  * transaction category code.</b> Assumptions: that ordering is the VSAM key order and is provable

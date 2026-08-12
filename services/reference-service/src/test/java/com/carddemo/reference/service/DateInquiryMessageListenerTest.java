@@ -252,12 +252,15 @@ class DateInquiryMessageListenerTest {
     /**
      * Verifies the reply declares its media type, replacing the reference program's string-format indicator.
      *
-     * <p>Refactoring Rationale: the expected value was {@code text/plain} and is now {@code text/csv}. The
-     * migration maps {@code MQFMT-STRING} to exactly one content type across all three message flows --
-     * {@code docs/architecture/messaging-contracts.md} states it as a row of the descriptor table -- and the
-     * attribute's documented job is to discriminate a POSITIONAL payload from the additive JSON envelope that
-     * document reserves. A third value on one of three flows discriminates the flow instead of the encoding,
-     * so a consumer written to the documented rule would read this reply as neither form.</p>
+     * <p>Refactoring Rationale: the expected value was {@code text/csv} and is now {@code text/plain}. The
+     * earlier reading was that the migration maps {@code MQFMT-STRING} to one content type across all three
+     * flows, taken from a row of the descriptor table in
+     * {@code docs/architecture/messaging-contracts.md}. That document qualifies the row in the section
+     * immediately below it, headed "The inquiry replies declare {@code text/plain}, not {@code text/csv}",
+     * which states that the {@code text/csv} value "belongs to the authorization flow alone" -- because that
+     * flow genuinely is comma-separated -- and reserves {@code text/plain} for the positional inquiry
+     * replies. A media type is a parsing instruction, and this reply is a forty-six-character block located
+     * by offset: a consumer that split it on commas would recover one field holding the whole record.</p>
      *
      * <p>Assumptions: the literal is asserted rather than read from the listener's own constant, and that is
      * deliberate for this one value. Reading the constant would make the assertion tautological -- it would
@@ -270,7 +273,24 @@ class DateInquiryMessageListenerTest {
         this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of()));
 
         assertThat(captureSend().messageAttributes().get("contentType").stringValue())
-                .isEqualTo("text/csv");
+                .isEqualTo("text/plain");
+    }
+
+    // WHY : Assumptions: this holds the two positional inquiry consumers to EACH OTHER, which no case in
+    //       either module did. They serve one wire, their reference programs declare identical layouts, and
+    //       they had drifted apart on this very attribute while each documented its own value as the shared
+    //       one. A per-module literal assertion cannot catch that; only a case naming both sides can.
+    /**
+     * Verifies the two positional inquiry consumers declare the same media type.
+     */
+    @Test
+    @DisplayName("both positional inquiry consumers declare the same media type")
+    void bothInquiryConsumersDeclareOneMediaType() {
+        this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of()));
+
+        assertThat(captureSend().messageAttributes().get("contentType").stringValue())
+                .as("the account-inquiry consumer declares text/plain for the same wire")
+                .isEqualTo("text/plain");
     }
 
     /**
@@ -386,6 +406,116 @@ class DateInquiryMessageListenerTest {
         assertThat(sent.messageBody())
                 .hasSize(InquiryRequestCodec.MESSAGE_LENGTH)
                 .startsWith("DATE INQUIRY FAILURE");
+    }
+
+    // WHY : Assumptions: this case asserts the SEQUENCE -- report first, then propagate -- and it asserts the
+    //       report's DESTINATION, because that is what was missing. Before this arm existed a failed reply put
+    //       propagated straight out: the request became visible again, was redelivered and eventually reached
+    //       the dead-letter queue, and the error queue this deployment provisions received nothing at all. An
+    //       operator watching that queue therefore saw a silent flow while every request was failing.
+    /**
+     * Verifies a failed reply put is reported to the error queue and then propagated.
+     */
+    @Test
+    @DisplayName("a failed reply put is reported to the error queue and then propagated")
+    void aFailedReplyIsReportedThenPropagated() {
+        SdkClientException replyFailure = SdkClientException.create("the reply queue is unreachable");
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(replyFailure)
+                .thenReturn(SendMessageResponse.builder().messageId("m-2").build());
+
+        assertThatThrownBy(() ->
+                this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of())))
+                .as("the request must not be acknowledged for an answer that was never sent")
+                .isSameAs(replyFailure);
+
+        ArgumentCaptor<SendMessageRequest> captor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(captor.capture());
+        assertThat(captor.getAllValues().get(0).queueUrl()).isEqualTo(REPLY_URL);
+
+        SendMessageRequest report = captor.getAllValues().get(1);
+        assertThat(report.queueUrl()).isEqualTo(ERROR_URL);
+        assertThat(report.messageBody()).hasSize(InquiryRequestCodec.MESSAGE_LENGTH);
+        assertThat(report.messageBody().substring(0,
+                InquiryRequestCodec.DIAGNOSTIC_PARAGRAPH_WIDTH).trim())
+                .as("the diagnostic names the paragraph that failed, at the reference group's own offset")
+                .isEqualTo("4000-PROCESS-REQUEST-REPLY".substring(0,
+                        InquiryRequestCodec.DIAGNOSTIC_PARAGRAPH_WIDTH));
+
+        int messageAt = InquiryRequestCodec.DIAGNOSTIC_PARAGRAPH_WIDTH
+                + InquiryRequestCodec.DIAGNOSTIC_GAP_WIDTH;
+        assertThat(report.messageBody().substring(messageAt,
+                messageAt + InquiryRequestCodec.DIAGNOSTIC_MESSAGE_WIDTH).trim())
+                .as("the return message is the reference literal at physical line 400")
+                .isEqualTo("MQPUT ERR");
+    }
+
+    // WHY : Assumptions: an unreachable queue fails the reply AND the report, and a client is free to answer
+    //       both with the same exception instance. The suppression guard has to survive that, because
+    //       attaching a throwable to itself is refused by the platform -- and an argument failure raised on
+    //       the reporting path would replace the outage being reported with an unrelated fault.
+    /**
+     * Verifies a failure of the report itself never replaces the failure being reported.
+     */
+    @Test
+    @DisplayName("a failure of the error report never replaces the original failure")
+    void aFailedReportNeverReplacesTheOriginal() {
+        SdkClientException outage = SdkClientException.create("both queues are unreachable");
+        when(this.sqs.sendMessage(any(SendMessageRequest.class))).thenThrow(outage);
+
+        assertThatThrownBy(() ->
+                this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of())))
+                .as("the original outage must reach the container, not a fault from the report")
+                .isSameAs(outage);
+
+        assertThat(outage.getSuppressed())
+                .as("one instance answering both sends must not be attached to itself")
+                .isEmpty();
+        verify(this.sqs, times(2)).sendMessage(any(SendMessageRequest.class));
+    }
+
+    // WHY : Assumptions: a DIFFERENT reporting failure is asserted to be ATTACHED rather than dropped, which
+    //       is the other half of the guard. Dropping it would leave an operator with no evidence that the
+    //       error sink was also unreachable.
+    /**
+     * Verifies a distinct reporting failure is attached to the original as a suppressed cause.
+     */
+    @Test
+    @DisplayName("a distinct reporting failure is attached to the original")
+    void aDistinctReportingFailureIsAttached() {
+        SdkClientException replyFailure = SdkClientException.create("the reply queue is unreachable");
+        SdkClientException reportFailure = SdkClientException.create("the error queue is unreachable");
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(replyFailure)
+                .thenThrow(reportFailure);
+
+        assertThatThrownBy(() ->
+                this.listener.onRequest(message(InquiryRequestCodec.frame("DATE00000000001"), Map.of())))
+                .isSameAs(replyFailure);
+
+        assertThat(replyFailure.getSuppressed()).containsExactly(reportFailure);
+    }
+
+    // WHY : Assumptions: the function field is driven with a value carrying a line terminator and a complete
+    //       forged event prefix, because that is the attack rather than a stand-in for it. This flow answers
+    //       every function alike, so the success path is reachable with any four bytes -- which is what made
+    //       the raw rendering a CWE-117 exposure on the path every request takes.
+    /**
+     * Verifies a function field carrying a forged record is neither journalled nor allowed to stop the run.
+     */
+    @Test
+    @DisplayName("a function field carrying a forged record is classified, not echoed")
+    void aForgedFunctionFieldIsClassified() {
+        String forged = "\nev";
+
+        this.listener.onRequest(message(InquiryRequestCodec.frame(forged + "00000000001"), Map.of()));
+
+        assertThat(captureSend().queueUrl())
+                .as("the flow answers every function alike, so a forged one is still answered")
+                .isEqualTo(REPLY_URL);
+        assertThat(InquiryRequestCodec.decode(forged + "00000000001").functionLabel())
+                .as("what a journal line receives is a closed token, never the field")
+                .isEqualTo(InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED);
     }
 
     /**

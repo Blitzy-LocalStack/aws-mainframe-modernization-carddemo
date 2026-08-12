@@ -34,6 +34,7 @@ import type { AxiosInstance, AxiosResponse, InternalAxiosRequestConfig } from 'a
 
 import { runtimeApiBaseUrl } from './runtimeConfig';
 import { recordServerDate } from './serverClock';
+import type { ApiError, ContractOperation } from './types';
 
 const ACCESS_TOKEN_STORAGE_KEY = 'carddemo.access-token';
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -282,6 +283,134 @@ export function getApiClient(): AxiosInstance {
  */
 export function resetApiClient(): void {
   client = undefined;
+}
+
+// WHY : Refactoring Rationale: the two request-and-response helpers every typed API module composes
+//       its calls with, and the version prefix they are defined against, are declared here: these
+//       three declarations were moved out of `./types`. That module
+//       is a TYPES-ONLY module -- everything in it is erased at compile time, which is what lets it be
+//       imported with `import type` from anywhere without pulling code into a bundle -- and a value, a
+//       function and a regular expression are none of them erasable, so their presence there quietly
+//       contradicted the module's own contract. They belong here rather than in a module of their own
+//       because both are boundary concerns this file already owns: `requestPath` composes the target
+//       that `getApiClient` sends, and `isApiError` reads the failure body that the same client's
+//       rejection carries. The alternative -- a fourth module beside `client`, `runtimeConfig` and
+//       `serverClock` -- would have added an import edge to seven callers for declarations only ever
+//       used alongside the client they are already importing.
+// WHY : Trade-offs: the runtime types this file needs from `./types` are imported with `import type`,
+//       so the dependency arrow still points from this module to that one and never back. Placing
+//       `requestPath` in `./types` had been the shorter arrangement precisely because it put the
+//       function beside the `ContractOperation` interface it consumes; the cost paid here is that the
+//       two now sit in different files, and what it buys is a types module that is genuinely erasable.
+
+/**
+ * The version prefix every published contract path carries and no client target does.
+ *
+ * Assumptions: the prefix belongs to the configured base URL rather than to a per-request target.
+ * `VITE_API_BASE_URL` addresses the public HTTP API, whose route keys are all versioned -- the
+ * `route_keys` default in `infra/modules/api-gateway-http/variables.tf` records that every key is
+ * published under `/api/v1` -- so the base URL a build is given already ends in this prefix and a
+ * target repeating it would resolve to `/api/v1/api/v1/...`.
+ */
+export const API_PATH_PREFIX = '/api/v1';
+
+/** Matches one path-template placeholder, for example `{cardSelector}`. */
+const PATH_PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]*)\}/gu;
+
+/**
+ * Builds the request target for one contract operation, substituting its path parameters.
+ *
+ * Assumptions: every supplied value is percent-encoded, and that is a correctness requirement rather
+ * than defensive habit. Two contracts take a path parameter whose value comes from a response
+ * body -- a sealed cursor in authorization-api and a reference code in reference-api -- and a sealed
+ * token is base64url text that may legitimately contain characters a target treats as structure.
+ * Encoding it is what stops such a value from being read as extra path segments.
+ *
+ * Assumptions: an unsubstituted placeholder and an unused parameter are BOTH refused. Refusing only
+ * the first would let a caller pass a misspelled parameter name and receive a target still carrying
+ * the literal placeholder text, which the service answers with 400 against a value the caller never
+ * typed -- a failure attributed to the wrong side of the boundary.
+ * @param {ContractOperation} operation - The operation, whose `path` is its contract template.
+ * @param {Readonly<Record<string, string>>} [parameters] - One value per placeholder in that
+ *   template, keyed by placeholder name. Omit it for an operation that declares none.
+ * @returns {string} The target relative to the configured base URL, with the version prefix removed
+ *   and every placeholder replaced by its percent-encoded value.
+ * @throws {RangeError} If the operation's path does not carry the version prefix, if a placeholder
+ *   has no supplied value, or if a supplied value matches no placeholder.
+ */
+export function requestPath(
+  operation: ContractOperation,
+  parameters: Readonly<Record<string, string>> = {},
+): string {
+  if (!operation.path.startsWith(`${API_PATH_PREFIX}/`)) {
+    throw new RangeError(
+      `Contract path for ${operation.operationId} must begin with ${API_PATH_PREFIX}/.`,
+    );
+  }
+
+  const template = operation.path.slice(API_PATH_PREFIX.length);
+  const consumed = new Set<string>();
+
+  /**
+   * Substitutes one placeholder, recording that its parameter was consumed.
+   *
+   * Assumptions: declared as a named inner function rather than written inline at the call below,
+   * because `jsdoc/require-jsdoc` is configured with `publicOnly: false` and so selects a function
+   * expression in every position -- and a block comment attached to an inline argument is moved by
+   * Prettier onto the preceding expression, which detaches it from what it documents.
+   * @param {string} _match - The whole matched placeholder, unused; the name alone identifies it.
+   * @param {string} name - The placeholder's parameter name.
+   * @returns {string} The supplied value, percent-encoded so it cannot read as extra path segments.
+   * @throws {RangeError} If no value was supplied for that placeholder.
+   */
+  function substitute(_match: string, name: string): string {
+    const value = parameters[name];
+    if (value === undefined) {
+      throw new RangeError(`Operation ${operation.operationId} requires a value for ${name}.`);
+    }
+    consumed.add(name);
+    return encodeURIComponent(value);
+  }
+
+  const target = template.replace(PATH_PLACEHOLDER, substitute);
+
+  for (const name of Object.keys(parameters)) {
+    if (!consumed.has(name)) {
+      throw new RangeError(
+        `Operation ${operation.operationId} declares no path parameter ${name}.`,
+      );
+    }
+  }
+  return target;
+}
+
+/**
+ * Reports whether an unknown value is a problem document a screen may read field errors from.
+ *
+ * Assumptions: the members probed are the ones a caller acts on -- the status, the correlation
+ * identifier a user quotes to support, and the field-error array a form binds to -- rather than every
+ * member the interface declares. Probing all eleven would reject a body from a future service that
+ * added a member, and the guard exists to decide whether the body is USABLE, not whether it is
+ * exhaustive.
+ *
+ * Alternatives Considered: narrowing with a cast at each call site instead, which needs no helper.
+ * Rejected because a cast asserts the shape without checking it, so a screen reading `fieldErrors`
+ * from an HTML error page returned by a misconfigured gateway would throw on `undefined.length` and
+ * report as a rendering bug rather than as a non-JSON response.
+ * @param {unknown} value - A response body of unknown shape, typically from a rejected request.
+ * @returns {boolean} `true` when the value carries the three members a caller acts on, narrowing it
+ *   to {@link ApiError}.
+ */
+export function isApiError(value: unknown): value is ApiError {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<ApiError>;
+  return (
+    typeof candidate.status === 'number' &&
+    typeof candidate.correlationId === 'string' &&
+    Array.isArray(candidate.fieldErrors)
+  );
 }
 
 /**

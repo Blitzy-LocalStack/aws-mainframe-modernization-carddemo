@@ -43,28 +43,36 @@
  * it to L43 would be the unsupported-rationale offence its L41 names, committed inside the
  * sentence claiming to observe it.</p>
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: the roster below names three classes and all three are present, so it is an
+ * <p>Assumptions: the roster below names four classes and all four are present, so it is an
  * inventory and not a forecast. Measured at this revision this directory holds this charter,
- * {@code DataSourceConfig}, {@code BatchConfig} and {@code SqsConfig}:
+ * {@code DataSourceConfig}, {@code BatchConfig}, {@code SqsConfig} and
+ * {@code SqsBatchFailureReporter}:
  *
  * <pre>
- * this directory: 4 java files = 3 classes + 1 charter
+ * this directory: 5 java files = 4 classes + 1 charter
  * </pre>
  *
- * <p>Refactoring Rationale: the marker line carried a planned clause naming {@code SqsConfig}, and the
- * paragraphs around it declared that class a target rather than an inventory entry. Both were correct
- * for the tree they were written against and are now false of this directory: the class landed, so a
- * clause reserving its name and a prose declaration of its absence would each report the opposite of
- * what a reader finds here. The clause is withdrawn rather than left in place because the check that
- * reads it asserts BOTH directions -- a planned name whose file exists fails the build, which is
- * precisely the drift the clause was added to catch. The marker is measured against this directory on
- * every build by
+ * <p>Refactoring Rationale: the fourth class is {@code SqsBatchFailureReporter}, and it is here rather
+ * than beside the rule that calls it for one structural reason. It is the ADAPTER half of
+ * {@code com.carddemo.batch.service.BatchFailureReporter}, a port declared in the service package
+ * beside its only caller, and its three concerns are all this package's own: a queue client, a
+ * validated queue address and a serialiser. Placing the adapter beside the port instead would make the
+ * service package depend on this one, which already depends on it for the durable step ledger, so the
+ * two would form a cycle. It is therefore an admitted exception to the "binds external concerns while
+ * the context is being built" reading below, and the exception is stated rather than left for a reader
+ * to infer: this class does its work at run time, on the failure path, and not during refresh. What
+ * keeps it inside this package's remit is that everything it knows is a binding -- it holds no rule,
+ * decides no outcome and reads no business row.</p>
+ *
+ * <p>Assumptions: the marker line carries NO planned clause, so its two figures differ by exactly one
+ * -- the charter itself -- which is the ordinary relationship every other marked charter in the tree
+ * states. A planned clause is the wrong tool here because the check that reads it asserts both
+ * directions: a reserved name whose file exists fails the build. The marker is measured against this
+ * directory on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so neither figure can drift silently. Assumptions: with no planned clause the two figures now differ
- * by exactly one -- the charter itself -- which is the ordinary relationship every other marked
- * charter in the tree states.</p>
+ * so neither figure can drift silently.</p>
  *
  * <h2>Purpose</h2>
  *
@@ -143,14 +151,13 @@
  *   <li>{@code SqsConfig} owns publish-only access to the terminal error sink: a bounded synchronous
  *       queue client, and the closed set of message attributes a published event carries, whose
  *       payload shape is fixed by the {@code BatchErrorEvent} record in the sibling {@code dto}
- *       package. Refactoring Rationale: this entry said the class owned a listener that "does not
- *       start with the context". It owns no listener at all -- the delivered class declares no
- *       listener container factory and no {@code @SqsListener}, and listener startup is switched off
- *       in {@code src/main/resources/application.yml} where the lifecycle concern belongs. Naming a
- *       listener here implied a consumer whose absence a reader would have had to discover by
- *       looking, and this module has no consumer: no reference batch program reads a queue, and the
- *       two reference producers of the sink's own name are online programs of the inquiry extension
- *       that migrate to other contexts. Trade-offs: the class is property-gated, so a task whose
+ *       package. Assumptions: the class owns NO listener -- it declares no listener container factory
+ *       and no {@code @SqsListener}, and listener startup is switched off in
+ *       {@code src/main/resources/application.yml} where the lifecycle concern belongs. The absence is
+ *       stated rather than left to be discovered, because this module has no consumer at all: no
+ *       reference batch program reads a queue, and the two reference producers of the sink's own name
+ *       are online programs of the inquiry extension that migrate to other contexts. Trade-offs: the
+ *       class is property-gated, so a task whose
  *       selected job has nothing to report starts and exits cleanly instead of failing on a queue it
  *       never needed. That follows from this module being argument-driven:
  *       {@code BatchApplication} selects the unit of work from its {@code --job=} argument, never
@@ -163,6 +170,27 @@
  *       it would make context refresh depend on a reachable queue and would pass silently in every
  *       test and local run, which is the same objection the sibling contexts record against reading
  *       a queue's own settings at startup.</li>
+ *   <li>{@code SqsBatchFailureReporter} owns the STEP-LEVEL send, and is the only class in this
+ *       package that issues one. It satisfies {@code com.carddemo.batch.service.BatchFailureReporter},
+ *       the port the durable step ledger reports a failed step through, by serialising the
+ *       {@code BatchErrorEvent} the sibling {@code dto} package defines, shaping the request through
+ *       the binding {@code SqsConfig} validated, and absorbing every failure of its own so that a
+ *       reporting problem can never replace the step failure it was reporting. Assumptions: it is not
+ *       the module's only sender and does not claim to be. The service package's
+ *       {@code BatchErrorPublisher} issues the RUN-level notification the entry point announces as the
+ *       process exits, which carries the graded return code and no {@code AbendDetail}; this one
+ *       reports each failed step and carries a redacted one. Two occasions, two payloads, one queue.
+ *       Refactoring Rationale: this adapter had no bean declaration at all. The ledger takes the port
+ *       as an {@code Optional} and the container resolves an absent candidate to empty, so the gap
+ *       failed no context, no test and no build -- it silently disabled the step-level report, leaving
+ *       every step failure recorded in its ledger row and none of them reaching the terminal error sink
+ *       the migration plan provisions at its section 0.4.1.8, while the startup line the gate emits
+ *       reported publishing as ENABLED. {@code SqsConfig.batchFailureReporter} now declares it behind
+ *       that same gate. Trade-offs: sending is a side effect on a network client and the
+ *       binding is a validated value, so they are two classes rather than a method on the record.
+ *       That keeps one assertion able to cover the whole attribute contract with no transport
+ *       present, and it is the same split the module already applies between the ledger's decision
+ *       and the ledger's writer.</li>
  * </ul>
  *
  * <h2>The negative boundary: no OpenApiConfig and no SecurityConfig</h2>
@@ -209,7 +237,7 @@
  * queue infrastructure -- which with its own charter is five {@code .java} files; and that charter
  * states why there is no {@code BatchConfig} there, citing the same plan section 0.4.1.2 that
  * scopes the class here, and noting that the module declares no batch starter. This package is
- * chartered for three classes and four files, and states why there is no published-contract
+ * chartered for four classes and five files, and states why there is no published-contract
  * metadata and no resource-server filter chain here. A reader arriving from either charter finds
  * the mirror fact written down.</p>
  *
@@ -221,7 +249,7 @@
  *
  * <ul>
  *   <li>{@code batch} is OWNED, and is the only schema this module owns. It is created for the
- *       batch role at {@code data-migration/sql/V0__schemas_and_roles.sql:514-515} and holds
+ *       batch role at {@code data-migration/sql/V0__schemas_and_roles.sql:723-724} and holds
  *       {@code BatchRun}, mapped to {@code batch.batch_run}, together with the framework's own job
  *       repository tables.</li>
  *   <li>{@code ledger} is owned by {@code transaction-service} and reached under a cross-schema
@@ -231,8 +259,8 @@
  *       plan assigns this module.</li>
  *   <li>{@code account} is owned by {@code account-service} and reached under a grant narrowed to
  *       one table: {@code SELECT} across the schema at
- *       {@code data-migration/sql/V0__schemas_and_roles.sql:768}, with {@code UPDATE} granted on
- *       {@code account.accounts} alone at its line 779. {@code Account} maps to that table and
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1215}, with {@code UPDATE} granted on
+ *       {@code account.accounts} alone at its line 1226. {@code Account} maps to that table and
  *       {@code CardXref} to {@code account.card_xref}, which this role may read and not write.
  *       Assumptions: one named table is the exact privilege because the whole nightly chain holds
  *       only two write sites against this schema, both rewriting an account master that already
@@ -241,7 +269,7 @@
  *       would also widen silently, since a table added to that schema afterwards would be writable
  *       the moment it was created with nothing recording that it had become so.</li>
  *   <li>{@code reference} is SELECT ONLY, and no write grant exists: its grant at
- *       {@code data-migration/sql/V0__schemas_and_roles.sql:815} carries {@code SELECT} and
+ *       {@code data-migration/sql/V0__schemas_and_roles.sql:1277} carries {@code SELECT} and
  *       nothing further. {@code DisclosureGroup} maps to {@code reference.disclosure_groups}, and
  *       a job here reads a rate rather than maintaining one.</li>
  * </ul>
@@ -285,22 +313,38 @@
  *
  * <p>{@code BatchConfig}'s job repository together with the {@code batch.batch_run} table is this
  * module's analogue of a mainframe restart directive. {@code BatchRun} declares a uniqueness
- * constraint over {@code (run_id, step_name)} above a surrogate identity key, which is the mechanism
- * <i>intended</i> to make a redriven orchestrator state a no-op for a step that already completed
+ * constraint over {@code (run_id, step_name)} above a surrogate identity key, and that constraint is
+ * the mechanism that makes a redriven orchestrator state a no-op for a step that already completed
  * rather than a second application of the same work.</p>
  *
- * <p>Trade-offs: the two halves of that sentence are at different stages, and collapsing them would
- * overstate what this package delivers. The framework's own job repository IS wired here and IS
- * operative: because the business date is added as an identifying job parameter, a repeat of a
- * business date that already completed is recognised and reported clean, which is the guarantee
- * {@code BatchApplication} implements at its {@code JobInstanceAlreadyCompleteException} branch. The
- * {@code batch.batch_run} half is <b>not</b> operative: the table and its repository exist, but the
- * only class that touches them lives in the sibling service package and has no production caller
- * while the job beans remain unauthored. So the granularity available today is the whole business
- * date, not the individual step, and a mid-chain redrive of one state within a night cannot yet be
- * told apart from a first attempt at it. Assumptions: recording that gap here is worth more than a
- * tidier paragraph, because this is the package a reader consults to learn what the restart story
- * is, and the step-level half of it is the half that is easy to assume is already running.</p>
+ * <p>Refactoring Rationale: <b>both halves are now operative, and this paragraph used to say they were
+ * not.</b> The framework's own job repository is wired here: because the business date is added as an
+ * identifying job parameter, a repeat of a business date that already completed is recognised and
+ * reported clean, which is the guarantee {@code BatchApplication} implements at its
+ * {@code JobInstanceAlreadyCompleteException} branch. The {@code batch.batch_run} half is operative too:
+ * every step of all seven job beans runs through the ledger, so each step of each run
+ * reads and writes its own ledger row and a mid-chain redrive of one state skips the states that already
+ * completed. The earlier text said the table's "only class ... has no production caller while the job
+ * beans remain unauthored", which described a state of this module that no longer holds. A charter
+ * that understates what it delivers is not a safe error: a reader planning a recovery would have
+ * concluded that step-level redrive was unavailable and rebuilt it.</p>
+ *
+ * <p>Assumptions: the ledger is reached by TWO spellings and not one, and stating only the first would
+ * send a reader looking for the wrong thing in five of the seven jobs. Measured at this revision, the
+ * two dataset round-trip jobs -- {@code ExportJob} and {@code ImportJob} -- build their step through
+ * {@code LedgerGuardedStep} below, which wraps the body and grades the exit status for them; the other
+ * five build their own step and call {@code BatchStepLedger.runStep} from inside their own tasklet,
+ * because each of them also has to publish counters or banners the shared builder does not know about.
+ * Trade-offs: two spellings of one guarantee is a real cost, and it is accepted rather than resolved by
+ * forcing all seven through the builder, because the builder's contract is a body that returns a graded
+ * outcome and nothing else -- widening it to carry a job's own counters would put five jobs' reporting
+ * concerns into this package. What matters for the guarantee is that BOTH spellings reach the same
+ * method on the same class, so neither can record a step outcome the other would not.</p>
+ *
+ * <p>Assumptions: the granularity available is therefore the STEP, and the business-date granularity is
+ * the coarser guarantee that still holds beneath it. The two are complementary rather than alternative --
+ * a repeated business date is refused by the framework before any step runs, and a redriven execution of
+ * the same run identifier is filtered step by step by the ledger.</p>
  *
  * <p>Refactoring Rationale: there was no checkpoint contract to carry across, and the absence is
  * stated as an absence. The only {@code RESTART=} anywhere in the thirty-eight jobs of

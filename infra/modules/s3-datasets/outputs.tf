@@ -6,10 +6,10 @@
 #   outputs and nothing else. Between them they answer the only three questions
 #   a caller has about this bucket: what it is called, what it is called to IAM,
 #   and where inside it each baseline dataset lives.
-#   WHY (Refactoring Rationale): this said SEVEN, which was never the declared
-#   number in this file. A return-surface count is the one figure a caller reads
-#   before wiring a module, so an under-count reads as "there is nothing else to
-#   wire" and hides the outputs a root actually needs.
+#   Assumptions: the count above is maintained against the `output` blocks in
+#   this file. A return-surface count is the one figure a caller reads before
+#   wiring a module, so an under-count reads as "there is nothing else to wire"
+#   and hides the outputs a root actually needs.
 #
 #   AAP section 0.5.3.5 states the contract these outputs exist to satisfy:
 #   "Terraform module outputs are the only source of runtime endpoints and

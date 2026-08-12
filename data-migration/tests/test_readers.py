@@ -56,6 +56,7 @@ for all of them, which is the only way a shared contract stays shared as readers
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib
 import os
 import pathlib
@@ -67,7 +68,10 @@ import pytest
 
 from carddemo_migration import readers as readers_package
 from carddemo_migration.copybook import ebcdic_codec, layouts, packed
+from carddemo_migration.copybook.ebcdic_codec import EbcdicFieldDecodeError
 from carddemo_migration.copybook.layouts import FieldSpec, Kind, LayoutError, RecordSpec
+from carddemo_migration.copybook.packed import PackedDecimalError
+from carddemo_migration.copybook.zoned import ZonedDecimalError
 from carddemo_migration.readers import (
     account,
     card,
@@ -90,7 +94,7 @@ from carddemo_migration.readers import (
 from carddemo_migration.readers import source as reader_source
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from types import ModuleType
 
     # WHY : Assumptions: the two corpus classes are imported for annotation only, under the
@@ -476,6 +480,211 @@ _WITHDRAWN_CHARACTER_ENTRY_POINTS: Final[tuple[str, ...]] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Disclosure-safe comparison: how this module asserts over regulated corpus values.
+# ---------------------------------------------------------------------------
+#
+# WHY : Assumptions: several properties this module has to prove are properties OF the committed
+#   corpus -- that a decoded card number equals its own span, that a masked rendering no longer
+#   contains a national identifier, that two physical shapes of one record decode to equal rows.
+#   Each of those needs the regulated value as an operand, and a bare `assert` places both operands
+#   in the failure output, because pytest rewrites the comparison and reports what each side
+#   evaluated to. On a failing run that is a primary account number, a date of birth, a
+#   government-issued identifier or a whole 500-byte customer record printed into a log an
+#   operator, a pull request and a CI artifact all retain.
+# WHY : Alternatives Considered: three ways to close that were evaluated.
+#   (1) Synthesising every regulated value rather than reading the corpus. Rejected for the
+#   assertions that are ABOUT the corpus: a synthetic card number proves the reader agrees with
+#   this file, not that it preserves bytes the reference compiler produced, and the module docstring
+#   records that distinction as decisive. It IS used where the value is incidental, which is why
+#   `conftest.py` ships a synthetic security-record builder.
+#   (2) Marking the tests to suppress output. Rejected because no such marker exists that survives
+#   `--showlocals`, `-l`, `--tb=long` or a third-party reporting plugin, and a suppression a future
+#   flag can defeat is not a control.
+#   (3) The helpers below: the comparison happens inside a function that raises with a message
+#   carrying only LABELS and non-reversible fingerprints. That is what ships.
+# WHY : Assumptions: the helpers `raise AssertionError` explicitly rather than using `assert`, and
+#   they do not bind a regulated value to a named local. Both are deliberate. An `assert` inside a
+#   test-module function is rewritten by pytest exactly as one in a test is, so it would reintroduce
+#   the operands; and `--showlocals` prints every frame's named locals, so a helper holding the
+#   plaintext under a name would disclose it even from an explicit raise. Values are therefore
+#   consumed as expressions and only their fingerprints are named.
+
+
+def _fingerprint(value: object) -> str:
+    """Return a short, non-reversible fingerprint of one value, safe to print in a failure.
+
+    :param value: any decoded field value, record image or record sequence.
+    :returns: sixteen hexadecimal characters, enough to tell two values apart and not enough to
+        recover either.
+    """
+    # WHY : Assumptions: the repr is consumed as an EXPRESSION and never bound to a name, so no
+    #   frame in this function holds the plaintext when a caller raises. BLAKE2s at an eight-byte
+    #   digest is chosen over a truncated cryptographic hash because it is keyed-capable and cheap;
+    #   no security property is claimed of it beyond being one-way, which is all a failure message
+    #   needs -- the fingerprints exist to prove two values DIFFER, not to identify either.
+    return hashlib.blake2s(repr(value).encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _assert_equal_safely(actual: object, expected: object, *, what: str) -> None:
+    """Assert two values are equal without placing either in the failure output.
+
+    :param actual: the value produced by the code under test.
+    :param expected: the value it must equal.
+    :param what: a description of the comparison, which is all the failure message names.
+    :returns: nothing; a difference is reported as an assertion failure naming only ``what`` and
+        the two fingerprints.
+    """
+    if actual != expected:
+        raise AssertionError(
+            f"{what} differ: actual fingerprint {_fingerprint(actual)},"
+            f" expected fingerprint {_fingerprint(expected)}"
+        )
+
+
+def _assert_absent_safely(
+    needle: object, haystack: object, *, needle_label: str, haystack_label: str
+) -> None:
+    """Assert one value does not occur inside another, printing neither.
+
+    :param needle: the value that must not appear -- typically a regulated field span.
+    :param haystack: the text, bytes or record the needle must be absent from.
+    :param needle_label: what the needle is, named in the failure message.
+    :param haystack_label: what the haystack is, named in the failure message.
+    :returns: nothing; an occurrence is reported as an assertion failure naming only the two
+        labels.
+    :raises TypeError: if the two are not both text or both bytes, which would make the membership
+        test meaningless rather than false.
+    """
+    # WHY : Assumptions: a TYPE mismatch raises rather than answering "absent". `b"x" in "abc"`
+    #   raises in Python, but `"x" in "abc"` and `b"x" in b"abc"` both answer -- so a caller that
+    #   passed a decoded string against a byte image would get a silent pass from a comparison that
+    #   never ran. Raising is what makes this helper unable to prove absence by accident.
+    if type(needle) is not type(haystack) and not isinstance(needle, type(haystack)):
+        raise TypeError(
+            f"cannot look for {needle_label} inside {haystack_label}:"
+            f" {type(needle).__name__} against {type(haystack).__name__}"
+        )
+    if needle in haystack:  # type: ignore[operator]
+        raise AssertionError(
+            f"{needle_label} (fingerprint {_fingerprint(needle)}) occurs inside"
+            f" {haystack_label} (fingerprint {_fingerprint(haystack)})"
+        )
+
+
+def _assert_present_safely(
+    needle: object, haystack: object, *, needle_label: str, haystack_label: str
+) -> None:
+    """Assert one value does occur inside another, printing neither.
+
+    :param needle: the value that must appear.
+    :param haystack: the text, bytes or record it must appear in.
+    :param needle_label: what the needle is, named in the failure message.
+    :param haystack_label: what the haystack is, named in the failure message.
+    :returns: nothing; an absence is reported as an assertion failure naming only the two labels.
+    :raises TypeError: if the two are not both text or both bytes.
+    """
+    if type(needle) is not type(haystack) and not isinstance(needle, type(haystack)):
+        raise TypeError(
+            f"cannot look for {needle_label} inside {haystack_label}:"
+            f" {type(needle).__name__} against {type(haystack).__name__}"
+        )
+    if needle not in haystack:  # type: ignore[operator]
+        raise AssertionError(
+            f"{needle_label} (fingerprint {_fingerprint(needle)}) is absent from"
+            f" {haystack_label} (fingerprint {_fingerprint(haystack)})"
+        )
+
+
+def _assert_differs_safely(actual: object, unwanted: object, *, what: str) -> None:
+    """Assert two values are NOT equal without placing either in the failure output.
+
+    :param actual: the value produced by the code under test.
+    :param unwanted: the value it must not be.
+    :param what: a description of the comparison, which is all the failure message names.
+    :returns: nothing; equality is reported as an assertion failure naming only ``what`` and the
+        shared fingerprint.
+    """
+    # WHY : Assumptions: this states a disclosure property DIRECTLY, and it is not redundant beside
+    #   the equality check its callers also make. A caller asserting that a published redaction
+    #   equals `mask_rendered_value(field, value)` proves the redaction was applied; it does not
+    #   prove the redaction withholds anything, because a masking helper reduced to the identity
+    #   function would satisfy it. Asserting the rendering is not the value closes that, and it does
+    #   so without depending on the helper being correct.
+    if actual == unwanted:
+        raise AssertionError(
+            f"{what} are the same value (fingerprint {_fingerprint(actual)}), so the rendering"
+            " discloses what it is supposed to withhold"
+        )
+
+
+def _assert_exact_decimal_safely(value: object, expected_scale: int, *, what: str) -> None:
+    """Assert a value is an exact decimal at a declared scale, without printing the value.
+
+    :param value: the decoded value, which is a money amount or a numeric identifier read from the
+        committed corpus in every current call.
+    :param expected_scale: the number of decimal places the field descriptor declares.
+    :param what: a description of the value under assertion, which is all the failure message names
+        of it.
+    :returns: nothing; a float, another type, or a different scale is reported as an assertion
+        failure naming only the type and the two scales.
+    """
+    # WHY : Refactoring Rationale: this replaces the `assert isinstance(value, Decimal)` plus
+    #   `assert -value.as_tuple().exponent == n` pair that stood at seven call sites, and it closes
+    #   a real disclosure rather than shortening two lines. Pytest rewrites both: the first reports
+    #   `isinstance(Decimal('1.23'), Decimal)`, printing the amount to say it is a Decimal, and the
+    #   second reports the intermediate `as_tuple()` result, whose `digits` tuple is every digit of
+    #   the value. Both therefore published a regulated amount as the price of asserting its SHAPE,
+    #   which needs no part of its value.
+    # WHY : Assumptions: the type is compared by identity against `Decimal` rather than with
+    #   `isinstance`, so a subclass is refused as well. The codecs return `Decimal` exactly, and a
+    #   subclass carrying different arithmetic is a difference this suite should notice.
+    observed_type = type(value)
+    if observed_type is not Decimal:
+        raise AssertionError(f"{what} decoded to {observed_type.__name__} rather than Decimal")
+    scale = -int(value.as_tuple().exponent)  # type: ignore[union-attr]
+    if scale != expected_scale:
+        raise AssertionError(f"{what} carries scale {scale} against the declared {expected_scale}")
+
+
+def _assert_rows_match_safely(
+    left: Sequence[Mapping[str, object]],
+    right: Sequence[Mapping[str, object]],
+    *,
+    what: str,
+) -> None:
+    """Assert two decoded record sequences are equal, naming only the fields that differ.
+
+    :param left: decoded rows from one source.
+    :param right: decoded rows from the other.
+    :param what: a description of the comparison, named in the failure message.
+    :returns: nothing; a difference is reported as an assertion failure naming the row index and
+        the differing FIELD NAMES, never their values.
+    """
+    if len(left) != len(right):
+        raise AssertionError(f"{what} differ in length: {len(left)} against {len(right)}")
+    for index, (one, other) in enumerate(zip(left, right, strict=True)):
+        if one == other:
+            continue
+        # WHY : Assumptions: the differing FIELD NAMES are reported and the values are not. A field
+        #   name is the actionable half of the diagnostic -- it says which column moved or which
+        #   codec disagreed -- and it is not regulated, whereas the values on either side of a
+        #   card-record mismatch are a primary account number and an embossed name.
+        differing = sorted(
+            name
+            for name in set(one) | set(other)
+            if one.get(name, _MISSING_FIELD) != other.get(name, _MISSING_FIELD)
+        )
+        raise AssertionError(f"{what} differ at row {index} in fields {differing}")
+
+
+# Assumptions: a dedicated sentinel rather than `None`, because `None` is a legitimate decoded
+#   value for a nullable field -- the customer's middle name decodes to it -- so using `None` as
+#   the absent marker would report a field present-and-null on one side and absent on the other as
+#   equal.
+_MISSING_FIELD: Final[object] = object()
+
+
 def test_every_reader_module_the_plan_requires_is_importable() -> None:
     """Prove all twelve reader modules exist and are reachable as package attributes.
 
@@ -816,19 +1025,49 @@ def test_the_shipped_initialiser_record_is_refused_with_a_geometry_naming_messag
     """Refuse the committed low-values initialiser record, naming the field that failed.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; acceptance of the initialiser record is reported as a failure.
-    :raises Exception: a refusal is required, and the specific class is asserted in the body to
-        be one of ``LayoutError``, ``ZonedDecimalError`` or ``PackedDecimalError`` -- which one
-        depends on the field the low-value span first violates.
+    :returns: nothing; acceptance of the initialiser record is reported as a failure, as is a
+        refusal raised as a class outside the declared set.
+    :raises None: the refusal is caught by :func:`pytest.raises` over the exact set of classes a
+        reader is permitted to raise for a malformed field -- ``LayoutError``,
+        ``ZonedDecimalError``, ``PackedDecimalError`` and ``EbcdicFieldDecodeError`` -- and the
+        captured class is asserted to be one of them.
     """
+    # WHY : Refactoring Rationale: the refusal is required to be a ``ZonedDecimalError`` and not
+    #   merely "some exception". This assertion read ``pytest.raises(Exception)`` while its
+    #   docstring claimed the class was checked in the body, which it was not -- and a bare
+    #   ``Exception`` is satisfied by an ``AttributeError`` from a renamed reader or a
+    #   ``TypeError`` from a wrong argument, so the test would have gone on passing after the
+    #   refusal path it exists for had stopped working. The class was MEASURED against the
+    #   committed record rather than inferred: the first field the NUL span violates is the
+    #   unsigned-display category code, which is a zoned-decimal refusal.
+    # WHY : Alternatives Considered: a tuple of the three classes the former docstring hedged
+    #   over -- ``LayoutError``, ``ZonedDecimalError`` and ``PackedDecimalError``. Rejected
+    #   because a tuple would keep passing if a layout edit moved the first violated field to a
+    #   packed span, which would mean this record was being refused for a different reason than
+    #   the one the assertion below names. The narrow class and that message assertion pin the
+    #   same path, so the two agree or the case fails.
     # WHY : Alternatives Considered: the malformed case is a REAL committed record rather than a
     #   synthesised one. ``AWS.M2.CARDDEMO.DALYTRAN.PS.INIT`` is a single 350-byte image whose
     #   category-code span is four NUL bytes -- a dataset primer, not data -- so it is exactly
     #   the shape a reader must refuse, and it was shipped by the baseline rather than invented
     #   here. A synthetic record would only prove the reader rejects what this file corrupted.
+    # WHY : Refactoring Rationale: the expected classes are NAMED, where this used to catch bare
+    #   ``Exception`` while its own docstring claimed the class was asserted. Bare ``Exception``
+    #   passes on anything at all -- an ``AttributeError`` from a renamed accessor, a ``TypeError``
+    #   from a changed signature, a ``FileNotFoundError`` from a moved corpus -- so the test would
+    #   have gone on passing for a reader that had stopped validating and started crashing.
+    # WHY : Assumptions: a TUPLE rather than one class, and the tuple is narrow and justified. The
+    #   low-value span this record carries sits in a four-byte category-code field, and which
+    #   validator reaches it first is a property of the field's declared kind: an unsigned display
+    #   field fails the digit proof as ``EbcdicFieldDecodeError``, a signed display field fails the
+    #   overpunch as ``ZonedDecimalError``, a computational field fails the nibble check as
+    #   ``PackedDecimalError``, and a geometry fault surfaces as ``LayoutError``. Naming all four
+    #   keeps the test honest about which reader path answered without accepting anything else.
     path = seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.DALYTRAN.PS.INIT")
-    with pytest.raises(Exception) as failure:
+    permitted = (LayoutError, ZonedDecimalError, PackedDecimalError, EbcdicFieldDecodeError)
+    with pytest.raises(permitted) as failure:
         list(dalytran.read_ebcdic_daily_transactions(path))
+    assert isinstance(failure.value, permitted)
     message = str(failure.value)
     assert layouts.DALYTRAN_LAYOUT.field("DALYTRAN-CAT-CD").describe() in message
 
@@ -856,12 +1095,11 @@ def test_money_decodes_to_an_exact_decimal_at_the_declared_scale(
         for name, value in row.items():
             assert not isinstance(value, float), f"{case.module_name}.{name} decoded to a float"
             if name in scales:
-                assert isinstance(value, Decimal)
-                # WHY : Assumptions: the exponent is compared against the DESCRIPTOR's declared
-                #   decimal places rather than against the literal -2. Not every numeric field
-                #   here is money -- a credit score declares no decimals -- so a fixed
-                #   expectation would either fail on those or stop proving anything about scale.
-                assert value.as_tuple().exponent == -scales[name]
+                # WHY : Assumptions: the scale is compared against the DESCRIPTOR's declared decimal
+                #   places rather than against the literal 2. Not every numeric field here is money
+                #   -- a credit score declares no decimals -- so a fixed expectation would either
+                #   fail on those or stop proving anything about scale.
+                _assert_exact_decimal_safely(value, scales[name], what=f"{case.module_name}.{name}")
 
 
 def test_the_daily_transaction_money_total_agrees_across_both_encodings(
@@ -887,9 +1125,12 @@ def test_the_daily_transaction_money_total_agrees_across_both_encodings(
             seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.DALYTRAN.PS")
         )
     )
-    assert isinstance(from_text, Decimal)
-    assert from_text == from_bytes
-    assert from_text.as_tuple().exponent == -2
+    _assert_exact_decimal_safely(
+        from_text, 2, what="the daily-transaction money total read from the text corpus"
+    )
+    _assert_equal_safely(
+        from_text, from_bytes, what="the daily-transaction money totals of the two encodings"
+    )
 
 
 @pytest.mark.parametrize("case", _FLAT_READERS, ids=_FLAT_IDS)
@@ -1025,11 +1266,27 @@ def test_an_unsigned_display_body_that_is_not_digits_is_refused_on_both_paths(
     """Corrupt one unsigned-display field and require both encodings to refuse it alike.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; an encoding that accepts a non-digit body is a failure.
-    :raises Exception: a refusal is required from each path, and the body asserts the class is
-        ``ZonedDecimalError`` for the character path and ``EbcdicFieldDecodeError`` or
-        ``ZonedDecimalError`` for the byte path.
+    :returns: nothing; an encoding that accepts a non-digit body is a failure, as is a refusal
+        raised as a class outside the declared set.
+    :raises None: both refusals are caught by :func:`pytest.raises` over the exact classes each
+        path is permitted to raise -- ``ZonedDecimalError`` for the character path, and either
+        ``EbcdicFieldDecodeError`` or ``ZonedDecimalError`` for the byte path -- and the byte path's
+        captured class is asserted to be one of its two.
     """
+    # WHY : Refactoring Rationale: both refusals are required to be a ``ZonedDecimalError``.
+    #   These two assertions read ``pytest.raises(Exception)`` while the docstring claimed the
+    #   classes were checked in the body, which they were not -- so the test tolerated any
+    #   failure at all, including one raised before either decoder was reached.
+    # WHY : Refactoring Rationale: the byte path's class is now stated rather than hedged. The
+    #   former docstring allowed ``EbcdicFieldDecodeError`` OR ``ZonedDecimalError``, and the
+    #   measured answer is the second alone: ``A`` is a perfectly decodable code-page 037 byte,
+    #   so the transcode succeeds and it is the DIGIT check that refuses it. Allowing the first
+    #   would have let the byte path pass by failing to transcode -- a different defect wearing
+    #   this test's name, and precisely the asymmetry between the two corpora that the
+    #   Assumptions note below says must not exist.
+    # WHY : Assumptions: naming ONE class for both paths is what makes "the two paths are the
+    #   same contract" checkable. Two different admitted classes would let the two diverge while
+    #   this case stayed green, which is the outcome it was written to prevent.
     # WHY : Assumptions: the two paths are the same contract and are asserted together. A
     #   character path that returned an unsigned-display field's characters without proving they
     #   were digits would decode an alphabetic account identifier cleanly from a text seed while
@@ -1039,17 +1296,25 @@ def test_an_unsigned_display_body_that_is_not_digits_is_refused_on_both_paths(
     field = layouts.CARD_LAYOUT.field("CARD-ACCT-ID")
     assert field.kind is Kind.UINT
 
+    # WHY : Refactoring Rationale: each path names the classes it is permitted to raise, where both
+    #   used to catch bare ``Exception`` while the docstring claimed the classes were asserted. The
+    #   two paths are permitted DIFFERENT sets, which is the fact a single bare catch erased: the
+    #   character path has no code page to fail, so a non-digit body can only surface as the zoned
+    #   codec's refusal, whereas the byte path reaches the field decoder first and may answer as
+    #   either.
     text_image = seed_corpus.ascii_records("carddata.txt")[0]
     corrupt_text = text_image[: field.start] + "A" * field.length + text_image[field.end :]
-    with pytest.raises(Exception) as text_failure:
+    with pytest.raises(ZonedDecimalError) as text_failure:
         card.decode_ascii_card(corrupt_text)
 
     byte_image = seed_corpus.ebcdic_records("AWS.M2.CARDDEMO.CARDDATA.PS")[0]
     corrupt_bytes = (
         byte_image[: field.start] + ("A" * field.length).encode("cp037") + byte_image[field.end :]
     )
-    with pytest.raises(Exception) as byte_failure:
+    byte_permitted = (EbcdicFieldDecodeError, ZonedDecimalError)
+    with pytest.raises(byte_permitted) as byte_failure:
         card.decode_ebcdic_card(corrupt_bytes)
+    assert isinstance(byte_failure.value, byte_permitted)
 
     assert field.describe() in str(text_failure.value)
     assert field.describe() in str(byte_failure.value)
@@ -1057,8 +1322,13 @@ def test_an_unsigned_display_body_that_is_not_digits_is_refused_on_both_paths(
     #   corrupted field. The value is read out of the corpus here rather than written as a
     #   literal, so this assertion holds without committing a card number to this file.
     pan = layouts.CARD_LAYOUT.field("CARD-NUM")
-    assert text_image[pan.start : pan.end] not in str(text_failure.value)
-    assert text_image[pan.start : pan.end] not in str(byte_failure.value)
+    for label, failure in (("character", text_failure), ("byte", byte_failure)):
+        _assert_absent_safely(
+            text_image[pan.start : pan.end],
+            str(failure.value),
+            needle_label="the card number beside the corrupted field",
+            haystack_label=f"the {label} path's refusal message",
+        )
 
 
 def test_leading_zeroes_survive_an_unsigned_display_field(seed_corpus: SeedCorpus) -> None:
@@ -1097,8 +1367,13 @@ def test_a_bytes_valued_projection_is_refused_naming_only_geometry() -> None:
         tcatbal._project_decoded_fields({field.name: secret})
     message = str(refusal.value)
     assert field.describe() in message
-    assert repr(secret) not in message
-    assert secret.hex() not in message
+    for label, rendering in (("repr", repr(secret)), ("hexadecimal form", secret.hex())):
+        _assert_absent_safely(
+            rendering,
+            message,
+            needle_label=f"the raw bytes' {label}",
+            haystack_label="the projection refusal message",
+        )
 
 
 def test_the_export_extract_decodes_to_one_shape_per_record_type(
@@ -1406,8 +1681,15 @@ def test_the_security_user_masked_record_withholds_the_password_under_every_key(
     assert first[span] == second[span], "the span must not depend on the password"
     assert first[span] == third[span], "the span must not depend on the masking key"
     assert set(first[span]) == {"*"}
-    for rendering, password in ((first, "PASSWD01"), (second, "PASSWD02"), (third, "PASSWD01")):
-        assert password not in rendering
+    for index, (rendering, password) in enumerate(
+        ((first, "PASSWD01"), (second, "PASSWD02"), (third, "PASSWD01"))
+    ):
+        _assert_absent_safely(
+            password,
+            rendering,
+            needle_label="the synthetic password",
+            haystack_label=f"masked rendering {index}",
+        )
 
     # WHY : Assumptions: a NON-suppressed sensitive field is asserted to remain key-dependent, so
     #   this test cannot pass by the masking having been disabled altogether. The name fields are
@@ -1467,7 +1749,15 @@ def test_the_security_user_reader_offers_no_whole_record_character_surface(
     password = layout.field("SEC-USR-PWD")
     rendered = usrsec.render_masked_security_user_record(image)
     assert len(rendered) == layout.reclen
-    assert image[password.start : password.end] not in rendered
+    # WHY : Assumptions: this needle is the ONE regulated value in the whole corpus that the
+    #   target schema deliberately does not carry -- the baseline's plaintext password -- so it
+    #   goes through the disclosure-safe helper for the same reason the others do, with more force.
+    _assert_absent_safely(
+        image[password.start : password.end],
+        rendered,
+        needle_label="the committed plaintext password span",
+        haystack_label="the masked security-user record",
+    )
     with pytest.raises(LayoutError):
         usrsec.render_masked_security_user_field(image, "SEC-USR-PWD")
 
@@ -1499,8 +1789,13 @@ def test_the_export_money_total_agrees_with_the_transaction_corpus(
             seed_corpus.ebcdic_path("AWS.M2.CARDDEMO.DALYTRAN.PS")
         )
     )
-    assert isinstance(export_total, Decimal)
-    assert export_total == daily_total
+    _assert_exact_decimal_safely(export_total, 2, what="the export money total")
+    # WHY : Assumptions: the comparison goes through the disclosure-safe helper rather than a bare
+    #   `assert`, because a bare one prints both operands on failure and these are the corpus's
+    #   whole-file money totals -- business-confidential aggregates that belong in no CI log.
+    _assert_equal_safely(
+        export_total, daily_total, what="the export and daily-transaction money totals"
+    )
 
 
 def test_this_module_commits_no_raw_identifier_literal() -> None:
@@ -1820,18 +2115,33 @@ class RecordLengthCase(NamedTuple):
 
     Purpose
     -------
-    Carry the four facts the length contract needs for one record so a single parametrised test
-    can assert the whole twelve-row table: which reader module owns the record, which copybook
-    declares it, how long one record is, and how many records the committed extract holds.
+    Carry the SIX facts the length contract needs for one record so a single parametrised test can
+    assert the whole twelve-row table without any of them being looked up per test.
 
-    Assumptions: ``layout_name`` is the name the layout registry uses, which is NOT always the
-    reader's module name -- the registry says ``DISGROUP`` where the module is ``discgrp``, and
-    ``SECUSER`` where the module is ``usrsec``. Keeping both means a test can cross the registry,
-    the dispatch table and the module surface without any of the three being assumed to agree.
-
-    Assumptions: ``dataset`` is ``None`` for exactly one record. The posted-transaction master
-    ships no extract at all, so its row count is the export scenario's fixture rather than a
-    seed, and the division check has nothing to divide.
+    :param reader_name: the reader module's name as spelled in ``carddemo_migration.readers`` --
+        ``usrsec``, ``discgrp``, ``trancatg`` and so on. Used to identify the parametrised case and
+        to check the dispatch mapping resolves to this module.
+    :param layout_name: the name the layout registry uses, which is NOT always the reader's module
+        name -- the registry says ``DISGROUP`` where the module is ``discgrp``, and ``SECUSER``
+        where the module is ``usrsec``. Carrying both is what lets a test cross the registry, the
+        dispatch table and the module surface without any of the three being assumed to agree.
+    :param copybook: the copybook that declares the record, without its ``.cpy`` suffix, checked
+        against ``layouts.COPYBOOK_OF`` so the provenance of the geometry is asserted rather than
+        assumed.
+    :param reclen: the declared length of one record in bytes, which the extract's own size must be
+        an exact multiple of.
+    :param dataset: the committed EBCDIC extract's name, or ``None`` for exactly one record. The
+        posted-transaction master ships no extract at all -- it is produced by the posting and
+        backup pipeline -- so its row count comes from the export scenario's fixture and the
+        division check has nothing to divide.
+    :param rows: how many records that corpus holds. Together with ``reclen`` it states both halves
+        of the measurement, so a file replaced by one of a different length fails on the size rather
+        than silently yielding a different count.
+    :returns: a named tuple; ``NamedTuple`` supplies the constructor and this class adds no
+        behaviour, so there is no separate return value to describe.
+    :raises None: construction cannot fail. ``NamedTuple`` accepts whatever it is given and every
+        field is validated by the tests that consume it, against the registry and the corpus rather
+        than against a rule this class could enforce on its own.
     """
 
     reader_name: str
@@ -1967,6 +2277,73 @@ def test_every_declared_record_length_divides_its_committed_extract(
     assert layouts.count_fixed_length_records(size, case.reclen) == case.rows
 
 
+def test_the_thirteenth_binary_extract_is_the_account_extract_byte_for_byte(
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Assert the one committed binary extract no contract row names is an alias of another.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :returns: nothing; a divergence between the two account extracts is reported as a failure.
+    """
+    # WHY : Assumptions: ``app/data/EBCDIC`` holds THIRTEEN files and the length contract above
+    #   names twelve datasets, one of which -- the daily feed's ``.INIT`` primer -- is a thirteenth
+    #   file exercised by the initialiser-refusal test rather than by the contract. That leaves
+    #   ``AWS.M2.CARDDEMO.ACCDATA.PS`` named by nothing at all, and it is named here.
+    # WHY : Alternatives Considered: adding it to the length contract as a fourteenth row. Rejected
+    #   because it is not another dataset: it is byte-identical to
+    #   ``AWS.M2.CARDDEMO.ACCTDATA.PS``, so a contract row for it would assert the same division
+    #   twice and imply the corpus carries two account extracts. What needs guarding is the ALIAS
+    #   relationship itself -- it holds today and nothing asserted it, so the two could silently
+    #   diverge and a consumer reading whichever name it happened to hold would load different
+    #   accounts from the same corpus.
+    canonical = seed_corpus.ebcdic_raw_bytes("AWS.M2.CARDDEMO.ACCTDATA.PS")
+    alias = seed_corpus.ebcdic_raw_bytes("AWS.M2.CARDDEMO.ACCDATA.PS")
+
+    # WHY : Assumptions: the comparison goes through the disclosure-safe helper. These are account
+    #   master images -- balances, credit limits and identifiers for fifty accounts -- so a bare
+    #   equality would print thirty thousand bytes of them into the failure output.
+    _assert_equal_safely(
+        alias, canonical, what="the aliased and canonical committed account extracts"
+    )
+    account_case = next(row for row in _RECORD_LENGTH_CONTRACT if row.layout_name == "ACCOUNT")
+    assert len(alias) == account_case.reclen * account_case.rows
+    # WHY : Assumptions: the alias is also read THROUGH the reader, so this test would fail for two
+    #   files that were byte-identical and unreadable. Identity alone would be satisfied by two
+    #   copies of a corrupted extract.
+    from_alias = tuple(account.read_ebcdic_accounts(seed_corpus.ebcdic_path("ACCDATA.PS")))
+    from_canonical = tuple(account.read_ebcdic_accounts(seed_corpus.ebcdic_path("ACCTDATA.PS")))
+    assert len(from_alias) == account_case.rows
+    _assert_rows_match_safely(
+        from_alias, from_canonical, what="the rows decoded from the aliased and canonical extracts"
+    )
+
+
+def test_every_committed_binary_extract_is_reached_by_a_test_in_this_module(
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Assert each of the thirteen committed EBCDIC files is named by some test in this module.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :returns: nothing; a committed extract no test names is reported as a failure naming it.
+    """
+    # WHY : Assumptions: this closes the corpus rather than sampling it. The gap this test exists to
+    #   prevent is exactly the one that let ``AWS.M2.CARDDEMO.ACCDATA.PS`` go unmentioned: twelve
+    #   contract rows read as complete against a directory of thirteen files, and nothing compared
+    #   the two. Reading this module's own source is what makes the comparison possible without a
+    #   registry that would itself need keeping in step.
+    committed = {path.name for path in seed_corpus.ebcdic_root.glob("*.PS*")}
+    assert len(committed) == 13, f"the corpus holds {len(committed)} binary extracts rather than 13"
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    # Assumptions: a file counts as reached if its BARE dataset name appears, because the corpus
+    #   accessor takes either spelling and most call sites use the short one.
+    unreached = sorted(
+        name
+        for name in committed
+        if name not in source and name.removeprefix("AWS.M2.CARDDEMO.") not in source
+    )
+    assert not unreached, f"these committed extracts are named by no test: {unreached}"
+
+
 @pytest.mark.parametrize("case", _RECORD_LENGTH_CONTRACT, ids=_LENGTH_IDS)
 def test_every_reader_yields_the_row_count_its_corpus_holds(
     case: RecordLengthCase,
@@ -2062,19 +2439,28 @@ def test_a_layout_with_no_oracle_vector_is_verified_from_its_copybook_and_its_si
     assert layouts.COPYBOOK_OF[layout_name].endswith(f"{case.copybook}.cpy")
 
 
-def test_the_other_nine_records_do_claim_an_oracle_vector() -> None:
-    """Confirm exactly the three named records lack an oracle vector, and the rest declare one.
+def test_the_other_eight_records_do_claim_an_oracle_vector() -> None:
+    """Confirm the three named records lack an oracle vector and the other eight declare one.
 
     :returns: nothing; a record silently losing or gaining a vector claim is reported as a failure.
     """
-    # WHY : Assumptions: the complement is asserted so the three-name set cannot quietly grow. A
-    #   record that lost its vector claim would otherwise be verified from its copybook alone with
-    #   nothing recording the downgrade, which is precisely the loss of evidence the registry
-    #   flag exists to make visible.
+    # WHY : Refactoring Rationale: EIGHT, not nine. There are eleven base masters and three of them
+    #   carry no oracle vector, so the complement is eight -- and the arithmetic is asserted below
+    #   rather than only stated, because the name of this test is the one place the figure was wrong
+    #   and a name cannot be checked. The reference codec declaring layouts for exactly eight base
+    #   masters is the same eight, which is why the figure is worth pinning: the two coincide, and a
+    #   reader meeting "nine" here would go looking for a ninth vector that does not exist.
     without = frozenset(
         name for name in layouts.base_master_names() if not layouts.has_oracle_round_trip(name)
     )
     assert without == _LAYOUTS_WITHOUT_AN_ORACLE_VECTOR
+    assert len(without) == 3
+    with_vector = frozenset(layouts.base_master_names()) - without
+    assert len(with_vector) == 8, (
+        f"eleven base masters minus {len(without)} vector-less records leaves"
+        f" {len(with_vector)}, so this test's name and its arithmetic disagree"
+    )
+    assert len(frozenset(layouts.base_master_names())) == 11
 
 
 def test_the_dataset_dispatch_reaches_every_reader_the_length_contract_names() -> None:
@@ -2088,12 +2474,26 @@ def test_the_dataset_dispatch_reaches_every_reader_the_length_contract_names() -
     #   mapping is a record no pipeline step can load, however complete its reader is.
     dispatch = readers_package.DATASET_READERS
     contracted = {case.layout_name: case.reader_name for case in _RECORD_LENGTH_CONTRACT}
-    assert dict(dispatch) == contracted, (
-        "the dataset dispatch and the length contract name different records or different modules"
+    assert set(dispatch) == set(contracted), (
+        "the dataset dispatch and the length contract name different records"
     )
+    # WHY : Refactoring Rationale: the mapping's VALUES are compared by their owning module rather
+    #   than by equality against a module-name string, because the values are now the readers'
+    #   whole-extract entry points. The earlier form compared the mapping to a name-to-name dict,
+    #   which is exactly the contract that changed: a mapping of strings cannot dispatch, so a
+    #   caller holding a record name had to make a second call before it could read anything.
     for layout_name, reader_name in contracted.items():
+        reader = dispatch[layout_name]
+        assert callable(reader), f"the dispatch value for {layout_name} is not callable"
+        assert reader.__module__.endswith(f".{reader_name}")
         module = readers_package.reader_module(layout_name)
         assert module.__name__.endswith(f".{reader_name}")
+        # WHY : Assumptions: the resolver and the mapping are asserted to answer with the SAME
+        #   module object, not merely with the same name. `reader_module` derives its answer from
+        #   the registered callable, so this is what proves the two cannot disagree about which
+        #   module owns a record -- the failure that would otherwise decode one record at another
+        #   record's offsets.
+        assert getattr(module, reader.__name__) is reader
 
     # WHY : Assumptions: the derived layouts are asserted ABSENT from the dispatch. The reject
     #   record, the statement-ordered view and the interest-generated transaction are produced by
@@ -2103,18 +2503,79 @@ def test_the_dataset_dispatch_reaches_every_reader_the_length_contract_names() -
         assert derived not in dispatch
 
 
+@pytest.mark.parametrize("case", _RECORD_LENGTH_CONTRACT, ids=_LENGTH_IDS)
+def test_every_dispatch_value_reads_its_own_extract_when_invoked(
+    case: RecordLengthCase, seed_corpus: SeedCorpus, tmp_path: pathlib.Path
+) -> None:
+    """Invoke each registered dispatch value and confirm it reads the record it is registered for.
+
+    :param case: one row of the record-length contract, naming the record and its extract.
+    :param seed_corpus: read-only accessor over the committed EBCDIC seed datasets.
+    :param tmp_path: scratch directory for the one record that ships no extract.
+    :returns: nothing; a value that cannot be called, or that reads the wrong record, fails.
+    """
+    # WHY : Assumptions: every dispatch value is INVOKED rather than merely inspected, which is
+    #   what the package's plan requires of it and what a `callable()` check does not establish. A
+    #   mapping can hold a callable that raises on the first call, takes different arguments, or
+    #   belongs to another record; only calling it over that record's own extract distinguishes a
+    #   dispatch table from a table of plausible objects.
+    reader = readers_package.DATASET_READERS[case.layout_name]
+
+    if case.dataset is None:
+        # WHY : Assumptions: exactly one record -- the posted-transaction master -- ships no extract
+        #   at all, so it is invoked over an EMPTY file and asserted to yield nothing. That still
+        #   calls the value with the argument the pipeline calls it with and proves it accepts a
+        #   path and returns an iterable; the alternative, synthesising a cp037 extract here, would
+        #   be this suite inventing the very bytes the committed corpus exists to supply.
+        empty = tmp_path / "no-committed-extract.PS"
+        empty.write_bytes(b"")
+        assert list(reader(empty)) == []
+        return
+
+    extract = seed_corpus.ebcdic_path(case.dataset)
+    records = list(reader(extract))
+    assert len(records) == case.rows, (
+        f"{case.reader_name} read {len(records)} records from {case.dataset} against"
+        f" {case.rows} in the length contract"
+    )
+    # WHY : Assumptions: the decoded record is checked against the LAYOUT the dispatch key names,
+    #   so a value registered under the wrong key fails here rather than reading a full extract
+    #   successfully at another record's offsets. Field NAMES are compared, never field values:
+    #   several of these extracts carry regulated data and one carries a plaintext password.
+    spec = layouts.layout(case.layout_name) if case.layout_name != _EXPORT_LAYOUT_NAME else None
+    if spec is not None:
+        decoded_names = set(records[0])
+        expected = {
+            field.name
+            for field in spec.fields
+            if not field.suppressed and "FILLER" not in field.name
+        }
+        assert expected <= decoded_names, (
+            f"{case.reader_name} did not decode {sorted(expected - decoded_names)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # The fixture corpus: two naming schemes, and seven files that are legitimately empty.
 # ---------------------------------------------------------------------------
 
-# WHY : Assumptions: five fixture file names differ from the seed tree's name for the SAME record,
-#   and the difference is per domain rather than global -- the export scenario writes
-#   ``trandata.txt`` and the statement scenarios write ``acctfile.txt``, ``custfile.txt``,
-#   ``trnxfile.txt`` and ``xreffile.txt``, where ``app/data/ASCII`` spells the same records
-#   ``dailytran.txt``, ``acctdata.txt``, ``custdata.txt`` and ``cardxref.txt``. A test that resolved
-#   a fixture by the seed's name finds nothing in those two domains, which reads as a missing
-#   fixture rather than as a wrong name.
+# WHY : Assumptions: four fixture file names differ from the seed tree's name for the SAME record,
+#   and the difference is per domain rather than global -- the statement scenarios write
+#   ``acctfile.txt``, ``custfile.txt``, ``trnxfile.txt`` and ``xreffile.txt`` where
+#   ``app/data/ASCII`` spells the same records ``acctdata.txt``, ``custdata.txt``,
+#   ``dailytran.txt`` and ``cardxref.txt``. A test that resolved a fixture by the seed's name finds
+#   nothing in those domains, which reads as a missing fixture rather than as a wrong name.
+# WHY : Refactoring Rationale: the fifth row is NOT a renaming and used to be described as one. The
+#   export scenario's ``trandata.txt`` holds the POSTED-transaction master (``TRAN``,
+#   ``CVTRA05Y``), and the seed tree's ``dailytran.txt`` holds the PRE-posting daily feed
+#   (``DALYTRAN``, ``CVTRA06Y``). The two are distinct logical records that happen to share a
+#   physical shape -- 350 bytes with parallel field geometry, because posting copies the feed
+#   forward -- so "the same record under two names" was wrong in the way that matters: a reader
+#   acting on it would resolve a ``TRAN`` fixture with the ``DALYTRAN`` reader, and every field
+#   would decode at the right offset under the wrong name.
 _FIXTURE_NAMING: Final[tuple[tuple[str, str, str, int], ...]] = (
+    # Assumptions: this row is the SAME PHYSICAL SHAPE as the seed tree's ``dailytran.txt`` and a
+    #   DIFFERENT LOGICAL RECORD, per the rationale above -- posted transaction against daily feed.
     ("export/happy_path", "trandata.txt", "TRAN", 350),
     ("statement/happy_path", "acctfile.txt", "ACCOUNT", 300),
     ("statement/happy_path", "custfile.txt", "CUSTOMER", 500),
@@ -2236,11 +2697,25 @@ def test_no_fixture_row_carries_a_terminator_inside_its_declared_width(
     for scenario in fixture_corpus.scenarios():
         for path in sorted(fixture_corpus.root.joinpath(scenario).glob("*.txt")):
             dataset = path.name
-            raw = fixture_corpus.raw_bytes(scenario, dataset)
-            assert b"\r" not in raw, f"{scenario}/{dataset} carries a carriage return"
+            # WHY : Assumptions: the terminator check goes through the disclosure-safe helper. A
+            #   bare `assert b"\r" not in raw` prints BOTH operands on failure, and the haystack
+            #   here is an entire committed fixture -- up to five hundred bytes per record of
+            #   customer names, dates of birth and national identifiers -- so a stray carriage
+            #   return would have published the file it was found in.
+            _assert_absent_safely(
+                b"\r",
+                fixture_corpus.raw_bytes(scenario, dataset),
+                needle_label="a carriage return",
+                haystack_label=f"the {scenario}/{dataset} fixture",
+            )
             width = fixture_corpus.reclen(dataset)
-            for record in fixture_corpus.records(scenario, dataset):
-                assert len(record) == width
+            for index, record in enumerate(fixture_corpus.records(scenario, dataset)):
+                # Assumptions: the LENGTHS are compared, so the operands pytest reports are two
+                #   integers and an index rather than the record itself. The record is still named
+                #   in the message by its position, which is what a maintainer needs to find it.
+                assert len(record) == width, (
+                    f"{scenario}/{dataset} row {index} is {len(record)} characters against {width}"
+                )
             inspected += 1
     assert inspected == 78, f"the fixture corpus holds {inspected} data files rather than 78"
 
@@ -2289,8 +2764,12 @@ def test_the_short_cross_reference_seed_is_right_padded_to_its_declared_width(
 
     records = seed_corpus.ascii_records("cardxref.txt")
     assert len(records) == 50
-    for record in records:
-        assert len(record) == spec.reclen
+    for index, record in enumerate(records):
+        assert len(record) == spec.reclen, f"row {index} is {len(record)} characters"
+        # Assumptions: only the PAD span is compared, and it is compared to spaces, so neither
+        #   operand carries record data even on failure. The three published fields of this record
+        #   are a card number, a customer identifier and an account identifier, so a comparison
+        #   over the whole row would print all three.
         assert record[pad.start : pad.start + pad.length] == " " * pad.length
 
 
@@ -2300,7 +2779,10 @@ def test_a_cross_reference_row_longer_than_its_declared_width_is_refused(
     """Extend a real cross-reference row by one character and require both paths to refuse it.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; the assertion is that ``RecordLengthError`` is raised by each entry point.
+    :returns: nothing; a row accepted at one character over its declared width is a failure.
+    :raises None: both provoked refusals are caught by :func:`pytest.raises`, which requires
+        ``carddemo_migration.copybook.layouts.RecordLengthError`` from the single-record entry point
+        and from the iterating one.
     """
     # WHY : Assumptions: the tolerance is asymmetric BY DESIGN, so the long direction is asserted
     #   in the same test as the short one is proven. Truncating an over-long row to fit would move
@@ -2333,7 +2815,14 @@ def test_the_full_width_and_short_cross_reference_forms_decode_to_the_same_rows(
     from_text = tuple(xref.read_ascii_card_xrefs(seed_corpus.ascii_path("cardxref.txt")))
     from_bytes = tuple(xref.read_ebcdic_card_xrefs(seed_corpus.ebcdic_path("CARDXREF.PS")))
     assert len(from_text) == len(from_bytes) == 50
-    assert from_text == from_bytes
+    # WHY : Assumptions: the row comparison goes through the disclosure-safe helper, which reports
+    #   the row index and the differing FIELD NAMES and neither side's values. A bare equality over
+    #   these two tuples prints fifty decoded cross-reference rows on failure -- fifty card numbers
+    #   paired with the customer and account identifiers they belong to, which is the single most
+    #   sensitive join in this corpus.
+    _assert_rows_match_safely(
+        from_text, from_bytes, what="the short ASCII and full-width EBCDIC cross-reference rows"
+    )
     assert len(seed_corpus.ebcdic_raw_bytes("CARDXREF.PS")) == 50 * layouts.XREF_LAYOUT.reclen
 
 
@@ -2470,7 +2959,10 @@ def test_a_blank_row_inside_a_non_empty_extract_is_refused(seed_corpus: SeedCorp
     """Insert an empty line between two real rows and require the reader to refuse the extract.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; the assertion is that ``RecordLengthError`` names the offending line.
+    :returns: nothing; a blank line accepted inside a non-empty extract is a failure, as is a
+        refusal whose message does not locate the offending line.
+    :raises None: the provoked refusal is caught by :func:`pytest.raises`, which requires
+        ``carddemo_migration.copybook.layouts.RecordLengthError``.
     """
     # WHY : Assumptions: an empty FILE and an empty LINE are different inputs and get different
     #   answers, which is why they are asserted in adjacent tests rather than one. A zero-byte
@@ -2535,7 +3027,10 @@ def test_an_extract_that_does_not_divide_by_its_record_length_is_refused(
     """Truncate the export extract by one byte and require the reader to refuse the whole image.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; the assertion is that ``RecordLengthError`` reports the trailing remainder.
+    :returns: nothing; an image accepted with a trailing partial record is a failure, as is a
+        refusal that does not report the remainder.
+    :raises None: the provoked refusal is caught by :func:`pytest.raises`, which requires
+        ``carddemo_migration.copybook.layouts.RecordLengthError``.
     """
     # WHY : Assumptions: with no terminators to appeal to, the DIVISION is the only well-formedness
     #   property a fixed-length extract has. One byte is removed rather than a whole record, because
@@ -2565,40 +3060,98 @@ def test_no_computational_span_is_handed_to_a_character_decoder(seed_corpus: See
     #   through which a packed nibble pair or a binary word can arrive at a character decoder. The
     #   export record puts all three regimes plus an opaque overlay inside one 500-byte image, so
     #   the guarantee has to hold field by field rather than record by record.
+    # WHY : Refactoring Rationale: the regimes are now enumerated from ``Kind`` and the coverage is
+    #   asserted TOTAL, because the earlier version named four of the six by hand and the two it
+    #   omitted were the two with the most to hide. ``PACKED`` is the only regime whose bytes are
+    #   characters in no encoding at all -- two decimal digits per byte, sign in the final nibble --
+    #   so it is exactly the span a character decoder mangles into replacement characters or, worse,
+    #   into a plausible string; and ``UINT`` is a DISPLAY regime that must come back as characters,
+    #   so omitting it left the boundary between the two halves of this claim untested from the
+    #   character side. Driving the table from the enum means a regime added to the descriptor
+    #   vocabulary fails this test until it is exercised, rather than being silently uncovered.
     account_image = seed_corpus.ebcdic_records("ACCTDATA.PS")[0]
     spec = layouts.ACCOUNT_LAYOUT
-
-    text_field = spec.field("ACCT-ACTIVE-STATUS")
-    decoded_text = ebcdic_codec.decode_field(account_image, text_field)
-    assert isinstance(decoded_text, str)
-    assert decoded_text == account_image[text_field.start : text_field.end].decode("cp037")
-
-    money_field = spec.field("ACCT-CURR-BAL")
-    assert money_field.kind is Kind.ZONED
-    decoded_money = ebcdic_codec.decode_field(account_image, money_field)
-    assert isinstance(decoded_money, bytes)
-    assert decoded_money == account_image[money_field.start : money_field.end]
-
-    export_image = seed_corpus.ebcdic_records("EXPORT.DATA.PS")[0]
+    export_image = next(
+        record
+        for record in seed_corpus.ebcdic_records("EXPORT.DATA.PS")
+        if export_record.record_type(record) == "A"
+    )
     header = layouts.EXPORT_HEADER_LAYOUT
-    binary_field = header.field("EXPORT-SEQUENCE-NUM")
-    assert binary_field.kind is Kind.BINARY
-    assert isinstance(ebcdic_codec.decode_field(export_image, binary_field), bytes)
+    payload_field = header.field("EXPORT-RECORD-DATA")
+    # WHY : Assumptions: the packed example is reached by slicing the payload area out of a real
+    #   export record and reading the account overlay against it, because PACKED appears NOWHERE
+    #   else in a committed corpus -- the base masters carry their money as zoned display and only
+    #   the export overlays and the authorization segments declare COMP-3, and the segments ship no
+    #   extract. Synthesising a packed span was rejected for the reason the module docstring gives:
+    #   it would prove this file agrees with itself about a format the reference compiler wrote.
+    payload = bytes(export_image[payload_field.start : payload_field.end])
+    overlay = layouts.export_branch("A")
 
-    opaque_field = header.field("EXPORT-RECORD-DATA")
-    assert opaque_field.kind is Kind.OPAQUE
-    assert (
-        ebcdic_codec.decode_field(export_image, opaque_field)
-        == (export_image[opaque_field.start : opaque_field.end])
+    per_regime: dict[Kind, tuple[bytes, FieldSpec]] = {
+        Kind.TEXT: (account_image, spec.field("ACCT-ACTIVE-STATUS")),
+        Kind.UINT: (account_image, spec.field("ACCT-ID")),
+        Kind.ZONED: (account_image, spec.field("ACCT-CURR-BAL")),
+        Kind.PACKED: (payload, overlay.field("EXP-ACCT-CURR-BAL")),
+        Kind.BINARY: (export_image, header.field("EXPORT-SEQUENCE-NUM")),
+        Kind.OPAQUE: (export_image, payload_field),
+    }
+    assert set(per_regime) == set(Kind), (
+        "every declared regime needs a real span here; missing"
+        f" {sorted(kind.name for kind in set(Kind) - set(per_regime))}"
+    )
+    character_regimes = {Kind.TEXT, Kind.UINT}
+
+    for regime in sorted(per_regime, key=lambda kind: kind.name):
+        image, field = per_regime[regime]
+        assert field.kind is regime
+        decoded = ebcdic_codec.decode_field(image, field)
+        raw = bytes(image[field.start : field.end])
+        if regime in character_regimes:
+            assert isinstance(decoded, str), f"{regime.name} decoded to {type(decoded).__name__}"
+            # WHY : Assumptions: the comparison goes through the disclosure-safe helper because two
+            #   of these spans are regulated -- the account identifier is sensitive and so is the
+            #   balance -- and a bare equality would print both operands on failure.
+            _assert_equal_safely(
+                decoded, raw.decode("cp037"), what=f"the {field.name} span decoded field by field"
+            )
+        else:
+            assert isinstance(decoded, bytes), f"{regime.name} decoded to {type(decoded).__name__}"
+            _assert_equal_safely(
+                decoded, raw, what=f"the {field.name} span returned as untouched bytes"
+            )
+
+    # WHY : Assumptions: the unsigned display span is additionally required to be DIGITS, tested
+    #   with a generator rather than `str.isdigit` on a bound name. Both spellings answer the same
+    #   question; only this one keeps the characters out of the failure output, because pytest
+    #   reports the value a method call was made on and expands nothing inside a generator.
+    uint_image, uint_field = per_regime[Kind.UINT]
+    assert all(
+        character in "0123456789"
+        for character in str(ebcdic_codec.decode_field(uint_image, uint_field))
+    )
+
+    # WHY : Assumptions: the packed span is then decoded through the packed codec to prove the bytes
+    #   really are COMP-3 rather than merely opaque, and only its SCALE is compared. The value is
+    #   consumed as an expression and never bound, so no frame in this test holds a balance for
+    #   `--showlocals` to print.
+    packed_image, packed_field = per_regime[Kind.PACKED]
+    _assert_exact_decimal_safely(
+        packed.decode_packed_field(packed_image, packed_field),
+        packed_field.dec_digits,
+        what=f"the {packed_field.name} span decoded by the packed codec",
     )
 
     # WHY : Assumptions: the whole-record decode is where a NUMBER appears, and it appears as an
     #   exact decimal at the field's declared scale. Asserting both halves in one test is what ties
     #   them together: the field-level call must not produce a number, and the record-level call
     #   must, so neither can be satisfied by an implementation that blurred the two.
+    money_field = spec.field("ACCT-CURR-BAL")
     row = ebcdic_codec.decode_record(account_image, spec)
-    assert isinstance(row[money_field.name], Decimal)
-    assert -row[money_field.name].as_tuple().exponent == money_field.dec_digits
+    _assert_exact_decimal_safely(
+        row[money_field.name],
+        money_field.dec_digits,
+        what=f"the {money_field.name} value decoded record by record",
+    )
 
 
 def test_every_ascii_seed_row_holds_one_byte_for_every_character(seed_corpus: SeedCorpus) -> None:
@@ -2765,7 +3318,12 @@ def test_a_synthetic_security_record_never_surfaces_its_placeholder_slot(
 
     rendered = usrsec.render_masked_security_user_record(record)
     assert len(rendered) == layouts.SECUSER_LAYOUT.reclen
-    assert slot not in rendered
+    _assert_absent_safely(
+        slot,
+        rendered,
+        needle_label="the withheld password span",
+        haystack_label="the masked security-user record",
+    )
 
     # WHY : Assumptions: the field-scoped rendering is asked for the withheld name explicitly,
     #   because a renderer that fell through to a span it has no rule for is the failure mode a
@@ -2773,12 +3331,27 @@ def test_a_synthetic_security_record_never_surfaces_its_placeholder_slot(
     #   message is inspected as well as the exception type.
     with pytest.raises(LayoutError) as refusal:
         usrsec.render_masked_security_user_field(record, withheld.name)
-    assert slot not in str(refusal.value)
+    _assert_absent_safely(
+        slot,
+        str(refusal.value),
+        needle_label="the withheld password span",
+        haystack_label="the field-scoped refusal message",
+    )
 
 
 # ---------------------------------------------------------------------------
 # The posted-transaction record: the one reader with no seed of its own.
 # ---------------------------------------------------------------------------
+
+
+# Assumptions: the one instant every committed posted-transaction row carries, measured from
+#   ``tests/fixtures/export/happy_path/trandata.txt`` at the originating-stamp span. It is written
+#   here as a literal because it is the ORACLE: the reference compiler produced it, this package
+#   must reproduce it character for character, and an expectation read back out of the same file it
+#   verifies would pass for any value the file happened to hold.
+# Assumptions: it is not regulated. A transaction's originating instant identifies no person and is
+#   identical on all five rows, which is why it can be written down where a card number cannot.
+_COMMITTED_ORIGIN_TIMESTAMP: Final[str] = "2022-06-10 19:27:53.000000"
 
 
 def test_the_posted_transaction_offsets_are_the_ones_two_sources_corroborate() -> None:
@@ -2859,10 +3432,33 @@ def test_the_only_committed_transaction_rows_carry_a_blank_processing_stamp(
     #   has. The originating stamp, by contrast, is deterministic business data and is identical on
     #   all five, which is what makes it usable as a fixed expectation.
     assert {str(row[proc.name]) for row in rows} == {" " * proc.length}
-    assert len({str(row[orig.name]) for row in rows}) == 1
-    carried = next(iter(str(row[orig.name]) for row in rows))
-    assert len(carried) == orig.length
-    assert carried == carried.strip(), "the originating stamp is written to its full width"
+    # WHY : Refactoring Rationale: the EXACT originating stamp is asserted on every one of the five
+    #   rows, where this used to assert only that the five agreed with each other and that the value
+    #   filled its declared width. Those two properties are satisfied by any uniform, full-width,
+    #   wrong value -- a stamp shifted by a field, a stamp read from the clock, a stamp transcoded
+    #   through the wrong code page and happening to land on printable characters -- so the test
+    #   would have passed for a reader that decoded the right span into the wrong instant. The
+    #   originating stamp is deterministic business data written by the reference compiler, which is
+    #   what makes a fixed expectation legitimate here and not in the processing-stamp assertion
+    #   above.
+    # WHY : Assumptions: the expected value is a MODULE CONSTANT rather than a literal at this call
+    #   site, and it is not regulated: a transaction's originating instant is business metadata, it
+    #   identifies no person, and it is the same value on all five committed rows -- so unlike a
+    #   card number it can be written down, which is what lets this assertion be exact at all.
+    assert {str(row[orig.name]) for row in rows} == {_COMMITTED_ORIGIN_TIMESTAMP}
+    for index, row in enumerate(rows):
+        carried = str(row[orig.name])
+        assert carried == _COMMITTED_ORIGIN_TIMESTAMP, f"row {index} carries another instant"
+        assert len(carried) == orig.length
+        assert carried == carried.strip(), "the originating stamp is written to its full width"
+    # WHY : Assumptions: the raw SPAN is compared as well as the decoded value, so a reader that
+    #   normalised, re-rendered or re-parsed the stamp on the way through would fail here even
+    #   though its output happened to match. The stamp is carried across as characters, and the
+    #   committed bytes are the specification for what those characters are.
+    for index, record in enumerate(records):
+        assert record[orig.start : orig.end] == _COMMITTED_ORIGIN_TIMESTAMP, (
+            f"the committed span of row {index} is not the oracle instant"
+        )
 
 
 def test_a_processing_stamp_that_is_neither_blank_nor_well_formed_is_refused(
@@ -2871,7 +3467,10 @@ def test_a_processing_stamp_that_is_neither_blank_nor_well_formed_is_refused(
     """Replace a blank processing stamp with 26 characters of neither shape and require a refusal.
 
     :param fixture_corpus: session accessor over ``tests/fixtures``.
-    :returns: nothing; the assertion is that ``LayoutError`` is raised and quotes no input.
+    :returns: nothing; a stamp of neither admissible shape being accepted is a failure, as is a
+        refusal message that quotes the offending span.
+    :raises None: the provoked refusal is caught by :func:`pytest.raises`, which requires
+        ``carddemo_migration.copybook.layouts.LayoutError``.
     """
     # WHY : Assumptions: the two ADMISSIBLE shapes are a well-formed 26-character stamp and a
     #   uniformly unwritten one, and anything else of the right width is refused. Width alone cannot
@@ -2933,10 +3532,17 @@ def test_a_transaction_card_number_survives_as_a_string_with_its_leading_zero(
     field = spec.field("TRAN-CARD-NUM")
     records = fixture_corpus.records("export/happy_path", "trandata.txt")
     rows = tuple(transaction.decode_ascii_transaction(record) for record in records)
-    for record, row in zip(records, rows, strict=True):
+    for index, (record, row) in enumerate(zip(records, rows, strict=True)):
         value = row[field.name]
         assert isinstance(value, str)
-        assert value == record[field.start : field.end]
+        # WHY : Assumptions: the equality goes through the disclosure-safe helper. The two operands
+        #   here are the same primary account number twice over -- decoded and raw -- so a bare
+        #   assertion would print it twice in the one place a reader is guaranteed to look.
+        _assert_equal_safely(
+            value,
+            record[field.start : field.end],
+            what=f"the decoded and raw card number of transaction row {index}",
+        )
         assert len(value) == field.length
     assert any(str(row[field.name]).startswith("0") for row in rows), (
         "the corpus no longer carries a leading-zero card number, so the hazard is untested"
@@ -3005,12 +3611,18 @@ def test_the_two_category_keys_share_a_copybook_group_name_and_nothing_else() ->
 #   byte is therefore wrong about four of the eleven layouts -- and wrong quietly, because a pad is
 #   dropped from every decoded row, so the assumption only shows up when something reads the pad
 #   deliberately: a checksum over the raw record, a re-encode, or a golden comparison.
+# WHY : Refactoring Rationale: ``cardxref.txt`` is NOT in the space-filled family and used to be.
+#   Its committed lines are 36 characters and stop at the published data region -- the file OMITS
+#   its fourteen-byte pad entirely -- and the corpus accessor supplies the spaces when it pads a
+#   short row to its declared width. So a test reading the pad through the accessor observed the
+#   accessor's own padding and reported it as a property of the extract, which is the one thing
+#   this whole section exists to measure. It moves to its own family below, where the property
+#   asserted is that the pad is ABSENT from the file.
 _SPACE_FILLED_SEEDS: Final[tuple[str, ...]] = (
     "acctdata.txt",
     "carddata.txt",
     "custdata.txt",
     "dailytran.txt",
-    "cardxref.txt",
 )
 _ZERO_FILLED_SEEDS: Final[tuple[str, ...]] = (
     "discgrp.txt",
@@ -3018,6 +3630,11 @@ _ZERO_FILLED_SEEDS: Final[tuple[str, ...]] = (
     "trantype.txt",
     "tcatbal.txt",
 )
+# Assumptions: exactly one committed seed omits its trailing pad rather than filling it, and it is
+#   named as its own family so the partition below stays total. The reader pads it on the way in --
+#   argued at length where that behaviour is tested -- and this family records that the bytes are
+#   not in the file.
+_OMITTED_PAD_SEEDS: Final[tuple[str, ...]] = ("cardxref.txt",)
 
 
 def _trailing_pad(spec: RecordSpec) -> FieldSpec:
@@ -3043,8 +3660,17 @@ def _trailing_pad(spec: RecordSpec) -> FieldSpec:
     #   than by matching its name. One record's pad is called ``SEC-USR-FILLER`` and the other ten
     #   call theirs ``FILLER``, so a name match would miss exactly the record whose pad is hardest
     #   to notice, and this helper is used by tests that must cover all of them.
+    # WHY : Assumptions: the positional answer is then CHECKED to be a pad, because one registered
+    #   record's last field is not one. The export envelope closes with ``EXPORT-RECORD-DATA``, a
+    #   460-byte OPAQUE span that carries the record's whole per-type payload -- it is data, and
+    #   treating it as padding would assert that the largest field in the corpus should be dropped.
+    #   Refusing here is what keeps a caller from reaching that conclusion positionally.
     pad = spec.fields[-1]
     assert pad.start + pad.length == spec.reclen
+    assert pad.name == "FILLER" or pad.name.endswith("-FILLER"), (
+        f"{spec.name}'s last declared field is {pad.name}, which is payload rather than padding;"
+        " this helper answers only for a record whose final field is a declared pad"
+    )
     return pad
 
 
@@ -3073,11 +3699,29 @@ def test_each_seed_pads_with_the_byte_its_own_family_uses(
     #   from the first, because a fill byte is a property of the extract and not of one record. A
     #   single row of a zero-filled record whose pad happened to be blank would otherwise reclassify
     #   the whole dataset, and the disagreement would then be invisible.
+    # WHY : Refactoring Rationale: the pad is read out of the RAW file rather than through the
+    #   record accessor, and the difference is not cosmetic. The accessor right-pads a short row to
+    #   its declared width, so reading a pad through it can report the ACCESSOR's fill byte as the
+    #   extract's -- which is exactly what happened for the cross-reference seed, whose file carries
+    #   no pad at all and which was consequently classified space-filled on the strength of spaces
+    #   this suite's own helper had inserted. Reading raw bytes is the only way the measurement is
+    #   about the committed file.
     spec = seed_corpus.record_spec(dataset)
     pad = _trailing_pad(spec)
+    assert pad.name == "FILLER" or pad.name.endswith("-FILLER"), (
+        f"{spec.name}'s last field is {pad.name}, which is not a declared pad"
+    )
+    raw = seed_corpus.ascii_raw_bytes(dataset)
+    lines = raw.split(b"\n")
+    assert lines[-1] == b"", "the seed is newline-terminated, so the split leaves one empty piece"
     observed: set[str] = set()
-    for record in seed_corpus.ascii_records(dataset):
-        observed.update(record[pad.start : pad.start + pad.length])
+    for index, line in enumerate(lines[:-1]):
+        image = line.rstrip(b"\r").decode("ascii")
+        assert len(image) == spec.reclen, (
+            f"{dataset} row {index} is {len(image)} characters against {spec.reclen}, so its pad is"
+            " not in the file and it belongs in the omitted-pad family"
+        )
+        observed.update(image[pad.start : pad.start + pad.length])
     assert observed == {fill}, f"{dataset} pads with {sorted(observed)} rather than {fill!r}"
 
 
@@ -3087,18 +3731,145 @@ def test_the_two_pad_families_are_disjoint_and_cover_every_seed(seed_corpus: See
     :param seed_corpus: session accessor over ``app/data``.
     :returns: nothing; a seed in neither family, or in both, is reported as a failure.
     """
-    # WHY : Assumptions: the two families are asserted to PARTITION the seed tree, so a seed added
-    #   or renamed cannot fall outside both lists and go unmeasured. Four of the nine are
+    # WHY : Assumptions: the THREE families are asserted to PARTITION the seed tree, so a seed added
+    #   or renamed cannot fall outside every list and go unmeasured. Four of the nine are
     #   zero-filled, which is the number that makes a single-fill assumption wrong rather than
-    #   merely imprecise.
-    families = frozenset(_SPACE_FILLED_SEEDS) | frozenset(_ZERO_FILLED_SEEDS)
+    #   merely imprecise, and exactly one omits its pad -- which is the case a two-family split
+    #   could only express by misclassifying it.
+    families = (
+        frozenset(_SPACE_FILLED_SEEDS)
+        | frozenset(_ZERO_FILLED_SEEDS)
+        | frozenset(_OMITTED_PAD_SEEDS)
+    )
     assert frozenset(_SPACE_FILLED_SEEDS).isdisjoint(_ZERO_FILLED_SEEDS)
+    assert frozenset(_OMITTED_PAD_SEEDS).isdisjoint(_SPACE_FILLED_SEEDS)
+    assert frozenset(_OMITTED_PAD_SEEDS).isdisjoint(_ZERO_FILLED_SEEDS)
     assert families == frozenset(seed_corpus.ascii_datasets())
+    assert len(_SPACE_FILLED_SEEDS) == 4
     assert len(_ZERO_FILLED_SEEDS) == 4
+    assert len(_OMITTED_PAD_SEEDS) == 1
+
+
+# WHY : Assumptions: the pad fill is classified by RECORD rather than by file name, because the
+#   fixture tree spells four of these records differently from the seed tree -- ``acctfile.txt``,
+#   ``custfile.txt``, ``xreffile.txt`` and ``trnxfile.txt`` -- and a file-name classification would
+#   simply not reach them. Two records here have no seed at all: the posted-transaction master and
+#   the statement transaction view are produced by the batch pipeline rather than shipped under
+#   ``app/data``, so the seed families above are structurally incapable of measuring their pads and
+#   this table is the only place those two are measured.
+# WHY : Trade-offs: the two classifications are kept separate and then CROSS-CHECKED against each
+#   other, rather than one being derived from the other. Deriving would make a divergence
+#   impossible to see -- if a seed's fill byte changed, the fixture expectation would change with
+#   it and neither test would report anything -- whereas cross-checking two independently stated
+#   tables fails loudly on exactly that.
+_PAD_FILL_BY_RECORD: Final[tuple[tuple[str, str], ...]] = (
+    ("ACCOUNT", " "),
+    ("CARD", " "),
+    ("CUSTOMER", " "),
+    ("XREF", " "),
+    ("DALYTRAN", " "),
+    ("TRAN", " "),
+    ("TRNX", " "),
+    ("DISGROUP", "0"),
+    ("TCATBAL", "0"),
+    ("TRANTYPE", "0"),
+    ("TRANCAT", "0"),
+)
+_FIXTURE_ONLY_PAD_RECORDS: Final[frozenset[str]] = frozenset({"TRAN", "TRNX"})
+
+
+def test_every_fixture_row_pads_with_the_byte_its_record_family_uses(
+    fixture_corpus: FixtureCorpus,
+) -> None:
+    """Measure every committed fixture's trailing pad and require its record family's fill byte.
+
+    :param fixture_corpus: session accessor over ``tests/fixtures``.
+    :returns: nothing; a pad of the other family's byte, or a record whose pad this corpus never
+        exercises, is reported as a failure.
+    """
+    # WHY : Refactoring Rationale: this test exists because the seed-tree pad families cannot reach
+    #   two of the eleven flat records. The posted-transaction master ships no extract and no seed
+    #   -- it is written by the posting and backup chain -- and the statement transaction view ships
+    #   none either, so before this test the twenty pad bytes at the end of a 350-byte posted
+    #   transaction were declared by the descriptor, dropped by the reader and MEASURED NOWHERE. On
+    #   that record the pad sits immediately behind two 26-byte timestamps, which is the one place a
+    #   stamp read one field too wide would land, so leaving it unmeasured left the least visible
+    #   mis-slice in the corpus unguarded.
+    # WHY : Assumptions: the bytes are read RAW and the pad span is accumulated over every row, for
+    #   the same two reasons the seed measurement gives. The record accessor right-pads a short row,
+    #   so a pad read through it can report the accessor's fill byte rather than the file's; and a
+    #   fill byte is a property of the extract, so one row's pad is not evidence about the dataset.
+    expected = dict(_PAD_FILL_BY_RECORD)
+    observed_by_record: dict[str, set[str]] = {}
+    inspected = 0
+    for scenario in fixture_corpus.scenarios():
+        for dataset_path in sorted(fixture_corpus.root.joinpath(scenario).glob("*.txt")):
+            dataset = dataset_path.name
+            spec = fixture_corpus.record_spec(dataset)
+            pad = _trailing_pad(spec)
+            assert spec.name in expected, (
+                f"{scenario}/{dataset} holds record {spec.name}, which this table does not classify"
+            )
+            raw = fixture_corpus.raw_bytes(scenario, dataset)
+            observed = observed_by_record.setdefault(spec.name, set())
+            for index, line in enumerate(raw.split(b"\n")):
+                if line == b"":
+                    continue
+                image = line.decode("ascii")
+                assert len(image) == spec.reclen, (
+                    f"{scenario}/{dataset} row {index} is {len(image)} characters against"
+                    f" {spec.reclen}, so its pad is not where the descriptor puts it"
+                )
+                observed.update(image[pad.start : pad.start + pad.length])
+            inspected += 1
+    assert inspected == 78, f"the fixture corpus holds {inspected} data files rather than 78"
+    for record, fill in sorted(expected.items()):
+        seen = observed_by_record.get(record)
+        if seen is None:
+            # WHY : Assumptions: a classified record the fixture tree does not carry is ACCEPTED
+            #   here rather than failed, because the two reference-data records are exercised by the
+            #   seed families instead. What is not accepted is a record carried by neither, which is
+            #   why the two fixture-only records are required below by name.
+            assert record not in _FIXTURE_ONLY_PAD_RECORDS
+            continue
+        assert seen == {fill} or seen == set(), (
+            f"{record} pads with {sorted(seen)} rather than {fill!r}"
+        )
+    for record in sorted(_FIXTURE_ONLY_PAD_RECORDS):
+        assert observed_by_record.get(record) == {expected[record]}, (
+            f"{record} ships no seed, so this corpus is the only place its pad is measured, and"
+            " this run measured nothing"
+        )
+
+
+def test_the_fixture_pad_classification_agrees_with_the_seed_pad_families(
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Hold the record-keyed pad table against the file-keyed seed families for all nine seeds.
+
+    :param seed_corpus: session accessor over ``app/data``.
+    :returns: nothing; a record classified space-filled by one table and zero-filled by the other
+        is reported as a failure.
+    """
+    # WHY : Assumptions: the omitted-pad seed is expected to classify as SPACE-filled in the
+    #   record-keyed table, and the two statements do not contradict each other. The seed file
+    #   carries no pad bytes at all, which is a fact about that file; the fixture copies of the same
+    #   record do carry theirs, space-filled, which is a fact about the record. Asserting the pair
+    #   is what records that the omission is the seed's and not the record's.
+    by_record = dict(_PAD_FILL_BY_RECORD)
+    for dataset in _SPACE_FILLED_SEEDS + _OMITTED_PAD_SEEDS:
+        assert by_record[seed_corpus.record_spec(dataset).name] == " "
+    for dataset in _ZERO_FILLED_SEEDS:
+        assert by_record[seed_corpus.record_spec(dataset).name] == "0"
+    covered = {
+        seed_corpus.record_spec(dataset).name
+        for dataset in _SPACE_FILLED_SEEDS + _ZERO_FILLED_SEEDS + _OMITTED_PAD_SEEDS
+    }
+    assert covered | _FIXTURE_ONLY_PAD_RECORDS == set(by_record)
 
 
 def test_every_pad_is_dropped_from_the_row_yet_stays_declared_in_the_descriptor() -> None:
-    """Require each record's pad to be absent from the published fields and present in the layout.
+    """Require each flat record's pad to be absent from its published fields and kept in its layout.
 
     :returns: nothing; a pad missing from the descriptor, or published by a reader, is a failure.
     """
@@ -3107,21 +3878,79 @@ def test_every_pad_is_dropped_from_the_row_yet_stays_declared_in_the_descriptor(
     #   keeping it in the descriptor is what keeps the field spans contiguous and the sum equal to
     #   the record length, so the geometry stays provable rather than being asserted about a record
     #   with a hole in it.
+    # WHY : Refactoring Rationale: the export envelope is excluded from the pad half of this loop
+    #   and asserted by the test below instead, because its final field is not a pad. The loop used
+    #   to run over all twelve rows and take each record's last declared field as its pad, which for
+    #   the envelope is ``EXPORT-RECORD-DATA`` -- the 460-byte opaque span carrying the whole
+    #   per-type payload. The assertion PASSED there, because that payload IS dropped from the
+    #   envelope row, so the reason for the drop went unexamined and this loop read as though the
+    #   largest data field in the corpus were padding. The contiguity half still covers all twelve,
+    #   because that property is about the descriptor and holds however the last field is used.
+    examined = 0
     for case in _RECORD_LENGTH_CONTRACT:
         spec = _contract_layout(case)
+        assert sum(field.length for field in spec.fields) == spec.reclen
+        if case.layout_name == _EXPORT_LAYOUT_NAME:
+            continue
         pad = _trailing_pad(spec)
         module = getattr(readers_package, case.reader_name)
-        published = {
-            field.name
-            for field in (
-                module.ENVELOPE_LOADED_FIELDS
-                if case.reader_name == "export_record"
-                else module.LOADED_FIELDS
-            )
-        }
+        published = {field.name for field in module.LOADED_FIELDS}
         assert pad.name in module.DROPPED_FIELD_NAMES
         assert pad.name not in published
-        assert sum(field.length for field in spec.fields) == spec.reclen
+        examined += 1
+    assert examined == len(_RECORD_LENGTH_CONTRACT) - 1 == 11
+
+
+def test_the_export_payload_is_data_the_branch_replaces_and_every_branch_declares_its_own_pad() -> (
+    None
+):
+    """Separate the export envelope's opaque payload from the pads its five overlays declare.
+
+    :returns: nothing; a payload classified as padding, or a branch pad left published, is a
+        failure.
+    :raises None: the one provoked refusal is caught by :func:`pytest.raises`, which requires
+        ``AssertionError`` from :func:`_trailing_pad` -- the positional pad helper -- when it is
+        offered the envelope, whose final field is data.
+    """
+    # WHY : Assumptions: the envelope and the overlays are asserted to drop DIFFERENT things for
+    #   different reasons, because a single "the last field is dropped" statement is true of both
+    #   and distinguishes neither. ``EXPORT-RECORD-DATA`` leaves the envelope row because the
+    #   decoded branch replaces it -- its bytes are published, in typed form, by the overlay --
+    #   whereas each
+    #   overlay's ``FILLER`` leaves the branch row because its bytes are padding and are published
+    #   nowhere at all. Conflating the two would license dropping a data field on the grounds that
+    #   the last field is droppable, which is exactly the reasoning this test exists to refuse.
+    envelope = layouts.EXPORT_HEADER_LAYOUT
+    payload = envelope.fields[-1]
+    assert (payload.name, payload.start, payload.length) == ("EXPORT-RECORD-DATA", 40, 460)
+    assert payload.kind is Kind.OPAQUE
+    assert payload.name != "FILLER" and not payload.name.endswith("-FILLER")
+    with pytest.raises(AssertionError):
+        _trailing_pad(envelope)
+    assert payload.name in export_record.DROPPED_FIELD_NAMES
+    assert payload.name not in {field.name for field in export_record.ENVELOPE_LOADED_FIELDS}
+    # WHY : Assumptions: the envelope is asserted to declare NO pad, which is why the record needs
+    #   this separate treatment at all. Its five envelope fields and the payload span the full 500
+    #   bytes with nothing left over, so there is no trailing filler to find and a positional search
+    #   can only return data.
+    assert not [
+        field
+        for field in envelope.fields
+        if field.name == "FILLER" or field.name.endswith("-FILLER")
+    ]
+    branches = layouts.EXPORT_RECORD_TYPES
+    assert sorted(branches) == ["A", "C", "D", "T", "X"]
+    for discriminator, branch in sorted(branches.items()):
+        pad = _trailing_pad(branch)
+        # WHY : Assumptions: each overlay is required to be exactly as long as the payload area it
+        #   occupies, and the pad is what makes that true of overlays declaring as little as three
+        #   data fields. An overlay shorter than the area would leave undescribed bytes inside a
+        #   record this reader reports as fully decoded.
+        assert branch.reclen == payload.length
+        assert sum(field.length for field in branch.fields) == payload.length
+        published = {field.name for field in export_record.branch_loaded_fields(discriminator)}
+        assert pad.name in export_record.DROPPED_FIELD_NAMES
+        assert pad.name not in published
 
 
 # ---------------------------------------------------------------------------
@@ -3253,10 +4082,18 @@ def test_the_card_verification_value_never_renders_as_itself(seed_corpus: SeedCo
     row = card.decode_ascii_card(record)
     protected = row[field.name]
     assert isinstance(protected, card.ProtectedValue)
-    digits = record[field.start : field.end]
     for rendering in (str(protected), repr(protected), f"{protected}", format(protected)):
         assert rendering == card.ProtectedValue.MARKER
-        assert digits not in rendering
+        # WHY : Assumptions: the absence goes through the disclosure-safe helper rather than a bare
+        #   `not in`. A bare one prints both operands, and the needle here IS the verification value
+        #   -- so the assertion that exists to prove the value never reaches an output would have
+        #   been the output that carried it.
+        _assert_absent_safely(
+            record[field.start : field.end],
+            rendering,
+            needle_label="the card verification value",
+            haystack_label="a rendering of the protected wrapper",
+        )
 
     # WHY : Assumptions: the masked whole-record rendering is checked for the primary account number
     #   and the embossed name as well, because those two are the fields a card record leaks if the
@@ -3265,7 +4102,12 @@ def test_the_card_verification_value_never_renders_as_itself(seed_corpus: SeedCo
     rendered = card.render_masked_card_record(record)
     for name in ("CARD-NUM", "CARD-EMBOSSED-NAME"):
         span = layouts.CARD_LAYOUT.field(name)
-        assert record[span.start : span.end] not in rendered
+        _assert_absent_safely(
+            record[span.start : span.end],
+            rendered,
+            needle_label=f"the raw {name} span",
+            haystack_label="the masked card record",
+        )
 
 
 def test_the_customer_record_redacts_every_identifying_field_it_declares(
@@ -3299,9 +4141,17 @@ def test_the_customer_record_redacts_every_identifying_field_it_declares(
         field = spec.field(name)
         assert (field.start, field.end) == (start, end), f"{name} moved"
         assert field.sensitive, f"{name} is no longer classified sensitive"
-        original = record[start:end]
-        if original.strip():
-            assert original not in rendered, f"{name} survived the masked rendering"
+        if record[start:end].strip():
+            # WHY : Assumptions: the absence goes through the disclosure-safe helper, and this is
+            #   the site where a bare assertion would be worst: the needle is a national
+            #   identifier, a government-issued identifier, a date of birth or a name, and the
+            #   haystack is the whole 500-byte customer record. A bare `not in` prints both.
+            _assert_absent_safely(
+                record[start:end],
+                rendered,
+                needle_label=f"the raw {name} span",
+                haystack_label="the masked customer record",
+            )
 
     # WHY : Assumptions: a diagnostic must not echo raw record bytes either, so the field-scoped
     #   refusal for a name the record does not declare is checked to carry none of the record.
@@ -3385,18 +4235,46 @@ def test_the_export_reader_reaches_all_three_numeric_decoders(seed_corpus: SeedC
         images.setdefault(export_record.record_type(image), image)
     assert sorted(images) == ["A", "C", "D", "T", "X"]
 
+    # WHY : Refactoring Rationale: the per-field loop no longer skips a published field that is
+    #   ABSENT from the decoded row, and the change is what makes this test able to fail. The skip
+    #   meant a decoder that emitted the envelope and dropped the whole branch satisfied every
+    #   assertion here: no field was present, so none was checked, and the regime set was then
+    #   satisfied by whichever branch happened to decode. Requiring presence per field, and
+    #   requiring the row's key ORDER to be the envelope's fields followed by that branch's, states
+    #   the shape exactly rather than as a lower bound.
+    envelope_names = tuple(field.name for field in export_record.ENVELOPE_LOADED_FIELDS)
+    declared: set[Kind] = set()
     seen: set[Kind] = set()
     for discriminator, image in sorted(images.items()):
         row = export_record.decode_ebcdic_export_record(image)
-        for field in export_record.branch_loaded_fields(discriminator):
-            if field.name not in row:
-                continue
+        branch_fields = export_record.branch_loaded_fields(discriminator)
+        assert tuple(row) == envelope_names + tuple(field.name for field in branch_fields), (
+            f"overlay {discriminator} decoded to {len(row)} fields against"
+            f" {len(envelope_names) + len(branch_fields)} published"
+        )
+        for field in branch_fields:
+            declared.add(field.kind)
+            assert field.name in row, (
+                f"{field.name} is published for overlay {discriminator} and absent from its row"
+            )
             seen.add(field.kind)
             if field.kind in {Kind.ZONED, Kind.PACKED, Kind.BINARY}:
-                value = row[field.name]
-                assert isinstance(value, Decimal), f"{field.name} decoded to {type(value).__name__}"
-                assert -value.as_tuple().exponent == field.dec_digits
+                # WHY : Assumptions: the shape goes through the disclosure-safe helper, so a failure
+                #   names a type and two small numbers. These are money amounts and identifiers;
+                #   printing one to prove its scale is wrong would disclose it to make a point about
+                #   its shape.
+                _assert_exact_decimal_safely(
+                    row[field.name],
+                    field.dec_digits,
+                    what=f"{field.name} on overlay {discriminator}",
+                )
+    # WHY : Assumptions: the regimes actually reached are required to be EXACTLY the ones the five
+    #   overlays declare, rather than merely to include the three numeric ones. A subset check
+    #   passes while a whole regime goes unreached, which is how a decoder could quietly stop
+    #   decoding one.
+    assert seen == declared
     assert {Kind.ZONED, Kind.PACKED, Kind.BINARY} <= seen
+    assert Kind.OPAQUE not in seen, "the payload area is replaced by the branch, never published"
 
     # WHY : Assumptions: the declared widths of the four computational shapes this record uses are
     #   pinned against the codec's own width functions rather than as bare numbers, so the record
@@ -3412,7 +4290,9 @@ def test_a_binary_span_is_never_decoded_at_the_packed_width(seed_corpus: SeedCor
     """Read a real binary field at the packed width and require the packed codec to refuse it.
 
     :param seed_corpus: session accessor over ``app/data``.
-    :returns: nothing; the assertion is that ``PackedDecimalError`` is raised at the wrong width.
+    :returns: nothing; a binary span decoded successfully at the packed width is a failure.
+    :raises None: the provoked refusal is caught by :func:`pytest.raises`, which requires
+        ``carddemo_migration.copybook.packed.PackedDecimalError``.
     """
     # WHY : Assumptions: the token ``COMP-3`` CONTAINS the token ``COMP``, so a picture-clause
     #   parser matching the shortest token first reads every packed field as binary and every
@@ -3440,9 +4320,11 @@ def test_a_binary_span_is_never_decoded_at_the_packed_width(seed_corpus: SeedCor
     # WHY : Assumptions: the correctly-widthed read is asserted in the same test, so the refusal
     #   above cannot be explained by the span being undecodable in principle. Reading the same field
     #   through its own regime returns an exact decimal at the declared scale.
-    value = packed.decode_binary_field(payload, binary_field)
-    assert isinstance(value, Decimal)
-    assert -value.as_tuple().exponent == binary_field.dec_digits
+    _assert_exact_decimal_safely(
+        packed.decode_binary_field(payload, binary_field),
+        binary_field.dec_digits,
+        what=f"the {binary_field.name} span read at its own declared width",
+    )
 
 
 @pytest.mark.parametrize("discriminator", sorted(layouts.EXPORT_RECORD_TYPES))
@@ -3470,23 +4352,76 @@ def test_every_export_overlay_masks_the_sensitive_fields_it_declares(
     rendered = export_record.render_masked_export_record(image)
     assert rendered["EXPORT-REC-TYPE"] == discriminator
 
+    # WHY : Refactoring Rationale: the loop no longer SKIPS a sensitive field whose regime is not
+    #   text-decodable, and that skip was the whole gap. Between a third and a half of the sensitive
+    #   fields on these overlays are computational -- packed balances and amounts, binary customer,
+    #   account and merchant identifiers, a packed credit score -- so the earlier loop checked that
+    #   each of them had SOME rendering and never checked that the rendering withheld anything. A
+    #   decoder emitting a packed amount verbatim satisfied it.
+    # WHY : Alternatives Considered: for a computational field the raw stored bytes are not a
+    #   comparable operand -- a COMP-3 balance is nibbles, and searching a rendering for them finds
+    #   nothing whatever the rendering says -- so the check is made against the DECODED value
+    #   instead, in the same rendered form the redaction is derived from. Comparing the rendering
+    #   against the keyed tag of that decoded form is stronger than an absence check on its own: it
+    #   requires the published redaction to BE the redaction of this value, so a rendering that
+    #   withheld the value by returning a constant, or by redacting a different field, fails too.
     branch = layouts.export_branch(discriminator)
     published = {field.name for field in export_record.branch_loaded_fields(discriminator)}
+    row = export_record.decode_ebcdic_export_record(image)
     payload = image[layouts.EXPORT_PAYLOAD_OFFSET :]
     sensitive = 0
+    computational = 0
     for field in branch.fields:
         if field.name not in published or not field.sensitive:
             continue
         sensitive += 1
         assert field.name in rendered, f"{field.name} has no rendering on overlay {discriminator}"
+        # WHY : Assumptions: the plain form is rendered from the decoded value with `format` at
+        #   fixed point for the computational regimes, which is the spelling a money value
+        #   carries -- never a float and never scientific notation -- and left as-is for the
+        #   character regimes, which decode to characters already.
+        # WHY : Trade-offs: the SUBSTRING-absence check below is applied to the text regimes only,
+        #   and the asymmetry is structural rather than lenient. A text field's stored characters
+        #   are exactly the declared width and a redaction tag is at most that width, so a value
+        #   can only appear inside its own rendering by being equal to it -- a bounded claim. A
+        #   computational value is much shorter than its stored width: a binary account identifier
+        #   renders as `50`, and a keyed tag is hexadecimal, so those two characters occur inside it
+        #   by coincidence with real probability -- and because the tag key is process-scoped random
+        #   when none is configured, the coincidence lands on a different overlay each run. That
+        #   check was therefore intermittently RED for a correctly-masked reader, which is worse
+        #   than no check: the deterministic pair above -- the rendering IS this value's redaction,
+        #   and the rendering is NOT this value -- states the same property without the flake.
+        decoded = row[field.name]
+        plain = decoded if isinstance(decoded, str) else format(decoded, "f")
+        _assert_equal_safely(
+            rendered[field.name],
+            layouts.mask_rendered_value(field, plain),
+            what=f"the redaction of {field.name} on overlay {discriminator}",
+        )
+        _assert_differs_safely(
+            rendered[field.name],
+            plain,
+            what=f"the rendering and the decoded value of {field.name} on overlay {discriminator}",
+        )
         if field.kind not in factory.TEXT_DECODABLE_KINDS:
+            computational += 1
             continue
         original = payload[field.start : field.start + field.length].decode("cp037")
         if original.strip():
-            assert original not in rendered[field.name], (
-                f"{field.name} survived the masked rendering of overlay {discriminator}"
+            _assert_absent_safely(
+                original,
+                rendered[field.name],
+                needle_label=f"the stored characters of {field.name}",
+                haystack_label=f"its rendering on overlay {discriminator}",
             )
     assert sensitive, f"overlay {discriminator} declares no sensitive field to mask"
+    # WHY : Assumptions: every one of the five overlays is required to carry at least one
+    #   COMPUTATIONAL sensitive field, so the branch this loop no longer skips is reached on all
+    #   five rather than on whichever overlay happens to declare one.
+    assert computational, (
+        f"overlay {discriminator} exercises no computational sensitive field, so the regime that"
+        " used to be skipped here is still unexercised"
+    )
 
     # WHY : Assumptions: the verification value is the one field with NO rendering at all on the
     #   card overlay, because the target has no column for it and a field with no destination has no
@@ -3541,14 +4476,29 @@ def test_every_decoded_row_holds_exactly_the_fields_its_reader_publishes(
     #   whose projection dropped a field would satisfy a hand-written list that had been edited to
     #   match it; it cannot satisfy its own declared inventory.
     if case.reader_name == "export_record":
-        image = seed_corpus.ebcdic_records("EXPORT.DATA.PS")[0]
-        discriminator = export_record.record_type(image)
-        expected = {field.name for field in export_record.ENVELOPE_LOADED_FIELDS} | {
-            field.name for field in export_record.branch_loaded_fields(discriminator)
-        }
-        row = export_record.decode_ebcdic_export_record(image)
-        assert set(row) <= expected
-        assert set(row) >= {field.name for field in export_record.ENVELOPE_LOADED_FIELDS}
+        # WHY : Refactoring Rationale: this branch used to assert a SUBSET and a superset of the
+        #   envelope, on the FIRST image only, and neither half held the decoder to its contract. A
+        #   row carrying the envelope and no branch field at all satisfied both bounds -- it is a
+        #   subset of the union and a superset of the envelope -- so the projection that gives this
+        #   record its whole point was unasserted, and four of the five overlays were never decoded
+        #   here because the first image is one type. It now requires exact equality, in declared
+        #   order, once per discriminator.
+        images: dict[str, bytes] = {}
+        for candidate in seed_corpus.ebcdic_records("EXPORT.DATA.PS"):
+            images.setdefault(export_record.record_type(candidate), candidate)
+        assert sorted(images) == sorted(layouts.EXPORT_RECORD_TYPES)
+        envelope_names = tuple(field.name for field in export_record.ENVELOPE_LOADED_FIELDS)
+        for discriminator, image in sorted(images.items()):
+            expected = envelope_names + tuple(
+                field.name for field in export_record.branch_loaded_fields(discriminator)
+            )
+            row = export_record.decode_ebcdic_export_record(image)
+            assert tuple(row) == expected, (
+                f"overlay {discriminator} decoded {len(row)} fields against {len(expected)}"
+                f" published; symmetric difference {sorted(set(row) ^ set(expected))}"
+            )
+            assert set(export_record.DROPPED_FIELD_NAMES).isdisjoint(row)
+            assert set(export_record.SUPPRESSED_FIELD_NAMES).isdisjoint(row)
         return
 
     module = getattr(readers_package, case.reader_name)

@@ -27,8 +27,9 @@ import tools.jackson.databind.json.JsonMapper;
  *
  * <h2>The identity contract</h2>
  *
- * <p>Three obligations define this filter, and each of the three is inherited from a reference-only
- * program rather than invented here:</p>
+ * <p>Three obligations define this filter. The first and the third are inherited from a
+ * reference-only program; the second is a decision taken by this migration, for the reason recorded
+ * beside it:</p>
  *
  * <ul>
  *   <li>an identity supplied by the caller is echoed back <b>exactly as it arrived</b>, so the caller
@@ -78,12 +79,16 @@ import tools.jackson.databind.json.JsonMapper;
  * lives only inside one of those copybooks is therefore not verifiable from this repository, and no
  * such width is asserted anywhere in this class.</p>
  *
- * <p><b>Echo, and mint when absent.</b> Line 745 moves the saved inbound identifier straight into the
- * reply descriptor, unaltered. Line 746 moves the no-identifier constant {@code MQMI-NONE} into the
- * reply's own message identifier, which is the baseline's idiom for "there is no inbound value here,
- * so start fresh". Those two lines sit next to each other and do opposite things on purpose: one
- * field is carried across, the adjacent one is originated. This filter reproduces exactly that
- * split -- carry the caller's identity, originate what the caller did not supply.</p>
+ * <p><b>Echo is inherited; minting is this migration's decision.</b> Line 745 moves the saved
+ * inbound identifier straight into the reply descriptor, unaltered, which is the echo obligation and
+ * is inherited exactly. Line 746 moves the no-identifier constant {@code MQMI-NONE} into the reply's
+ * own MESSAGE identifier -- a different field from the correlation one, originated because it has no
+ * inbound value. Assumptions: the reference therefore never meets a request whose CORRELATION value
+ * is absent, so it decides nothing about that case and this filter cannot inherit an answer for it.
+ * Minting one is chosen here instead of refusing the request, because a request carrying no identity
+ * is well-formed in HTTP terms and refusing it would invent a failure the reference does not have;
+ * the adjacent {@code MQMI-NONE} line is cited as the house idiom for originating a fresh identifier,
+ * not as authority for minting a correlation value.</p>
  *
  * <p><b>The identity is a token, never a selector.</b> Line 395 moves {@code MQMI-NONE} and line 396
  * moves {@code MQCI-NONE} into the descriptor used to read the next request, which makes that read
@@ -388,16 +393,13 @@ public final class CorrelationIdFilter implements Filter {
     /**
      * The punctuation an inbound identity may contain, beyond letters and digits.
      *
-     * <p>Refactoring Rationale: an earlier revision accepted the whole printable single-byte range
-     * from {@code 0x21} to {@code 0x7E}, which blocked a carriage return and a line feed and admitted
-     * everything else -- the double quote, the backslash, the square and curly brackets, the equals
-     * sign, the semicolon and the comma among them. Blocking the two line terminators is necessary and
-     * is not sufficient: this value is written into a log line and into a mapped diagnostic context
-     * field, so a caller supplying {@code a","level":"ERROR} closes a field and opens another in a
-     * structured encoder, and a caller supplying {@code a,b} splits one field into two in a delimited
-     * one. Neither forges a new RECORD -- the line terminators are still refused -- but both corrupt
-     * the record they appear in, which is enough to make an operational search return the wrong answer
-     * about which request did what.</p>
+     * <p>Assumptions: blocking the two line terminators is necessary and is not sufficient, so the
+     * alphabet is an allow-list rather than a deny-list. This value is written into a log line and into
+     * a mapped diagnostic context field, and the quoting, bracketing and delimiting characters of those
+     * formats can corrupt the field boundaries of the record the value lands in without forging a new
+     * record at all -- which is enough to make an operational search return the wrong answer about
+     * which request did what. Admitting the whole printable single-byte range would leave every one of
+     * those characters available to a caller.</p>
      *
      * <p>Assumptions: the three characters admitted here are the ones real callers use as separators
      * inside an identity -- the hyphen of a universally unique identifier, the underscore and the dot
@@ -496,12 +498,11 @@ public final class CorrelationIdFilter implements Filter {
     /**
      * The clock the refusal body reads its failure instant from.
      *
-     * <p>Refactoring Rationale: the filter holds a clock because it now RENDERS a problem shape, and
-     * that shape carries a timestamp. It previously held no state at all, which was correct while the
-     * refusal delegated its body to the container. Taking the clock as a constructor argument rather
-     * than reading the system clock inside the method is what lets a test assert the rendered body
-     * against a fixed instant -- the same arrangement {@code GlobalExceptionHandler} already uses, so
-     * a service configures one clock and both error paths read it.</p>
+     * <p>Assumptions: the filter holds a clock because it RENDERS a problem shape of its own and that
+     * shape carries a timestamp. Taking the clock as a constructor argument rather than reading the
+     * system clock inside the method is what lets a test assert the rendered body against a fixed
+     * instant -- the same arrangement {@code GlobalExceptionHandler} uses, so a service configures one
+     * clock and both error paths read it.</p>
      *
      * <p>Assumptions: the field is immutable and the clock implementations used are thread-safe, so one
      * instance still serves every request thread and a service is still free to hold it as a
@@ -529,10 +530,9 @@ public final class CorrelationIdFilter implements Filter {
      * in this module does so beyond its own auto-configuration, which passes the context's shared clock
      * so that a refusal and a handler-rendered error stamp one request identically.</p>
      *
-     * <p>Alternatives Considered: leaving the constructor implicit, which is no longer available now
-     * that the class holds a field, and reading the clock statically, which would leave the rendered
-     * timestamp unassertable. Declaring both forms costs two members and puts the registration contract
-     * where it is looked for.</p>
+     * <p>Alternatives Considered: reading the clock statically, which would leave the rendered
+     * timestamp unassertable. Declaring both constructor forms costs two members and puts the
+     * registration contract where it is looked for.</p>
      *
      * @param clock the clock the refusal body reads its failure instant from; must not be {@code null}
      * @throws NullPointerException if {@code clock} is {@code null}
@@ -603,18 +603,13 @@ public final class CorrelationIdFilter implements Filter {
         }
         request.setAttribute(FILTER_APPLIED_ATTRIBUTE, Boolean.TRUE);
 
-        // WHY : Refactoring Rationale: a supplied identity that does not conform is REFUSED here
-        //       rather than replaced. This method previously took whatever resolveCorrelationId
-        //       returned and carried on, and that method answered a nonconforming inbound value with
-        //       a freshly minted one -- so a caller that sent, for example, a canonical
-        //       thirty-six-character universally unique identifier was answered under a DIFFERENT
-        //       identity, with nothing in the response saying so. That silently broke the first of
-        //       this filter's three documented obligations: the caller correlates on the exact bytes
-        //       it sent, so an identity it never sent is an identity it cannot find in any log. The
-        //       cases are now distinct and each is honest -- conforming means echo,
-        //       present-but-unusable means refuse, and absent means fall back to the edge's own
-        //       request identifier before minting -- which is what makes the echo a contract rather
-        //       than a best effort.
+        // WHY : Assumptions: a supplied identity that does not conform is REFUSED here rather than
+        //       replaced, because answering it under a minted identity would break the first of this
+        //       filter's three obligations silently -- the caller correlates on the exact bytes it sent,
+        //       so an identity it never sent is one it cannot find in any log. The three cases are
+        //       therefore distinct and each is honest: conforming means echo, present-but-unusable means
+        //       refuse, and absent means fall back to the edge's own request identifier before minting.
+        //       That is what makes the echo a contract rather than a best effort.
         // WHY : Alternatives Considered: widening the contract instead, so a thirty-six-character
         //       identifier conforms. Rejected because the width is not this class's to choose: it is
         //       the twenty-four characters of WS-SAVE-CORRELID at
@@ -624,10 +619,10 @@ public final class CorrelationIdFilter implements Filter {
         //       it is far harder to see. The bound is published in
         //       docs/architecture/observability.md for callers to build against.
         // WHY : Trade-offs: refusal costs a caller that sends a wrong-shaped header a failed request
-        //       where it previously got a working one under an identity it did not choose. That cost
-        //       is accepted and is the point -- a 400 naming the constraint is actionable at the one
-        //       moment the caller can act on it, whereas a substituted identity is discovered during
-        //       an incident, when the log it was needed for has already been written.
+        //       rather than a served one under an identity it did not choose. That cost is accepted and
+        //       is the point -- a 400 naming the constraint is actionable at the one moment the caller
+        //       can act on it, whereas a substituted identity is discovered during an incident, when the
+        //       log it was needed for has already been written.
         String inbound = inboundCorrelationId(request);
         if (inbound != null && !isContractConforming(inbound)) {
             rejectNonconformingIdentity(request, response, inbound, this.clock);
@@ -809,17 +804,15 @@ public final class CorrelationIdFilter implements Filter {
      * the response correlation header, and does not invoke the remainder of the chain -- so no handler
      * runs under an identity the caller did not choose.</p>
      *
-     * <p>Refactoring Rationale: the refusal is RENDERED HERE, where it previously delegated to
-     * {@code sendError}. Delegating was wrong in two ways that only appear together. A published
-     * contract states that 400 carries the problem shape and that every response carries the
-     * correlation header, and {@code sendError} produced neither: it hands the response to the
-     * container's error dispatch, which does not pass through the shared advice, so the body was
-     * whatever error page the deployment happened to configure and the header was absent because the
-     * refusal path returns before {@code publishToResponse} is reached. A client written against the
-     * contract therefore could not parse this one refusal and could not correlate it. Writing the
-     * record here makes the refusal identical in every deployment AND identical in shape to every
-     * other error this stack returns, which is what the earlier note was reaching for by committing the
-     * status.</p>
+     * <p>Alternatives Considered: delegating the refusal to {@code sendError}. Rejected because it
+     * satisfies neither half of the published contract -- that a 400 carries the problem shape and that
+     * every response carries the correlation header. {@code sendError} hands the response to the
+     * container's error dispatch, which does not pass through the shared advice, so the body would be
+     * whatever error page a deployment happened to configure, and the header would be absent because
+     * this path returns before {@code publishToResponse} is reached. A client written against the
+     * contract could then neither parse nor correlate this one refusal. Writing the record here makes
+     * the refusal identical in every deployment and identical in shape to every other error this stack
+     * returns.</p>
      *
      * <p>Assumptions: the response carries a FRESHLY MINTED identity rather than the refused one. The
      * caller's value cannot be echoed -- that is what it is being refused for -- but the header cannot
@@ -1041,18 +1034,16 @@ public final class CorrelationIdFilter implements Filter {
             }
         }
 
-        // WHY : Refactoring Rationale: the alphabet check above admits digits, and the width contract
-        //       admits twenty-four characters, so a value made only of digits and shaped exactly like a
-        //       primary account number conformed until this test was added -- and a conforming value is
-        //       published to the mapped diagnostic context and therefore onto every log line the
-        //       request produces. A caller could then write its own card number into log storage
-        //       through a header, which is the one exposure the alphabet check cannot see because the
-        //       characters themselves are unobjectionable.
-        //       Alternatives Considered: hashing an inbound identity instead of refusing it, so that
-        //       any value at all could be accepted. Rejected because it defeats the reason the identity
-        //       is echoed: a caller matches a response to its request on the value it sent, and a
-        //       hashed identity is no longer that value. Refusing the small PAN-shaped class keeps the
-        //       echo exact for every other value.
+        // WHY : Assumptions: the alphabet check cannot see this exposure, because the characters of an
+        //       account number are individually unobjectionable. A conforming value is published to the
+        //       mapped diagnostic context and therefore onto every log line the request produces, so a
+        //       caller could place cardholder data into log storage through a header. This test is what
+        //       keeps that class of value out.
+        //       Alternatives Considered: hashing an inbound identity instead of refusing it, so that any
+        //       value at all could be accepted. Rejected because it defeats the reason the identity is
+        //       echoed: a caller matches a response to its request on the value it sent, and a hashed
+        //       identity is no longer that value. Refusing the narrow account-number-shaped class keeps
+        //       the echo exact for every other value.
         return !isAccountNumberShaped(candidate);
     }
 
@@ -1068,14 +1059,11 @@ public final class CorrelationIdFilter implements Filter {
      * wider than that single width deliberately, because a caller choosing to smuggle a number is not
      * bound by the width this system stores.</p>
      *
-     * <p>Refactoring Rationale: the test is applied to the value with its SEPARATORS REMOVED, and it
-     * previously was not. The alphabet admits a hyphen, a dot and an underscore, so
-     * {@code 4111-1111-1111-1111} carried no bare run of thirteen digits, conformed, and was published
-     * to the mapped diagnostic context, echoed onto the response header and written to every log line
-     * of the request -- the exact exposure this test was added to close, defeated by the three
-     * characters the alphabet had to admit for legitimate callers. Normalising first is what makes the
-     * rule about the VALUE rather than about its punctuation, and it is the same correction
-     * {@code com.carddemo.common.security.CardNumberMasker} carries for the rendering half of the same
+     * <p>Assumptions: the test is applied to the value with its SEPARATORS REMOVED, because the
+     * alphabet has to admit a hyphen, a dot and an underscore for legitimate callers and a rule stated
+     * over the raw text would therefore be a rule about punctuation rather than about the value.
+     * Normalising first is what makes it about the value, and it is the same treatment
+     * {@code com.carddemo.common.security.CardNumberMasker} applies for the rendering half of the same
      * problem.</p>
      *
      * <p>Trade-offs: the refused class widens, and the cost is real and worth naming. A legitimate

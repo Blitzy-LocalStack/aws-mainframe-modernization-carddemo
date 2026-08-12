@@ -37,8 +37,17 @@
 name: CardDemo UI CI
 
 # Assumptions: UI source, manifest, delivery config, the service-held OpenAPI
-# documents and this workflow are the complete owning surface. Infrastructure and
-# immutable baseline paths have separate workflows and are intentionally excluded.
+# documents, the Rule 1 lexical gate's own source, the documentation standard that
+# gate is measured against, and this workflow are the complete owning surface.
+# Infrastructure and immutable baseline paths have separate workflows and are
+# intentionally excluded.
+#
+# Assumptions: config/rule1/** and docs/CODE_DOCUMENTATION_STANDARD.md are triggers
+# because the lexical gate below reads the WHOLE tree, this SPA included, and the
+# standard is authoritative over the gate rather than descriptive of it. A change to
+# either can turn this SPA's prose from compliant to non-compliant without touching
+# a file under ui/, and a filter that named neither would let that change reach the
+# default branch with no run.
 #
 # Refactoring Rationale: the third pattern, the openapi trees under services, was
 # ADDED and is not a UI path. Without it this workflow's own contract-agreement
@@ -59,12 +68,16 @@ on:
     paths:
       - "ui/**"
       - "services/*/src/main/resources/openapi/**"
+      - "config/rule1/**"
+      - "docs/CODE_DOCUMENTATION_STANDARD.md"
       - ".github/workflows/ui-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "ui/**"
       - "services/*/src/main/resources/openapi/**"
+      - "config/rule1/**"
+      - "docs/CODE_DOCUMENTATION_STANDARD.md"
       - ".github/workflows/ui-ci.yml"
   workflow_dispatch:
     inputs:
@@ -185,6 +198,33 @@ jobs:
       - name: Run ESLint and the JSDoc documentation gate
         shell: bash
         run: npm run lint
+
+      # Assumptions: this step and the one above enforce DIFFERENT halves of Rule 1
+      # over the same files, which is why both run here. ESLint decides docstring
+      # PRESENCE and tag coverage on TypeScript declarations; the lexical gate
+      # decides the written FORM of a rationale label and the prohibition on a
+      # statement-level WHAT comment, in every language at once -- neither of which
+      # any ESLint rule expresses. A repository-wide gate appears in three workflows
+      # for that reason: whichever one a change triggers, the property is checked.
+      # GATING and FAIL-CLOSED: the script exposes no tolerance flag, no `--fix` and
+      # no allow-list argument, and this step adds none.
+      # Alternatives Considered: relying on the copy in services-ci.yml alone.
+      # Rejected -- a change confined to ui/** does not trigger that workflow, so a
+      # prohibited form introduced in a screen or a message catalog would reach the
+      # default branch unexamined. Trade-offs: the gate therefore runs up to three
+      # times for a change touching several trees, which costs seconds because it
+      # imports only the standard library.
+      # Assumptions: the runner image's own `python3` is used rather than a pinned
+      # setup-python step, because this job is otherwise Node-only and the gate needs
+      # no third-party package. The `python3 -V` line makes the interpreter the run
+      # actually used visible in the log, so a future image change is diagnosable
+      # from the same step that would fail.
+      - name: Run the Rule 1 lexical and consistency gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -V
+          python3 config/rule1/rule1_gate.py
 
       - name: Check formatting drift
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_format_check }}

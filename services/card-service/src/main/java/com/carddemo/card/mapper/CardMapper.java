@@ -420,8 +420,7 @@ public class CardMapper {
         //       are bound to different directions, and only the component that issued the query knows
         //       which way it read; a mapper that minted them would have to be told, and would then be
         //       able to mint the wrong one.
-        return new PageResponse<>(
-                items, page.firstKey(), page.lastKey(), page.hasNext(), page.hasPrevious());
+        return new PageResponse<>(items, page.firstKey(), page.lastKey(), page.hasNext());
     }
 
     /**

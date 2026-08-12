@@ -10,7 +10,7 @@ import java.util.Optional;
  *
  * <h2>Purpose: a type exists here because one of these rules is an absence in the source</h2>
  *
- * <p><b>Purpose.</b> This type carries the reason codes and reason descriptions that transaction
+ * <p>This type carries the reason codes and reason descriptions that transaction
  * posting assigns when a daily transaction cannot be posted, the fixed-width renderings those two
  * values take in the reject stream, and the rule that decides which reason survives when more than
  * one condition holds. It is a vocabulary type. It states what the reasons ARE and what bytes each
@@ -63,57 +63,35 @@ import java.util.Optional;
  *
  * <h2>Which reasons can co-occur at all: exactly one pair</h2>
  *
- * <p>The precedence question is narrow because the reference program's structure makes most of
- * these reasons mutually exclusive:</p>
- *
- * <ul>
- *   <li>100 excludes everything downstream. The guard at {@code app/cbl/CBTRN02C.cbl:372} runs the
- *       account lookup only when no reason has been assigned, so a failed cross-reference read ends
- *       validation.</li>
- *   <li>101 excludes both 102 and 103. It is assigned in the {@code INVALID KEY} branch of the
- *       account read, whereas the credit-limit and expiration tests live in the
- *       {@code NOT INVALID KEY} branch of that same read, so a missing account means neither
- *       balance nor expiry is ever evaluated.</li>
- *   <li>109 co-occurs with nothing. It is assigned on the posting path, which
- *       {@code app/cbl/CBTRN02C.cbl:211} enters only when validation assigned no reason at all.</li>
- *   <li>102 and 103 CAN both hold, and they are precisely the pair with no guard between
- *       them.</li>
- * </ul>
- *
- * <p>Assumptions: stating the exclusivity is what makes the precedence rule answerable rather than
- * open-ended. There is one pair to decide and the source decides it, so
+ * <p>Assumptions: the precedence question is narrow because the reference program's structure makes
+ * most of these reasons mutually exclusive. 100 excludes everything downstream, because the guard at
+ * {@code app/cbl/CBTRN02C.cbl:372} runs the account lookup only when no reason has been assigned;
+ * 101 excludes both 102 and 103, because it is assigned in the {@code INVALID KEY} branch of the
+ * account read while both boundary tests live in the {@code NOT INVALID KEY} branch of that same
+ * read; and 109 co-occurs with nothing, because {@code :211} enters the posting path only when
+ * validation assigned no reason at all. That leaves {@code {102, 103}} as the one pair that can both
+ * hold, and it is precisely the pair with no guard between them -- so
  * {@link #lastWriterWins(RejectReason)} is a transcription rather than a policy invented here.</p>
  *
  * <h2>Both boundaries are inclusive on the passing side, so equality posts</h2>
  *
- * <p>Each of the two boundary tests is written in the reference as a PASS guard using
- * {@code &gt;=}, which means the reject predicate is the strict complement. Both framings are given
- * on {@link #OVER_CREDIT_LIMIT} and {@link #RECEIVED_AFTER_ACCOUNT_EXPIRATION} because readers
- * invert them in the retelling:</p>
- *
- * <ul>
- *   <li><b>Credit limit.</b> {@code app/cbl/CBTRN02C.cbl:407} passes when the limit is greater than
- *       or equal to the projected amount, so a projection landing exactly ON the limit POSTS and
- *       only a projection strictly greater than the limit rejects.</li>
- *   <li><b>Expiration.</b> {@code app/cbl/CBTRN02C.cbl:414} passes when the expiration date is
- *       greater than or equal to the transaction date, so a transaction dated exactly ON the
- *       expiration date POSTS and only a strictly earlier expiration rejects.</li>
- * </ul>
- *
- * <p>Assumptions: both senses are corroborated independently by committed expectation files of the
- * functional-parity oracle. {@code tests/golden/posting/boundary_exact_limit} and
- * {@code tests/golden/posting/boundary_expiry_equal} each expect an EMPTY reject stream and a
- * return code of zero, which is only consistent with the inclusive reading of both guards.</p>
+ * <p>Assumptions: each of the two boundary tests is written in the reference as a PASS guard using
+ * {@code &gt;=}, so the reject predicate is the strict complement -- a projection landing exactly ON
+ * the credit limit posts, and a transaction dated exactly ON the expiration date posts. Both senses
+ * are corroborated independently by the parity oracle, whose
+ * {@code tests/golden/posting/boundary_exact_limit} and
+ * {@code tests/golden/posting/boundary_expiry_equal} each expect an EMPTY reject stream and a return
+ * code of zero. Both framings are restated on {@link #OVER_CREDIT_LIMIT} and
+ * {@link #RECEIVED_AFTER_ACCOUNT_EXPIRATION}, where a caller reads them, because readers invert them
+ * in the retelling.</p>
  *
  * <h2>The fixed-width renderings, and the record length that determines them</h2>
  *
  * <p>A rejected transaction is written as one 430-character record: the 350-character transaction
- * image, then an 80-character trailer holding this type's two values. The widths are declared at
- * {@code app/cbl/CBTRN02C.cbl:176-182} -- {@code REJECT-TRAN-DATA PIC X(350)} and
- * {@code VALIDATION-TRAILER PIC X(80)} at lines 177 and 178, and the trailer's own two fields,
+ * image, then an 80-character trailer holding this type's two values as
  * {@code WS-VALIDATION-FAIL-REASON PIC 9(04)} and
- * {@code WS-VALIDATION-FAIL-REASON-DESC PIC X(76)}, at lines 181 and 182. Four plus 76 is the 80 of
- * line 178, and 350 plus 80 is 430. That total is asserted independently by the driver, at
+ * {@code WS-VALIDATION-FAIL-REASON-DESC PIC X(76)}, declared at
+ * {@code app/cbl/CBTRN02C.cbl:176-182}. The 430 total is asserted independently by the driver at
  * {@code app/jcl/POSTTRAN.jcl:36}, which allocates the stream with
  * {@code DCB=(RECFM=F,LRECL=430,BLKSIZE=0)}.</p>
  *
@@ -147,36 +125,18 @@ import java.util.Optional;
  * the two account descriptions; and the cross-reference description ends in {@code FOUND} while
  * describing a row that was not found. None of the three is a defect to repair in this file.</p>
  *
- * <h2>Parameters, return values and exceptions at type level</h2>
- *
- * <p>This type declares no type parameter, so this block carries no parameter at-clause; a type
- * declaration returns nothing and raises nothing, so it carries no return or exception at-clause
- * either. Each member below carries its own. No authorship, availability or revision at-clause
- * appears anywhere in this file, matching the rest of this package.</p>
- *
- * <p>Baseline paths above are cited for provenance only. Nothing under {@code app/**} is read at
- * run time and nothing under it is altered by this migration: the reference is the behavioural
- * oracle and stays byte-identical. Where this type's behaviour departs from the reference, the
- * reference does one thing, this type does another, and the divergence is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}. Line numbers refer to the source as
- * committed, and columns 73 to 80 of a COBOL or JCL line carry a sequence field that is not part of
- * the statement.</p>
- *
- * <h2>The five constants, and the three properties a caller has to know</h2>
- *
- * <p>This enum declares FIVE reason codes, of which FOUR can be persisted. The fifth, 109, is
- * assigned by the reference on a path that cannot reach the reject writer;
- * {@link #isPersistedToRejectStream()} carries that distinction, so it cannot drift from the
- * sibling type that persists these rows.</p>
+ * <h2>Two properties a caller has to know before comparing reasons</h2>
  *
  * <p>Assumptions: reasons 101 and 109 carry BYTE-IDENTICAL descriptions under different codes, so a
  * description does not identify a reason. {@link #code()} is what a caller compares, and a caller
- * matching on text would silently conflate the two.</p>
+ * matching on text would silently conflate the two. Precedence is
+ * {@link #lastWriterWins(RejectReason)} and expressly NOT {@link #ordinal()}: relying on declaration
+ * order would make the answer a property of how this file is written rather than of what the
+ * reference does.</p>
  *
- * <p>Assumptions: precedence is {@link #lastWriterWins(RejectReason)} and expressly NOT
- * {@link #ordinal()}. The only pair the reference can actually produce is {@code {102, 103}}, and on
- * that pair 103 wins; relying on declaration order would make the answer a property of how this
- * file is written rather than of what the reference does.</p>
+ * <p>Baseline paths are cited for provenance only; nothing under {@code app/**} is read at run time
+ * or altered by this migration, and every divergence from it is registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  */
 public enum RejectReason {
 
@@ -271,9 +231,19 @@ public enum RejectReason {
      * therefore emits 109, which the committed expectation files confirm: the code {@code 0109}
      * appears in none of them. This type carries the constant because the code exists in the
      * reference's vocabulary, and {@link #isPersistedToRejectStream()} answers false for it. The
-     * migrated job surfaces a failed account rewrite through its hard-failure exit tier instead,
-     * and the divergence is registered in
+     * migrated job surfaces a failed account rewrite through its hard-failure exit tier instead --
+     * the posting transaction rolls back and the step fails, so nothing is posted and nothing is
+     * rejected -- and the divergence is registered as {@code D-POSTING-ATOMIC-NO-REJECT-109} in
      * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Assumptions: <b>no durable reject row carries this code, in this target or the
+     * reference.</b> The register briefly carried an entry, {@code D-REJECT-109-DURABLE}, describing
+     * a row written from outside the rolled-back unit of work so that the failure would be
+     * queryable; no code ever wrote one, and that identifier is now recorded as withdrawn in the
+     * register's withdrawn-identifier section. This is stated here because this constant is the
+     * first thing a reader looking for reason 109 finds, and an unqualified "hard-failure tier"
+     * leaves open which artifact records the failure. The answer is the batch state machine and the
+     * task's own log, not {@code ledger.transaction_rejects}.</p>
      *
      * <p>Assumptions: <b>this constant is kept distinct from {@link #ACCOUNT_NOT_FOUND_ON_READ}
      * despite the identical description.</b> The reference assigns two different codes for two
@@ -491,21 +461,16 @@ public enum RejectReason {
      *     reference assigns on a path that cannot reach the writer
      */
     public boolean isPersistedToRejectStream() {
-        // WHY : Assumptions: the exclusion rests on reachability, not on preference. The paragraph
-        //       that assigns 109 is performed only from app/cbl/CBTRN02C.cbl:441, inside the posting
-        //       paragraph, which is performed only from :212 on the branch taken when validation
-        //       assigned no reason; the paragraph that writes the reject stream is performed only
-        //       from :215, on the other branch of that same decision at :211-216. The two branches
-        //       are alternatives, the branch is chosen before the rewrite runs, and :208 resets the
-        //       reason before the next record, so no execution can carry 109 to the writer. The
-        //       oracle's expectations agree independently: the code 0109 appears in none of the
-        //       committed reject expectation files under tests/golden/posting/.
-        // WHY : Assumptions: this predicate is what keeps two separately authored statements of the
-        //       same fact from drifting. The sibling that persists a reject row declares its
-        //       reason-code domain as exactly {100, 101, 102, 103}; this type declares five
-        //       constants because the reference's vocabulary has five. The two agree only because
-        //       this predicate defines the narrower set in terms of the wider one, rather than each
-        //       file restating a list that the other cannot see.
+        // WHY : Assumptions: the exclusion rests on reachability, not on preference. 109 is assigned
+        //       from the posting paragraph, which app/cbl/CBTRN02C.cbl:212 performs on the branch
+        //       taken when validation assigned no reason, while the reject writer is performed from
+        //       :215 on the other branch of that same decision; the two are alternatives and :208
+        //       resets the reason before the next record, so no execution can carry 109 to the
+        //       writer. The oracle agrees independently -- the code 0109 appears in none of the
+        //       committed reject expectation files under tests/golden/posting/. Defining the narrower
+        //       persisted set HERE, in terms of the wider vocabulary, is also what keeps this type
+        //       and the sibling that persists a reject row -- whose reason-code domain is exactly
+        //       {100, 101, 102, 103} -- from each restating a list the other cannot see.
         return this != ACCOUNT_NOT_FOUND_ON_REWRITE;
     }
 
@@ -522,17 +487,15 @@ public enum RejectReason {
      */
     public boolean terminatesValidation() {
         // WHY : Assumptions: the reference short-circuits in one place and not in the other, and the
-        //       asymmetry is the whole content of this predicate. app/cbl/CBTRN02C.cbl:372 guards
-        //       the account lookup with IF WS-VALIDATION-FAIL-REASON = 0, so a cross-reference
-        //       failure ends validation; and an account-read failure takes the INVALID KEY branch at
-        //       :396, leaving the two tests in the NOT INVALID KEY branch unevaluated. The two
-        //       boundary tests at :407 and :414 carry no such guard between them, so assigning 102
-        //       does NOT stop the expiration test from running and possibly overwriting it.
-        // WHY : Assumptions: the rewrite failure answers false for a different reason than the
-        //       boundary failures do -- there is no validation left for it to terminate, because it
-        //       is assigned from the posting path at :556, which :211 reaches only after validation
-        //       completed with no reason at all. Answering true would suggest it participates in a
-        //       validation sequence it never enters.
+        //       asymmetry is the whole content of this predicate. app/cbl/CBTRN02C.cbl:372 guards the
+        //       account lookup with IF WS-VALIDATION-FAIL-REASON = 0, so a cross-reference failure
+        //       ends validation, and an account-read failure takes the INVALID KEY branch at :396,
+        //       leaving the two tests in the NOT INVALID KEY branch unevaluated; the two boundary
+        //       tests at :407 and :414 carry no such guard between them, so assigning 102 does NOT
+        //       stop the expiration test from overwriting it. The rewrite failure answers false for a
+        //       different reason -- there is no validation left for it to terminate, because :211
+        //       reaches its assignment at :556 only after validation completed with no reason at
+        //       all.
         return this == CARD_NUMBER_NOT_IN_CROSS_REFERENCE || this == ACCOUNT_NOT_FOUND_ON_READ;
     }
 

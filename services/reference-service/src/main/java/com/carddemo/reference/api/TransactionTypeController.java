@@ -270,7 +270,8 @@ public class TransactionTypeController {
      * predicate at all.</p>
      *
      * @param cursor the sealed paging position a previous reply minted, absent on a first request
-     * @param direction the paging direction, absent meaning forward
+     * @param direction the paging direction as the caller spelled it, one of the two lower-case values
+     *     the contract publishes, absent meaning forward
      * @param typeCode an exact two-digit type-code filter, absent meaning unfiltered
      * @param description a description containment filter, absent meaning unfiltered
      * @param principal the authenticated caller, supplied by the filter chain; its name is sealed into
@@ -287,7 +288,13 @@ public class TransactionTypeController {
             @RequestParam(name = PARAM_CURSOR, required = false)
             @Size(max = CursorToken.MAX_TOKEN_LENGTH)
             @Pattern(regexp = CursorToken.SEALED_SHAPE_PATTERN) String cursor,
-            @RequestParam(name = PARAM_DIRECTION, required = false) PageDirection direction,
+            // WHY : ⚠️ Refactoring Rationale: bound as a STRING and converted below, because a
+            //       parameter declared as the enumeration is bound by Enum.valueOf against the
+            //       CONSTANT NAME -- so the two lower-case values this contract publishes, and the
+            //       only two the browser client sends, were refused while NEXT and PREVIOUS were
+            //       accepted. The whole argument, and the converter alternative that was rejected,
+            //       is recorded on PageDirection.fromRequestParameter.
+            @RequestParam(name = PARAM_DIRECTION, required = false) String direction,
             @RequestParam(name = PARAM_TYPE_CODE, required = false)
             @Size(min = TransactionTypeListRequest.TYPE_CODE_LENGTH,
                     max = TransactionTypeListRequest.TYPE_CODE_LENGTH)
@@ -298,7 +305,8 @@ public class TransactionTypeController {
             Principal principal) {
 
         return this.service.list(
-                new TransactionTypeListRequest(cursor, direction, typeCode, description),
+                new TransactionTypeListRequest(cursor, PageDirection.fromRequestParameter(direction),
+                        typeCode, description),
                 this.cursorToken, principal.getName());
     }
 

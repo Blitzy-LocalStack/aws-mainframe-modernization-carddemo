@@ -112,7 +112,7 @@ Stated so that a reader cannot mistake this scenario's outcome for either of the
   whole body displays the message, moves 4 to `RETURN-CODE`, and returns through
   `1003-TREAT-RECORD` to the loop at L93 to L96, so every later row is still read. That
   case belongs to
-  [`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md).
+  [`../invalid_type_abend`](../invalid_type_abend/README.md).
 
 Assumptions: the paragraph *name* is the only thing on that second path suggesting
 termination, which is exactly why its real effect is written out here rather than left
@@ -236,14 +236,25 @@ artifact as if it already exists.
   53. The action codes it matches are the single bytes `A` and `D`, so this fixture's
   two rows select the `ADD` action for row 1 and the `DELETE` action for row 2. Its
   removal member cites the same L196 to L226 span this document cites.
-- **A case binding these two rows** - `[planned]`. The scenario-parameterised classpath
-  loader in `ReferenceBatchUpdateServiceTest` is `[present]` and resolves
+- **A case binding these two rows** - `[present]`. The scenario-parameterised classpath
+  loader in `ReferenceBatchUpdateServiceTest` resolves
   `fixtures/batch_reference_update/<scenario>/trtype-update.txt`, which is the mechanism
-  that makes one file name per scenario resolvable at all (section 6). No case currently
-  feeds *this* scenario through it, and the fixture-geometry cases in
-  `com.carddemo.reference.fixtures` enumerate the sibling scenarios rather than this
-  one. These bytes are therefore stated as this file's declared contract, not as an
-  observed assertion.
+  that makes one file name per scenario resolvable at all (section 6), and the
+  `on the stored scenario fixtures` group feeds *this* scenario through it. It asserts the
+  ordered pair section 3.1 states - an applied `ADD` on code `08` carrying
+  `RECORD INSERTED SUCCESSFULLY`, then an applied `DELETE` on the same code carrying
+  `RECORD DELETED SUCCESSFULLY`, nothing refused, the clean return code - and verifies the
+  removal as a real delete of the row the lookup returned, because an outcome reporting
+  `DELETE` while nothing was removed is the shape a swallowed foreign-key refusal takes.
+  The fixture-geometry cases in `com.carddemo.reference.fixtures` now enumerate this
+  scenario alongside its siblings, and `ReferenceFixtureTest` sweeps the packaged tree so
+  none can fall out of that enumeration again.
+- **This entry read `[planned]` until a review found it.** Its own wording was accurate -
+  these bytes were "stated as this file's declared contract, not as an observed assertion"
+  - and that is precisely the state a committed fixture should not be left in: nothing
+  executed against the file, so an edit that made it wrong would have passed. The
+  annotation is kept in this shape rather than deleted so the distinction between a
+  declared and an observed contract stays legible to the next reader.
 - **What that consumer is not.** A plain service method over a record stream. There is
   no batch job, no step, no job repository and no run ledger behind this input, and
   describing one would attribute machinery to a flow whose baseline is a single
@@ -487,8 +498,8 @@ meaningful.
 
 Assumptions: **the one ordering this scenario does have comes from its own intent and
 not from any key rule.** Row 1 must precede row 2, because a delete of a row that has
-not yet been added takes the `+100` arm rather than the success arm. That is a data
-dependency between two records in one sequential stream, which is a different thing
+not been added takes the `+100` arm rather than the success arm. That is a data
+dependency between two records in one sequential stream, which is a different matter
 entirely from a sorted-key requirement on the file - the distinction is drawn here
 rather than left to inference, because a reader who reads "order matters" as "the file
 is sorted" will look for a key that does not exist, and one who reads the absence of a

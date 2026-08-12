@@ -2,33 +2,28 @@
  * Persistence model of the LEDGER bounded context: one JPA entity per reference
  * COBOL record layout, mapping the four tables of the ledger schema.
  *
- * <h2>Target contract, and the tree state that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every type name, byte width and figure below states this
- * package's target contract as the migration plan assigns it. The directory
- * beside this file now matches that contract -- all five files the inventory
- * names are present -- but it did not when this charter was authored, and the
- * distinction is recorded rather than quietly dropped. This paragraph was
- * written when the directory held this charter alone, so that a name below with
- * no file could be read as planned rather than missing; it is kept because the
- * same reading is needed again the next time this charter leads its files, and
- * because a charter that switched from stating a target to measuring a
- * directory without saying so leaves a reader unable to tell which one is in
- * front of them.
+ * <p>Five compilation units sit in this directory: this charter and the four
+ * entities {@code Transaction}, {@code DailyTransaction},
+ * {@code TransactionCategoryBalance} and {@code TransactionReject}. Every type
+ * name, byte width and figure below is a measurement of that directory and of
+ * those files, and the marker line is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a fifth entity arriving without an entry here fails the build:
  *
- * <p>Alternatives Considered: withholding this charter until the four entities
- * it governs exist. Rejected on two independent grounds, either of which
- * settles it alone. First, the charter is what those authors work from -- which
- * record belongs here, which does not, and which column list each entity
- * answers to -- so a package holding entities but no stated contract is exactly
- * the state in which a fifth entity, a locally declared page envelope or a
- * version attribute gets added. Second, the documentation gate's
- * charter-presence check is a file-set check over directories: a directory
- * holding an audited compilation unit and no charter fails the build outright,
- * so the first entity authored here could not have compiled unless this file
- * already existed. The cost accepted was that the inventory read as present
- * tense before every file it names existed, which is what the paragraph above
- * is for.
+ * <pre>
+ * this directory: 5 java files = 4 classes + 1 charter
+ * </pre>
+ *
+ * <p>Assumptions: the roster is closed as well as measured, and the closure is the
+ * half a reader cannot reconstruct by listing files -- which record belongs here,
+ * which does not, and what may not be added. A package holding entities but no
+ * stated contract is exactly the state in which a fifth entity, a locally declared
+ * page envelope or a version attribute gets added unnoticed. This charter also has
+ * to exist for the directory to build at all: the documentation gate's
+ * charter-presence check is a file-set check over directories, and a directory
+ * holding an audited compilation unit and no charter fails the build outright.
  *
  * <p><b>Purpose.</b> This package holds the persistence model of the ledger
  * bounded context: one JPA entity per reference COBOL record layout, and
@@ -386,11 +381,8 @@
  * migration are {@code com.carddemo.common} and one per service, and the
  * boundary between any two of them is not a convention: it is asserted by the
  * shared kernel's ArchUnit layering rules, which this module declares at test
- * scope and runs against its own classes. That rule class is authored at
- * another index of the same migration plan, so at the checkpoint that authored
- * this charter no engine enforces the boundary and it is carried by review; the
- * declarations that make it executable are already in this module's build
- * manifest.
+ * scope and runs against its own classes, so a cross-context import fails the
+ * build rather than a review.
  *
  * <p>Alternatives Considered: configuring the documentation ruleset's
  * import-control module to enforce those same import boundaries. Rejected

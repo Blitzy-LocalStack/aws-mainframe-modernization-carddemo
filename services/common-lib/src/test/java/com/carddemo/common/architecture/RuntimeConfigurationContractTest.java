@@ -110,6 +110,15 @@ class RuntimeConfigurationContractTest {
             List.of("infra/envs/dev/main.tf", "infra/envs/prod/main.tf");
 
     /**
+     * The one module directory whose workload publishes no HTTP listener.
+     *
+     * <p>Assumptions: named as a constant rather than inlined because two separate assertions turn on
+     * it, and because the exception is a property of the workload -- a one-shot task whose exit status
+     * is its result -- rather than a property of any one setting.</p>
+     */
+    private static final String BATCH_MODULE = "batch-service";
+
+    /**
      * Locates the repository root by walking up from the working directory.
      *
      * <p>Assumptions: the marker is the service module itself rather than a build file, because that file
@@ -320,6 +329,61 @@ class RuntimeConfigurationContractTest {
                 .as("each of these is a setting the task-definition contract requires of a workload and"
                         + " that no environment root supplies, so the workload cannot start on a"
                         + " provisioned stack")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms every workload declares the fleet's shutdown budget, and that only the web ones enable
+     * graceful shutdown.
+     *
+     * <p><b>Purpose.</b> Two settings have to agree across the whole fleet for a rolling deployment to
+     * drain rather than sever: {@code spring.lifecycle.timeout-per-shutdown-phase}, which bounds the
+     * drain, and {@code server.shutdown}, which enables it. Neither is checkable from one module,
+     * because what makes a value right is that every sibling carries the same one.</p>
+     *
+     * <p>Assumptions: the budget is twenty seconds for every workload, and it is a real number rather
+     * than a preference. Spring Boot's own default for the key is thirty seconds and
+     * {@code infra/modules/ecs-service} pins the container's {@code stopTimeout} to thirty as well, so
+     * leaving the key unset makes the drain deadline and the SIGKILL deadline the same instant -- a task
+     * can then be killed while it is still draining, which is the exact failure graceful shutdown
+     * exists to prevent. Twenty is also below the load balancer's thirty-second deregistration delay,
+     * so a draining task is already out of rotation before the timer starts. Two services carried
+     * neither key while six carried both, which is what this test now makes impossible to repeat.</p>
+     *
+     * <p>Assumptions: {@code batch-service} is asserted to declare NO {@code server.shutdown}, rather
+     * than being skipped. It publishes no listener -- it is a one-shot task whose exit status is its
+     * result -- so the key would be inert there, and an inert setting invites a reader to conclude the
+     * batch task drains HTTP traffic it never serves. It still carries the lifecycle budget, because
+     * that key bounds every {@code SmartLifecycle} phase and not only the web server.</p>
+     *
+     * <p>Trade-offs: the assertion is a text search over the concatenated base and production profiles,
+     * matching this class's established style, rather than a YAML parse. A parse would be exact and
+     * would need a dependency this shared kernel has no other use for; the cost accepted is that a key
+     * commented out in a way that still contains the literal would pass, which the surrounding
+     * comment-stripping in {@link #noFallbackNames(String)} shows is a known and bounded limitation.</p>
+     */
+    @Test
+    @DisplayName("every workload carries the fleet's twenty-second shutdown budget, and only web ones drain")
+    void everyWorkloadCarriesTheFleetShutdownBudget() {
+        Map<String, String> configurations = serviceConfigurations(repositoryRoot());
+        List<String> wrong = new ArrayList<>();
+
+        configurations.forEach((service, configuration) -> {
+            if (!configuration.contains("timeout-per-shutdown-phase: 20s")) {
+                wrong.add(service + " sets no twenty-second lifecycle shutdown budget");
+            }
+            boolean drains = configuration.contains("shutdown: graceful");
+            if (BATCH_MODULE.equals(service) && drains) {
+                wrong.add(service + " enables graceful shutdown but publishes no listener");
+            } else if (!BATCH_MODULE.equals(service) && !drains) {
+                wrong.add(service + " serves HTTP but does not enable graceful shutdown");
+            }
+        });
+
+        assertThat(wrong)
+                .as("each of these is a workload whose drain behaviour differs from the rest of the"
+                        + " fleet, which a rolling deployment surfaces as severed in-flight requests"
+                        + " rather than as a configuration difference")
                 .isEmpty();
     }
 

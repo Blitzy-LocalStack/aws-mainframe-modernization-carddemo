@@ -1,8 +1,7 @@
 package com.carddemo.account.service;
 
+import com.carddemo.common.security.ApprovedOriginPolicy;
 import com.carddemo.account.service.AddressValidationService.AreaCodeClass;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Optional;
@@ -63,7 +62,14 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
             "/api/v1/reference/us-state-zip-prefixes/{stateZipPrefix}";
 
     /** The only scheme a relayed credential may travel over. */
-    private static final String REQUIRED_SCHEME = "https";
+    /**
+     * The configuration prefix this seam's two address properties sit under.
+     *
+     * <p>Assumptions: the prefix is named once and both the base address and the approved origin are
+     * read from it, so the two cannot come to sit under different prefixes. Every refusal the shared
+     * policy raises names its property from this value, which is why the messages are unchanged.</p>
+     */
+    private static final String PROPERTY_PREFIX = "carddemo.reference-context";
 
     /** The configured client, already carrying the base address, both timeouts and the relay. */
     private final RestClient client;
@@ -154,75 +160,32 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
     }
 
     /**
-     * Refuses a base address that is not an absolute HTTPS origin equal to the approved one.
+     * Refuses the configured address unless it is the approved absolute HTTPS origin.
      *
-     * <p>Assumptions: the shape checks run BEFORE the origin comparison, so a malformed value is
-     * reported as malformed rather than as unapproved. The two have different remedies -- one is a typo
-     * in the value, the other a deployment pointed at the wrong environment.
+     * <p>Refactoring Rationale: the seven refusals this used to perform inline now come from the shared
+     * kernel's {@link ApprovedOriginPolicy}, and the messages are unchanged character for character because
+     * the prefix and the three risk clauses below are the ones this copy carried. Two modules held a
+     * structurally identical copy of the check and a third was about to add one; transformation rule T2 puts
+     * a shared concern in the kernel exactly once, and the failure mode of three copies is that one of them
+     * gets strengthened.</p>
      *
-     * @param baseUrl the configured base address to examine
-     * @param approvedOrigin the origin it is required to equal
+     * <p>Assumptions: the clauses stay HERE rather than moving into the kernel with the check, because they
+     * state what is at risk on THIS seam and no other seam shares it. A kernel-side default would have to be
+     * vague enough to fit every caller, and a vague reason is what the Explainability rule forbids.</p>
+     *
+     * @param baseUrl the configured base address; may be {@code null}
+     * @param approvedOrigin the origin the base address must equal; may be {@code null}
      * @throws IllegalStateException if either value is absent, or the base address is not an absolute
-     *     HTTPS origin, or carries user information, a path, a query or a fragment, or is not approved
+     *     HTTPS origin, or it is not the approved origin
      */
     private static void requireApprovedOrigin(String baseUrl, String approvedOrigin) {
-        if (baseUrl == null || baseUrl.isBlank()) {
-            throw new IllegalStateException(
-                    "carddemo.reference-context.base-url must be supplied: every request this client"
-                            + " makes relays the calling user's bearer token, so there is no safe"
-                            + " default address to fall back to");
-        }
-        if (approvedOrigin == null || approvedOrigin.isBlank()) {
-            throw new IllegalStateException(
-                    "carddemo.reference-context.approved-origin must be supplied when it is set at all");
-        }
-        URI address;
-        try {
-            address = new URI(baseUrl.trim());
-        } catch (URISyntaxException malformed) {
-            throw new IllegalStateException(
-                    "carddemo.reference-context.base-url is not a valid address", malformed);
-        }
-        if (!REQUIRED_SCHEME.equalsIgnoreCase(address.getScheme())) {
-            throw new IllegalStateException("carddemo.reference-context.base-url must use the "
-                    + REQUIRED_SCHEME + " scheme, because every request relays the caller's bearer"
-                    + " token and plain HTTP would put it on the wire in clear text");
-        }
-        if (address.getHost() == null) {
-            throw new IllegalStateException(
-                    "carddemo.reference-context.base-url must be absolute and name a host");
-        }
-        if (address.getUserInfo() != null) {
-            throw new IllegalStateException("carddemo.reference-context.base-url must carry no user"
-                    + " information: it would place a credential in a header this client never declares");
-        }
-        String path = address.getPath();
-        if (path != null && !path.isEmpty() && !"/".equals(path)) {
-            throw new IllegalStateException("carddemo.reference-context.base-url must carry no path,"
-                    + " because this client appends its own and a base path would silently re-root every"
-                    + " call");
-        }
-        if (address.getQuery() != null || address.getFragment() != null) {
-            throw new IllegalStateException(
-                    "carddemo.reference-context.base-url must carry no query and no fragment,"
-                            + " because either would be attached to all three published requests");
-        }
-        if (!normaliseOrigin(baseUrl).equals(normaliseOrigin(approvedOrigin))) {
-            throw new IllegalStateException("carddemo.reference-context.base-url is not the approved"
-                    + " origin: every request relays the caller's bearer token, so an unapproved"
-                    + " destination receives a live credential on the first account update");
-        }
-    }
-
-    /**
-     * Drops a single trailing separator so two spellings of one origin compare equal.
-     *
-     * @param address the address to normalise; must not be {@code null}
-     * @return the address with no trailing separator, never {@code null}
-     */
-    private static String normaliseOrigin(String address) {
-        String trimmed = address.trim();
-        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+        ApprovedOriginPolicy.require(PROPERTY_PREFIX, baseUrl, approvedOrigin,
+                new ApprovedOriginPolicy.Sensitivity(
+                        "every request this client makes relays the calling user's bearer token, so there"
+                                + " is no safe default address to fall back to",
+                        "every request relays the caller's bearer token",
+                        "every request relays the caller's bearer token, so an unapproved destination"
+                                + " receives a live credential on the first account update"));
     }
 
     /**

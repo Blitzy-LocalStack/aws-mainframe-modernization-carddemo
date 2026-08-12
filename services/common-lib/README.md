@@ -79,31 +79,47 @@ following, and their absence is a design decision rather than an omission:
 | Container-registry repository | Publishes no image. See §1.4. |
 
 On the ignore file specifically: `target/` is already ignored repository-wide by
-a **deliberately non-root-anchored** pattern [`.gitignore` line 92], precisely
+a **deliberately non-root-anchored** pattern — the `target/` entry in
+[`.gitignore`](../../.gitignore), written without a leading slash — precisely
 because every `target/` appears nested under `services/<module>/` and never at
 the repository root, where a leading slash would match nothing. A local ignore
 file here would be redundant, and a redundant ignore rule is one more place for
 the two to disagree.
 
-### 1.4 The 9 / 8 / 10 asymmetry — do not "correct" it
+### 1.4 The 9 / 8 / 10 / 11 asymmetry — do not "correct" it
 
-Three counts in this repository deliberately disagree, and every one of them is
+Four counts in this repository deliberately disagree, and every one of them is
 right:
 
 - **9** Maven modules under `services/` — verified by counting `services/*/pom.xml`
 - **8** Dockerfiles under `services/` — this module has none
-- **10** container images — the eight services plus `ui` plus `data-migration`
-  [`infra/modules/ecr/variables.tf` lines 95 to 104]
+- **10** container images **built by this repository** — the eight services plus
+  `ui` plus `data-migration`, which is exactly the number of Dockerfiles it holds
+- **11** ECR repositories provisioned — those ten plus `aws-otel-collector`, which
+  is **mirrored from a public registry rather than built here**
+  ([`infra/modules/ecr`](../../infra/modules/ecr) declares the eleven names and
+  asserts the count is exactly eleven)
 
-`common-lib` is the ninth module and the reason the first two figures differ.
-Reconciling them is a real and recorded hazard: *"Counting nine Maven modules as
-nine service images would therefore create an eleventh phantom repository whose
-emptiness would not make `terraform apply` fail."*
-[`infra/modules/ecr/README.md` line 38]. This module's own POM records the same
-conclusion — *"provision an eleventh phantom registry repository for a module
-that publishes no image."* [`services/common-lib/pom.xml` line 63]. A failure
-that does not fail the apply is the worst kind, so the asymmetry is documented
-in three places on purpose.
+`common-lib` is the ninth module and the reason the first two figures differ. It is
+**non-deployable by design**: it holds a POM and Java sources and no Dockerfile, it
+is compiled from source inside each service's Maven reactor build, no deployment
+pushes it and no task definition pulls it. Reconciling the module count with the
+image count is a real and recorded hazard, because the surplus repository would be
+empty and *"whose emptiness would not make `terraform apply` fail"*
+[`infra/modules/ecr/README.md`] — a failure that does not fail the apply is the
+worst kind, which is why the asymmetry is documented in three places on purpose.
+
+Refactoring Rationale: this section listed three counts and treated ten as both the
+image count and the repository count, so it described a `common-lib` repository as
+the **eleventh** phantom. Eleven repositories are already provisioned, so the
+phantom would now be the **twelfth**. The two sources quoted here — this module's
+own POM and the ECR module's README — both still say "eleventh", and they are
+quoted accurately: each was written when ten repositories were provisioned, and
+the mirrored collector took the eleventh slot afterwards. The fix is therefore to
+separate *images built* from *repositories provisioned* rather than to renumber a
+quotation, because the two counts answer different questions and will keep
+diverging whenever a repository is added for something this repository does not
+build.
 
 ---
 
@@ -181,7 +197,8 @@ Surefire writes to `services/common-lib/target/surefire-reports/` and Failsafe
 to `services/common-lib/target/failsafe-reports/`. Both are the plugin
 defaults, left unset on purpose, because the services pipeline collects from
 `services/*/target/surefire-reports/` and `services/*/target/failsafe-reports/`
-[`services/pom.xml` lines 1027 to 1028 and 1073 to 1074]. A suite whose reports
+[`services/pom.xml`](../pom.xml), in the report-collection step that names both
+directories]. A suite whose reports
 land outside those directories passes locally and reports nothing in CI, which
 is a silent loss of signal rather than a visible failure.
 
@@ -265,53 +282,85 @@ BINARY: it either passes or it fails. There is no tolerated warning level"*
 
 ### 3.1 Module layout
 
-Nine packages, nine `package-info.java` files under `src/main/java` (one per
-package — see §8, they are mandatory), and one more per test package.
+**Eleven packages** — a root and ten flat subpackages — each with one
+`package-info.java` under `src/main/java` (see §8, they are mandatory), holding
+**41** production classes for **52** compilation units. The set is deliberately flat:
+there is no nested subpackage, and `SharedKernelInventoryTest` re-derives the root
+charter's inventory table from the directory one level deep, so a nested package would
+be reported as drift rather than folded into its parent's row. `src/test/java` holds
+twelve directories, each with its own charter.
 
 ```text
-src/main/java/com/carddemo/common/
+src/main/java/com/carddemo/common/          11 packages · 40 production types
   package-info.java
   CardDemoCommonAutoConfiguration.java
   money/          package-info.java · Money.java · MoneyModule.java
   codec/          package-info.java · CopybookLayout.java · FixedWidthCodec.java
                   ZonedDecimalCodec.java · PackedDecimalCodec.java · CsvAuthCodec.java
+                  InquiryRequestCodec.java
   error/          package-info.java · ApiError.java · GlobalExceptionHandler.java
                   AbendDetail.java · ApiErrorSecurityHandlers.java
                   ClientInputException.java · RecordConflictException.java
                   FieldOrdering.java
+  messaging/      package-info.java · MessageExpiry.java · MessagingCorrelationId.java
+                  QueueClientBudget.java · RethrowingDigestErrorHandler.java
   web/            package-info.java · CorrelationIdFilter.java · PageResponse.java
                   CursorToken.java
   security/       package-info.java · JwtRoleConverter.java · CardNumberMasker.java
                   CognitoAccessTokenValidator.java · OpaqueIdentifier.java
+                  HtmlTextEncoder.java · InternalServiceToken.java
+                  MaskedCardNumber.java · SealedSelector.java
   observability/  package-info.java · MetricsConfig.java · LogSafeText.java
+                  ThrowableDigest.java
   time/           package-info.java · TimestampFormatter.java
   validation/     package-info.java · DateEditValidator.java · FieldValidationFlag.java
+  control/        package-info.java · OnlineWriteGate.java
+                  OnlineWriteGateExempt.java · OnlineWriteGateInterceptor.java
+                  OnlineWritesDisabledException.java
 
 src/main/resources/
   carddemo-common-defaults.yml
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/
+src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
+                  PackageCharterInventoryTest.java
+                  RuntimeConfigurationContractTest.java
+                  RuntimeDeletePrivilegeContractTest.java
+                  ServiceCatalogInventoryTest.java
+                  SharedKernelInventoryTest.java
   money/          package-info.java · MoneyTest.java · MoneyModuleTest.java
   codec/          package-info.java · CopybookLayoutTest.java
                   FixedWidthCodecTest.java · ZonedDecimalCodecTest.java
                   PackedDecimalCodecTest.java · CsvAuthCodecTest.java
+                  AuthorizationDisclosurePolicyTest.java
+                  InquiryRequestCodecTest.java
   error/          package-info.java · AbendDetailTest.java · ApiErrorTest.java
                   ApiErrorSecurityHandlersTest.java
                   GlobalExceptionHandlerTest.java
                   GlobalExceptionHandlerPathMaskingTest.java
+                  AbsentAndUnconvertibleValueTest.java
+                  RejectedParameterOrderingTest.java
+  messaging/      package-info.java · MessageExpiryTest.java
+                  MessagingCorrelationIdTest.java · QueueClientBudgetTest.java
+                  RethrowingDigestErrorHandlerTest.java
+                  MessageSinkSuppressionTest.java
   web/            package-info.java · CorrelationIdFilterTest.java
                   CursorTokenTest.java · PageResponseTest.java
   security/       package-info.java · JwtRoleConverterTest.java
                   CognitoAccessTokenValidatorTest.java · CardNumberMaskerTest.java
-                  OpaqueIdentifierTest.java
+                  OpaqueIdentifierTest.java · HtmlTextEncoderTest.java
+                  InternalServiceTokenTest.java · MaskedCardNumberTest.java
+                  SealedSelectorTest.java
   observability/  package-info.java · LogSafeTextTest.java · MetricsConfigTest.java
+                  StructuredLoggingDefaultsTest.java · ThrowableDigestTest.java
   time/           package-info.java · TimestampFormatterTest.java
   validation/     package-info.java · DateEditValidatorTest.java
                   FieldValidationFlagTest.java
+  control/        package-info.java · OnlineWriteGateTest.java
+                  OnlineWriteGateInterceptorTest.java
 ```
 
 Two facts about that tree are worth stating rather than leaving to be inferred.
@@ -321,63 +370,70 @@ eight services receive the one shared layering rule class. And **every** test
 package carries a `package-info.java` beside its classes, because §8's
 documentation gate audits test sources and requires both; a new test package is
 created together with its descriptor, never before it. Every main package now has
-a matching test package, `validation` included, so a class author adding a new
-package creates both.
+a matching test package, `validation` and `control` included, so a class author
+adding a new package creates both.
 
-**Measured suite sizes.** These are execution counts read from a
+**Measured suite sizes.** These are execution counts read from the Surefire XML of a
 `mvn -f services/pom.xml -pl common-lib test` run, not estimates, and they sum to
-the module total:
+the module total. They are attributed by test SUITE rather than by the display name
+each case reports under, because several classes here report their cases under
+`@Nested` group names and one reports none under its own name at all:
 
 | Package | Classes | Executions |
 |---|---|---|
-| `codec` | `CopybookLayoutTest` 149 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 118 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 | **584** |
-| `validation` | `DateEditValidatorTest` 90 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **119** |
-| `error` | `ApiErrorTest` 28 · `GlobalExceptionHandlerTest` 22 · `AbendDetailTest` 20 · `GlobalExceptionHandlerPathMaskingTest` 15 · `ApiErrorSecurityHandlersTest` 5 | **90** |
-| `security` | `OpaqueIdentifierTest` 30 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 9 · `JwtRoleConverterTest` 5 | **57** |
-| `money` | `MoneyTest` 29 · `MoneyModuleTest` 10 | **39** |
-| `web` | `PageResponseTest` 15 · `CursorTokenTest` 13 · `CorrelationIdFilterTest` 7 | **35** |
+| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `AuthorizationDisclosurePolicyTest` 13 · `InquiryRequestCodecTest` 13 | **619** |
+| `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
+| `error` | `GlobalExceptionHandlerTest` 32 · `ApiErrorTest` 28 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `AbsentAndUnconvertibleValueTest` 8 · `RejectedParameterOrderingTest` 5 · `ApiErrorSecurityHandlersTest` 5 | **119** |
+| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 10 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **123** |
+| `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
+| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `CorrelationIdFilterTest` 8 | **41** |
+| `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 12 · `MessageExpiryTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **53** |
+| `observability` | `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 6 · `LogSafeTextTest` 5 | **34** |
+| `architecture` | `LayeringRulesTest` 9 · `SharedKernelInventoryTest` 7 · `PackageCharterInventoryTest` 4 · `ServiceCatalogInventoryTest` 4 · `RuntimeConfigurationContractTest` 3 · `RuntimeDeletePrivilegeContractTest` 2 | **29** |
+| `control` | `OnlineWriteGateTest` 15 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **27** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
-| `observability` | `MetricsConfigTest` 12 · `LogSafeTextTest` 5 | **17** |
-| `architecture` | `LayeringRulesTest` 9 | **9** |
-| | **module total** | **974** |
+| | **module total** | **1232** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
-`DateEditValidatorTest` reports `Tests run: 0` against its own class name and
-reports its 90 executions under its eight `@Nested` display names instead, so a
-reader grepping for the class name finds a zero.
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 974: it is an
+`DateEditValidatorTest`, both `control` classes and three of the `architecture`
+classes report `Tests run: 0` against their own class names and report their
+executions under `@Nested` or `@DisplayName` labels instead, so a reader grepping
+the console output for a class name finds a zero. The table above is therefore read
+from `target/surefire-reports/*.xml`, where each case still carries the suite it
+belongs to, and the console total agrees with it: 1084 executions report under a
+class name and 148 under a display name, summing to 1232.
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1232: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3). And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
-the first of those nine is counted in the table above, which measures this module.
+the first of those nine is counted in the execution total above, which measures this
+module.
 
 > Assumptions: the tree and the counts above are read from disk and from a build,
-> not copied from a plan. Both trees are complete as listed — nine main packages
-> with nine charters, ten test directories with ten charters, and
+> not copied from a plan. Both trees are complete as listed — eleven main packages
+> with eleven charters, twelve test directories with twelve charters, and
 > `LayeringRulesTest` present in the `architecture` package under the filename §7
 > pins. It is annotated with a pointer to §7 because its filename is a build
 > contract that a later move would break silently. The counts will drift as tests
 > are added, and the drift is visible rather than hidden — §2's commands are the
 > authority that cannot go stale, and this section is a map of the territory
 > they measure.
-> Refactoring Rationale: three earlier revisions of this section were wrong in the
-> same direction and are corrected here. One marked `LayeringRulesTest` as
-> pinned-but-unauthored and told a reader in §2.2 that selecting it would fail;
-> one said the `validation` package had no test package; and one counted eight
-> executions for the gate and 973 for the module, both of which predate the
-> resilience-library rule. Each statement outlived the files it described, so a
-> reader following this README would have concluded the gate was not running, that
-> two validators were untested, and that a rule which exists does not. Six further
-> test classes — `CopybookLayoutTest`, `ApiErrorTest`, `AbendDetailTest`,
-> `PageResponseTest`, `OpaqueIdentifierTest` and `MetricsConfigTest` — were missing
-> from the listing for the same reason.
+> Assumptions: every figure and every class name in this section is a MEASUREMENT
+> of the tree, and the listing is CLOSED — nothing named here is absent and nothing
+> present is omitted. The distinction matters more than it sounds: a listing that
+> understates itself reads as evidence that the gate is not running, that a
+> validator is untested, or that a rule which exists does not, and each of those
+> readings sends a contributor to write something that is already there. §2's
+> commands are the authority that cannot go stale; this section is a map of the
+> territory they measure.
 > Trade-offs: describing the tree as it is means this section needs an edit
 > whenever a class lands, which a target list copied from a plan would not. That
 > cost is accepted because the alternative fails in the worse direction: a README
 > naming classes that do not exist sends a reader hunting for them, and one
-> omitting classes that do exist invites a duplicate of work already done.
+> omitting classes that do exist invites a duplicate of work already done. Either
+> way §2's commands are the authority a prose count cannot be.
 
 ### 3.2 Responsibility and source authority, one line each
 
@@ -461,16 +517,18 @@ every entry below is a boundary that has already been reasoned about.
   **`maxRetries`** — total attempts are one *more* than that value — and the
   enabling annotation is **`@EnableResilientMethods`**, not the older
   `@EnableRetry`, so a service that copies a Boot 3 example will not compile.
-  **The wording is precise on purpose**, because an earlier revision of this
-  bullet claimed the flat absence of a resilience library and that is measurably
-  untrue: `spring-cloud-aws-starter-sqs` 4.1.0 → `spring-cloud-aws-sqs` 4.1.0 →
-  `org.springframework.retry:spring-retry` 2.0.13 resolves at **compile** scope in
-  four of the nine modules — account, reference, batch and authorization services
-  — and that artifact references it from six of its own classes for the listener
-  container's polling back-off. `mvn -f services/pom.xml dependency:tree
-  -Dincludes=org.springframework.retry:spring-retry` shows every path. Excluding it was evaluated and rejected — it
-  would delete a type the integration loads at run time — so what is guaranteed
-  instead is that **no `com.carddemo` class depends on it**, and that guarantee is
+  **The three-part wording is precise on purpose.** Assumptions: the flatter
+  claim — that no resilience library is present at all — is measurably untrue,
+  so this bullet may not be shortened to it. `spring-cloud-aws-starter-sqs`
+  4.1.0 → `spring-cloud-aws-sqs` 4.1.0 →
+  `org.springframework.retry:spring-retry` 2.0.13 resolves at **compile** scope
+  in four of the nine modules — account, reference, batch and authorization
+  services — and that artifact references it from six of its own classes for the
+  listener container's polling back-off. `mvn -f services/pom.xml dependency:tree
+  -Dincludes=org.springframework.retry:spring-retry` shows every path.
+  Alternatives Considered: excluding the transitive outright. Rejected — it would
+  delete a type the integration loads at run time — so what is guaranteed instead
+  is that **no `com.carddemo` class depends on it**, and that guarantee is
   enforced by rule **A5** of the layering gate rather than asserted here (§7,
   [ADR-002](../../docs/adr/ADR-002-compute-platform.md)). A breaker is omitted on
   purpose: the only synchronous hops run inside the private network behind an
@@ -677,23 +735,21 @@ vector additionally asserts against a `FLOOR` counterfactual, because `DOWN` and
 exact-quotient claim is asserted with `RoundingMode.UNNECESSARY` so it throws rather
 than passing if a future edit makes the vector inexact.
 
-**Refactoring Rationale: this section described one mode and a divergence it
-accepted.** `monthlyInterest` reduced with `HALF_UP` and the resulting cent was
-registered as documented divergence `C-ROUNDING`. That disposition is withdrawn and
-the divergence is closed; the identifier survives only as a withdrawal record in
-[§7.5 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md).
-Reading rule T3's "one mode for the money path" as covering the accrual put the
-letter of a transformation rule above the requirement it exists to serve — the plan
-requires observable behaviour to be unchanged, names the exact interest formula
-among the rules that must be preserved, and admits a behavioural change only as an
-authorised divergence. The accrual is also one of the business rules the reference
-test suite asserts verbatim, so the cent was a parity failure in the most heavily
-asserted computation in the system. And it compounded: line 467 adds each reduced
-term into the account total and line 352 adds that total to the account balance, so
-a cent gained per transaction category reached the balance the next **inclusive**
-over-limit comparison is made against. What rule T3 actually forbids — binary
-floating point, and a caller-selectable mode — is still forbidden and still asserted
-mechanically.
+**Alternatives Considered: reducing the accrual with `HALF_UP` too, on the reading
+that rule T3's "one mode for the money path" covers it.** Rejected, and the
+identifier `C-ROUNDING` appears in
+[§7.5 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md)
+as a withdrawal record rather than as a live divergence. That reading puts the letter
+of a transformation rule above the requirement it exists to serve: the plan requires
+observable behaviour to be unchanged, names the exact interest formula among the
+rules that must be preserved, and admits a behavioural change only as an authorised
+divergence. The accrual is also one of the business rules the reference test suite
+asserts verbatim, so a cent there is a parity failure in the most heavily asserted
+computation in the system — and it compounds: line 467 adds each reduced term into
+the account total and line 352 adds that total to the account balance, so a cent
+gained per transaction category reaches the balance the next **inclusive** over-limit
+comparison is made against. What rule T3 does forbid — binary floating point, and a
+caller-selectable mode — is forbidden here and asserted mechanically.
 
 **Why there is still no mode parameter.** Alternatives Considered: keeping the mode
 on the accrual entry point so a parity caller could ask for truncation while other
@@ -720,10 +776,56 @@ one-to-one mapping rather than an approximation.
 [`app/cbl/COCRDLIC.cbl` lines 229 to 248] persists five things in the
 communication area between screen turns: a **last-key pair**, a **first-key
 pair**, a screen number, a last-page-displayed flag and a next-page-exists
-indicator. `PageResponse<T>` is a record carrying exactly `items`, `firstKey`,
-`lastKey` and `hasNext`.
+indicator. `PageResponse<T>` is a record carrying exactly **four** components —
+`items`, `firstKey`, `lastKey` and `hasNext`.
 
-Two details a reader will otherwise miss:
+**Backward availability is not a component, and this is the one thing to get
+right about the envelope.** The one availability flag the envelope carries is the
+forward one, established by the read that produced the page — one row beyond the
+window — and never inferred from the presence of a boundary token. What a
+backward step needs from a page is the **position** to seek from, which is
+`firstKey`, and whether a row waits at that position is not a property of the
+page at all: it is a property of where the caller stands in the walk, and the
+reference keeps exactly that on the terminal side. It declares a one-digit page
+ordinal with `88 CA-FIRST-PAGE VALUE 1` [`app/cbl/COCRDLIC.cbl` lines 237 to
+238], refuses the backward step on that condition **without reading anything**
+and redisplays the page with the nothing-precedes notice [lines 902 to 903,
+message at lines 1301 to 1302], and moves the ordinal itself as the two paging
+keys are pressed [lines 492 and 508]. That ordinal lived in the communication
+area the terminal carried between turns, so its migrated home is the browser
+client's own navigation state — and it is the one of the five baseline cursor
+fields with no envelope member.
+
+`Alternatives Considered:` a fifth component stating backward availability,
+settled server-side by a probe read in the backward direction. It is **withdrawn**
+on two independent grounds. It spends a query recomputing what the caller already
+knows — whether it issued a cursor at all — and it would put the wire out of
+agreement with every reader of it, since the two package charters that quote the
+signature and the browser's own type declaration all describe exactly four
+members. `PageResponseTest` asserts the closed set at four and refuses that
+member by name.
+
+`Trade-offs:` a client that binds a backward control to the presence of
+`firstKey` alone offers that control on the opening page, and following it
+returns an empty page rather than a refusal. That is the one failure mode the
+withdrawn component removed, and what removes it here is the client's own
+ordinal: `ui/src/screens/cardList` refuses the backward key while it holds the
+first page and renders the reference's own sentence.
+
+The canonical constructor holds the four invariants that make every instance in
+existence obey the contract, and the forward rule is deliberately **one-sided**:
+
+| Invariant | Why it is that way round |
+|---|---|
+| `items` is non-null, holds no null element, and is stored as an unmodifiable copy | A null row serialises as a hole a caller cannot tell from a row of absent values; a retained list would let a page change after it was assembled |
+| A page carrying rows names **both** boundaries | Those are the two values the next request is verified against — the trailing one to continue from, the leading one to step back from. The converse is **not** asserted: a page whose every row was removed by a post-read filter still names the keys at which scanning stopped, which the card list genuinely produces at `9500-FILTER-RECORDS.` [line 1382] |
+| `hasNext == true` requires `lastKey` | Telling a caller to continue with nowhere to continue from is the one forward state it cannot act on. The converse is **not** asserted: a final page still names its trailing boundary |
+| Every present token is one sealed by `CursorToken` | A raw composite key would be a client-forgeable field, and refusing it at construction is what makes that unrepresentable rather than merely discouraged |
+
+Sealing is what stops a primary account number travelling in a response body and
+being replayed by the client.
+
+Two further details a reader will otherwise miss:
 
 - **The keys are composite pairs, not scalars** — card number `PIC X(16)` plus
   account id `PIC 9(11)` [lines 230 to 235]. A cursor type that assumes a single
@@ -732,13 +834,23 @@ Two details a reader will otherwise miss:
   `File Data Array         28 CHARS X 7 ROWS = 196`. A forward query therefore
   fetches size **plus one** to determine `hasNext` — which is exactly how the
   baseline sets its own next-page indicator, by discovering one more record than
-  fits.
+  fits. A backward query fetches size plus one in the other direction too, and
+  that surplus row is what settles `hasNext` on a backward walk — the direction
+  the caller came from demonstrably has a further page.
 
 **Offset pagination is REJECTED.** Under concurrent inserts it skips and repeats
 rows, changing observable behaviour that browse-by-key does not. A forward page
 is "keyed strictly greater than `lastKey`, ordered ascending, limit size + 1"; a
 backward page is "keyed strictly less than `firstKey`, ordered descending" —
 which is precisely what read-previous did.
+
+**Where the flag comes from, since a caller supplies it.** The envelope accepts
+`hasNext` as given because only the query that read past the window can know it,
+so the answer is settled one layer up. `UserService` in `auth-service` is the
+worked example: forward availability is the surplus row on a forward walk and is
+unconditionally true on a backward one — a caller that has just stepped back came
+from a page that exists, and reporting otherwise would strand it at the position
+it had just retreated from.
 
 ### 6.2 `TimestampFormatter` — 26 characters, and a mask that must never be transliterated
 
@@ -815,10 +927,11 @@ between *explicitly blank* and *never set* — and that distinction is what the
 | `ABEND-REASON` | `X(50)` |
 | `ABEND-MSG` | `X(72)` |
 
-⚠ **A correction worth recording explicitly:** an earlier draft of the folder
-specification cited lines 45 to 53 for these fields. `app/cpy/CSMSG02Y.cpy` is
-only **35 lines long**, so those lines cannot exist. **Lines 21 to 29 are
-correct**, and they were re-verified against the file.
+⚠ **The citation to check when you meet another one:** these fields are declared
+at **lines 21 to 29** of `app/cpy/CSMSG02Y.cpy`, verified against the file. That
+copybook is only **35 lines long**, so any citation into the forties — a range that
+looks plausible for a copybook and appears elsewhere for other books — cannot
+exist and is a transcription error rather than a different revision of the file.
 
 **`GlobalExceptionHandler` status mapping.** An optimistic-lock failure maps to
 **HTTP 409 Conflict**, carrying the same data-changed semantic the baseline's
@@ -826,6 +939,32 @@ before-image comparison produced; a violation of the reference data's
 `ON DELETE RESTRICT` constraint also maps to **HTTP 409**. Neither ever surfaces
 as a raw database error, because a database error message is both unhelpful to
 the caller and a disclosure risk.
+
+#### 6.3.1 The emitted property set, which is part of the contract
+
+All seven published contracts declare `ApiError` and `FieldError` with
+`additionalProperties: false`, so **which keys are written is contractual** and not
+an implementation detail. Two facts about Jackson decide it, and both are asserted
+by `ApiErrorWireShapeTest` rather than left to inspection:
+
+- **A record component is always written.** `message` and `abend` are therefore
+  emitted as `"message":null` and `"abend":null` when there is nothing to report,
+  rather than omitted. That is why every contract lists them as **required and
+  nullable** — required-and-nullable and optional are different statements, and
+  only the first is true here. A contract that called them optional would let a
+  generated client conflate *not supplied* with *nothing to report*.
+- **An `isX()` method returning `boolean` is a readable property.** The derived
+  predicate `FieldError.isError()` was consequently published as a fourth `error`
+  key, which no contract declaring three sealed members admits. It now carries
+  `@JsonIgnore`: the predicate stays callable inside the JVM, and only its
+  publication was withdrawn. Its sibling `screenMarker()` needs no annotation
+  because it is neither a component nor `get`/`is`-prefixed — a naming coincidence,
+  which is exactly why the property set is pinned by a test.
+
+| Shape | Emitted keys |
+|---|---|
+| `FieldError` | `field`, `state`, `message` |
+| `ApiError` | `code`, `secondaryCode`, `message`, `severity`, `subsystem`, `status`, `correlationId`, `path`, `timestamp`, `fieldErrors`, `abend` |
 
 ### 6.4 `JwtRoleConverter` — a signed claim replacing an echoed field
 
@@ -1020,13 +1159,10 @@ lineage is never ambiguous:
 
 > Assumptions: the third row names the **persisted** declaration, and that is
 > the one the target column is derived from, so it is the one the register cites.
-> Refactoring Rationale: an earlier revision of this row cited
-> `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line 28] instead. That is a real
-> declaration and it carries the same misspelling, but it is the **request
-> message** field, not the persisted one, so a register presenting itself as an
-> exact three-field inventory pointed at the wrong side of the lineage. Naming
-> the persisted declaration is what makes the "→ `merchant_category_code`" arrow
-> follow from the row rather than merely sit beside it.
+> The request-message field `PA-RQ-MERCHANT-CATAGORY-CODE` [`CCPAURQY.cpy` line 28]
+> carries the same misspelling and is deliberately NOT the citation here: naming the
+> persisted declaration is what makes the "→ `merchant_category_code`" arrow follow
+> from the row rather than merely sit beside it.
 >
 > **The misspelling is the baseline's NAME, not a slip in one place**, which is
 > why one correction covers every surface. It appears **three** times: the
@@ -1098,7 +1234,8 @@ identifies the boundary without anyone reading the test:
 
 **The location is pinned character-for-character**, because the Surefire
 `architecture-rules` execution selects it by filename
-(`**/LayeringRulesTest.java`, [`services/pom.xml` line 1047]):
+(the `<include>` of the `architecture-rules` execution in
+[`services/pom.xml`](../pom.xml)):
 
 ```text
 services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
@@ -1192,8 +1329,24 @@ silently empty filter.
 
 ### 8.3 Test sources are in scope, and the suppressions charter is narrow
 
-`includeTestSourceDirectory` resolves to **`true`**
-[`services/pom.xml` line 888]. Two consequences follow, and neither is optional:
+`includeTestSourceDirectory` resolves to **`true`** — set on the
+`maven-checkstyle-plugin` configuration in [`services/pom.xml`](../pom.xml). Two
+consequences follow, and neither is optional:
+
+Refactoring Rationale: those four references, and the one in §1.2, were carried as
+**line numbers** and every one of them had drifted — `.gitignore`'s `target/` entry
+had moved from line 92 to 141, the report-collection comment from lines 1027 and
+1073 to 1191, the `LayeringRulesTest` include from 1047 to 1165, and this
+`includeTestSourceDirectory` setting from 888 to 967. They are now cited by the
+**element and file** that hold them instead. Assumptions: a line number is the
+least stable way to cite a build file, because any edit above the cited line
+invalidates it silently while the sentence around it still reads as authoritative —
+and a reader who follows a drifted citation, lands on unrelated XML and concludes
+the claim is wrong is worse off than one given no citation at all. Trade-offs: an
+element name is slower to locate by eye than a line number, which is the accepted
+cost; where a citation genuinely needs a line — a quotation from immutable
+baseline COBOL, for instance — the line number is kept, because `app/**` is
+reference-only and cannot drift.
 
 - **The test classes need full Javadoc too** — class-level and method-level —
   which is consistent with the house convention that *"Every new test, fixture
@@ -1334,12 +1487,11 @@ states the scope before the form for exactly this reason, and lists `.java`, `.t
 **not** carry a statement-level `WHAT:`. A file-header or module-level `WHAT:`
 inside a header block is a different thing again and remains correct.
 
-Refactoring Rationale: an earlier revision of this section presented the twin pair
-as "the house comment idiom adapted to Java" and showed a `// WHAT:` line in a Java
-example. That was wrong in the one place it does the most damage — an example in a
-shared-kernel README is copied — and it is recorded here rather than silently
-replaced, because a reader who learned the idiom from it needs to know it changed
-and why.
+Trade-offs: no Java example in this README shows a statement-level `// WHAT:` line,
+and the omission is deliberate rather than an oversight in the examples. An example
+in a shared-kernel README is the most-copied prose in the module, so an example
+carrying a prohibited form would propagate the prohibition's violation faster than
+the prohibition itself.
 
 ### 9.3 `@throws` coverage is mandatory, not situational
 
@@ -1385,6 +1537,21 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
+<!-- test-inventory: 53 tests + 1 integration tests -->
+**54** test classes: **53** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
+comment above and re-measures both figures against this module's own test tree, so the count fails
+the build when it drifts rather than ageing quietly in prose.
+
+Refactoring Rationale: this module publishes the marker although the class that reads it lives here,
+which looks circular and is not. `ServiceReadmeInventoryTest` names seven READMEs as marked and
+requires at least seven, while only the six service READMEs ever carried one — so the floor was
+already one above the truth and the last marked README could have lost its marker without the count
+noticing. Adopting the marker here is what makes the roster and the floor agree, and it does so by
+extending the check rather than by lowering it: the alternative was to drop the floor to six, which
+would have left the module whose test tree is the largest of the nine as the only one publishing an
+unchecked census.
+
 All `*Test` classes run under Surefire in the `test` phase; the one `*IT` class
 runs under Failsafe (§2.3). This module needs no database and no container for
 its unit suites, which is why they are fast enough to run on every build.
@@ -1401,6 +1568,7 @@ its unit suites, which is why they are fast enough to run on every build.
 | `TimestampFormatterTest` | the 26-character form, and that the commentary mask is never used as a pattern |
 | `GlobalExceptionHandlerTest`, `GlobalExceptionHandlerPathMaskingTest` | the 409 mappings, the per-field error array, that no raw database text escapes, and that a card number in a request path is masked before it reaches a log line |
 | `ApiErrorTest`, `AbendDetailTest` | the three message widths and two sentinels, and the four abend components — see §6.3 |
+| `ApiErrorWireShapeTest` | the emitted JSON property set of both shapes, read through a real mapper: a field entry carries exactly `field`, `state` and `message`, its derived predicate stays callable but unpublished, and the problem shape writes all eleven members with `message` and `abend` present as `null` — see §6.3.1 |
 | `DateEditValidatorTest`, `FieldValidationFlagTest` | the century, leap-year, date-of-birth and month/day rules, the result envelope, the Language-Environment path, and the **three** validation states of §6.5 |
 | `JwtRoleConverterTest`, `CognitoAccessTokenValidatorTest` | the `'A'`/`'U'` group mapping, and that issuer and audience are checked before groups are trusted |
 | `CardNumberMaskerTest`, `LogSafeTextTest`, `OpaqueIdentifierTest` | masking to the last four digits; control-character stripping and truncation; opaque identifier derivation and that it is not reversible |
@@ -1432,6 +1600,33 @@ That narrower token is accepted on decode and re-emitted at the declared width.
 |---|---|---|
 | Declared width sum | **57** | the reply money field stays at 14 characters |
 | **Emitted** wire length | **63** | 57 plus **six** delimiters — the reply carries a **trailing** delimiter, because the baseline's `STRING` appends `','` after *every* field including the last [`COPAUA0C.cbl` lines 722 to 727] |
+| **Transmitted** frame length | **64** | the 63 payload bytes plus **one trailing pad byte**, for the reason below |
+
+**The reply has three lengths, not two, and the third is the one on the wire.**
+The baseline builds the reply with `STRING … WITH POINTER WS-RESP-LENGTH`
+[`COPAUA0C.cbl` line 730] into a `PIC X(200)` buffer, and `WS-RESP-LENGTH` is
+declared `PIC S9(4) VALUE 1` [line 46]. A `STRING` pointer is a **cursor**: it
+starts at 1 and finishes at one byte *past* the last byte written, so after 63
+bytes it holds 64. That same field is then handed to the put as the message length
+— `MOVE WS-RESP-LENGTH TO W02-BUFFLEN` [line 756], and `W02-BUFFLEN` is the length
+argument of the `MQPUT1` call [lines 762 to 763]. The consequence is that the
+producer transmits **64** bytes: the 63-byte payload followed by byte 64 of a
+buffer nothing wrote into, which is a space.
+
+Assumptions: this is a genuine off-by-one in the reference program, registered as
+divergence **`D-REPLY-PUT-LENGTH`**, not a reading of the copybook. The codec here
+**decodes tolerantly and re-emits canonically**: a 64-byte frame is accepted and
+its trailing pad ignored, because `UNSTRING … DELIMITED BY ','` in the reference
+consumer imposes no total length and a real producer does send 64; and
+`CsvAuthCodec` emits **63**, because that is the length the field widths and
+delimiters actually define and emitting a pad byte would propagate the defect to
+every new consumer. Trade-offs: a test author asserting an exact emitted length
+must therefore use 63, while one asserting what a baseline producer puts on the
+queue must use 64 — which is exactly why all three numbers are tabulated rather
+than the two a copybook reading would yield. Refactoring Rationale: this section
+gave only the declared sum and the emitted length. A reader building a
+byte-for-byte reply comparison against a captured baseline message would have
+found an unexplained extra byte and reasonably suspected their own codec.
 
 With a string-format payload, field order and delimiter *are* the interface, so
 neither may be "tidied". The reference consumer's `UNSTRING ... DELIMITED BY ','`

@@ -354,9 +354,9 @@
  * messaging settings, among them the poll timeout and the bounded processing limit the listener tests
  * assert against.
  *
- * <p>Assumptions: the production package names the tests import are {@code .api}, {@code .service},
- * {@code .repository}, {@code .domain}, {@code .dto}, {@code .mapper} and {@code .config}, seven in all,
- * and they are NOT the same set as the nine test packages above. The asymmetry runs one way only now: there
+ * <p>Assumptions: the production package names are {@code .api}, {@code .config}, {@code .domain},
+ * {@code .dto}, {@code .mapper}, {@code .repository}, {@code .service} and {@code .task}, EIGHT in all,
+ * and they are NOT the same set as the ten test packages above. The asymmetry runs one way only: there
  * are {@code .contract} and {@code .fixtures} test packages with no production counterpart, because a
  * wire width and a recorded byte image are subjects of a test rather than of a deployable, and there is no
  * production package without a test package. No test package
@@ -365,14 +365,11 @@
  * charter sets out, and its name coinciding with a production package's is a consequence rather than the
  * reason.
  *
- * <p>Refactoring Rationale: this paragraph gave the asymmetry as running BOTH ways and offered the
- * missing repository test package as its first example, adding that "the single integration test that
- * exercises persistence lives with the fixture tests that supply its rows". That was two claims and both
- * are now wrong: the package exists, and the count of container-backed tests is no longer one. The one
- * that does live with the fixtures, {@code fixtures.PendingAuthFraudDomainRepositoryIT}, is still there
- * and still belongs there, because its subject is a recorded image and the constraint that refuses it
- * rather than a catalogue shape -- so the sentence was not merely out of date, it also described the
- * remaining case's reason for being where it is, which is why the reason is restated rather than dropped.
+ * <p>Assumptions: ONE container-backed test deliberately sits outside {@code .repository} --
+ * {@code fixtures.PendingAuthFraudDomainRepositoryIT} -- and it belongs where it is because its subject
+ * is a recorded byte image and the constraint that refuses it, rather than a catalogue shape. Stating
+ * where it lives and why is what keeps a reader from moving it on the assumption that every
+ * container-backed test belongs in the repository package.
  *
  * <p>Assumptions: this module has no batch job and no test may assume one. Its own POM declares no batch
  * starter and no batch dependency of any kind; chunk-oriented batch is scoped to the batch context, whose

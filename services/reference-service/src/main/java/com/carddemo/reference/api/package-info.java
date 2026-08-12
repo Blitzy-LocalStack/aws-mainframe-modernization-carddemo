@@ -144,11 +144,21 @@
  * <p>Trade-offs: every list operation here answers with
  * {@code com.carddemo.common.web.PageResponse}, whose four components are exactly {@code items}, the rows
  * of the page; {@code firstKey} and {@code lastKey}, the sealed positions of its first and last row, each
- * absent precisely when the page is empty; and {@code hasNext}. There is no previous-page flag, no page
+ * absent precisely when the page is empty; and {@code hasNext}. There is no page
  * number, no last-page-displayed indicator and no page-size member, and none may be added, because that
- * type belongs to the shared kernel and is answered for there. Backward availability is not a separate
- * claim at all: it is the presence of {@code firstKey}, which is the position a caller sends back to
- * retreat. What a caller gives up is that one derivation. What it buys is page boundaries that hold
+ * type belongs to the shared kernel and is answered for there. Refactoring Rationale: backward
+ * availability is NOT a claim this envelope makes, and the leading position is what a page owes a
+ * caller stepping back. The reference asks the backward question of the TERMINAL rather than of the
+ * table -- the browse screens hold a page ordinal in the communication area and refuse the backward
+ * key on the first page from that ordinal alone, without reading anything -- so the answer belongs to
+ * the client's navigation state, and a fifth component would spend a query recomputing what the
+ * caller already knows. Forward availability is settled by the read that produced the page and is
+ * UNCONDITIONALLY true on a backward walk, because a page reached by paging backward was reached FROM
+ * a page, which therefore exists; the reference does the same thing unconditionally at
+ * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} L1738, at the top of its backward reader,
+ * before reading anything. The envelope admits {@code hasNext} as true only alongside a present
+ * {@code lastKey}, so a caller told to continue always holds the position to continue from. What a
+ * caller gives up is any positioning by ordinal. What it buys is page boundaries that hold
  * under concurrent inserts, which an offset scan cannot promise, since an offset both skips and repeats
  * rows once a row is inserted ahead of the position. Reading forward asks for keys strictly beyond the
  * last-row key in ascending order; reading backward asks for keys strictly before the first-row key in
@@ -175,7 +185,7 @@
  *       <b>twenty</b>, and that figure is ADDITIVE. Those domains exist in the baseline only as
  *       condition-name allow-lists inside {@code app/cpy/CSLKPCDY.cpy}, tested against rather than
  *       displayed, and no map browses any of them, so there is no row count to inherit. The reasoning
- *       for twenty over seven is written at {@code AddressLookupController.PAGE_SIZE}.</li>
+ *       for twenty over seven is written at {@code AddressLookupService.PAGE_SIZE}.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: this paragraph asserted a single package-wide size of seven while the
@@ -267,16 +277,21 @@
  * declarations able to answer one question can disagree with no rule for which wins, and the failure is
  * silent in the direction that matters: the looser of the two is the one a reader would not notice.</p>
  *
- * <h2>Why three of the reads reach a repository with no service between</h2>
+ * <h2>Every read in this package now reaches a service, and none reaches a store</h2>
  *
- * <p>Alternatives Considered: a lookup service wrapping the three seeded allow-list repositories was
- * evaluated and rejected, and the sibling {@code com.carddemo.reference.service} charter records the same
- * decision. Those three tables carry no rule beyond whether a code is present, drawn from the
- * condition-name lists of {@code app/cpy/CSLKPCDY.cpy}, so a service over them would forward a call and
- * add a file. The two transaction-reference tables are the opposite case -- a version comparison, a
- * referential refusal and three distinct write behaviours -- and every one of those goes through a
- * service. The compromise accepted is that this package is not uniform in depth, which is why the
- * asymmetry is recorded here rather than left for a reader to interpret as an oversight.</p>
+ * <p>⚠️ Refactoring Rationale: the paragraph that stood here recorded the opposite decision -- that the
+ * three seeded allow-list browses would reach {@code UsPhoneAreaCodeRepository},
+ * {@code UsStateRepository} and {@code UsStateZipPrefixRepository} directly, on the argument that those
+ * tables "carry no rule beyond whether a code is present" so a service over them "would forward a call and
+ * add a file". Review found that argument false on both counts. It was not one call being forwarded: the
+ * controller held three near-identical four-way conditionals selecting among four query members each on
+ * the paging direction and the classification filter, the {@code PAGE_SIZE + 1} walk bound, the in-memory
+ * reversal of a backward page, the envelope assembly and the three "NOT found" refusals -- roughly two
+ * hundred lines of selection logic in the layer the AAP's ports-and-adapters rule states reaches no store.
+ * And the file it was avoiding is the one place those three conditionals can be corrected once rather than
+ * three times. {@code com.carddemo.reference.service.AddressLookupService} now owns all of it, and this
+ * package is uniform in depth: every controller here holds exactly its published paths, its parameter
+ * shapes and their constraints, the paging-direction conversion, and delegation.</p>
  *
  * <h2>The contract is the authority, and two of its wire types invite the wrong guess</h2>
  *

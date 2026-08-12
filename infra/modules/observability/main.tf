@@ -1842,8 +1842,16 @@ resource "aws_cloudwatch_metric_alarm" "aurora_connections" {
 #       volume that varies by orders of magnitude between working hours and
 #       overnight; a count threshold that is meaningful at one volume is noise or
 #       silence at the other, whereas a rate is comparable across both.
+#       Refactoring Rationale: the presence half of the guard reads
+#       create_cloudfront_alarm rather than testing the identifier against null.
+#       The identifier is the roots' own module.cloudfront_spa.distribution_id and
+#       is unknown before the distribution exists, so a count derived from it
+#       failed every plan with `Invalid count argument`; variables.tf records that
+#       in full. The REGION half is unchanged, because the provider's region is
+#       known during plan and is the constraint that actually decides whether the
+#       series exists.
 resource "aws_cloudwatch_metric_alarm" "cloudfront_5xx" {
-  count = var.cloudfront_distribution_id != null && data.aws_region.current.region == "us-east-1" ? 1 : 0
+  count = var.create_cloudfront_alarm && data.aws_region.current.region == "us-east-1" ? 1 : 0
 
   alarm_name          = "${local.name_stem}-cloudfront-5xx-rate"
   alarm_description   = "Condition: percentage of viewer requests answered with a server error by the distribution. Question: is the static delivery path failing, as distinct from the API path the api_5xx alarm watches? Action: compare against the origin bucket's access log before redeploying the built assets."

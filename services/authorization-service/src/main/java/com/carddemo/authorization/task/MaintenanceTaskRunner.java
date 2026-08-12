@@ -1,6 +1,7 @@
 package com.carddemo.authorization.task;
 
 import com.carddemo.authorization.AuthorizationApplication;
+import com.carddemo.authorization.service.UnloadService;
 import com.carddemo.common.observability.LogSafeText;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -57,6 +58,9 @@ public final class MaintenanceTaskRunner {
     /** The argument prefix carrying the path of the staged prefixed-detail extract. */
     public static final String CHILD_EXTRACT_OPTION = "--child-extract=";
 
+    /** The argument prefix carrying the export's record form, which the export alone accepts. */
+    public static final String EXTRACT_FORM_OPTION = "--extract-form=";
+
     /** The parameter name the business date is published under. */
     public static final String BUSINESS_DATE_PARAMETER = "businessDate";
 
@@ -66,14 +70,20 @@ public final class MaintenanceTaskRunner {
     /** The parameter name the prefixed-detail extract path is published under. */
     public static final String CHILD_EXTRACT_PARAMETER = "childExtract";
 
+    /** The parameter name the export's record form is published under. */
+    public static final String EXTRACT_FORM_PARAMETER = "extractForm";
+
     /** The job name of the extract load. */
     public static final String LOAD_JOB = "load-authorizations";
+
+    /** The job name of the segment export. */
+    public static final String UNLOAD_JOB = "unload-authorizations";
 
     /** The job name of the expiry purge. */
     public static final String PURGE_JOB = "purge-authorizations";
 
     /** Every job name this runner accepts, in the order the usage text lists them. */
-    public static final List<String> JOB_NAMES = List.of(LOAD_JOB, PURGE_JOB);
+    public static final List<String> JOB_NAMES = List.of(LOAD_JOB, UNLOAD_JOB, PURGE_JOB);
 
     /** The exit status of a run that completed. */
     public static final int EXIT_STATUS_CLEAN = 0;
@@ -230,13 +240,55 @@ public final class MaintenanceTaskRunner {
      */
     static Map<String, String> taskParameters(String jobName, String[] args) {
         Map<String, String> parameters = new LinkedHashMap<>();
-        if (PURGE_JOB.equals(jobName)) {
-            parameters.put(BUSINESS_DATE_PARAMETER, requiredDate(args, BUSINESS_DATE_OPTION));
-            return parameters;
+        // WHY : Refactoring Rationale: every job is named EXPLICITLY and an unrecognised one raises, where
+        //       this method previously tested for the purge and treated everything else as the load. That
+        //       shape was correct while there were two jobs and became a trap when a third was added: the
+        //       export wants the same two location options as the load, so it would have fallen through
+        //       and appeared to work while silently skipping any validation of its own -- and a fourth job
+        //       wanting different options would have been handed the load's.
+        switch (jobName) {
+            case PURGE_JOB -> parameters.put(
+                    BUSINESS_DATE_PARAMETER, requiredDate(args, BUSINESS_DATE_OPTION));
+            case LOAD_JOB -> {
+                parameters.put(ROOT_EXTRACT_PARAMETER, requiredValue(args, ROOT_EXTRACT_OPTION));
+                parameters.put(CHILD_EXTRACT_PARAMETER, requiredValue(args, CHILD_EXTRACT_OPTION));
+            }
+            case UNLOAD_JOB -> {
+                parameters.put(ROOT_EXTRACT_PARAMETER, requiredValue(args, ROOT_EXTRACT_OPTION));
+                parameters.put(CHILD_EXTRACT_PARAMETER, requiredValue(args, CHILD_EXTRACT_OPTION));
+                // WHY : Assumptions: the form is optional and is therefore absent from the map when the
+                //       operator omitted it, rather than present with the default written in here. The
+                //       default belongs to the exporter, which publishes it, and a copy of it in this
+                //       method would be a second place to change it.
+                String form = valueOf(args, EXTRACT_FORM_OPTION);
+                if (form != null) {
+                    parameters.put(EXTRACT_FORM_PARAMETER, requiredForm(form));
+                }
+            }
+            default -> throw new IllegalArgumentException(
+                    "no parameters are declared for job " + jobName);
         }
-        parameters.put(ROOT_EXTRACT_PARAMETER, requiredValue(args, ROOT_EXTRACT_OPTION));
-        parameters.put(CHILD_EXTRACT_PARAMETER, requiredValue(args, CHILD_EXTRACT_OPTION));
         return parameters;
+    }
+
+    /**
+     * Refuses an export form this service does not publish.
+     *
+     * <p>Assumptions: the value is converted here and the converted form discarded, exactly as the business
+     * date is parsed and discarded above, so the refusal reaches the operator as a usage message naming the
+     * admitted values instead of as a failure raised inside the job after a container has started.</p>
+     *
+     * @param value the form the operator wrote; must not be {@code null}
+     * @return the value, which names a published form
+     * @throws IllegalArgumentException if the value names no published form
+     */
+    private static String requiredForm(String value) {
+        if (value.isEmpty()) {
+            throw new IllegalArgumentException(
+                    EXTRACT_FORM_OPTION + " is required and must not be empty");
+        }
+        UnloadService.UnloadForm.fromRequestParameter(value);
+        return value;
     }
 
     /**
@@ -310,8 +362,13 @@ public final class MaintenanceTaskRunner {
      */
     static String usage() {
         return "usage:\n"
-                + "  " + JOB_OPTION + LOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<path> "
-                + CHILD_EXTRACT_OPTION + "<path>\n"
-                + "  " + JOB_OPTION + PURGE_JOB + " " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD>";
+                + "  " + JOB_OPTION + LOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<location> "
+                + CHILD_EXTRACT_OPTION + "<location>\n"
+                + "  " + JOB_OPTION + UNLOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<location> "
+                + CHILD_EXTRACT_OPTION + "<location> ["
+                + EXTRACT_FORM_OPTION + String.join("|", UnloadService.UnloadForm.WIRE_VALUES) + "]\n"
+                + "  " + JOB_OPTION + PURGE_JOB + " " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD>\n"
+                + "\n"
+                + "a <location> is either s3://bucket/key or a filesystem path";
     }
 }

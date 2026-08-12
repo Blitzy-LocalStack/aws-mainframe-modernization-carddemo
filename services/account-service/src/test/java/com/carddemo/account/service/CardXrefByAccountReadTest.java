@@ -12,8 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.account.domain.CardXref;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefResponse;
-import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.account.mapper.AccountContextMapper;
 import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CardXrefMapper;
@@ -342,17 +342,30 @@ class CardXrefByAccountReadTest {
      * because the target index is not unique: ascending card number is the base cluster's own order per
      * {@code ACCESS MODE IS SEQUENTIAL} at L31 of {@code app/cbl/CBACT03C.cbl}, and without it two
      * identical requests could differ.</p>
+     *
+     * <p>Refactoring Rationale: the projection asserted here is now the account-keyed one and no longer the
+     * card-keyed {@code toCardXrefView}. The two operations shared that projection, and sharing it was the
+     * defect: it withholds the card number, which is right for a caller that supplied the card and leaves an
+     * ACCOUNT-keyed caller without the one value it asked for. The consuming context takes
+     * {@code XREF-CARD-NUM} from this read -- {@code READ-CXACAIX-FILE} at lines 576 to 604 of
+     * {@code app/cbl/COTRN02C.cbl} and the same read at line 414 of {@code app/cbl/COBIL00C.cbl} both write
+     * the row they produce under it -- so the substituted mapper is asked for the widened projection and the
+     * card number is asserted present on what this read answers with.</p>
      */
     @Test
-    @DisplayName("the single account-keyed read takes the lowest-ordering row")
+    @DisplayName("the single account-keyed read takes the lowest-ordering row and carries its card number")
     void theSingleReadTakesTheLowestOrderingRow() {
         CardXref row = new CardXref(cardNumber(1), 1L, ACCOUNT_ID);
-        CardXrefView view = new CardXrefView(ACCOUNT_ID, 1L);
+        CardXrefByAccountView view =
+                new CardXrefByAccountView(ACCOUNT_ID, 1L, cardNumber(1));
         when(this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID))
                 .thenReturn(Optional.of(row));
-        when(this.contextMapper.toCardXrefView(row)).thenReturn(view);
+        when(this.contextMapper.toCardXrefByAccountView(row)).thenReturn(view);
 
         assertThat(this.reads.resolveCardCrossReferenceByAccount(ACCOUNT_ID)).isSameAs(view);
+        assertThat(this.reads.resolveCardCrossReferenceByAccount(ACCOUNT_ID).cardNumber())
+                .as("the account-keyed answer must carry the selected card the consumer keys its row on")
+                .isEqualTo(cardNumber(1));
 
         // Refactoring Rationale: this used to assert that the UNBOUNDED by-account query was not called,
         //   and that query no longer exists on the repository at all -- it was withdrawn because a public
@@ -360,7 +373,11 @@ class CardXrefByAccountReadTest {
         //   primary account number. The guarantee is now structural rather than asserted: there is no
         //   unbounded read for this service to reach for. What is still worth asserting is that resolving
         //   one row costs exactly one bounded call, which is what the count below pins.
-        verify(this.crossReferences, times(1)).findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID);
+        // WHY : Assumptions: TWO bounded calls are expected here and not one, because the case now reads
+        //       twice -- once for the identity assertion and once for the card-number assertion. What the
+        //       count still pins is the property that matters: each resolution costs exactly one bounded
+        //       call, so a read that fanned out into a scan would fail this whether it ran once or twice.
+        verify(this.crossReferences, times(2)).findFirstByAccountIdOrderByCardNumAsc(ACCOUNT_ID);
     }
 
     /**

@@ -65,16 +65,24 @@ class MaintenanceTaskWiringTest {
     }
 
     /**
-     * Both task classes implement the contract the runner resolves by.
+     * All three task classes implement the contract the runner resolves by.
+     *
+     * <p>Refactoring Rationale: this case named TWO classes and now names three. The export was added to
+     * the package after the load and the purge, and a case enumerating its subjects one at a time is a case
+     * that cannot see the class nobody added it to -- which is the same reason the set-equality assertion
+     * above reads the directory instead of a list.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("both task classes implement the runner's contract")
-    void bothTaskClassesImplementTheRunnersContract() {
+    @DisplayName("all three task classes implement the runner's contract")
+    void allThreeTaskClassesImplementTheRunnersContract() {
         assertThat(AuthorizationTask.class)
                 .as("the load task is resolvable through the contract the runner asks the context for")
                 .isAssignableFrom(LoadAuthorizationsTask.class);
+        assertThat(AuthorizationTask.class)
+                .as("the export task is resolvable through the contract the runner asks the context for")
+                .isAssignableFrom(UnloadAuthorizationsTask.class);
         assertThat(AuthorizationTask.class)
                 .as("the purge task is resolvable through the contract the runner asks the context for")
                 .isAssignableFrom(PurgeAuthorizationsTask.class);
@@ -163,6 +171,87 @@ class MaintenanceTaskWiringTest {
     }
 
     /**
+     * The export requires both destinations and takes the record form as an option with a default.
+     *
+     * <p>Assumptions: the absent-form case asserts the parameter is ABSENT rather than defaulted, because
+     * the default belongs to the exporter, which publishes it. A default written into the argument handling
+     * would be a second statement of it, and the copy that drifts would silently change which record shape
+     * an operator's unchanged command produced.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the export requires both destinations and defaults its record form")
+    void theExportRequiresBothDestinationsAndDefaultsItsRecordForm() {
+        assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.UNLOAD_JOB, new String[] {"--root-extract=s3://bucket/roots"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(MaintenanceTaskRunner.CHILD_EXTRACT_OPTION);
+
+        Map<String, String> defaulted = MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.UNLOAD_JOB,
+                new String[] {"--root-extract=s3://bucket/roots", "--child-extract=s3://bucket/children"});
+        assertThat(defaulted)
+                .as("an omitted form leaves the parameter absent so the exporter applies its own default")
+                .containsOnlyKeys(MaintenanceTaskRunner.ROOT_EXTRACT_PARAMETER,
+                        MaintenanceTaskRunner.CHILD_EXTRACT_PARAMETER);
+
+        Map<String, String> sequential = MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.UNLOAD_JOB,
+                new String[] {"--root-extract=/staged/roots", "--child-extract=/staged/children",
+                        "--extract-form=sequential"});
+        assertThat(sequential).containsEntry(MaintenanceTaskRunner.EXTRACT_FORM_PARAMETER, "sequential");
+    }
+
+    /**
+     * An unpublished record form is refused before a container starts, with the published forms named.
+     *
+     * <p>Assumptions: the refusal is asserted to name the admitted values, not merely to be raised. An
+     * operator who mistyped a form learns which forms exist from the message, and the alternative -- a bare
+     * rejection plus a documentation lookup -- is the reason the exporter publishes the values as a list
+     * this refusal can render.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an unpublished record form is refused and the published forms are named")
+    void anUnpublishedRecordFormIsRefusedAndThePublishedFormsAreNamed() {
+        String[] withForm = {"--root-extract=/staged/roots", "--child-extract=/staged/children",
+                "--extract-form=PREFIXED"};
+        assertThatThrownBy(() ->
+                MaintenanceTaskRunner.taskParameters(MaintenanceTaskRunner.UNLOAD_JOB, withForm))
+                .as("the constant NAME is not a wire value, so it is refused like any other unknown form")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("prefixed")
+                .hasMessageContaining("sequential");
+        assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.UNLOAD_JOB,
+                new String[] {"--root-extract=/r", "--child-extract=/c", "--extract-form="}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(MaintenanceTaskRunner.EXTRACT_FORM_OPTION);
+    }
+
+    /**
+     * A job with no declared parameters raises rather than inheriting another job's options.
+     *
+     * <p>Refactoring Rationale: the parameter collection tested for the purge and treated EVERYTHING ELSE
+     * as the load. That was correct for two jobs and became a trap at three, because the export wants the
+     * same two location options and would have fallen through -- passing this suite while performing no
+     * validation of its own. This case pins the explicit refusal that replaced the fall-through, so a fourth
+     * job cannot silently be handed the load's arguments.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a job with no declared parameters is refused rather than given another job's")
+    void aJobWithNoDeclaredParametersIsRefusedRatherThanGivenAnothers() {
+        assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                "some-future-job", new String[] {"--root-extract=/r", "--child-extract=/c"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("some-future-job");
+    }
+
+    /**
      * The usage text names every published job, so a refusal tells an operator what to run instead.
      *
      * <p>This test takes no parameter and returns no value.</p>
@@ -198,6 +287,9 @@ class MaintenanceTaskWiringTest {
         }
         if (text.contains("@Component(MaintenanceTaskRunner.LOAD_JOB)")) {
             return MaintenanceTaskRunner.LOAD_JOB;
+        }
+        if (text.contains("@Component(MaintenanceTaskRunner.UNLOAD_JOB)")) {
+            return MaintenanceTaskRunner.UNLOAD_JOB;
         }
         if (text.contains("@Component(MaintenanceTaskRunner.PURGE_JOB)")) {
             return MaintenanceTaskRunner.PURGE_JOB;

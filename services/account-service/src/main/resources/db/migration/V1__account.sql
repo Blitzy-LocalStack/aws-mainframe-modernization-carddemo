@@ -67,13 +67,13 @@
 --   - A pre-existing schema, owner role and privilege graph, bootstrapped by
 --     data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
 --     authority for schemas, roles and grants in this system. The schema and
---     its owning role are established together at V0:701. Because
+--     its owning role are established together at V0:711-712. Because
 --     spring.flyway.create-schemas is false in application.yml, this script
 --     may migrate the account schema and may not create it.
 --   - The executing role: Flyway authenticates as carddemo_account_migrator
 --     and issues SET ROLE carddemo_account_owner first, so the owner owns
 --     every object below. That ownership is what carries V0's ALTER DEFAULT
---     PRIVILEGES clauses at V0:879-882, V0:1115-1116 and V0:1235-1236 onto
+--     PRIVILEGES clauses at V0:926-929, V0:1199-1200 and V0:1550-1551 onto
 --     these tables, without this file issuing a single GRANT of its own.
 --
 -- Return values:

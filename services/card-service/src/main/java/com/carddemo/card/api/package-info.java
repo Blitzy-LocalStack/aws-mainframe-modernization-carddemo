@@ -175,7 +175,14 @@
  *       last-key pair, a first-key pair, a screen number and a next-page indicator at
  *       {@code :230-244}, travels in the page envelope
  *       {@code com.carddemo.common.web.PageResponse} through its {@code firstKey},
- *       {@code lastKey} and {@code hasNext} members</li>
+ *       {@code lastKey} and {@code hasNext} members. Assumptions: the screen number is the one
+ *       field of the four with no envelope member, because the reference answers "is there an
+ *       earlier page" from that ordinal and never from a read of the file -- it refuses the
+ *       backward step on the opening page at {@code :902-903} on exactly that condition, with the
+ *       notice at {@code :1301-1302}, and moves the ordinal itself at {@code :492} and
+ *       {@code :508}. Its migrated home is therefore the browser client's navigation state, and
+ *       the envelope carries the backward POSITION, {@code firstKey}, rather than a backward
+ *       availability claim</li>
  *   <li>Navigation, carried by the from-program and to-program fields and their transaction
  *       counterparts at {@code app/cpy/COCOM01Y.cpy:21-24}, is entirely client-side. No response
  *       leaving this package names a next program or a next screen</li>

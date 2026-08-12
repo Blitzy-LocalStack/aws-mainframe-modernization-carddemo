@@ -60,8 +60,11 @@ from __future__ import annotations
 import ast
 import base64
 import hashlib
+import logging
 import subprocess
 import sys
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
@@ -89,20 +92,93 @@ from conftest import (
     SeedCorpus,
 )
 
+from carddemo_migration import cli
 from carddemo_migration.config import (
     REDACTED,
     SCHEMA_ROLES,
     AuroraConnectionSettings,
+    ConfigurationError,
     DatasetStagingSettings,
     quoted_schema,
     role_for_schema,
 )
 from carddemo_migration.copybook import layouts
 from carddemo_migration.loaders import aurora, s3_stage
-from carddemo_migration.readers import account, discgrp, usrsec, xref
+from carddemo_migration.loaders.protected_columns import (
+    CardVerificationValueCipher,
+    CustomerIdentifierCipher,
+    DataKey,
+)
+from carddemo_migration.readers import (
+    account,
+    dalytran,
+    discgrp,
+    tcatbal,
+    transaction,
+    usrsec,
+    xref,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - imported for annotations only
-    from collections.abc import Mapping
+    from collections.abc import Iterable
+
+# Assumptions: ``Mapping`` is imported at RUN TIME rather than only for annotations, because this
+#   module builds a ``MappingProxyType`` constant annotated with it and ``Final[Mapping[...]]`` is
+#   evaluated by the type checker against a name that must exist in the module namespace for the
+#   ``TYPE_CHECKING`` block to be the only source of it. Keeping it eagerly imported costs nothing
+#   -- ``collections.abc`` is already loaded by the interpreter -- and avoids a split where two
+#   names from one module are imported in two different places.
+
+
+# Assumptions: the three synthetic constants below are the only literal values this module
+#   invents, and each is unmistakably synthetic. They exist because two of the eleven declared
+#   targets cannot be exercised from the committed corpus at all -- the security extract carries a
+#   plaintext password and the customer extract carries a national identifier and a date of birth
+#   -- and a re-run proof that skipped those two would leave the two records with the strictest
+#   disclosure rules untested.
+# Trade-offs: an all-zero subject in version-4 shape rather than a generated one. A subject NAMES
+#   a user and does not authenticate one, so nothing is disclosed either way; the fixed value is
+#   chosen because the re-run comparison is exact, and a generated subject would differ between
+#   the two passes for a reason that has nothing to do with idempotency.
+# Assumptions: the five money-bearing records are STATED here and their completeness is asserted
+#   against the descriptors by ``test_the_money_surface_is_nine_columns_across_five_targets``. A
+#   tuple derived from the layouts would have made the money parametrisation self-fulfilling: a
+#   target that lost its monetary field would simply drop out of the parametrisation and the suite
+#   would still pass.
+# Assumptions: every value below is SYNTHETIC and unmistakable in a message, which is what makes
+#   a substring search over a diagnostic a sound assertion. Reading real values out of the corpus
+#   was the alternative and was rejected: a corpus value can legitimately coincide with a fragment
+#   of a column name, a constraint name or a byte count, so a false pass would be
+#   indistinguishable from a real one.
+# Assumptions: the six classes are the ones the migration's own disclosure policy names -- primary
+#   account number, national identifier, government-issued identifier, name, date of birth -- plus
+#   the two the baseline carries and the target deliberately does not store: the card verification
+#   value and the plaintext password.
+_REGULATED_VALUES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "pan": "4111111111111111",
+        "national-identifier": "999-00-1234",
+        "government-identifier": "GOVTID9999999999",
+        "name": "SYNTHETICCARDHOLDER",
+        "date-of-birth": "1970-01-02",
+        "verification-value": "987",
+        "password": "SYNTHPWD",
+    }
+)
+_MONEY_BEARING_RECORDS: Final[tuple[str, ...]] = (
+    "DISGROUP",
+    "ACCOUNT",
+    "DALYTRAN",
+    "TRAN",
+    "TCATBAL",
+)
+_SYNTHETIC_USER_ID: Final[str] = "SYNTH001"
+_SYNTHETIC_SUBJECT: Final[str] = "00000000-0000-4000-8000-000000000001"
+# Assumptions: the stamp is the canonical 26-character form the timestamp module renders, taken
+#   from the committed transaction fixture's own originating stamp so it is a shape the reference
+#   compiler actually produced rather than one invented here.
+_SYNTHETIC_TIMESTAMP: Final[str] = "2022-06-10 19:27:53.000000"
+_SYNTHETIC_DATE: Final[str] = "2022-06-10"
 
 
 class _TargetTable(NamedTuple):
@@ -309,6 +385,29 @@ _WALL_CLOCK_CALLS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# WHY : Assumptions: the allow-list is keyed by MODULE PATH relative to the package root and names
+#   the exact client each module may import, so a new import site is a failure rather than a silent
+#   widening. It is stated here, in the test, rather than derived from the tree -- deriving it would
+#   make the assertion "the tree imports what the tree imports", which is true of every tree.
+# WHY : Assumptions: `credentials.py` is on this list, and its presence is the correction. The
+#   loader package's own boundary docstring used to claim `aurora` was the distribution's SOLE
+#   psycopg owner while this module imported the driver in two functions, and the earlier version of
+#   the ownership test below inspected only `aurora` and `s3_stage` -- so it passed while the
+#   architecture it asserted was false. The two sites are not duplication: `aurora.connect`
+#   authenticates as a per-schema LOGIN role and verifies which one, whereas `credentials` connects
+#   as the cluster's MASTER user to run `ALTER ROLE`, which is the one principal that role check
+#   exists to refuse.
+# WHY : Assumptions: `config.py` is allowed `boto3` and `botocore` because it is the single place a
+#   client is constructed and an endpoint resolved, which is what lets `s3_stage` take its client as
+#   an argument and import no SDK at all.
+_PERMITTED_SERVICE_CLIENT_IMPORTS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "config.py": frozenset({"boto3", "botocore"}),
+        "credentials.py": frozenset({"psycopg"}),
+        "loaders/aurora.py": frozenset({"psycopg"}),
+    }
+)
+
 #: Third-party service clients whose absence from a module's imports is the layering guard.
 _SERVICE_CLIENT_MODULES: Final[frozenset[str]] = frozenset({"boto3", "botocore", "psycopg"})
 
@@ -417,7 +516,8 @@ def _module_tree(module_path: str) -> ast.Module:
     ----------
     module_path : str
         Absolute filesystem path of the module to parse. A path is taken rather than a module
-        object so the result is cacheable by a hashable key.
+        object so that one file has one cache key however many module objects reference it, and so
+        that a file that has not been imported can be parsed at all.
 
     Returns
     -------
@@ -431,9 +531,14 @@ def _module_tree(module_path: str) -> ast.Module:
     SyntaxError
         If the source does not parse, which would already have failed at import.
     """
-    # WHY : Trade-offs: the parameter is a PATH STRING rather than the module object,
-    #   purely so the result can be memoised -- a module is unhashable for caching
-    #   purposes here in the sense that callers hold different objects for the same file.
+    # WHY : Trade-offs: the parameter is a PATH STRING rather than the module object, and the reason
+    #   is that the path is the identity the cache should key on -- NOT that a module object cannot
+    #   be a key. A module object is perfectly hashable, by identity, which is exactly the problem:
+    #   two callers holding different objects for the same file -- the installed distribution and a
+    #   reimported copy, or the module reached through a package attribute versus through
+    #   ``importlib`` -- would hash differently and parse the same source twice, while the path they
+    #   share would hash once. Keying on the path also lets a caller ask for a file it has not
+    #   imported at all, which is what the tree-wide import scan in this module does.
     #   The accepted cost is that every caller reaches for ``module.__file__`` at the call
     #   site; what it buys is one parse per module across all the source-level assertions
     #   instead of one per test, over two files of roughly two and a half thousand lines.
@@ -718,80 +823,267 @@ def _all_declared_layouts() -> Mapping[str, layouts.RecordSpec]:
     )
 
 
-def _key_window_columns(target: aurora.TableTarget) -> tuple[str, ...]:
-    """Derive a target's conflict columns from its record descriptor's key geometry.
+class _StubDataKeys:
+    """Answer every data-key request with one fixed key pair, recording nothing.
 
     Purpose
     -------
-    Compute, from ``key_offset`` and ``key_length`` alone, which target columns make up the
-    record's primary key -- so the declared conflict target can be checked against the
-    descriptor instead of against a second hand-written list.
+    Let a load whose target declares a sealing projection run with no key-management service, so
+    the eleven-dataset properties below can be exercised for the two records that carry protected
+    columns. The pair is fixed and synthetic; it protects nothing and is never persisted.
+    """
 
-    Parameters
-    ----------
-    target : aurora.TableTarget
-        The load target. Its record name is the key into the layout registry, and its own column
-        mapping translates each key field to the column it becomes.
+    def data_key(self, *, key_id: str, encryption_context: Mapping[str, str]) -> DataKey:
+        """Return the one fixed key pair, ignoring the key and the context.
+
+        Parameters
+        ----------
+        key_id : str
+            The customer-managed key the caller would have used. Accepted and ignored.
+        encryption_context : Mapping[str, str]
+            The binding the caller would have authenticated. Accepted and ignored.
+
+        Returns
+        -------
+        DataKey
+            A fixed plaintext/wrapped pair.
+
+        Raises
+        ------
+        None
+        """
+        # WHY : Assumptions: the key material is a FIXED byte range rather than random, because a
+        #   random key would make the envelope differ between two runs of the same test for a
+        #   reason unrelated to what is under test. The envelope still differs between two SEALS
+        #   of the same value -- the initialisation vector is drawn per value by the cipher, not
+        #   here -- which is precisely why every comparison below is taken over
+        #   ``comparable_fields`` rather than over the whole row.
+        del key_id, encryption_context
+        return DataKey(plaintext=bytes(range(32)), wrapped=b"synthetic-wrapped-key")
+
+
+def _load_context() -> aurora.LoadContext:
+    """Build the collaborator bundle every declared target can be loaded with.
+
+    Purpose
+    -------
+    Supply the two ciphers and the subject document in one object, so a test that parametrises
+    over all eleven targets does not have to know which of them declare a non-mechanical
+    projection.
 
     Returns
     -------
-    tuple[str, ...]
-        The target column names of the fields overlapping the descriptor's key window, in
-        declaration order.
+    aurora.LoadContext
+        A context carrying both ciphers over :class:`_StubDataKeys` and a subject for the one
+        synthetic user identifier :func:`_synthetic_records` produces.
+
+    Raises
+    ------
+    None
+    """
+    keys = _StubDataKeys()
+    return aurora.LoadContext(
+        identifier_cipher=CustomerIdentifierCipher(key_id="synthetic-key", keys=keys),
+        verification_value_cipher=CardVerificationValueCipher(key_id="synthetic-key", keys=keys),
+        # WHY : Assumptions: the subject is an all-zero identifier in version-4 shape. A subject
+        #   NAMES a user rather than authenticating one, so nothing is disclosed by writing it,
+        #   and a fixed value is what lets the re-run comparison below be exact.
+        subjects=MappingProxyType({_SYNTHETIC_USER_ID: _SYNTHETIC_SUBJECT}),
+    )
+
+
+def _synthetic_value(field: layouts.FieldSpec, column: str, ordinal: int) -> object:
+    """Produce one deterministic, disclosure-safe value for one mapped field.
+
+    Purpose
+    -------
+    Derive a loadable value from the field's own declared kind and width, so a record built for
+    any of the eleven targets satisfies that target's projections without a per-record table of
+    literals that could drift from the layout.
+
+    Parameters
+    ----------
+    field : layouts.FieldSpec
+        The descriptor field being filled. Its ``kind`` selects the value's type and its
+        ``length`` its width.
+    column : str
+        The target column the field becomes, used only to recognise a date-bearing column.
+    ordinal : int
+        Which record in the batch is being built, so successive records differ in their key.
+
+    Returns
+    -------
+    object
+        A ``Decimal`` at scale two for a signed display field, a canonical 26-character stamp for
+        a timestamp column, and a fixed-width string otherwise.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the value is derived from the DESCRIPTOR's kind and width rather than
+    #   typed at a literal length, so a layout change moves these records with it. The alternative
+    #   -- a table of literals per record name -- is the same duplication the key-geometry finding
+    #   objects to, one layer down: it would keep passing after a width changed underneath it.
+    if field.kind is layouts.Kind.ZONED:
+        # Assumptions: a two-place Decimal, because every signed display field in these eleven
+        #   records is money or a rate and the columns are NUMERIC(p,2). The ordinal varies the
+        #   cents so two records are distinguishable without either resembling a real balance.
+        return Decimal(f"{ordinal + 1}.{(ordinal + 1) % 100:02d}")
+    if column.endswith(("_ts",)):
+        return _SYNTHETIC_TIMESTAMP
+    if column.endswith("_date") or column == "dob":
+        return _SYNTHETIC_DATE.ljust(field.length)[: field.length]
+    if field.kind is layouts.Kind.UINT:
+        return str(ordinal + 1).rjust(field.length, "0")[-field.length :]
+    return (f"S{ordinal + 1}").ljust(field.length, "X")[: field.length]
+
+
+def _synthetic_records(record: str, count: int) -> tuple[dict[str, object], ...]:
+    """Build a batch of loadable records for one declared target, from its layout alone.
+
+    Purpose
+    -------
+    Give the re-run proof a batch for every one of the eleven targets, including the two whose
+    committed extracts may not be reproduced here -- the security record carries a plaintext
+    password, and the customer record carries a national identifier and a date of birth.
+
+    Parameters
+    ----------
+    record : str
+        A registered record name that is also a declared load target.
+    count : int
+        How many records to build. Each carries a distinct key, so a merge over them conflicts
+        on nothing within the batch.
+
+    Returns
+    -------
+    tuple[dict[str, object], ...]
+        ``count`` records, each carrying exactly the fields the target maps and reads from the
+        extract. Deterministic: two calls with the same arguments produce equal records.
 
     Raises
     ------
     carddemo_migration.copybook.layouts.LayoutError
-        If the target's record name is not registered.
+        If the record name is not registered.
     """
-    record = layouts.layout(_record_name_of(target))
-    window_end = record.key_offset + record.key_length
-    # WHY : Assumptions: OVERLAP is tested rather than containment, so a key window that ends
-    #   mid-field still selects that field. Containment would silently return a shorter tuple for
-    #   such a layout, and a shorter tuple compared against a declared conflict key would fail
-    #   with a message about the declaration when the fault was in this derivation.
-    return tuple(
-        target.columns[field.name]
-        for field in record.fields
-        if field.start < window_end
-        and field.start + field.length > record.key_offset
-        and field.name in target.columns
-    )
+    target = aurora.TARGETS[record]
+    spec = layouts.layout(record)
+    by_name = {field.name: field for field in spec.fields}
+    built: list[dict[str, object]] = []
+    for ordinal in range(count):
+        values: dict[str, object] = {}
+        for name, column in target.columns.items():
+            field = by_name.get(name)
+            # WHY : Assumptions: a mapped name absent from the LAYOUT is skipped rather than
+            #   filled. Exactly one exists -- the security record's subject column, which is
+            #   derived from the published seed-user document and not read from the extract -- and
+            #   inventing a value for it here would bypass the derivation under test.
+            if field is None:
+                continue
+            values[name] = _synthetic_value(field, column, ordinal)
+        if "SEC-USR-ID" in values:
+            # Assumptions: the user identifier is pinned to the one the subject document names,
+            #   because the subject projection looks the record up by it and refuses a user it
+            #   cannot resolve.
+            values["SEC-USR-ID"] = _SYNTHETIC_USER_ID
+        built.append(values)
+    return tuple(built)
 
 
-def _record_name_of(target: aurora.TableTarget) -> str:
-    """Resolve the registered record name a load target belongs to.
+def _money_bearing_records(
+    record: str, fixtures: FixtureCorpus, seeds: SeedCorpus
+) -> tuple[Mapping[str, object], ...]:
+    """Read one money-bearing dataset from the committed corpus, ready to load.
 
     Purpose
     -------
-    Recover the registry key for a target, since a target carries its schema and table but not
-    the record name it is filed under.
+    Pair each of the five money-bearing records with a committed extract and the reader that
+    decodes it, so the money assertions run over bytes the reference compiler produced rather
+    than over values this module invented.
 
     Parameters
     ----------
-    target : aurora.TableTarget
-        The load target to identify.
+    record : str
+        One of the five money-bearing record names.
+    fixtures : FixtureCorpus
+        Read-only accessor over the scenario corpus.
+    seeds : SeedCorpus
+        Read-only accessor over the seed datasets.
 
     Returns
     -------
-    str
-        The record name whose entry in :data:`carddemo_migration.loaders.aurora.TARGETS` is this
-        target.
+    tuple[Mapping[str, object], ...]
+        The decoded records, in file order. Never empty.
 
     Raises
     ------
     AssertionError
-        If the target is not one of the declared eleven, which can only happen for a target a
-        test constructed itself.
+        If the record is not one of the five, or its extract decodes to no record.
     """
-    # WHY : Assumptions: the comparison is IDENTITY rather than equality. A target is a frozen
-    #   dataclass, so two structurally identical declarations would compare equal and this
-    #   lookup could return either name -- which would make the key-window derivation read a
-    #   different record's geometry while appearing to succeed.
-    for record_name in aurora.target_names():
-        if aurora.TARGETS[record_name] is target:
-            return record_name
-    raise AssertionError(f"{target.schema}.{target.table} is not a declared load target")
+    if record == "DISGROUP":
+        decoded: tuple[Mapping[str, object], ...] = tuple(
+            discgrp.read_ascii_disclosure_groups(seeds.ascii_path("discgrp.txt"))
+        )
+    elif record == "ACCOUNT":
+        decoded = tuple(
+            account.read_ascii_accounts(fixtures.path("provisioning/happy_path", "acctdata.txt"))
+        )
+    elif record == "DALYTRAN":
+        decoded = tuple(
+            dalytran.read_ascii_daily_transactions(
+                fixtures.path("posting/happy_path", "dailytran.txt")
+            )
+        )
+    elif record == "TRAN":
+        # WHY : Assumptions: the transaction master's processing stamp is SUBSTITUTED from the
+        #   record's own originating stamp, because the committed extract is the pre-posting feed
+        #   and carries blanks in that span -- and the column is declared NOT NULL, so the loader
+        #   refuses a blank rather than converting it. The substitution is not a workaround: the
+        #   posting program is what writes that span, and standing in its output is the only way to
+        #   exercise this target's money without deriving a stamp from the clock.
+        decoded = tuple(
+            {**row, "TRAN-PROC-TS": row["TRAN-ORIG-TS"]}
+            for row in transaction.read_ascii_transactions(
+                fixtures.path("export/happy_path", "trandata.txt")
+            )
+        )
+    elif record == "TCATBAL":
+        decoded = tuple(tcatbal.read_ascii_category_balances(seeds.ascii_path("tcatbal.txt")))
+    else:  # pragma: no cover - guarded by the parametrisation
+        raise AssertionError(f"{record} is not one of the money-bearing records")
+    assert decoded, f"the committed extract for {record} decoded to no record"
+    return decoded
+
+
+def _comparable_positions(target: aurora.TableTarget) -> tuple[int, ...]:
+    """Report the row positions whose value is a deterministic function of the source.
+
+    Purpose
+    -------
+    Let two loads of the same records be compared row for row despite the sealing projections,
+    whose envelopes carry a per-value initialisation vector and therefore differ on every seal.
+
+    Parameters
+    ----------
+    target : aurora.TableTarget
+        The load target whose row shape is being indexed.
+
+    Returns
+    -------
+    tuple[int, ...]
+        Zero-based positions within a copied row, in column order, of every field the target
+        itself reports as comparable.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the comparable set is read from the TARGET rather than filtered here by
+    #   projection, because the target already publishes exactly this distinction for the checksum
+    #   verification pass. Re-deriving it would put a second answer to one question in the suite.
+    comparable = set(target.comparable_fields())
+    return tuple(position for position, name in enumerate(target.columns) if name in comparable)
 
 
 def _stage_generations(
@@ -938,15 +1230,19 @@ def test_the_eleven_targets_span_the_five_schemas_that_own_an_extract() -> None:
 
 @pytest.mark.parametrize("row", _ELEVEN_TARGET_TABLES, ids=lambda row: row.record.lower())
 def test_each_target_loads_as_its_own_schema_s_login_role(
-    row: _TargetTable, fake_aurora: FakeAuroraDatabase
+    row: _TargetTable,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Assert one connection per schema, authenticated as that schema's ``carddemo_`` role.
+    """Assert PRODUCTION orchestration opens each target's connection as that schema's own role.
 
     Purpose
     -------
     Establish that the load reaches each table through the least-privilege role the bootstrap
-    created for it, rather than through one shared connection. A load that only works as a
-    superuser proves nothing about whether the service owning the table can write it.
+    created for it, and that the role is chosen by the shipped command module rather than by this
+    test. A load that only works as a superuser proves nothing about whether the service owning
+    the table can write it.
 
     Parameters
     ----------
@@ -955,27 +1251,90 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
     fake_aurora : FakeAuroraDatabase
         The in-process database double, whose ``connect`` validates the translated parameters and
         records them with the credential masked.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic connection settings, re-stamped per schema by the injected resolver.
+    monkeypatch : pytest.MonkeyPatch
+        Injects the settings resolver and the connection factory into the command module, which is
+        what lets production orchestration run with no reachable database.
 
     Returns
     -------
     None
-        Nothing; a connection authenticated as the wrong role, or one carrying an unmasked
-        credential, is reported as an assertion failure.
+        Nothing; a connection authenticated as the wrong role, one opened with no stated
+        expectation, or one carrying an unmasked credential, is reported as an assertion failure.
 
     Raises
     ------
     None
     """
+    # WHY : Refactoring Rationale: this test used to call a HELPER in this module that looked the
+    #   role up in ``SCHEMA_ROLES`` and then asserted the helper had looked it up -- a tautology
+    #   dressed as a privilege proof, which would have passed unchanged if the shipped code had
+    #   connected as a superuser for every schema. It now drives ``cli._connect_for``, the one
+    #   function every database command resolves its connection through, and records what
+    #   PRODUCTION asked for.
+    demanded: list[str | None] = []
+
+    def _resolve(schema: str) -> AuroraConnectionSettings:
+        """Return synthetic settings stamped with the schema's own login role.
+
+        Parameters
+        ----------
+        schema : str
+            The schema production resolved from its target.
+
+        Returns
+        -------
+        AuroraConnectionSettings
+            Settings whose user is that schema's login role.
+
+        Raises
+        ------
+        None
+        """
+        return replace(aurora_settings, user=role_for_schema(schema))
+
+    def _connect(resolved: AuroraConnectionSettings, *, expected_role: str | None = None) -> Any:  # noqa: ANN401 -- the double and the driver return unrelated connection types
+        """Record the role production demanded, then open a recording connection.
+
+        Parameters
+        ----------
+        resolved : AuroraConnectionSettings
+            The settings production resolved.
+        expected_role : str | None
+            The role production expects the credential to authenticate as.
+
+        Returns
+        -------
+        Any
+            A recording connection from the double.
+
+        Raises
+        ------
+        None
+        """
+        demanded.append(expected_role)
+        # WHY : Assumptions: the parameters are produced by ``as_connection_params`` rather than
+        #   assembled by hand, because the settings attribute is spelled ``database`` and the driver
+        #   keyword is ``dbname``. Passing the fields through by name is a mistake only a connect
+        #   call catches.
+        return fake_aurora.connect(**resolved.as_connection_params())
+
+    monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
+    monkeypatch.setattr(cli, "connect", _connect)
+
     target = aurora.TARGETS[row.record]
-    _connect_as_owning_role(fake_aurora, target.schema)
+    cli._connect_for(target)  # noqa: SLF001 -- the orchestration under test is module-private
+
+    # WHY : Assumptions: the role production DEMANDED is asserted, not merely the role the
+    #   connection ended up using. The two differ exactly where it matters: a command that opened
+    #   the connection with no expectation would still authenticate as whatever the resolver
+    #   returned, so a test reading only the recorded parameters would call that a pass.
+    assert demanded == [f"carddemo_{row.schema}"]
+    assert demanded == [role_for_schema(target.schema)]
 
     recorded = fake_aurora.connection_params[-1]
     assert recorded["user"] == f"carddemo_{row.schema}"
-    # WHY : Assumptions: the expected role is ALSO resolved through the published accessor, so the
-    #   assertion above and this one check each other. The literal spelling proves the naming
-    #   convention the bootstrap SQL uses; the accessor proves the loader can reach that spelling
-    #   without a test having told it what to expect.
-    assert recorded["user"] == role_for_schema(target.schema)
     assert recorded["dbname"] == "carddemo"
     # WHY : Assumptions: the credential is asserted PRESENT and REDACTED rather than absent. The
     #   double masks a non-empty password and leaves an empty one alone, so this distinguishes "a
@@ -984,6 +1343,58 @@ def test_each_target_loads_as_its_own_schema_s_login_role(
     assert recorded["password"] == REDACTED
     assert SYNTHETIC_PASSWORD_FILL not in str(recorded)
     assert len(fake_aurora.connections) == 1
+
+
+@pytest.mark.parametrize("row", _ELEVEN_TARGET_TABLES, ids=lambda row: row.record.lower())
+def test_a_credential_for_the_wrong_role_is_refused_before_the_driver_is_reached(
+    row: _TargetTable, aurora_settings: AuroraConnectionSettings
+) -> None:
+    """Assert a credential whose stored user is not the schema's role opens no connection.
+
+    Purpose
+    -------
+    Establish the enforcement half of the privilege contract. Selecting the right role is worth
+    nothing if a credential resolved for another role is accepted anyway: a secret rotated to a
+    different user, or a parameter path pointing at another schema's secret, would otherwise load
+    successfully as whichever role it found -- most damagingly as a superuser.
+
+    Parameters
+    ----------
+    row : _TargetTable
+        One expected target, supplying the schema whose role is expected.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic connection settings, re-stamped with a deliberately wrong user.
+
+    Returns
+    -------
+    None
+        Nothing; an accepted mismatch is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+        The provoked refusal is caught by :func:`pytest.raises`.
+    """
+    target = aurora.TARGETS[row.record]
+    expected = role_for_schema(target.schema)
+    # WHY : Assumptions: the wrong role is another schema's REAL login role rather than a nonsense
+    #   string, because that is the realistic fault -- a per-schema secret path resolving to the
+    #   neighbouring context's secret. A nonsense value would also be refused by any check that
+    #   merely required a ``carddemo_`` prefix, which is not the check being asserted.
+    wrong = role_for_schema("reporting" if target.schema != "reporting" else "batch")
+    assert wrong != expected
+
+    with pytest.raises(ConfigurationError) as refused:
+        aurora.connect(replace(aurora_settings, user=wrong), expected_role=expected)
+
+    message = str(refused.value)
+    assert expected in message
+    assert wrong in message
+    # WHY : Assumptions: the refusal names no credential. The settings object carries a password,
+    #   and a message rendering the whole object -- the obvious way to write this diagnostic --
+    #   would put it in an operator's log.
+    assert SYNTHETIC_PASSWORD_FILL not in message
+    assert aurora_settings.password not in message
 
 
 def test_every_qualified_table_name_quotes_both_identifiers() -> None:
@@ -1007,12 +1418,18 @@ def test_every_qualified_table_name_quotes_both_identifiers() -> None:
     for record in aurora.target_names():
         target = aurora.TARGETS[record]
         assert target.qualified_name == f'"{target.schema}"."{target.table}"'
-        assert target.copy_statement().startswith(f"COPY {target.qualified_name} (")
+        # WHY : Refactoring Rationale: the qualified name is asserted on the STAGING and MERGE
+        #   statements, which is where it now appears. The COPY names the session-temporary
+        #   staging table -- a single unqualified identifier -- so asserting the schema-qualified
+        #   form on the COPY would now be asserting a rendering the loader no longer produces.
+        assert target.stage_statement().endswith(f"FROM {target.qualified_name} WITH NO DATA")
+        assert target.merge_statement().startswith(f"INSERT INTO {target.qualified_name} (")
         # WHY : Assumptions: the column list is checked for quoting too, not just the table. A
         #   column named after a reserved word would break exactly the same way, and the two are
         #   rendered by different code paths.
         for column in target.copy_columns():
-            assert f'"{column}"' in target.copy_statement()
+            assert f'"{column}"' in target.stage_copy_statement()
+            assert f'"{column}"' in target.merge_statement()
 
 
 def test_a_target_in_the_reserved_word_schema_is_quoted_by_the_same_path() -> None:
@@ -1048,8 +1465,17 @@ def test_a_target_in_the_reserved_word_schema_is_quoted_by_the_same_path() -> No
     )
 
     assert reserved.qualified_name == '"authorization"."pending_auth_summary"'
-    assert reserved.copy_statement() == (
-        'COPY "authorization"."pending_auth_summary" ("account_id") FROM STDIN'
+    # WHY : Refactoring Rationale: the rendering asserted here is the STAGING statement, because
+    #   that is the one statement a target bound to no record can produce -- the merge needs the
+    #   record descriptor's key window, and no extract loads into this schema, so there is no
+    #   record to bind. The staging statement carries the schema-qualified name, so it exercises
+    #   the reserved word on exactly the path that would fail to parse without the quoting.
+    assert reserved.stage_statement() == (
+        'CREATE TEMPORARY TABLE "carddemo_stage_pending_auth_summary" AS SELECT "account_id"'
+        ' FROM "authorization"."pending_auth_summary" WITH NO DATA'
+    )
+    assert reserved.stage_copy_statement() == (
+        'COPY "carddemo_stage_pending_auth_summary" ("account_id") FROM STDIN'
     )
     # WHY : Assumptions: the rendering is also compared against the accessor the configuration
     #   module publishes for this purpose, not only against a literal. The two spell the quoting
@@ -1095,6 +1521,11 @@ def test_one_dataset_loads_inside_exactly_one_transaction(
     connection = _connect_as_owning_role(fake_aurora, target.schema)
     extract = fixture_corpus.path("provisioning/happy_path", "acctdata.txt")
     expected_rows = len(fixture_corpus.records("provisioning/happy_path", "acctdata.txt"))
+    # WHY : Assumptions: the affected-row count is arranged, because the double holds no rows and
+    #   therefore reports none affected by the merge. Arranging it to the extract's own count is
+    #   what a server reports for a merge into a table holding none of these keys, which is the
+    #   state a first load meets.
+    fake_aurora.arrange_affected_rows("INSERT INTO", expected_rows)
 
     outcome = aurora.load_records(connection, target, account.read_ascii_accounts(extract))
 
@@ -1109,27 +1540,115 @@ def test_one_dataset_loads_inside_exactly_one_transaction(
     #   one transaction would satisfy the commit count while abandoning that contract entirely.
     assert len(fake_aurora.copy_statements) == 1
     assert len(fake_aurora.copied_rows) == expected_rows
+    # WHY : Assumptions: the three statements are asserted in ORDER, not merely counted. A merge
+    #   issued before the COPY would insert nothing into the target and still commit, reporting a
+    #   successful load of an empty table -- and the arranged affected-row count would make that
+    #   outcome indistinguishable from this one on the counts alone.
+    assert fake_aurora.executed_sql() == (
+        target.stage_statement(),
+        target.stage_copy_statement(),
+        target.merge_statement(),
+    )
 
 
-def test_money_reaches_its_numeric_column_as_an_exact_decimal(
-    fake_aurora: FakeAuroraDatabase, fixture_corpus: FixtureCorpus
-) -> None:
-    """Assert every monetary field arrives as :class:`decimal.Decimal` at scale two.
+def _money_columns_of(record: str) -> tuple[str, ...]:
+    """Report the target columns one record's signed display fields become.
 
     Purpose
     -------
-    Establish the fixed-point rule at the last boundary the ETL controls. A binary float cannot
-    represent ten cents exactly, so a money total routed through one is wrong by an amount that
-    grows with the row count and is invisible in any single value.
+    Name the monetary columns of a target from the record descriptor's own field kinds, so the
+    money coverage below is a function of the layouts rather than of a list written in a test.
 
     Parameters
     ----------
+    record : str
+        A registered record name that is also a declared load target.
+
+    Returns
+    -------
+    tuple[str, ...]
+        The mapped columns of every signed display field, in the mapping's order. Empty for a
+        record carrying no money at all.
+
+    Raises
+    ------
+    carddemo_migration.copybook.layouts.LayoutError
+        If the record name is not registered.
+    """
+    target = aurora.TARGETS[record]
+    return tuple(
+        target.columns[field.name]
+        for field in layouts.layout(record).fields
+        if field.kind is layouts.Kind.ZONED and field.name in target.columns
+    )
+
+
+def test_the_money_surface_is_nine_columns_across_five_targets() -> None:
+    """Assert the money-bearing surface is exactly the nine columns the migrations declare.
+
+    Purpose
+    -------
+    Close the money coverage below rather than leaving it open. A parametrised test proves a
+    property of the targets it names; this one proves that the targets it names are ALL of them,
+    so a twelfth target carrying a signed display field cannot be added without either being
+    covered or failing here.
+
+    Returns
+    -------
+    None
+        Nothing; a money column outside the declared surface, or a declared surface that has
+        shrunk, is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Refactoring Rationale: the surface is measured from the DESCRIPTORS and compared
+    #   against a stated total, where the earlier revision asserted money on one target and
+    #   described it as "every monetary field". Five targets carry money and nine columns hold it:
+    #   the disclosure rate, the account's five balances and limits, the daily feed's amount, the
+    #   transaction master's amount, and the category balance. Naming the total here is what makes
+    #   the omission of four of them a failure rather than an absence.
+    measured = {record: _money_columns_of(record) for record in aurora.target_names()}
+    bearing = {record: columns for record, columns in measured.items() if columns}
+    assert set(bearing) == set(_MONEY_BEARING_RECORDS), (
+        "the set of targets carrying a signed display field changed:"
+        f" {sorted(set(bearing) ^ set(_MONEY_BEARING_RECORDS))}"
+    )
+    assert sum(len(columns) for columns in bearing.values()) == 9
+    # WHY : Assumptions: the ACCOUNT count is stated explicitly because it is the one that was
+    #   previously miscounted. The account record maps FIVE signed display fields -- the current
+    #   balance, the credit limit, the cash credit limit, and the two cycle totals -- and a
+    #   docstring claiming six was what let the other four targets go uncovered unnoticed.
+    assert len(bearing["ACCOUNT"]) == 5
+
+
+@pytest.mark.parametrize("record", _MONEY_BEARING_RECORDS)
+def test_money_reaches_its_numeric_column_as_an_exact_decimal(
+    record: str,
+    fake_aurora: FakeAuroraDatabase,
+    fixture_corpus: FixtureCorpus,
+    seed_corpus: SeedCorpus,
+) -> None:
+    """Assert every monetary field of every money-bearing target arrives as an exact Decimal.
+
+    Purpose
+    -------
+    Establish the fixed-point rule at the last boundary the ETL controls, on the whole money
+    surface. A binary float cannot represent ten cents exactly, so a money total routed through
+    one is wrong by an amount that grows with the row count and is invisible in any single value.
+
+    Parameters
+    ----------
+    record : str
+        One money-bearing record name, supplied for each of the five.
     fake_aurora : FakeAuroraDatabase
         The database double. Its copy stream refuses a ``float`` outright, so this test asserts
         the positive property and the double enforces the negative one.
     fixture_corpus : FixtureCorpus
-        Read-only accessor supplying the account extract, whose five records carry six zoned
-        monetary fields each.
+        Read-only accessor over the committed scenario corpus.
+    seed_corpus : SeedCorpus
+        Read-only accessor over the committed seed datasets.
 
     Returns
     -------
@@ -1141,24 +1660,21 @@ def test_money_reaches_its_numeric_column_as_an_exact_decimal(
     ------
     None
     """
-    target = aurora.TARGETS["ACCOUNT"]
+    target = aurora.TARGETS[record]
     connection = _connect_as_owning_role(fake_aurora, target.schema)
-    extract = fixture_corpus.path("provisioning/happy_path", "acctdata.txt")
+    records = _money_bearing_records(record, fixture_corpus, seed_corpus)
 
-    aurora.load_records(connection, target, account.read_ascii_accounts(extract))
+    aurora.load_records(connection, target, records, _load_context())
 
     # WHY : Assumptions: which columns hold money is read from the record descriptor's zoned
     #   fields rather than from a list of column names written here. The descriptor is where the
     #   PICTURE clause's scale lives, so a field changing kind moves this assertion with it
     #   instead of leaving a stale name behind that no longer names a monetary column.
-    record = layouts.layout("ACCOUNT")
     columns = target.copy_columns()
-    money_positions = [
-        columns.index(target.columns[field.name])
-        for field in record.fields
-        if field.kind is layouts.Kind.ZONED and field.name in target.columns
-    ]
-    assert money_positions, "the account record declares no zoned field, so nothing was checked"
+    money = _money_columns_of(record)
+    assert money, f"{record} declares no zoned field, so nothing was checked"
+    money_positions = [columns.index(column) for column in money]
+    assert fake_aurora.copied_rows, f"no row was staged for {record}, so nothing was checked"
 
     for _statement, row in fake_aurora.copied_rows:
         for position in money_positions:
@@ -1173,6 +1689,57 @@ def test_money_reaches_its_numeric_column_as_an_exact_decimal(
             #   wrong scale renders differently -- 158 rather than 158.00 -- and the golden
             #   comparisons the parity oracle performs are byte comparisons.
             assert -value.as_tuple().exponent == 2, f"{columns[position]} is not at scale two"
+
+
+def test_a_money_value_survives_the_reader_to_copy_boundary_unrounded(
+    fake_aurora: FakeAuroraDatabase, fixture_corpus: FixtureCorpus
+) -> None:
+    """Assert a staged money value equals the value the reader decoded, cent for cent.
+
+    Purpose
+    -------
+    Close the gap a type assertion leaves open. Every staged value being an exact two-place
+    ``Decimal`` would still hold if the projection had rounded, negated or zeroed it, so the
+    values are compared against what the reader produced from the committed extract.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        The database double, whose copy log carries the staged values.
+    fixture_corpus : FixtureCorpus
+        Read-only accessor supplying the interest scenario's account extract, which carries both
+        signs across its records.
+
+    Returns
+    -------
+    None
+        Nothing; a staged value differing from the decoded value is reported as an assertion
+        failure.
+
+    Raises
+    ------
+    None
+    """
+    target = aurora.TARGETS["ACCOUNT"]
+    extract = fixture_corpus.path("interest/happy_path", "acctdata.txt")
+    decoded = tuple(account.read_ascii_accounts(extract))
+    assert decoded, "the interest scenario's account extract is empty, so nothing was checked"
+    connection = _connect_as_owning_role(fake_aurora, target.schema)
+
+    aurora.load_records(connection, target, decoded)
+
+    columns = target.copy_columns()
+    fields = {target.columns[name]: name for name in target.columns}
+    for (_statement, row), source in zip(fake_aurora.copied_rows, decoded, strict=True):
+        for column in _money_columns_of("ACCOUNT"):
+            staged = row[columns.index(column)]
+            # WHY : Assumptions: the comparison is ``==`` on Decimal, which compares NUMERIC value
+            #   rather than representation, and the scale is asserted separately above. A staged
+            #   value that had been rounded to whole units would compare unequal here even though
+            #   it would still be a Decimal of the right type, which is the failure this closes.
+            assert staged == source[fields[column]], (
+                f"{column} was staged as {staged} from a decoded value of {source[fields[column]]}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1864,8 @@ def test_the_password_field_never_reaches_the_user_table(
     #   seed-user document rather than from the extract. The value is an all-zero identifier in
     #   version-4 shape and is not a credential: a subject NAMES a user, it does not authenticate
     #   one, so nothing is disclosed by writing it here.
-    context = aurora.LoadContext(subjects={"SYNTH001": "00000000-0000-4000-8000-000000000001"})
+    context = aurora.LoadContext(subjects={_SYNTHETIC_USER_ID: _SYNTHETIC_SUBJECT})
+    fake_aurora.arrange_affected_rows("INSERT INTO", 1)
 
     outcome = aurora.load_records(connection, target, [decoded], context)
 
@@ -1307,7 +1875,7 @@ def test_the_password_field_never_reaches_the_user_table(
     assert SYNTHETIC_PASSWORD_FILL not in statement
     _statement, row = fake_aurora.copied_rows[0]
     assert SYNTHETIC_PASSWORD_FILL not in row
-    assert row == ("SYNTH001", "SYNTHETIC", "TESTUSER", "A", "00000000-0000-4000-8000-000000000001")
+    assert row == (_SYNTHETIC_USER_ID, "SYNTHETIC", "TESTUSER", "A", _SYNTHETIC_SUBJECT)
 
 
 @pytest.mark.parametrize(
@@ -1523,14 +2091,15 @@ def test_a_load_diagnostic_names_the_field_and_never_its_value(
 
 
 @pytest.mark.parametrize("record", aurora.target_names())
-def test_the_conflict_target_is_read_from_the_record_descriptor(record: str) -> None:
-    """Assert a declared conflict key equals the columns of the descriptor's key window.
+def test_the_conflict_target_is_derived_by_the_production_key_function(record: str) -> None:
+    """Assert each target's key columns are the production derivation over its own descriptor.
 
     Purpose
     -------
     Establish that idempotency is a property of the layout rather than of a per-table code path.
-    The conflict target is the record's own primary key, computed here from ``key_offset`` and
-    ``key_length`` and compared against what the target declares.
+    The conflict target is the record's own primary key, and it is PRODUCED by
+    :func:`carddemo_migration.loaders.aurora.key_columns_of` from ``key_offset`` and
+    ``key_length`` rather than declared anywhere.
 
     Parameters
     ----------
@@ -1540,129 +2109,284 @@ def test_the_conflict_target_is_read_from_the_record_descriptor(record: str) -> 
     Returns
     -------
     None
-        Nothing; a conflict key that is not the descriptor's key window is reported as an
-        assertion failure.
+        Nothing; a key that is not the descriptor's key window, or a merge statement that
+        conflicts on something else, is reported as an assertion failure.
 
     Raises
     ------
     None
-        For a target declaring no conflict key this test asserts a refusal instead, caught by
-        :func:`pytest.raises`, which verifies
-        :class:`carddemo_migration.loaders.aurora.AuroraLoadError` -- such a target has no merge
-        statement to produce.
     """
+    # WHY : Refactoring Rationale: this test used to compute the window with a helper of its OWN
+    #   and compare the answer against a tuple the loader declared by hand. That construction was
+    #   the wrong shape twice over: it left the geometry written down in two places, and it could
+    #   only ever report a disagreement between them -- so a loader and a test that drifted the
+    #   same way would agree with each other while both disagreed with the index the table is
+    #   declared on. The derivation now lives in production and this test EXERCISES it.
     target = aurora.TARGETS[record]
-    derived = _key_window_columns(target)
-    layout = layouts.layout(record)
+    spec = layouts.layout(record)
 
-    # WHY : Assumptions: the key window is asserted NON-EMPTY for every record, because a record
-    #   with no primary key would make the derivation below vacuously agree with an empty declared
-    #   key -- so the property would hold for a target that had simply lost its conflict target.
-    assert derived, f"{record} yields no key column from key_offset/key_length"
-    assert layout.key_length > 0
-    assert layout.key_offset >= 0
+    # WHY : Assumptions: the key window is asserted non-empty and non-negative before anything is
+    #   derived from it, because a record with no key would make every comparison below vacuous.
+    assert spec.key_length > 0
+    assert spec.key_offset >= 0
+    assert target.key_columns, f"{record} yields no key column from key_offset/key_length"
 
-    if target.conflict_key:
-        # WHY : Assumptions: the conflict target is compared against the DESCRIPTOR rather than
-        #   against a column list written in this test, which is the whole point. A hard-coded
-        #   expectation would drift from the layout exactly as a hard-coded conflict target in the
-        #   loader would, and the two would then agree with each other while both disagreed with
-        #   the key the table is actually declared on.
-        assert target.conflict_key == derived, (
-            f"{record} declares ON CONFLICT {target.conflict_key} but its descriptor's key window"
-            f" is {derived}"
-        )
-        assert f"ON CONFLICT ({', '.join(chr(34) + c + chr(34) for c in derived)})" in (
-            target.merge_statement()
-        )
+    # WHY : Assumptions: the production function is called DIRECTLY as well as being observed
+    #   through the target, so a target that cached a stale tuple at construction would fail here.
+    #   The two calls are the same computation over the same inputs, which is the point: there is
+    #   one derivation, and both the loader and this test reach it.
+    assert aurora.key_columns_of(record, target.columns) == target.key_columns
+
+    # WHY : Assumptions: the expectation is stated INDEPENDENTLY of the production function as
+    #   well -- as the fields whose byte span falls inside the window, translated through the
+    #   target's own mapping -- so this test would still fail if the production derivation were
+    #   replaced by something that returned a plausible but wrong tuple. Restating the window
+    #   arithmetic is duplication only in appearance: it is the specification the function is
+    #   being held to, and it lives nowhere else in the suite.
+    window_end = spec.key_offset + spec.key_length
+    expected = tuple(
+        target.columns[field.name]
+        for field in spec.fields
+        if field.start >= spec.key_offset
+        and field.start + field.length <= window_end
+        and field.name in target.columns
+    )
+    assert target.key_columns == expected, (
+        f"{record} keys on {target.key_columns} but its descriptor's {spec.key_length}-byte"
+        f" window at offset {spec.key_offset} covers {expected}"
+    )
+
+    quoted = ", ".join(f'"{column}"' for column in target.key_columns)
+    if target.strategy is aurora.LoadStrategy.KEYED_MERGE:
+        assert f"ON CONFLICT ({quoted}) DO NOTHING" in target.merge_statement()
     else:
-        # WHY : Assumptions: a target with no conflict key is asserted to have no merge statement
-        #   rather than merely being skipped. Only a table with a SECOND writer merges; a
-        #   single-writer master loads through a plain COPY that fails on a second run, and that
-        #   failure is useful information a silent no-op would destroy.
-        with pytest.raises(aurora.AuroraLoadError):
-            target.merge_statement()
+        # WHY : Assumptions: the one whole-row target is asserted to name NO conflict target,
+        #   because its table's key is not unique -- the daily feed's transaction identifier
+        #   repeats across business dates -- and PostgreSQL refuses an ``ON CONFLICT`` whose
+        #   columns carry no unique constraint. The key is still derived for it, because the
+        #   derivation is what proves the descriptor and the mapping agree; it is simply not
+        #   what the merge conflicts on.
+        assert "ON CONFLICT" not in target.merge_statement()
+        assert "WHERE NOT EXISTS" in target.merge_statement()
 
 
-def test_loading_one_dataset_twice_adds_nothing_and_raises_nothing(
-    fake_aurora: FakeAuroraDatabase, seed_corpus: SeedCorpus
-) -> None:
-    """Assert a repeated load of a merge-path dataset yields the same rows and no key error.
+def test_the_key_derivation_refuses_a_window_it_cannot_translate() -> None:
+    """Assert the production key derivation refuses an unregistered record and a partial mapping.
 
     Purpose
     -------
-    Establish idempotency by construction on the tables that need it. The disclosure groups are
-    seeded by the reference service's own migration before this loader ever runs, so a second
-    pass has to compose with rows already present rather than abort on the first key collision.
-
-    Parameters
-    ----------
-    fake_aurora : FakeAuroraDatabase
-        The database double. Its arranged affected-row count stands in for what the server would
-        report for the merge, since a double has no rows of its own to conflict.
-    seed_corpus : SeedCorpus
-        Read-only accessor over the committed seed datasets, supplying the disclosure groups.
+    Establish that the derivation fails loudly rather than answering an empty tuple, since an
+    empty tuple is indistinguishable from a target that merges on nothing -- which would compose
+    a merge PostgreSQL rejects only after the whole dataset had been staged.
 
     Returns
     -------
     None
-        Nothing; a differing row set between the two passes, or any raised error, is reported as
-        an assertion failure.
+        Nothing; a silent answer where a refusal is required is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+        Both provoked refusals are caught by :func:`pytest.raises`.
+    """
+    with pytest.raises(ValueError) as unregistered:
+        aurora.key_columns_of("NOSUCHRECORD", {"WHATEVER": "column"})
+    assert "NOSUCHRECORD" in str(unregistered.value)
+
+    # WHY : Assumptions: TRANCAT is chosen because its key window spans TWO fields, so a mapping
+    #   naming only the first is a partial cover rather than an empty one. That is the realistic
+    #   mistake: an empty mapping is obviously wrong, whereas a mapping that names the leading key
+    #   field looks complete and would produce a merge conflicting on a non-unique prefix.
+    with pytest.raises(ValueError) as partial:
+        aurora.key_columns_of("TRANCAT", {"TRAN-TYPE-CD": "type_cd"})
+    assert "TRAN-CAT-CD" in str(partial.value)
+
+
+@pytest.mark.parametrize("record", aurora.target_names())
+def test_loading_any_dataset_twice_adds_nothing_and_raises_nothing(
+    record: str, fake_aurora: FakeAuroraDatabase
+) -> None:
+    """Assert a repeated load of ANY of the eleven datasets ends in the same state and no error.
+
+    Purpose
+    -------
+    Establish idempotency by construction across the whole delivered surface rather than on one
+    table. A re-run is a normal event for every dataset: the batch state machine's redrive
+    resumes a failed execution from the failed state, and an operator re-running a staging branch
+    after a decode fault is the documented recovery. A load that raised a duplicate-key error on
+    the second pass -- or, worse, succeeded and doubled the rows -- would make both unusable.
+
+    Parameters
+    ----------
+    record : str
+        One registered record name, supplied for each of the eleven load targets.
+    fake_aurora : FakeAuroraDatabase
+        The database double. Its arranged affected-row count stands in for what the server would
+        report for the merge, since a double holds no rows of its own to conflict with.
+
+    Returns
+    -------
+    None
+        Nothing; a differing final row set between the two passes, a raised error, or a second
+        pass reporting rows gained is reported as an assertion failure.
 
     Raises
     ------
     None
     """
-    target = aurora.TARGETS["DISGROUP"]
-    assert target.conflict_key, "the disclosure groups must load through the merge path"
-    extract = seed_corpus.ascii_path("discgrp.txt")
-    expected_rows = len(seed_corpus.ascii_records("discgrp.txt"))
+    # WHY : Refactoring Rationale: this test used to load ONE dataset twice -- the disclosure
+    #   groups, the only target that then declared a conflict key -- and the other ten were
+    #   covered by a sibling asserting that a target without a conflict key had no merge at all.
+    #   That pair codified the defect as the contract: seven of the eleven loaded through a direct
+    #   COPY that fails outright on a second pass, and the daily feed's key is not unique, so its
+    #   second pass succeeded and silently doubled the feed. Parametrising over every declared
+    #   target is what makes the property a fact about the loader rather than about one table.
+    target = aurora.TARGETS[record]
+    records = _synthetic_records(record, 3)
+    context = _load_context()
+    positions = _comparable_positions(target)
+    assert positions, f"{record} has no deterministic column, so two passes cannot be compared"
 
     first_connection = _connect_as_owning_role(fake_aurora, target.schema)
-    fake_aurora.arrange_affected_rows("INSERT INTO", expected_rows)
-    first = aurora.load_records(
-        first_connection, target, discgrp.read_ascii_disclosure_groups(extract)
+    fake_aurora.arrange_affected_rows("INSERT INTO", len(records))
+    first = aurora.load_records(first_connection, target, records, context)
+    first_rows = tuple(
+        tuple(row[position] for position in positions)
+        for _statement, row in fake_aurora.copied_rows
     )
-    first_rows = tuple(row for _statement, row in fake_aurora.copied_rows)
 
-    # WHY : Assumptions: the second pass arranges ZERO affected rows, which is what the server
-    #   reports for ``ON CONFLICT ... DO NOTHING`` against a table that already holds every key.
-    #   That is the state a re-run actually meets, and it is a SUCCESS: the outcome distinguishes
-    #   rows offered from rows gained, so a re-run reports every row skipped and raises nothing.
+    # WHY : Assumptions: the second pass arranges ZERO affected rows, which is what a server
+    #   reports for a merge against a table that already holds every staged row -- ``ON CONFLICT
+    #   ... DO NOTHING`` for the ten keyed targets and a ``WHERE NOT EXISTS`` anti-join that
+    #   matches every row for the daily feed. That is the state a re-run actually meets, and it is
+    #   a SUCCESS: the outcome distinguishes rows offered from rows gained.
     fake_aurora.arrange_affected_rows("INSERT INTO", 0)
     second_connection = _connect_as_owning_role(fake_aurora, target.schema)
-    second = aurora.load_records(
-        second_connection, target, discgrp.read_ascii_disclosure_groups(extract)
-    )
-    second_rows = tuple(row for _statement, row in fake_aurora.copied_rows)[len(first_rows) :]
+    second = aurora.load_records(second_connection, target, records, context)
+    second_rows = tuple(
+        tuple(row[position] for position in positions)
+        for _statement, row in fake_aurora.copied_rows
+    )[len(first_rows) :]
 
-    assert first.staged == second.staged == expected_rows
-    assert first.inserted == expected_rows
+    assert first.staged == second.staged == len(records)
+    assert first.inserted == len(records)
+    assert first.skipped == 0
     assert second.inserted == 0
-    assert second.skipped == expected_rows
+    assert second.skipped == len(records)
     # WHY : Assumptions: the FINAL ROW SET is compared, not just the counts. Idempotency means the
     #   table ends in the same state, so two passes offering the same keys with different values --
-    #   which a non-deterministic decode would produce -- must fail here even though both counts
-    #   would match.
+    #   which a non-deterministic decode or a clock-derived stamp would produce -- must fail here
+    #   even though both counts would match. The comparison is taken over the target's own
+    #   comparable fields, because a sealed column's envelope carries a per-value initialisation
+    #   vector and differs on every seal by design.
     assert second_rows == first_rows
     assert fake_aurora.commits == 2
     assert fake_aurora.rollbacks == 0
+    # WHY : Assumptions: the merge statement is asserted to have been issued on BOTH passes, not
+    #   merely once. A loader that staged the rows and skipped the merge on a re-run would report
+    #   the same counts as this one and leave the table missing every row a concurrent writer had
+    #   deleted between the passes.
+    merges = [
+        statement for statement in fake_aurora.executed_sql() if statement.startswith("INSERT INTO")
+    ]
+    assert merges == [target.merge_statement()] * 2
+
+
+def test_a_transaction_master_row_carries_the_stamp_its_column_requires(
+    fake_aurora: FakeAuroraDatabase, fixture_corpus: FixtureCorpus
+) -> None:
+    """Assert a transaction-master load supplies a processing stamp, or refuses before the COPY.
+
+    Purpose
+    -------
+    Establish the transaction master's timestamp contract at the boundary that decides it.
+    ``ledger.transactions.proc_ts`` is declared ``TIMESTAMP(6) NOT NULL``, because the posting
+    program writes the stamp on every row it posts; the committed extract, however, is the
+    PRE-posting feed and carries twenty-six blanks in that span. Converting those blanks to
+    ``NULL`` would send the whole dataset to a COPY the server rejects on the first row, after the
+    staging table had been created -- so the refusal has to happen here, before anything is sent.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        The database double, whose copy log is what makes "nothing was sent" observable.
+    fixture_corpus : FixtureCorpus
+        Read-only accessor over the committed corpus, supplying the export scenario's five-record
+        transaction extract.
+
+    Returns
+    -------
+    None
+        Nothing; a blank stamp reaching the COPY as ``NULL``, or a written stamp being rejected,
+        is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+        The provoked refusal is caught by :func:`pytest.raises`.
+    """
+    target = aurora.TARGETS["TRAN"]
+    assert target.projections["TRAN-PROC-TS"] is aurora.Projection.TIMESTAMP_REQUIRED
+    assert target.projections["TRAN-ORIG-TS"] is aurora.Projection.TIMESTAMP_OR_NULL
+    extract = fixture_corpus.path("export/happy_path", "trandata.txt")
+    unposted = tuple(transaction.read_ascii_transactions(extract))
+    assert unposted, "the committed transaction extract is empty, so nothing was checked"
+
+    # WHY : Assumptions: the committed extract is asserted to carry a BLANK processing span before
+    #   the refusal is provoked, so this test cannot pass because the fixture changed underneath
+    #   it. The blanks are a fact about the pre-posting feed rather than a defect in the extract:
+    #   the posting program is what writes that span.
+    assert all(row["TRAN-PROC-TS"].strip() == "" for row in unposted)
+
+    connection = _connect_as_owning_role(fake_aurora, target.schema)
+    with pytest.raises(aurora.AuroraLoadError) as refusal:
+        aurora.load_records(connection, target, unposted)
+    message = str(refusal.value)
+    assert "proc_ts" in message
+    assert "TRAN-PROC-TS" in message
+    # WHY : Assumptions: NOTHING was copied. The refusal is only useful if it precedes the write:
+    #   a loader that refused the row after streaming the four before it would leave the same
+    #   error text behind and a staging table holding a partial dataset.
+    assert fake_aurora.copied_rows == []
+    assert fake_aurora.commits == 0
+
+    # WHY : Assumptions: the same records with the span WRITTEN load cleanly, which is what proves
+    #   the refusal is about the blank rather than about the projection being unusable. The stamp
+    #   substituted here is the extract's own originating stamp, so the value is one the reference
+    #   compiler produced; it is not derived from the clock, because a load deriving a financial
+    #   stamp would be inventing posting metadata the source does not contain.
+    posted = tuple({**row, "TRAN-PROC-TS": row["TRAN-ORIG-TS"]} for row in unposted)
+    posted_connection = _connect_as_owning_role(fake_aurora, target.schema)
+    fake_aurora.arrange_affected_rows("INSERT INTO", len(posted))
+    outcome = aurora.load_records(posted_connection, target, posted)
+    assert outcome.staged == len(posted)
+    assert outcome.inserted == len(posted)
+    stamp_position = tuple(target.columns).index("TRAN-PROC-TS")
+    stamps = {row[stamp_position] for _statement, row in fake_aurora.copied_rows}
+    assert stamps == {_SYNTHETIC_TIMESTAMP}
+    assert None not in stamps
 
 
 @pytest.mark.parametrize(
-    ("record", "reader", "dataset"),
+    ("record", "strategy", "dataset"),
     (
-        pytest.param("ACCOUNT", "copy", "acctdata.txt", id="copy-path-accounts"),
-        pytest.param("DISGROUP", "merge", "discgrp.txt", id="merge-path-disclosure-groups"),
+        pytest.param(
+            "ACCOUNT", aurora.LoadStrategy.KEYED_MERGE, "acctdata.txt", id="keyed-merge-accounts"
+        ),
+        pytest.param(
+            "DALYTRAN",
+            aurora.LoadStrategy.WHOLE_ROW_MERGE,
+            "discgrp.txt",
+            id="whole-row-merge-daily-feed",
+        ),
     ),
 )
 def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
     record: str,
-    reader: str,
+    strategy: aurora.LoadStrategy,
     dataset: str,
     fake_aurora: FakeAuroraDatabase,
     fixture_corpus: FixtureCorpus,
-    seed_corpus: SeedCorpus,
 ) -> None:
     """Assert neither load path issues schema, role, grant, delete, truncate or index statements.
 
@@ -1679,18 +2403,17 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
     ----------
     record : str
         The registered record being loaded.
-    reader : str
-        Which path the target takes, ``"copy"`` or ``"merge"``, asserted against the target's own
-        declaration so the parametrisation cannot silently exercise one path twice.
+    strategy : aurora.LoadStrategy
+        Which merge the target composes, asserted against the target's own declaration so the
+        parametrisation cannot silently exercise one strategy twice.
     dataset : str
-        File name of the extract to load.
+        File name of the extract to load. Read for the record whose committed extract this module
+        may reproduce; ignored for the record whose rows are synthesised.
     fake_aurora : FakeAuroraDatabase
         The database double, whose recorded statement log is what makes a never-issued statement
         observable at all.
     fixture_corpus : FixtureCorpus
         Read-only accessor supplying the account extract.
-    seed_corpus : SeedCorpus
-        Read-only accessor supplying the disclosure-group extract.
 
     Returns
     -------
@@ -1703,12 +2426,22 @@ def test_the_loader_issues_no_statement_its_login_role_does_not_hold(
     None
     """
     target = aurora.TARGETS[record]
-    assert bool(target.conflict_key) is (reader == "merge")
+    # WHY : Refactoring Rationale: the parametrisation selects on the merge STRATEGY, where it used
+    #   to select on whether the target declared a conflict key. Every target merges now, so the
+    #   old discriminator would have put both parameters on the same path -- and the two paths that
+    #   remain differ in exactly the way that matters here: one closes with ``ON CONFLICT`` and the
+    #   other with an anti-join that reads the target table, which is a SELECT the login role must
+    #   hold and which no earlier revision of this test exercised.
+    assert target.strategy is strategy
     connection = _connect_as_owning_role(fake_aurora, target.schema)
+    fake_aurora.arrange_affected_rows("INSERT INTO", 1)
 
-    if reader == "merge":
-        fake_aurora.arrange_affected_rows("INSERT INTO", 1)
-        records = discgrp.read_ascii_disclosure_groups(seed_corpus.ascii_path(dataset))
+    if target.strategy is aurora.LoadStrategy.WHOLE_ROW_MERGE:
+        # Assumptions: the daily feed's rows are synthesised rather than read, because the
+        #   committed daily extract and the transaction extract share a layout and the feed's own
+        #   file is staged binary; the statements issued are a property of the target, not of where
+        #   the rows came from.
+        records: Iterable[Mapping[str, object]] = _synthetic_records(record, 2)
     else:
         records = account.read_ascii_accounts(
             fixture_corpus.path("provisioning/happy_path", dataset)
@@ -1851,6 +2584,412 @@ def test_a_failure_partway_through_rolls_back_rather_than_half_applying(
     assert len(fake_aurora.copied_rows) == 1
     assert "nothing is loaded" in str(refusal.value)
     assert target.table in str(refusal.value)
+
+
+class _SyntheticDriverError(RuntimeError):
+    """A driver error shaped the way psycopg shapes one, carrying a value-bearing message.
+
+    Purpose
+    -------
+    Stand in for the exception a real server failure raises, so the loader's diagnostic can be
+    tested against the two things such an exception actually carries: a ``str`` that quotes the
+    offending VALUES, and structured identifier fields that do not.
+
+    Parameters
+    ----------
+    message : str
+        The driver's own text, including the DETAIL clause. Deliberately value-bearing, because
+        that is the half a diagnostic must not repeat.
+    sqlstate : str
+        The five-character SQLSTATE the server reported.
+    diag : _SyntheticDiagnostic
+        The structured identifier fields the driver exposes alongside the message.
+    """
+
+    def __init__(self, message: str, *, sqlstate: str, diag: _SyntheticDiagnostic) -> None:
+        """Build the error with its message, SQLSTATE and structured diagnostic.
+
+        Parameters
+        ----------
+        message : str
+            The driver's own value-bearing text.
+        sqlstate : str
+            The five-character SQLSTATE.
+        diag : _SyntheticDiagnostic
+            The structured identifier fields.
+
+        Returns
+        -------
+        None
+            Initialises the exception.
+
+        Raises
+        ------
+        None
+        """
+        super().__init__(message)
+        # WHY : Assumptions: the attributes are named exactly as psycopg names them -- ``sqlstate``
+        #   and ``diag`` -- because the loader reads them by name through ``getattr``. A double
+        #   spelling them differently would make the loader's allow-list appear to find nothing,
+        #   so this test would pass while proving only that the double was misnamed.
+        self.sqlstate = sqlstate
+        self.diag = diag
+
+
+class _SyntheticDiagnostic(NamedTuple):
+    """The structured identifier fields a driver exposes on a server error.
+
+    Parameters
+    ----------
+    schema_name : str
+        Schema the failing statement touched.
+    table_name : str
+        Table the failing statement touched.
+    column_name : str
+        Column the failure names, when it names one.
+    constraint_name : str
+        Constraint the failure names, when it names one.
+    """
+
+    schema_name: str
+    table_name: str
+    column_name: str
+    constraint_name: str
+
+
+def _value_bearing_driver_error(target: aurora.TableTarget, column: str) -> _SyntheticDriverError:
+    """Build a driver error whose message quotes every class of regulated value.
+
+    Purpose
+    -------
+    Produce the worst realistic input to the loader's diagnostic: a unique-violation whose DETAIL
+    names the conflicting key's VALUES, which for these tables means a primary account number, a
+    national identifier, a name, a date of birth, a verification value or a password.
+
+    Parameters
+    ----------
+    target : aurora.TableTarget
+        The target being loaded, whose schema and table the error names.
+    column : str
+        The column the error names.
+
+    Returns
+    -------
+    _SyntheticDriverError
+        An error carrying a value-bearing message and safe structured fields.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the message is built in the DETAIL shape PostgreSQL actually uses --
+    #   ``Key (col)=(value) already exists`` -- rather than as an arbitrary sentence. That shape is
+    #   the reason this finding exists: a unique violation on a card, a customer or a user names
+    #   the conflicting value by construction, so any diagnostic echoing the driver's text
+    #   discloses a primary account number, a national identifier or a password.
+    quoted = ", ".join(f"{label}={value}" for label, value in _REGULATED_VALUES.items())
+    return _SyntheticDriverError(
+        f'duplicate key value violates unique constraint "pk_{target.table}"\n'
+        f"DETAIL:  Key ({column})=({quoted}) already exists.",
+        sqlstate="23505",
+        diag=_SyntheticDiagnostic(
+            schema_name=target.schema,
+            table_name=target.table,
+            column_name=column,
+            constraint_name=f"pk_{target.table}",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "strategy"),
+    (
+        pytest.param("ACCOUNT", aurora.LoadStrategy.KEYED_MERGE, id="keyed-merge"),
+        pytest.param("DALYTRAN", aurora.LoadStrategy.WHOLE_ROW_MERGE, id="whole-row-merge"),
+    ),
+)
+@pytest.mark.parametrize("phase", ("staging", "copy", "merge", "commit"))
+def test_a_failure_in_any_phase_rolls_back_and_reports_only_safe_metadata(
+    record: str,
+    strategy: aurora.LoadStrategy,
+    phase: str,
+    fake_aurora: FakeAuroraDatabase,
+) -> None:
+    """Assert every phase of a load rolls back, wraps, and discloses no value on failure.
+
+    Purpose
+    -------
+    Establish the failure contract across the whole transaction rather than at one point in it. A
+    load issues four things that can fail independently -- the staging table, the bulk copy, the
+    merge and the commit -- and each fails with a different driver exception at a different point
+    in the unit of work. The commit in particular used to sit OUTSIDE the guarded block, so a
+    commit failure escaped as the driver's own exception type, with the driver's own value-bearing
+    text, past every sanitising and rolling-back this function performs.
+
+    Parameters
+    ----------
+    record : str
+        The record being loaded, one per merge strategy so both paths are covered in every phase.
+    strategy : aurora.LoadStrategy
+        The strategy that record's target declares, asserted so the parametrisation cannot
+        silently exercise one path twice.
+    phase : str
+        Which of the four phases is arranged to fail.
+    fake_aurora : FakeAuroraDatabase
+        The database double, whose arranged failures are what make each phase separable.
+
+    Returns
+    -------
+    None
+        Nothing; a failure that commits, does not roll back, escapes untyped, or quotes a
+        regulated value is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+        Each provoked failure is caught by :func:`pytest.raises`.
+    """
+    target = aurora.TARGETS[record]
+    assert target.strategy is strategy
+    records = _synthetic_records(record, 3)
+    connection = _connect_as_owning_role(fake_aurora, target.schema)
+    column = target.key_columns[0]
+    error = _value_bearing_driver_error(target, column)
+
+    if phase == "staging":
+        fake_aurora.arrange_statement_failure("CREATE TEMPORARY TABLE", error)
+    elif phase == "copy":
+        fake_aurora.arrange_copy_write_failure(target.stage_copy_statement(), error, after_rows=2)
+    elif phase == "merge":
+        fake_aurora.arrange_statement_failure("INSERT INTO", error)
+    else:
+        fake_aurora.arrange_commit_failure(error)
+
+    with pytest.raises(aurora.AuroraLoadError) as refusal:
+        aurora.load_records(connection, target, records, _load_context())
+
+    message = str(refusal.value)
+    # WHY : Assumptions: the transaction is discarded in EVERY phase, including the commit phase.
+    #   A commit that failed and was not rolled back leaves the connection holding an aborted
+    #   transaction, and a caller returning that connection to a pool hands the next borrower a
+    #   session in which every statement fails with "current transaction is aborted" -- a defect
+    #   that surfaces somewhere else entirely.
+    assert fake_aurora.rollbacks == 1
+    assert fake_aurora.commits == 0
+    # WHY : Assumptions: the safe metadata IS present, not merely the values absent. A diagnostic
+    #   that reported nothing would satisfy every disclosure assertion below and leave an operator
+    #   with no way to tell a constraint violation from a lost connection.
+    assert "rolled back" in message
+    assert error.sqlstate in message
+    assert target.table in message
+    assert column in message
+    assert f"pk_{target.table}" in message
+    for label, value in _REGULATED_VALUES.items():
+        assert value not in message, f"the diagnostic echoed the {label}"
+    # WHY : Assumptions: the CHAINED CAUSE is asserted absent, which is the half a message
+    #   assertion cannot reach. A wrapped error raised ``from exc`` carries the driver's own text
+    #   in ``__cause__``, and anything logging ``exc_info`` -- which is what an unexpected failure
+    #   gets logged with -- prints that traceback in full, DETAIL clause included.
+    assert refusal.value.__cause__ is None
+    assert refusal.value.__context__ is None or refusal.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("record", "strategy"),
+    (
+        pytest.param("CARD", aurora.LoadStrategy.KEYED_MERGE, id="keyed-merge-card"),
+        pytest.param("DALYTRAN", aurora.LoadStrategy.WHOLE_ROW_MERGE, id="whole-row-merge-feed"),
+    ),
+)
+def test_a_failed_rollback_is_reported_without_replacing_the_original_diagnostic(
+    record: str, strategy: aurora.LoadStrategy, fake_aurora: FakeAuroraDatabase
+) -> None:
+    """Assert a rollback that itself fails is reported, safely, alongside the original failure.
+
+    Purpose
+    -------
+    Establish the state of the connection after the worst case. When the rollback fails too --
+    a lost connection, an administrator terminating the backend -- the caller needs to learn BOTH
+    that the load failed and that the transaction was not discarded, because the second fact
+    decides whether the connection can be reused. A rollback failure that propagated would replace
+    the original diagnostic with itself and lose the reason the load failed at all.
+
+    Parameters
+    ----------
+    record : str
+        The record being loaded, one per merge strategy.
+    strategy : aurora.LoadStrategy
+        The strategy that record's target declares.
+    fake_aurora : FakeAuroraDatabase
+        The database double, arranging both the merge failure and the rollback failure.
+
+    Returns
+    -------
+    None
+        Nothing; a lost original diagnostic, an unreported rollback failure, or a disclosed value
+        is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+        The provoked failure is caught by :func:`pytest.raises`.
+    """
+    target = aurora.TARGETS[record]
+    assert target.strategy is strategy
+    connection = _connect_as_owning_role(fake_aurora, target.schema)
+    column = target.key_columns[0]
+    merge_failure = _value_bearing_driver_error(target, column)
+    rollback_failure = _value_bearing_driver_error(target, column)
+    fake_aurora.arrange_statement_failure("INSERT INTO", merge_failure)
+    fake_aurora.arrange_rollback_failure(rollback_failure)
+
+    with pytest.raises(aurora.AuroraLoadError) as refusal:
+        aurora.load_records(connection, target, _synthetic_records(record, 2), _load_context())
+
+    message = str(refusal.value)
+    # WHY : Assumptions: the ORIGINAL failure is asserted still present. The rollback failure is
+    #   additional information, not a replacement: an operator told only that a rollback failed
+    #   has learned nothing about why the load did.
+    assert "rolled back" in message
+    assert merge_failure.sqlstate in message
+    assert "rollback" in message.lower()
+    for label, value in _REGULATED_VALUES.items():
+        assert value not in message, f"the diagnostic echoed the {label}"
+    # WHY : Assumptions: the rollback WAS attempted, which is what distinguishes a failed rollback
+    #   from a rollback that was never issued. The double counts the attempt before it raises,
+    #   precisely so the two are distinguishable here.
+    assert fake_aurora.rollbacks == 1
+    assert fake_aurora.commits == 0
+
+
+def test_a_driver_diagnostic_is_redacted_at_the_command_log_boundary(
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Assert a value-bearing driver failure reaches the command log carrying no regulated value.
+
+    Purpose
+    -------
+    Close the disclosure path end to end. The loader sanitising its own message is only half the
+    protection: the command handler is what LOGS it, and a handler that logged the exception with
+    traceback information, or that caught the driver error before the loader wrapped it, would put
+    the DETAIL clause into an operator's log file regardless of how careful the loader had been.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        The database double, arranging the value-bearing merge failure.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic connection settings, re-stamped per schema by the injected factory.
+    caplog : pytest.LogCaptureFixture
+        Captures what the command handler logged, which is the boundary under test.
+    monkeypatch : pytest.MonkeyPatch
+        Used to inject the connection factory and the settings resolver into the command module.
+    tmp_path : Path
+        Scratch directory for the synthetic extract the command reads.
+
+    Returns
+    -------
+    None
+        Nothing; a regulated value in any captured log record is reported as an assertion failure.
+
+    Raises
+    ------
+    None
+    """
+    target = aurora.TARGETS["XREF"]
+    error = _value_bearing_driver_error(target, target.key_columns[0])
+    fake_aurora.arrange_statement_failure("INSERT INTO", error)
+    # WHY : Assumptions: the cross-reference is chosen because its whole record is three fixed
+    #   fields, so a valid extract can be written here without reproducing a committed one -- and
+    #   the value that WOULD be disclosed, a card number, is the one with the strictest rule.
+    layout = layouts.layout("XREF")
+    widths = {field.name: field.length for field in layout.fields}
+    row = (
+        "9" * widths["XREF-CARD-NUM"]
+        + "0" * (widths["XREF-CUST-ID"] - 1)
+        + "1"
+        + "0" * (widths["XREF-ACCT-ID"] - 1)
+        + "2"
+    )
+    extract = tmp_path / "cardxref.txt"
+    extract.write_text(f"{row.ljust(layout.reclen)}\n", encoding="ascii")
+
+    def _resolve(schema: str) -> AuroraConnectionSettings:
+        """Return synthetic settings stamped with the schema's own login role.
+
+        Parameters
+        ----------
+        schema : str
+            The schema the command resolved from its target.
+
+        Returns
+        -------
+        AuroraConnectionSettings
+            Settings whose user is that schema's login role.
+
+        Raises
+        ------
+        None
+        """
+        return replace(aurora_settings, user=role_for_schema(schema))
+
+    def _connect(resolved: AuroraConnectionSettings, *, expected_role: str | None = None) -> Any:  # noqa: ANN401 -- the double and the driver return unrelated connection types
+        """Open a recording connection, honouring the command's role expectation.
+
+        Parameters
+        ----------
+        resolved : AuroraConnectionSettings
+            The settings the command resolved.
+        expected_role : str | None
+            The role the command expects the credential to authenticate as.
+
+        Returns
+        -------
+        Any
+            A recording connection from the double.
+
+        Raises
+        ------
+        AssertionError
+            If the command stated no expectation, or stated one the settings do not satisfy.
+        """
+        # WHY : Assumptions: the expectation is ASSERTED rather than ignored, because this test is
+        #   the one place the production orchestration's own role check is observable. A factory
+        #   that accepted the keyword and dropped it would let that check be deleted with every
+        #   command test still green.
+        assert expected_role is not None, "the command opened a connection with no role expectation"
+        assert resolved.user == expected_role
+        return fake_aurora.connect(**resolved.as_connection_params())
+
+    monkeypatch.setattr(cli, "resolve_aurora_settings", _resolve)
+    monkeypatch.setattr(cli, "connect", _connect)
+
+    with caplog.at_level(logging.DEBUG):
+        exit_code = cli.main(
+            ["load-dataset", "--dataset", "XREF", "--source", str(extract), "--encoding", "ascii"]
+        )
+
+    assert exit_code != 0, "a failed merge must not report success"
+    logged = "\n".join(
+        f"{record.getMessage()}\n{record.exc_text or ''}" for record in caplog.records
+    )
+    assert logged.strip(), "nothing was logged, so the boundary was not exercised"
+    for label, value in _REGULATED_VALUES.items():
+        assert value not in logged, f"the command log echoed the {label}"
+    # WHY : Assumptions: the log is asserted to carry the SAFE metadata too, so this test cannot
+    #   pass because the handler logged nothing at all -- which would satisfy every disclosure
+    #   assertion above while leaving an operator unable to diagnose a failed cutover step.
+    assert error.sqlstate in logged
+    assert target.table in logged
+    # WHY : Assumptions: no captured record carries traceback text. ``logger.exception`` and
+    #   ``exc_info=True`` both attach the formatted traceback, and a traceback of a wrapped driver
+    #   error prints the driver's own DETAIL clause in full even when the message above it is
+    #   clean.
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 @pytest.mark.parametrize(
@@ -2335,14 +3474,18 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
     ------
     None
     """
-    # WHY : Alternatives Considered: a locally held counter was available and was rejected. It
-    #   cannot survive a process restart, and it cannot survive a second concurrent stager: the
-    #   batch chain stages through a state-machine Map state that runs one containerised branch per
-    #   dataset, so every branch's counter would start from the same base and the second write would
-    #   land on the first one's key. A retried branch is worse still -- it would recompute
-    #   the number
-    #   its failed attempt already used and overwrite a generation that had completed. The bucket's
-    #   own prefix listing is the one durable state every branch and every attempt agrees on.
+    # WHY : Alternatives Considered: a locally held counter was available and was rejected, and the
+    #   reason is a collision between two writers to the SAME family and business date. It is not
+    #   the state machine's per-dataset Map branches: each branch writes under its own
+    #   ``<domain>/<dataset>`` prefix, so two branches with independent counters both start at
+    #   the family minimum and land on different keys, which collides with nothing. What does
+    #   collide is two attempts at ONE family and date -- a Map branch RETRIED after a timeout
+    #   while the first attempt is still writing, an operator re-running one staging step by
+    #   hand, or a fresh process resuming a redriven execution -- because a counter starts from
+    #   the family minimum with no knowledge of what previous attempts wrote, so it recomputes a
+    #   number already used and overwrites a generation that had completed. The bucket's own
+    #   prefix listing is the one durable state every attempt agrees on, which is why the next
+    #   number is DISCOVERED rather than counted.
     registered = s3_stage.family("dalyrejs")
     extract = seed_corpus.ascii_path("discgrp.txt")
     prefixes = _stage_generations(
@@ -2446,18 +3589,19 @@ def test_the_first_generation_of_a_business_date_is_the_documented_minimum(
     )
 
 
-def test_the_current_generation_resolves_to_the_highest_and_is_absent_when_none_exists(
+def test_the_zero_reference_resolves_to_the_highest_and_refuses_an_empty_family(
     fake_object_store: FakeObjectStore,
     staging_settings: DatasetStagingSettings,
     seed_corpus: SeedCorpus,
 ) -> None:
-    """Assert the baseline ``(0)`` reference returns the newest generation, or reports none.
+    """Assert the ``(0)`` reference returns the newest generation, and refuses an empty family.
 
     Purpose
     -------
-    Establish the read side of the convention. A consuming step must read the generation the
-    baseline job would have read, and where a family holds nothing the answer must be an explicit
-    absence -- never a fabricated generation zero, which would address a prefix no write ever used.
+    Establish the read side of the convention on both of its resolvers. A consuming step must read
+    the generation the baseline job would have read; where a family holds nothing, the low-level
+    query reports an explicit absence -- never a fabricated generation zero, which would address a
+    prefix no write ever used -- and the strict resolver a batch step calls raises instead.
 
     Parameters
     ----------
@@ -2491,6 +3635,25 @@ def test_the_current_generation_resolves_to_the_highest_and_is_absent_when_none_
     assert empty is None
     assert empty != 0
 
+    # WHY : Refactoring Rationale: the STRICT resolver is exercised on the same empty family, and it
+    #   was added because an absence is the wrong answer for the caller that matters. A consuming
+    #   batch step asking for ``(0)`` cannot proceed without a generation, and the baseline it
+    #   reproduces does not let it: a JCL step referencing ``TRANSACT.BKUP(0)`` against an empty
+    #   generation data group fails the step rather than reading nothing. Returning ``None`` to that
+    #   caller turns "the producing step never ran" into "the dataset was empty", and a run over
+    #   zero records reports success.
+    with pytest.raises(s3_stage.GenerationDiscoveryError) as refused:
+        s3_stage.current_generation(
+            fake_object_store, staging_settings, registered.domain, registered.dataset
+        )
+    message = str(refused.value)
+    assert registered.domain in message
+    assert registered.dataset in message
+    # WHY : Assumptions: the typed error is asserted to be the one an operator already handles for
+    #   the other way discovery yields no usable answer -- an exhausted generation space -- so a
+    #   caller catching "the generation I need cannot be determined" catches one class for both.
+    assert isinstance(refused.value, s3_stage.GenerationRetentionError)
+
     _stage_generations(
         fake_object_store,
         staging_settings,
@@ -2508,6 +3671,14 @@ def test_the_current_generation_resolves_to_the_highest_and_is_absent_when_none_
     assert current.generation == 3
     assert current.business_date == _BUSINESS_DATE
     assert current.prefix.endswith("gen=0003/")
+    # WHY : Assumptions: the two resolvers are asserted to agree once a generation EXISTS, which is
+    #   what keeps them one contract with two failure behaviours rather than two answers. A strict
+    #   resolver that re-derived the newest generation independently could disagree with the query
+    #   at a date boundary, and the disagreement would only appear on the first run of a new day.
+    strict = s3_stage.current_generation(
+        fake_object_store, staging_settings, registered.domain, registered.dataset
+    )
+    assert strict == current
 
 
 def test_an_exhausted_generation_space_raises_the_typed_staging_error(
@@ -2897,46 +4068,89 @@ def test_the_staging_module_constructs_no_literal_endpoint(
     )
 
 
-def test_only_the_aurora_loader_reaches_a_third_party_service_client() -> None:
-    """Assert the database driver and the AWS SDK are confined to the modules entitled to them.
+def test_every_service_client_import_in_the_distribution_is_declared_and_deferred() -> None:
+    """Assert the whole source tree's service-client imports match the allow-list, all deferred.
 
     Purpose
     -------
-    Establish the layering that keeps a codec-only process free of service dependencies. The bulk
-    loader is the one module permitted the database driver, and it defers that import into the
-    single function that needs it; the staging loader is permitted the SDK and does not import it at
-    all, taking its client from the configuration module instead.
+    Establish the layering that keeps a codec-only process free of service dependencies, across
+    the WHOLE distribution rather than across the two modules a reader might think to check. Two
+    properties are asserted together: which modules may import a client at all, and that none of
+    them does so at module scope -- because a module-scope import makes importing that module fail
+    on a host without the dependency, and the codec tests in this suite deliberately run in
+    exactly that condition.
 
     Returns
     -------
     None
-        Nothing; a service client imported by a module not entitled to it is reported as an
-        assertion failure.
+        Nothing; a client imported by a module the allow-list does not name, a permitted module
+        importing a client it was not allowed, or any client imported at module scope, is reported
+        as an assertion failure naming the module and the client.
 
     Raises
     ------
     None
     """
-    aurora_imports = _imported_module_names(aurora)
-    staging_imports = _imported_module_names(s3_stage)
+    # WHY : Refactoring Rationale: this walks every ``.py`` under the package root, where it used to
+    #   inspect two named modules. The narrow version passed while the boundary docstring it was
+    #   checking was false: ``credentials.py`` imports the database driver in two functions, and
+    #   no assertion anywhere reached that file. A layering claim about a distribution has to be
+    #   checked over the distribution.
+    root = Path(aurora.__file__).resolve().parent.parent
+    sources = sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+    assert len(sources) >= 20, f"only {len(sources)} sources were scanned under {root}"
 
-    assert aurora_imports & _SERVICE_CLIENT_MODULES == {"psycopg"}
-    # WHY : Assumptions: the staging loader importing NO AWS SDK is the property that makes the
-    #   in-process double substitutable with nothing mocked, patched or redirected. It takes its
-    #   client as an argument and obtains the default from configuration, so a test supplies its own
-    #   object at a seam that already exists rather than intercepting a constructor.
-    assert staging_imports & _SERVICE_CLIENT_MODULES == set()
+    observed: dict[str, frozenset[str]] = {}
+    module_scope: dict[str, set[str]] = {}
+    for path in sources:
+        relative = path.relative_to(root).as_posix()
+        tree = _module_tree(str(path))
+        found: set[str] = set()
+        eager: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+                names = {node.module.split(".")[0]}
+            else:
+                continue
+            found |= names & _SERVICE_CLIENT_MODULES
+        # WHY : Assumptions: module scope is read from the tree's own top-level body rather than by
+        #   walking every node, because that is exactly the distinction under test -- an import
+        #   nested inside a function body is deferred and is permitted, and the same statement at
+        #   the top of the file is not.
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                eager |= {
+                    alias.name.split(".")[0] for alias in node.names
+                } & _SERVICE_CLIENT_MODULES
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+                eager |= {node.module.split(".")[0]} & _SERVICE_CLIENT_MODULES
+        if found:
+            observed[relative] = frozenset(found)
+        if eager:
+            module_scope[relative] = eager
 
-    # WHY : Assumptions: the driver import is asserted to be DEFERRED inside a function rather than
-    #   merely present. A module-scope import would make importing the loader fail on a host without
-    #   the driver, and the codec tests in this suite deliberately run in exactly that condition.
-    module_scope = {
-        alias.name.split(".")[0]
-        for node in _module_tree(aurora.__file__).body
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
-    assert "psycopg" not in module_scope
+    assert observed == dict(_PERMITTED_SERVICE_CLIENT_IMPORTS), (
+        "the distribution's service-client imports are not the declared set:"
+        f" unexpected {sorted(set(observed) - set(_PERMITTED_SERVICE_CLIENT_IMPORTS))},"
+        f" missing {sorted(set(_PERMITTED_SERVICE_CLIENT_IMPORTS) - set(observed))},"
+        f" observed { ({name: sorted(clients) for name, clients in sorted(observed.items())}) }"
+    )
+    # WHY : Assumptions: NO module scope import is permitted, for any of the three clients, in any
+    #   module -- so this is asserted as an empty mapping rather than against a second allow-list.
+    #   Deferring every one of them is what keeps `import carddemo_migration.copybook.layouts`
+    #   working on a checkout with no driver and no SDK installed.
+    assert module_scope == {}, (
+        "a service client is imported at module scope, which makes that module unimportable without"
+        f" the dependency: { ({name: sorted(clients) for name, clients in module_scope.items()}) }"
+    )
+    # WHY : Assumptions: the staging loader importing NO AWS SDK is called out separately because it
+    #   is the property that makes the in-process double substitutable with nothing mocked, patched
+    #   or redirected. It takes its client as an argument and obtains the default from
+    #   configuration, so a test supplies its own object at a seam that already exists.
+    assert "loaders/s3_stage.py" not in observed
+    assert _imported_module_names(s3_stage) & _SERVICE_CLIENT_MODULES == set()
 
 
 def test_a_record_layout_import_pulls_in_no_service_client() -> None:

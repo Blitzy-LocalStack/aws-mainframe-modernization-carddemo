@@ -4,15 +4,23 @@ import com.carddemo.batch.config.BatchConfig.LedgerGuardedStep;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
-import com.carddemo.batch.mapper.ExportRecordMapper;
 import com.carddemo.batch.mapper.ExportRecordMapper.RecordType;
+import com.carddemo.batch.mapper.ExportRecordMapper;
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.time.TimestampFormatter;
-import java.io.ByteArrayOutputStream;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
@@ -23,15 +31,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.job.parameters.JobParametersValidator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 /**
@@ -157,19 +168,26 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * entity, no customer repository, no card repository and no {@code card.*} grant. Same copybook,
  * opposite direction, different architectural consequence.
  *
- * <h2>The four divergences this file carries, and a numbering collision</h2>
+ * <h2>The five divergences this file carries, and a numbering collision</h2>
  *
  * <p>⚠️ Assumptions: the register at {@code docs/architecture/cobol-to-service-traceability.md} is the
  * home of every documented divergence, and <b>its numbering and the labels used here agree on D-1
- * only.</b> That register presently enumerates D-1 through D-7; its D-4 is the plaintext-credential
- * field, its D-5 is the reply published before the decision commits, its D-7 is the online header
- * clock, and it has no D-8. The three import-specific differences below are labelled D-4, D-5 and D-8
+ * only.</b> That register enumerates D-1 through D-7 under its own numbering; its D-4 is the
+ * plaintext-credential field, its D-5 is the reply published before the decision commits, and its D-7 is
+ * the online header clock. The import-specific differences below are labelled D-4, D-5, D-8 and D-9
  * because this file's specification and the sibling {@link ExportJob} both use those labels, and they
  * are therefore identified <b>by subject</b> as well as by label throughout. A reader following the
  * bare label into the register would land on unrelated entries, which is precisely why the collision is
- * recorded here rather than left to be discovered. Only D-1 is currently registered; the other three
- * are documented here and are for that register's owner to absorb. This file references the register
- * and does not author it.
+ * recorded here rather than left to be discovered.
+ *
+ * <p>Refactoring Rationale: all five are now registered, in
+ * {@code docs/architecture/cobol-to-service-traceability.md} section "Batch export and import
+ * divergences", each keyed by its subject and cross-referenced to the label used here. An earlier
+ * revision of this comment stated that only D-1 was registered and left the other three "for that
+ * register's owner to absorb", which made every claim of a documented divergence in this file a claim
+ * about a document that did not describe it. A divergence recorded only beside the code it lives in is
+ * not registered: the register is what a reader consults who is comparing the two systems and does not
+ * know which file to open.
  *
  * <h3>Refactoring Rationale: divergence D-1, the file-description record key</h3>
  *
@@ -298,6 +316,36 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * {@code app/cbl/CBIMPORT.cbl:153} declares that field {@code PIC X(26)} and the formatter's contract
  * width is exactly 26. Nothing here builds a timestamp string by hand.
  *
+ * <h3>⚠️ Assumptions and Trade-offs: divergence D-9, registered as
+ * {@code D-IMPORT-TRUNCATED-ARTEFACT} -- a truncated artefact fails the run</h3>
+ *
+ * <p>The reference cannot meet this condition. Its input is selected {@code ORGANIZATION IS SEQUENTIAL}
+ * with {@code RECFM=FB} at {@code app/jcl/CBIMPORT.jcl:28-32}, and a fixed-blocked dataset's length is
+ * always a whole multiple of its record length, so a partial trailing image is not a state the storage
+ * can hold. The target's input is an object, whose length is whatever was written, so the condition is
+ * reachable here and needs an answer the reference never had to give.
+ *
+ * <p><b>The ruling.</b> A trailing image shorter than one record <b>fails the run before any artefact is
+ * published</b>. The diagnostic record is assembled and the condition is logged, and then the pass
+ * raises, so {@code 4000-FINALIZE} is never reached and the six accumulators are discarded with the
+ * failed transaction. The step reports the hard-failure tier.
+ *
+ * <p>Refactoring Rationale: this branch previously recorded the short image and stopped reading, after
+ * which the run reconciled the whole records it had, published all six artefacts and returned the clean
+ * tier. Every one of those steps is individually defensible and the combination is not: the artefacts
+ * this job produces have <b>no golden master</b> — D-1 above is the reason — so a consumer has nothing to
+ * compare them against and no way to tell a complete set from a set missing everything after a
+ * truncation point. A clean status on a knowingly partial product is the one outcome that cannot be
+ * detected downstream, and it is worse than a failure precisely because it is actionable-looking.
+ *
+ * <p>Alternatives Considered: the soft-warn tier, publishing what was read and grading the run four.
+ * Rejected because that tier gates the nightly chain's {@code Choice} states rather than stopping them,
+ * and because it would still leave the incomplete artefacts in the store for a loader to consume.
+ * Alternatives Considered: publishing the diagnostic artefact alone, so the truncation is recorded in the
+ * store as well as the log. Rejected because a diagnostic artefact standing beside five absent ones is
+ * indistinguishable from a run that never wrote them, and the log line carries the same three facts —
+ * offset, bytes remaining, bytes expected — through a channel the failure does not discard.
+ *
  * @see ExportJob
  * @see ExportRecordMapper
  * @see BatchJobName#IMPORT
@@ -319,7 +367,7 @@ public class ImportJob {
      * only as a string constant and any attempt to name a field, method or class for it would not
      * compile.</p>
      */
-    static final String JOB_NAME = BatchJobName.IMPORT.token();
+    public static final String JOB_NAME = BatchJobName.IMPORT.token();
 
     /**
      * Ledger step name, held separately from {@link #JOB_NAME} even though the two values agree.
@@ -329,7 +377,7 @@ public class ImportJob {
      * nightly jobs each declare the pair as two constants for that reason, and this job follows them so
      * that a future second step in this job cannot silently inherit the job's own key.</p>
      */
-    static final String STEP_NAME = JOB_NAME;
+    public static final String STEP_NAME = JOB_NAME;
 
     /** Key prefix the export artefact is read from; the sibling export job's write location. */
     private static final String EXPORT_KEY_PREFIX = "export/";
@@ -341,13 +389,21 @@ public class ImportJob {
     private static final String IMPORT_KEY_PREFIX = "import/";
 
     /**
+     * Bare name of the diagnostic artefact, used for both its object key and its staging filename.
+     *
+     * <p>Assumptions: it is spelled once here rather than in the member constant and again in the staging
+     * call, for the reason {@link #memberStem} records for the five typed artefacts.</p>
+     */
+    private static final String ERROR_STEM = "error";
+
+    /**
      * Member name of the diagnostic artefact, replacing {@code ERROUT}.
      *
      * <p>Assumptions: the five per-type members are named from {@link RecordType} rather than listed
      * here, so a sixth record type could not acquire an artefact without also acquiring a name. Only
      * the error member has no record type to be named from, which is why it alone is a literal.</p>
      */
-    private static final String ERROR_MEMBER = "/error.dat";
+    private static final String ERROR_MEMBER = "/" + ERROR_STEM + ".dat";
 
     /**
      * Content type recorded on every written artefact.
@@ -358,6 +414,76 @@ public class ImportJob {
      * mangles it into replacement characters while leaving every width plausible.</p>
      */
     private static final String CONTENT_TYPE = "application/octet-stream";
+
+    /**
+     * Filename prefix of every temporary file this job stages an artefact through.
+     *
+     * <p>Assumptions: a single shared prefix is used so that an operator inspecting the task's
+     * temporary directory can tell at a glance which files belong to this job, and so that the
+     * discard path can be asserted by a test that looks for the prefix rather than for one exact
+     * name. The prefix matches the convention the sibling dataset jobs already use, which is why it
+     * is stated as a constant here rather than inlined at each {@code createTempFile} call.</p>
+     */
+    private static final String STAGING_FILE_PREFIX = "carddemo-import-";
+
+    /**
+     * Value written into the card artefact's verification-value span in place of the carried digits.
+     *
+     * <p>⚠️ Refactoring Rationale: the reference moves {@code EXP-CARD-CVV-CD} into
+     * {@code CARD-CVV-CD} at {@code app/cbl/CBIMPORT.cbl:409}, and an earlier revision of this class
+     * carried it across unchanged. That is faithful transcription into an unfaithful destination: the
+     * artefact is a durable object in the dataset bucket, so carrying the value would leave sensitive
+     * authentication data at rest after authorisation. The span is therefore written as zeros, which
+     * keeps the record exactly its declared width and every following field at its declared offset
+     * while carrying no value.</p>
+     *
+     * <p>Assumptions: the field is declared {@code PIC 9(03)} — {@link CopybookLayout#sensitiveUint}
+     * at {@code CopybookLayout} line 1573 — so the codec renders an integral zero as {@code "000"},
+     * three digit bytes, and a consumer reading the artefact under the same descriptor decodes a
+     * well-formed zero rather than a blank it would have to special-case. A blank span was rejected
+     * for exactly that reason: {@code unsignedText} refuses non-digit bytes, so blanks could not be
+     * encoded at all without weakening the codec for every unsigned field in the corpus.</p>
+     *
+     * <p>Assumptions: the type is {@code Long} and not {@code BigDecimal}, because
+     * {@link #adaptToTargetKind} converts a decimal to a {@code long} for a display-numeric target and
+     * supplying the {@code long} directly means the redaction takes the same path as any other
+     * already-integral value rather than a conversion path of its own.</p>
+     */
+    private static final Long REDACTED_VERIFICATION_VALUE = 0L;
+
+    /**
+     * Value written into a display-numeric identifier span in place of the carried digits.
+     *
+     * <p>⚠️ Refactoring Rationale: {@code CUST-SSN} is the one display-numeric span among the
+     * protected fields the customer artefact declares, and it is redacted for the same reason the
+     * verification value is — the artefact is a durable object in the dataset bucket, and the migration
+     * plan's own data-exposure rule holds that a national identifier is stored encrypted and returned
+     * masked. Writing it in clear into an object outside the database would be the one place that rule
+     * did not hold, which is precisely the sort of quiet exception a security inventory exists to
+     * remove.</p>
+     *
+     * <p>Assumptions: this is a separate constant from the verification value even though both are
+     * {@code 0L}, because they are redacted under two different rules — one prohibited outright after
+     * authorisation, one permitted in the database but only encrypted — and folding them into one
+     * constant would make a later change to either silently change the other.</p>
+     */
+    private static final Long REDACTED_NUMERIC_IDENTIFIER = 0L;
+
+    /**
+     * Value written into a character identifier span in place of the carried characters.
+     *
+     * <p>⚠️ Refactoring Rationale: {@code CUST-GOVT-ISSUED-ID} is declared as twenty characters rather
+     * than digits, so its redaction has to be a character value; the codec blank-fills a field from the
+     * end of the supplied text, so the empty string leaves the span exactly its declared width of
+     * blanks. A span of blanks rather than of zeros is the right redaction for a character field
+     * because blanks are what {@code INITIALIZE} leaves in an alphanumeric field, so a consumer reading
+     * the artefact sees the value the reference itself would have left in an unset one.</p>
+     *
+     * <p>Assumptions: the field is redacted under the same rule as {@link #REDACTED_NUMERIC_IDENTIFIER}
+     * and the two are named apart only because the codec accepts digits for one and characters for the
+     * other.</p>
+     */
+    private static final String REDACTED_TEXT_IDENTIFIER = "";
 
     /**
      * Character set the fixed-width artefacts are encoded in.
@@ -527,6 +653,19 @@ public class ImportJob {
      * arithmetic is written out so a future reader does not "fix" the 130 into a 132 by widening a
      * field.</p>
      */
+    /**
+     * Byte capacity of the buffers wrapped around the streamed input and the staged outputs.
+     *
+     * <p>Assumptions: {@value} is 128 whole 500-byte export records, so a buffer boundary never falls
+     * inside a record and a staged output truncated by a task kill ends on a record boundary. That makes
+     * a partial artefact diagnosable by dividing its length by its declared record length. Trade-offs:
+     * the whole point of streaming the input and staging the outputs is to stop holding a dataset in
+     * memory, so the buffers are deliberately small enough not to become the memory problem themselves --
+     * 64 000 bytes each is negligible beside a task's allocation while still reducing one system call per
+     * record to one per 128.</p>
+     */
+    private static final int READ_BUFFER = 64_000;
+
     private static final int ERROR_RECORD_LENGTH = 132;
 
     /**
@@ -621,6 +760,8 @@ public class ImportJob {
      *     not be {@code null}
      * @param steps the shared ledger-guarded step builder supplying idempotency and exit-status
      *     translation; must not be {@code null}
+     * @param validator the shared parameter validator every job in this package is built with; must not
+     *     be {@code null}
      * @param objectStore the object store the artefact is read from and the six outputs written to;
      *     must not be {@code null}
      * @param bucket the dataset bucket name; must not be {@code null} or blank
@@ -635,12 +776,12 @@ public class ImportJob {
             JobRepository jobRepository,
             PlatformTransactionManager transactionManager,
             LedgerGuardedStep steps,
+            JobParametersValidator validator,
             S3Client objectStore,
             @Value("${carddemo.dataset.bucket}") String bucket,
             @Value("${carddemo.import.timestamp:}") String importTimestamp,
             Clock clock) {
 
-        // WHAT: the stamp is resolved once, before the step body is built, and captured by it.
         // WHY : Assumptions: resolving it here rather than per record is what makes one run carry one
         //       stamp, which is the reference's behaviour -- app/cbl/CBIMPORT.cbl:178-188 builds its
         //       date and time once inside 1000-INITIALIZE, and the whole run then reports those two
@@ -648,10 +789,18 @@ public class ImportJob {
         //       a different stamp, which is the opposite of what correlating them needs.
         ImportStamp stamp = ImportStamp.resolve(importTimestamp, clock);
 
-        Step step = steps.build(STEP_NAME, jobRepository, transactionManager,
+        Step step = steps.build(STEP_NAME, BatchJobName.IMPORT, jobRepository, transactionManager,
                 businessDate -> separate(businessDate, objectStore, bucket, stamp));
 
-        return new JobBuilder(JOB_NAME, jobRepository).start(step).build();
+        // WHY : Refactoring Rationale: the shared validator is attached, which it previously was not.
+        //       Five of this package's seven jobs were built with it and this job and the export were
+        //       not, so a launch of either with a missing business date reached the step body and failed
+        //       partway -- and for THIS job "partway" means an artefact set may already be half written.
+        //       A parameter validator refuses the launch before the job instance is created, which is
+        //       both earlier and cheaper. Assumptions: the validator is the single bean the batch
+        //       configuration publishes rather than one constructed here, so the required and optional
+        //       parameter names are stated once for all seven jobs and cannot drift between two of them.
+        return new JobBuilder(JOB_NAME, jobRepository).validator(validator).start(step).build();
     }
 
     /**
@@ -668,8 +817,8 @@ public class ImportJob {
      * @param bucket the dataset bucket; must not be {@code null} or blank
      * @return always {@link BatchReturnCode#CLEAN} on completion; see the exit-status note on
      *     {@link #separate(BusinessDate, S3Client, String, ImportStamp)}
-     * @throws IllegalStateException if the independently accumulated total disagrees with the sum of
-     *     the per-type counters
+     * @throws IllegalStateException if the artefact is truncated, per divergence D-9, or if the
+     *     independently accumulated total disagrees with the sum of the per-type counters
      */
     static BatchReturnCode separate(BusinessDate businessDate, S3Client objectStore, String bucket) {
         // WHY : Assumptions: the clock is read through the same resolver the bean uses rather than
@@ -712,7 +861,18 @@ public class ImportJob {
         try {
             return runImport(businessDate, objectStore, bucket, stamp);
         } catch (RuntimeException failure) {
-            LOG.error(LOG_ABENDING, failure);
+            // WHY : Refactoring Rationale: the throwable is rendered through ThrowableDigest rather than
+            //       attached whole. Attaching it put every message in the cause chain into a durable log,
+            //       and the chains this path produces are provider and codec chains: a storage client's
+            //       message can carry an endpoint and a bucket, and the shared codec's field diagnostics
+            //       quote the value they refused -- which in this artefact is a primary account number, a
+            //       national identifier or a card verification value. The digest carries the type names
+            //       and the frames, which is what identifies the fault, and drops every message. The step
+            //       above still receives the exception itself, so nothing is lost from the failure path;
+            //       only the LOG line is reduced.
+            // WHY : Assumptions: the banner text is preserved verbatim beside the digest, because it is
+            //       what an operator greps for and app/cbl/CBIMPORT.cbl:480 writes it before abending.
+            LOG.error("{} failure={}", LOG_ABENDING, ThrowableDigest.of(failure));
             throw failure;
         }
     }
@@ -733,15 +893,31 @@ public class ImportJob {
      * @param stamp the run stamp; must not be {@code null}
      * @return always {@link BatchReturnCode#CLEAN} on completion
      * @throws IllegalStateException if reconciliation fails
+     * @throws UncheckedIOException if an artefact cannot be staged, written or published
      */
     private static BatchReturnCode runImport(
             BusinessDate businessDate, S3Client objectStore, String bucket, ImportStamp stamp) {
 
-        Outputs outputs = initialize(stamp);
-        Tally tally = processExportFile(businessDate, objectStore, bucket, stamp, outputs);
-        validateImport(tally);
-        finalizeRun(objectStore, bucket, businessDate, outputs, tally);
-        return BatchReturnCode.CLEAN;
+        // WHY : Refactoring Rationale: the six accumulators are now a CLOSEABLE resource held in a
+        //       try-with-resources, because they are seven files on the task's ephemeral volume rather
+        //       than seven heap buffers. The resource block is what guarantees they are released on every
+        //       path, including the abending one -- a failed run that left seven files behind would leak
+        //       both volume and, because those files hold account, card and customer records, disclosure.
+        try (Outputs outputs = initialize(stamp)) {
+            Tally tally = processExportFile(businessDate, objectStore, bucket, stamp, outputs);
+            validateImport(tally);
+            finalizeRun(objectStore, bucket, businessDate, outputs, tally);
+            return BatchReturnCode.CLEAN;
+        } catch (IOException failure) {
+            // WHY : Assumptions: an input or output failure is translated to the unchecked form rather
+            //       than declared, and it is translated HERE rather than at each write. The step contract
+            //       this job is invoked through takes a body that throws nothing checked, and the abend
+            //       bracket in the caller catches RuntimeException -- so translating at the one boundary
+            //       keeps the banner, the tier translation and the ledger row all working exactly as they
+            //       did when every accumulator was a heap buffer that could not fail.
+            throw new UncheckedIOException("the import artefacts could not be assembled or published,"
+                    + " so the run is abandoned rather than partially published", failure);
+        }
     }
 
     /**
@@ -757,7 +933,8 @@ public class ImportJob {
      * records of this type" from "the import did not run" needs the empty artefact to exist.</p>
      *
      * @param stamp the run stamp whose date and time are echoed; must not be {@code null}
-     * @return the six freshly allocated output accumulators; never {@code null}
+     * @return the six freshly staged output artefacts plus the diagnostic one; never {@code null}
+     * @throws UncheckedIOException if a staging file cannot be created or opened
      */
     private static Outputs initialize(ImportStamp stamp) {
         LOG.info(LOG_STARTING);
@@ -775,18 +952,25 @@ public class ImportJob {
      * again. That ordering means end of file is detected before the record is used, unlike
      * {@code app/cbl/CBTRN01C.cbl}, which processes a stale record after end of file and whose migration
      * therefore does have something to fix. The loop below has the same three statements in the same
-     * order, expressed as a bounded walk over the artefact's whole-record boundaries.</p>
+     * order.</p>
      *
-     * <p>Trade-offs: the artefact is fetched as one payload rather than as a stream of records. The
-     * reference read one record at a time from a sequential file, and an object store can supply a
-     * stream, but the record boundary is the record <em>length</em> — these are {@code RECFM=FB}
-     * artefacts with no delimiter — so a partial read would have to be re-assembled into whole records
-     * anyway. Peak memory therefore scales with the artefact rather than with one record, which is the
-     * same accepted cost the sibling export job records for its single put and the same one
-     * {@link DatasetPayloadWriter} argues for a generation: the task's memory is a provisioning
-     * parameter, whereas a half-written artefact is a data-loss event. Each decoded record is encoded
-     * and appended to its output immediately rather than being collected, so no second copy of the
-     * decoded form accumulates.</p>
+     * <p>Refactoring Rationale: the artefact is <b>streamed one record at a time</b> rather than fetched
+     * as a single byte array. The previous shape called {@code getObjectAsBytes} and held the whole
+     * export dataset on the heap for the duration of the pass, and the export dataset is a full extract
+     * of five masters at 500 bytes a record -- so peak memory scaled with the institution while the
+     * task's memory is fixed at provisioning time, and a large enough extract would have exhausted it
+     * before a single artefact was written. Reading through the response stream bounds the input side at
+     * one record plus the read buffer, whatever the dataset size. Assumptions: nothing about the record
+     * boundary changes, because these are {@code RECFM=FB} artefacts whose boundary IS the record length
+     * -- so a whole record is obtained by reading exactly that many bytes, which is what
+     * {@link InputStream#readNBytes(int)} guarantees short of end of data.</p>
+     *
+     * <p>Alternatives Considered: staging the fetched object to a temporary file and walking that, which
+     * is what the outputs of this same job do. Rejected for the input because the input is walked exactly
+     * once, front to back, and never re-read -- so a staging file would add a full copy of the dataset to
+     * local storage and a second full traversal to obtain nothing the stream does not already give. The
+     * outputs are staged precisely because they cannot be published until the pass ends, which is the
+     * property the input does not share.</p>
      *
      * @param businessDate the injected business date identifying the artefact partition; must not be
      *     {@code null}
@@ -795,41 +979,70 @@ public class ImportJob {
      * @param stamp the run stamp applied to every diagnostic record; must not be {@code null}
      * @param outputs the six accumulators the records are appended to; must not be {@code null}
      * @return the eight counters this pass accumulated; never {@code null}
+     * @throws IllegalStateException if the artefact's length is not a whole multiple of the record
+     *     length, if the body ends part-way through a record, or if it cannot be read
+     * @throws IOException if the artefact cannot be read or a record cannot be staged
+     * @throws IllegalStateException if the artefact's length is not a whole multiple of the record
+     *     length, which means it was truncated in transit; raised so the pass fails before any artefact
+     *     is published rather than publishing six files that describe a partly-read input
      */
     private static Tally processExportFile(
             BusinessDate businessDate,
             S3Client objectStore,
             String bucket,
             ImportStamp stamp,
-            Outputs outputs) {
+            Outputs outputs) throws IOException {
 
         String sourceKey = EXPORT_KEY_PREFIX + businessDate.identifierPrefix() + EXPORT_MEMBER;
-        byte[] artefact = objectStore.getObjectAsBytes(
-                GetObjectRequest.builder().bucket(bucket).key(sourceKey).build()).asByteArray();
-
         int reclen = ExportRecordMapper.recordLayout().reclen();
         Tally tally = new Tally();
+        long bytesRead = 0L;
 
-        for (int offset = 0; offset < artefact.length; offset += reclen) {
-            // WHY : Assumptions: a trailing image shorter than one record is an error and NOT an
-            //       end-of-data marker. These artefacts are RECFM=FB, so their length is always a whole
-            //       multiple of the record length; a remainder means the artefact was truncated, and
-            //       ignoring it would report a partial import as a complete one. The reference cannot
-            //       reach this branch at all -- see MSG_SHORT_RECORD -- so the branch is additive and
-            //       reports rather than abends, which keeps the exit contract of a run that merely met
-            //       a damaged input the same as the reference's.
-            if (offset + reclen > artefact.length) {
-                recordShortImage(outputs, tally, stamp, offset, artefact.length - offset);
-                break;
+        try (ResponseInputStream<GetObjectResponse> body = objectStore.getObject(
+                        GetObjectRequest.builder().bucket(bucket).key(sourceKey).build());
+                InputStream buffered = new BufferedInputStream(body, READ_BUFFER)) {
+
+            while (true) {
+                byte[] image = buffered.readNBytes(reclen);
+                if (image.length == 0) {
+                    break;
+                }
+
+                // WHY : Assumptions: a trailing image shorter than one record is an error and NOT an
+                //       end-of-data marker. These artefacts are RECFM=FB, so their length is always a
+                //       whole multiple of the record length; a remainder means the artefact was
+                //       truncated, and ignoring it would report a partial import as a complete one. The
+                //       reference cannot reach this branch at all -- see MSG_SHORT_RECORD -- so the
+                //       branch is additive.
+                // WHY : Refactoring Rationale: the remainder is now REFUSED rather than merely noted.
+                //       The earlier shape recorded the short image and broke out of the loop, which let
+                //       the run publish all six import artefacts and return a clean tier from a source
+                //       it had only partly read -- six files that look complete and are not. The
+                //       diagnostic row is still composed first, because it names the offset and the
+                //       remaining byte count an operator needs, and the throw then leaves the step to
+                //       translate the failure and the ledger to record it, so nothing is published.
+                // WHY : Alternatives Considered: continuing and downgrading the return code to the warn
+                //       tier was rejected -- a warn tier is the reject-count contract of the posting
+                //       job, and reusing it here would make a damaged input indistinguishable from a
+                //       clean run that merely rejected rows.
+                if (image.length < reclen) {
+                    recordShortImage(outputs, tally, stamp, bytesRead, image.length);
+                    throw new IllegalStateException("the export artefact is truncated: " + reclen
+                            + "-byte records were expected and " + image.length
+                            + " bytes remain at offset " + bytesRead + ", so "
+                            + tally.totalRecordsRead() + " whole records were read and the rest of the"
+                            + " artefact is unreadable; no import artefact is published for a truncated"
+                            + " input");
+                }
+
+                bytesRead += reclen;
+                tally.countRead();
+                processRecordByType(image, outputs, tally, stamp);
             }
-
-            tally.countRead();
-            byte[] image = Arrays.copyOfRange(artefact, offset, offset + reclen);
-            processRecordByType(image, outputs, tally, stamp);
         }
 
         LOG.info("event=batch.import.artefact-read sourceKey={} bytes={} records={}",
-                sourceKey, artefact.length, tally.totalRecordsRead());
+                sourceKey, bytesRead, tally.totalRecordsRead());
         return tally;
     }
 
@@ -858,9 +1071,10 @@ public class ImportJob {
      * @param outputs the six accumulators; must not be {@code null}
      * @param tally the counters to increment; must not be {@code null}
      * @param stamp the run stamp applied to a diagnostic record; must not be {@code null}
+     * @throws IOException if a translated record cannot be appended to its staged artefact
      */
     private static void processRecordByType(
-            byte[] image, Outputs outputs, Tally tally, ImportStamp stamp) {
+            byte[] image, Outputs outputs, Tally tally, ImportStamp stamp) throws IOException {
 
         RecordType recordType;
         try {
@@ -934,6 +1148,14 @@ public class ImportJob {
                         requireMapped(view, exportField, recordType),
                         artefact.layout().field(targetField))));
 
+        // WHY : Assumptions: the redactions are applied from the artefact's own declaration rather
+        //       than read out of the decoded view, so a redacted field's source value is never bound
+        //       to a name in this method and cannot reach the target map by any path. The encoder
+        //       writes a fresh record, so a field supplied here is the only value that span receives.
+        artefact.redactions().forEach((targetField, constant) ->
+                target.put(targetField, adaptToTargetKind(
+                        constant, artefact.layout().field(targetField))));
+
         return FixedWidthCodec.encodeRecord(target, artefact.layout(), ARTEFACT_CHARSET);
     }
 
@@ -941,8 +1163,9 @@ public class ImportJob {
      * Presents a decoded export value in the form the target field's storage kind accepts.
      *
      * <p>⚠️ Refactoring Rationale: this is the one place a value changes type on its way across, and it
-     * exists because <b>six of the thirty-two field moves cross a storage boundary that COBOL crosses
-     * for free.</b> The shared codec yields an exact decimal for a {@code COMP} or {@code COMP-3} field
+     * exists because <b>five of the forty-nine carried field moves cross a storage boundary that COBOL
+     * crosses for free.</b> The shared codec yields an exact decimal for a {@code COMP} or {@code COMP-3}
+     * field
      * and an integral wrapper for a display numeric one, and its encoder for a display numeric field
      * accepts an integral wrapper and not a decimal. So an integer arriving as binary or packed and
      * leaving as display needs converting, whereas money arriving as packed or binary and leaving as
@@ -950,15 +1173,17 @@ public class ImportJob {
      *
      * <p>Assumptions: the conversion is exactly what the reference's own {@code MOVE} statements do. A
      * COBOL move from a {@code COMP} or {@code COMP-3} integer into a {@code PIC 9(n)} display field is
-     * a representation change performed by the compiler, and every one of the six is such a move:
+     * a representation change performed by the compiler, and every one of the five is such a move:
      * {@code EXP-CUST-ID} at {@code app/cbl/CBIMPORT.cbl:293} and
      * {@code EXP-CUST-FICO-CREDIT-SCORE} at {@code :310} into the customer master's display fields,
      * {@code EXP-XREF-ACCT-ID} at {@code :359}, {@code EXP-TRAN-MERCHANT-ID} at {@code :383}, and
-     * {@code EXP-CARD-ACCT-ID} at {@code :408} and {@code EXP-CARD-CVV-CD} at {@code :409}. The Java
-     * therefore performs the same change at the same points rather than declining it.</p>
+     * {@code EXP-CARD-ACCT-ID} at {@code :408}. The Java therefore performs the same change at the same
+     * points rather than declining it. A sixth such move exists in the reference —
+     * {@code EXP-CARD-CVV-CD} at {@code :409} — and is absent here because that field is redacted rather
+     * than carried, and its replacement constant is already integral.</p>
      *
      * <p>Assumptions: the conversion is <b>exact and refuses to round</b>, which is why it is
-     * {@code longValueExact} and not {@code longValue}. All six sources are declared with zero decimal
+     * {@code longValueExact} and not {@code longValue}. All five sources are declared with zero decimal
      * places, so a fractional value here would mean a field was read under the wrong geometry, and
      * truncating it silently is precisely the failure mode the migration plan's rule on fixed point
      * exists to prevent. <b>No money field is routed through this method at all</b> — every money pair
@@ -967,7 +1192,7 @@ public class ImportJob {
      *
      * <p>Alternatives Considered: converting in the mapping tables, by declaring a per-pair conversion
      * beside each field name. Rejected because it would put the same storage-kind knowledge in
-     * thirty-two places when it is already declared once in each descriptor, and a table that stated it
+     * forty-nine places when it is already declared once in each descriptor, and a table that stated it
      * again could disagree with the descriptor it was meant to describe. Driving the decision from the
      * target field's own declared kind means a descriptor change cannot leave a stale conversion
      * behind.</p>
@@ -1039,9 +1264,10 @@ public class ImportJob {
      *     {@code null}
      * @param tally the counters to increment; must not be {@code null}
      * @param stamp the run stamp written into the record; must not be {@code null}
+     * @throws IOException if the diagnostic artefact cannot be staged
      */
     private static void recordUnknownType(
-            byte[] image, Outputs outputs, Tally tally, ImportStamp stamp) {
+            byte[] image, Outputs outputs, Tally tally, ImportStamp stamp) throws IOException {
 
         tally.countUnknownType();
 
@@ -1065,15 +1291,23 @@ public class ImportJob {
      * record shape rather than two, and it carries no type character because the image is too short for
      * its discriminator to be meaningful.</p>
      *
+     * <p>⚠️ Assumptions: the diagnostic record this appends is <b>never published</b>, and that is
+     * deliberate rather than wasteful. Its caller raises immediately afterwards, so the six accumulators
+     * are discarded with the failed run; the record is still assembled because assembling it is what
+     * proves the layout accepts the condition, and because the WARN line below carries the same three
+     * facts to the operator through a channel the failure does not discard.</p>
+     *
      * @param outputs the six accumulators; must not be {@code null}
      * @param tally the counters to increment; must not be {@code null}
      * @param stamp the run stamp written into the record; must not be {@code null}
      * @param offset the zero-based offset of the short image within the artefact; must not be negative
      * @param remaining the number of bytes the artefact held from {@code offset} onward; must be
      *     positive
+     * @throws IOException if the diagnostic artefact cannot be staged
      */
     private static void recordShortImage(
-            Outputs outputs, Tally tally, ImportStamp stamp, int offset, int remaining) {
+            Outputs outputs, Tally tally, ImportStamp stamp, long offset, int remaining)
+            throws IOException {
 
         LOG.warn("event=batch.import.short-record offset={} remaining={} expected={} reason={}",
                 offset, remaining, ExportRecordMapper.recordLayout().reclen(), MSG_SHORT_RECORD);
@@ -1082,7 +1316,7 @@ public class ImportJob {
         //       than one record, so nothing in it establishes which view it was meant to be, and
         //       reporting a discriminator read from a truncated image would assert a fact the bytes do
         //       not support.
-        writeError(outputs, tally, stamp, ' ', (long) offset, MSG_SHORT_RECORD);
+        writeError(outputs, tally, stamp, ' ', offset, MSG_SHORT_RECORD);
     }
 
     /**
@@ -1127,6 +1361,12 @@ public class ImportJob {
             // WHY : Assumptions: the reference's own behaviour, not a lenient reading of it -- the
             //       failure is reported and the run continues. The exception is swallowed here and
             //       nowhere else in this class, so the abend bracket still catches every other fault.
+            // WHY : Assumptions: one catch of the UNCHECKED form covers a staged-file failure as well as
+            //       a heap one, because the append this guards wraps its IOException in an
+            //       UncheckedIOException rather than declaring it. A checked arm here would not compile,
+            //       and the property the arm exists for is unaffected: a failure to record a diagnostic
+            //       must not terminate the import, which is the asymmetry app/cbl/CBIMPORT.cbl:441-444
+            //       declines and the one this method exists to preserve.
             LOG.error("{}{}", LOG_ERROR_WRITE_FAILED, writeFailure.getClass().getSimpleName());
         }
 
@@ -1321,23 +1561,38 @@ public class ImportJob {
      * @param bucket the dataset bucket; must not be {@code null} or blank
      * @param businessDate the business date whose partition the artefacts are written under; must not be
      *     {@code null}
-     * @param outputs the six accumulators to put; must not be {@code null}
+     * @param outputs the seven staged artefacts to close and put; must not be {@code null}
      * @param tally the counters to report; must not be {@code null}
+     * @throws IOException if a staged artefact cannot be flushed and closed, which would mean it is short
+     *     of the records appended to it
      */
     private static void finalizeRun(
             S3Client objectStore,
             String bucket,
             BusinessDate businessDate,
             Outputs outputs,
-            Tally tally) {
+            Tally tally) throws IOException {
 
         String partition = IMPORT_KEY_PREFIX + businessDate.identifierPrefix();
 
+        // WHY : Assumptions: every sink is closed before the FIRST put rather than each one before its
+        //       own, so a close failure on the sixth artefact cannot happen after the first five have
+        //       already been published. That ordering is what keeps the six a set: either all of them
+        //       are complete on disk and all of them are put, or none is put at all.
+        // WHY : Refactoring Rationale: the sinks are closed BEFORE the first put, which is the analogue
+        //       of the reference's 4100-CLOSE-FILES at app/cbl/CBIMPORT.cbl:458-463 and is now
+        //       load-bearing rather than merely faithful. Each artefact is a buffered stream over a staged
+        //       file, so bytes still sitting in a buffer are not yet in the file -- publishing before the
+        //       close would put a short artefact and lose whatever the last buffer held. A close failure
+        //       therefore propagates rather than being swallowed: it means the staged artefact is short of
+        //       the records appended to it, and publishing it anyway is the one outcome this method must
+        //       not produce.
+        outputs.closeSinks();
+
         for (RecordType recordType : RecordType.values()) {
-            put(objectStore, bucket, partition + memberOf(recordType),
-                    outputs.forType(recordType).toByteArray());
+            put(objectStore, bucket, partition + memberOf(recordType), outputs.pathFor(recordType));
         }
-        put(objectStore, bucket, partition + ERROR_MEMBER, outputs.errors().toByteArray());
+        put(objectStore, bucket, partition + ERROR_MEMBER, outputs.errorPath());
 
         LOG.info(LOG_COMPLETED);
         LOG.info("{}{}", LOG_TOTAL_READ, tally.totalRecordsRead());
@@ -1367,20 +1622,31 @@ public class ImportJob {
     /**
      * Puts one artefact at its key.
      *
+     * <p>Assumptions: the body is the staging FILE rather than a byte array, so the artefact is never
+     * resident in the heap and is never copied into a request body. An empty file is put as an empty
+     * object, which is what an artefact for a record type the input did not hold has to be.</p>
+     *
      * @param objectStore the object store; must not be {@code null}
      * @param bucket the dataset bucket; must not be {@code null} or blank
      * @param key the object key; must not be {@code null}
-     * @param payload the artefact body, possibly empty; must not be {@code null}
+     * @param staged the staged file holding the artefact body, possibly empty; must not be {@code null}
      */
-    private static void put(S3Client objectStore, String bucket, String key, byte[] payload) {
+    private static void put(S3Client objectStore, String bucket, String key, Path staged) {
+        // WHY : Refactoring Rationale: the body is supplied from the staged FILE rather than from a byte
+        //       array. Reading the file into an array to hand it over would reinstate on the heap exactly
+        //       the whole-artefact copy that staging exists to avoid, and the request body form that takes
+        //       a path streams the file to the store while reporting its length up front -- so the put
+        //       remains a single request with a known content length, which is what keeps it
+        //       all-or-nothing.
         objectStore.putObject(
                 PutObjectRequest.builder()
                         .bucket(bucket)
                         .key(key)
                         .contentType(CONTENT_TYPE)
                         .build(),
-                RequestBody.fromBytes(payload));
-        LOG.debug("event=batch.import.artefact-written key={} bytes={}", key, payload.length);
+                RequestBody.fromFile(staged));
+        LOG.debug("event=batch.import.artefact-written key={} bytes={}",
+                key, DatasetPayloadWriter.stagedLength(staged));
     }
 
     /**
@@ -1394,7 +1660,24 @@ public class ImportJob {
      * @return the member name, with a leading separator, for example {@code /card_xref.dat}
      */
     private static String memberOf(RecordType recordType) {
-        return "/" + recordType.name().toLowerCase(Locale.ROOT) + ".dat";
+        return "/" + memberStem(recordType) + ".dat";
+    }
+
+    /**
+     * Derives one artefact's bare name, without a separator or an extension.
+     *
+     * <p>Refactoring Rationale: the stem is factored out of {@link #memberOf} because it is now needed in
+     * two places -- the object key and the staging filename. Deriving both from one expression is what
+     * keeps a staged file attributable to the artefact it will become; two independent spellings would let
+     * an operator holding a surviving staging file be unable to say which artefact it belonged to.</p>
+     *
+     * @param recordType the record type whose artefact is being named; must not be {@code null}
+     * @return the bare name, for example {@code card_xref}
+     */
+    private static String memberStem(RecordType recordType) {
+        // WHY : Assumptions: the root locale is named explicitly, because a default locale can lower-case
+        //       differently and an object key is not a display string.
+        return recordType.name().toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -1466,6 +1749,19 @@ public class ImportJob {
         //       silently, producing a record of the right width with the wrong content, and the
         //       reference's own moves at app/cbl/CBIMPORT.cbl:297-299 and :303-304 are the authority for
         //       the pairing.
+        // WHY : ⚠️ Refactoring Rationale: two spans are REDACTED rather than carried -- the national
+        //       identifier the reference moves at app/cbl/CBIMPORT.cbl:305 and the government-issued
+        //       identifier at :306. The transcription was faithful; the destination is not. This
+        //       artefact is a durable object in the dataset bucket, and the migration plan holds that
+        //       both identifiers are stored encrypted and returned masked, so carrying them in clear
+        //       into an object store would be the single place that rule did not hold. They are supplied
+        //       as constants below, which keeps every following field at its declared offset while
+        //       carrying no value, and the source values are never bound to a name in this class.
+        // WHY : Assumptions: this costs nothing on a round trip through this system, because the export
+        //       job redacts the same three spans on the way out -- it holds no key grant to decrypt
+        //       them -- so an artefact this job produced already carries zeros there. The redaction
+        //       matters for an artefact produced elsewhere, which is exactly the case where the values
+        //       would be real.
         declared.put(RecordType.CUSTOMER, new Artefact(
                 CopybookLayout.layout("CUSTOMER"),
                 moves(
@@ -1481,12 +1777,13 @@ public class ImportJob {
                         "EXP-CUST-ADDR-ZIP", "CUST-ADDR-ZIP",
                         "EXP-CUST-PHONE-NUM(1)", "CUST-PHONE-NUM-1",
                         "EXP-CUST-PHONE-NUM(2)", "CUST-PHONE-NUM-2",
-                        "EXP-CUST-SSN", "CUST-SSN",
-                        "EXP-CUST-GOVT-ISSUED-ID", "CUST-GOVT-ISSUED-ID",
                         "EXP-CUST-DOB-YYYY-MM-DD", "CUST-DOB-YYYY-MM-DD",
                         "EXP-CUST-EFT-ACCOUNT-ID", "CUST-EFT-ACCOUNT-ID",
                         "EXP-CUST-PRI-CARD-HOLDER-IND", "CUST-PRI-CARD-HOLDER-IND",
-                        "EXP-CUST-FICO-CREDIT-SCORE", "CUST-FICO-CREDIT-SCORE")));
+                        "EXP-CUST-FICO-CREDIT-SCORE", "CUST-FICO-CREDIT-SCORE"),
+                Map.of(
+                        "CUST-SSN", REDACTED_NUMERIC_IDENTIFIER,
+                        "CUST-GOVT-ISSUED-ID", REDACTED_TEXT_IDENTIFIER)));
 
         // ---- 'A' -> the 300-byte account artefact, app/cbl/CBIMPORT.cbl:323-349 -------------------
         // WHY : Assumptions: this is the view where money crosses three storage regimes into one, and
@@ -1554,24 +1851,41 @@ public class ImportJob {
                         "EXP-TRAN-PROC-TS", "TRAN-PROC-TS")));
 
         // ---- 'D' -> the 150-byte card artefact, app/cbl/CBIMPORT.cbl:402-422 ----------------------
-        // WHY : Assumptions: the card verification value is carried, and this artefact is the only place
-        //       it may appear. app/cbl/CBIMPORT.cbl:409 moves it, so declining to carry it would drop a
-        //       declared field from the record; it is therefore mapped here and appears in no log line,
-        //       no exception message and no other artefact. Note that this is also the only route by
-        //       which it CAN be carried: ExportRecordMapper's decoded projection deliberately strips the
-        //       field and hands it on only through an opaque carrier, so the field-map path this class
-        //       uses is what keeps the record whole. The value never becomes a numeric variable named in
-        //       this file -- it passes from the codec's decode straight into the codec's encode as an
-        //       anonymous map entry.
+        // WHY : ⚠️ Refactoring Rationale: the card verification value is NOT carried into this
+        //       artefact, where an earlier revision moved it across verbatim from
+        //       app/cbl/CBIMPORT.cbl:409. What was wrong with that is not the transcription, which was
+        //       faithful, but the destination: the artefact is a durable object in the dataset bucket,
+        //       so the run left a verification value at rest in an object store after authorisation,
+        //       under no retention rule, no access control of its own and no deletion control.
+        //       Encryption at rest does not answer that -- storing sensitive authentication data after
+        //       authorisation is prohibited whether or not the storage is encrypted. The field is
+        //       therefore REDACTED: the mapping still covers it, because the target layout declares it
+        //       and the encoder requires every named field, but the value written is a constant zero
+        //       and the source value is discarded at the boundary rather than carried.
+        // WHY : Alternatives Considered: tokenising the value, so a consumer could correlate two
+        //       records of one card without holding the value. Rejected because a card verification
+        //       value has three digits, so any token derived from it is reversible by exhaustion in a
+        //       thousand attempts and a token would therefore be the value in a longer form.
+        //       Alternatives Considered: keeping the value and documenting an issuer exception under
+        //       PCI SSC FAQ 1588, which permits an issuer to store sensitive authentication data where
+        //       there is a documented business need. Rejected because no business need exists here --
+        //       nothing downstream of this split reads that field -- and the exception would oblige
+        //       this project to implement and evidence purpose-bound access, retention and irreversible
+        //       deletion for one artefact of one operator-invoked job.
+        // WHY : Assumptions: the redaction is registered as divergence
+        //       D-EXPORT-PROTECTED-SPANS-REDACTED in
+        //       docs/architecture/cobol-to-service-traceability.md, together with the counterpart
+        //       redaction the export job applies to the same field and to the two customer
+        //       identifiers, because they are one rule applied in both directions.
         declared.put(RecordType.CARD, new Artefact(
                 CopybookLayout.layout("CARD"),
                 moves(
                         "EXP-CARD-NUM", "CARD-NUM",
                         "EXP-CARD-ACCT-ID", "CARD-ACCT-ID",
-                        "EXP-CARD-CVV-CD", "CARD-CVV-CD",
                         "EXP-CARD-EMBOSSED-NAME", "CARD-EMBOSSED-NAME",
                         "EXP-CARD-EXPIRAION-DATE", "CARD-EXPIRAION-DATE",
-                        "EXP-CARD-ACTIVE-STATUS", "CARD-ACTIVE-STATUS")));
+                        "EXP-CARD-ACTIVE-STATUS", "CARD-ACTIVE-STATUS"),
+                Map.of("CARD-CVV-CD", REDACTED_VERIFICATION_VALUE)));
 
         verifyMappingsAreComplete(declared);
         return Map.copyOf(declared);
@@ -1589,6 +1903,21 @@ public class ImportJob {
      * mapping names one: the encoder blank-fills it, which is what the reference's
      * {@code INITIALIZE} does to the same bytes.</p>
      *
+     * <p>⚠️ Refactoring Rationale: coverage is compared as a <b>sorted</b> list of the fields the two
+     * maps supply between them, where an earlier revision compared the move table's target names to the
+     * layout's declaration order directly. The direct comparison could not admit a redacted field: a
+     * redaction supplies a field the layout declares at an interior position, and appending it after the
+     * carried names would fail an order-sensitive comparison for a mapping that is in fact complete.
+     * Sorting loses nothing that matters — list equality on sorted lists is multiset equality, so an
+     * omitted field, an undeclared field and a field supplied twice each still fail. The authoring order
+     * this stops proving is instead proved by the subsequence check below, so both properties survive as
+     * two checks with two diagnostics rather than one check carrying both.</p>
+     *
+     * <p>Assumptions: the subsequence check asserts that the carried fields appear in the layout's own
+     * declaration order, which is the property that lets a reviewer read a mapping table against the
+     * COBOL block it transcribes. It is a subsequence and not an equality because a redacted field is
+     * absent from the carried list by design.</p>
+     *
      * <p>Alternatives Considered: asserting this in a unit test instead. Rejected as insufficient on its
      * own rather than wrong — a test proves it for the build that ran the test, whereas this proves it
      * for the process that is about to write artefacts, and the two mappings it compares are both static
@@ -1597,7 +1926,8 @@ public class ImportJob {
      *
      * @param declared the five mappings to verify; must not be {@code null}
      * @throws IllegalStateException if a record type is unmapped, if a mapping omits a named field of
-     *     its target layout, or if a mapping names a field the target layout does not declare
+     *     its target layout, if a mapping names a field the target layout does not declare, if one field
+     *     is supplied twice, or if the carried fields are not written in the target layout's order
      */
     private static void verifyMappingsAreComplete(Map<RecordType, Artefact> declared) {
         for (RecordType recordType : RecordType.values()) {
@@ -1612,15 +1942,57 @@ public class ImportJob {
                     .map(CopybookLayout.FieldSpec::name)
                     .filter(name -> !"FILLER".equals(name))
                     .toList();
-            List<String> mapped = List.copyOf(artefact.fieldMoves().values());
 
-            if (!expected.equals(mapped)) {
+            List<String> supplied = new ArrayList<>(artefact.fieldMoves().values());
+            supplied.addAll(artefact.redactions().keySet());
+
+            if (!expected.stream().sorted().toList().equals(supplied.stream().sorted().toList())) {
                 throw new IllegalStateException("the " + recordType + " mapping does not cover"
                         + " layout " + artefact.layout().name() + " exactly: the layout declares "
-                        + expected + " and the mapping supplies " + mapped + "; every named field must"
-                        + " be supplied because the encoder writes a fresh record and refuses to leave"
-                        + " one unset, which is how app/cbl/CBIMPORT.cbl's INITIALIZE is reproduced");
+                        + expected + " and the mapping supplies " + supplied + " between its carried"
+                        + " fields and its redactions; every named field must be supplied exactly once"
+                        + " because the encoder writes a fresh record and refuses to leave one unset,"
+                        + " which is how app/cbl/CBIMPORT.cbl's INITIALIZE is reproduced");
             }
+
+            requireLayoutOrder(recordType, artefact, expected);
+        }
+    }
+
+    /**
+     * Proves that one mapping's carried fields are written in its target layout's declaration order.
+     *
+     * <p>Purpose: to keep the property that made the original single equality check valuable as a review
+     * aid — that a mapping table can be read line by line against the {@code MOVE} block it transcribes
+     * — now that coverage is proved by an order-insensitive comparison.</p>
+     *
+     * <p>Assumptions: a subsequence rather than a prefix or an equality, because a redacted field is
+     * declared by the layout but absent from the carried list, so the carried names are the layout's
+     * order with zero or more entries removed. Walking the two lists once with a single advancing cursor
+     * is what makes that check exact: a carried name that appears out of order cannot be found at or
+     * after the cursor and therefore fails.</p>
+     *
+     * @param recordType the record type being verified, named in the diagnostic; must not be
+     *     {@code null}
+     * @param artefact the mapping being verified; must not be {@code null}
+     * @param expected the target layout's named fields in declaration order; must not be {@code null}
+     * @throws IllegalStateException if a carried target field does not appear at or after the position
+     *     of the previously carried one
+     */
+    private static void requireLayoutOrder(
+            RecordType recordType, Artefact artefact, List<String> expected) {
+
+        int cursor = 0;
+        for (String carried : artefact.fieldMoves().values()) {
+            int position = expected.subList(cursor, expected.size()).indexOf(carried);
+            if (position < 0) {
+                throw new IllegalStateException("the " + recordType + " mapping writes "
+                        + carried + " out of the declaration order of layout "
+                        + artefact.layout().name() + ", which is " + expected + "; the mapping is"
+                        + " written in the reference's own MOVE order so that it can be read against"
+                        + " app/cbl/CBIMPORT.cbl line by line");
+            }
+            cursor += position + 1;
         }
     }
 
@@ -1663,65 +2035,224 @@ public class ImportJob {
      * {@link #verifyMappingsAreComplete} check the pair rather than two lists that happen to be indexed
      * alike.</p>
      *
+     * <p>Assumptions: a named field of the target layout is supplied by exactly one of the two maps —
+     * carried from the export view through {@code fieldMoves}, or written as a constant through
+     * {@code redactions} — and {@link #verifyMappingsAreComplete} proves that the two together cover
+     * the layout with no field named twice. Splitting them rather than folding a constant into the
+     * move table is deliberate: a reader can see at a glance which fields cross the boundary and which
+     * are deliberately not carried, and the redaction cannot be mistaken for a transcription slip.</p>
+     *
      * @param layout the target record descriptor from the shared registry, whose record length is the
      *     artefact's fixed record length; never {@code null}
      * @param fieldMoves the ordered mapping from export field name to target field name, holding one
-     *     entry per named field of {@code layout}; never {@code null}
+     *     entry per carried field of {@code layout}; never {@code null}
+     * @param redactions constants written into named fields of {@code layout} that are deliberately
+     *     not carried from the export view, keyed by target field name; empty for every artefact that
+     *     carries all of its fields; never {@code null}
      */
-    private record Artefact(CopybookLayout.RecordSpec layout, Map<String, String> fieldMoves) {
+    private record Artefact(
+            CopybookLayout.RecordSpec layout,
+            Map<String, String> fieldMoves,
+            Map<String, Object> redactions) {
+
+        /**
+         * Declares an artefact every named field of which is carried from the export view.
+         *
+         * <p>Assumptions: four of the five artefacts carry every field they declare, so this
+         * convenience keeps their declarations reading as one mapping table rather than a mapping
+         * table plus an empty map. The one artefact that redacts a field states that explicitly
+         * through the canonical constructor, which is what makes the redaction visible at the
+         * declaration site instead of implied by its absence here.</p>
+         *
+         * @param layout the target record descriptor from the shared registry; must not be
+         *     {@code null}
+         * @param fieldMoves the ordered mapping from export field name to target field name; must not
+         *     be {@code null}
+         */
+        private Artefact(CopybookLayout.RecordSpec layout, Map<String, String> fieldMoves) {
+            this(layout, fieldMoves, Map.of());
+        }
     }
 
     /**
-     * The six output accumulators one import run assembles.
+     * The six output accumulators one import run assembles, staged outside the heap.
      *
      * <p>Purpose: to stand for the six sequential files the reference opens at
      * {@code app/cbl/CBIMPORT.cbl:205-245} and closes at {@code :458-463}, so that a record is appended
      * to an artefact chosen by its record type rather than to a variable a caller selected by hand.</p>
      *
-     * <p>Assumptions: all six accumulators are created eagerly, so an artefact that receives no record
-     * is written empty rather than omitted — the reference's outputs are allocated
-     * {@code DISP=(NEW,CATLG,DELETE)} and therefore exist after the run whichever record types the input
-     * held. The per-type accumulators are held in a map keyed by the enumeration rather than in five
-     * fields, so a sixth record type could not be routed to an accumulator that does not exist.</p>
+     * <p>Refactoring Rationale: each accumulator is a <b>staged file</b> where it used to be a
+     * {@code ByteArrayOutputStream}. The six artefacts together hold every record of the export dataset
+     * re-encoded into its target layout, so the heap shape held a second whole copy of the dataset beside
+     * the input copy -- and then a third, because each accumulator's {@code toByteArray} produced a fresh
+     * array for the put. Peak memory was therefore several multiples of the extract, against a task whose
+     * memory is a fixed provisioning parameter. Staging bounds it at one record plus seven buffers. The
+     * observable contract is unchanged: nothing is published until the pass has ended, and all six
+     * artefacts are still published whether or not the input held that record type.</p>
+     *
+     * <p>Alternatives Considered: publishing each artefact incrementally with a multipart upload, which
+     * needs no staging at all. Rejected because a failure partway through would leave artefacts that exist
+     * and are short, and a consumer reading one cannot distinguish a short artefact from a complete one --
+     * the same reason the sibling {@link DatasetPayloadWriter} gives for putting a generation in one
+     * request. Staging locally and putting once preserves the all-or-nothing property that the reference's
+     * {@code DISP=(NEW,CATLG,DELETE)} allocation gives its outputs.</p>
+     *
+     * <p>Assumptions: all seven staged files are created eagerly, so an artefact that receives no record
+     * is published empty rather than omitted -- the reference's outputs exist after the run whichever
+     * record types the input held, and a consumer distinguishing "no records of this type" from "the
+     * import did not run" needs the empty artefact to exist. The per-type entries are held in a map keyed
+     * by the enumeration rather than in five fields, so a sixth record type could not be routed to an
+     * accumulator that does not exist.</p>
      */
-    private static final class Outputs {
+    private static final class Outputs implements AutoCloseable {
 
-        /** One accumulator per record type, created eagerly so an unused artefact is still written. */
-        private final Map<RecordType, ByteArrayOutputStream> byType =
-                new EnumMap<>(RecordType.class);
+        /** One staged artefact per record type, created eagerly so an unused artefact is still written. */
+        private final Map<RecordType, Staged> byType = new EnumMap<>(RecordType.class);
 
-        /** The diagnostic accumulator, which has no record type to be keyed by. */
-        private final ByteArrayOutputStream errors = new ByteArrayOutputStream();
+        /** The staged diagnostic artefact, which has no record type to be keyed by. */
+        private final Staged errors;
 
         /**
-         * Creates one empty accumulator per record type plus the diagnostic accumulator.
+         * Creates one staged artefact per record type plus the staged diagnostic artefact.
          *
          * <p>Assumptions: the loop covers {@code RecordType.values()} rather than a written list, so the
-         * set of artefacts and the set of record types cannot diverge.</p>
+         * set of artefacts and the set of record types cannot diverge. A failure partway through creation
+         * discards whatever was already created before rethrowing, so a constructor that did not complete
+         * leaves nothing behind -- a partially constructed resource cannot be handed to a
+         * try-with-resources block, so it would otherwise never be closed.</p>
+         *
+         * @throws UncheckedIOException if a staging file cannot be created or opened
          */
         private Outputs() {
-            for (RecordType recordType : RecordType.values()) {
-                this.byType.put(recordType, new ByteArrayOutputStream());
+            try {
+                for (RecordType recordType : RecordType.values()) {
+                    this.byType.put(recordType, Staged.create(memberStem(recordType)));
+                }
+                this.errors = Staged.create(ERROR_STEM);
+            } catch (RuntimeException unopened) {
+                discardAll();
+                throw unopened;
             }
         }
 
         /**
-         * Returns the accumulator one record type's artefact is assembled in.
+         * Returns the stream one record type's artefact is assembled in.
          *
          * @param recordType the record type whose artefact is wanted; must not be {@code null}
-         * @return that type's accumulator; never {@code null}
+         * @return that type's staged sink; never {@code null}
          */
-        private ByteArrayOutputStream forType(RecordType recordType) {
-            return this.byType.get(recordType);
+        private OutputStream forType(RecordType recordType) {
+            return this.byType.get(recordType).sink();
         }
 
         /**
-         * Returns the accumulator the diagnostic artefact is assembled in.
+         * Returns the stream the diagnostic artefact is assembled in.
          *
-         * @return the diagnostic accumulator; never {@code null}
+         * @return the staged diagnostic sink; never {@code null}
          */
-        private ByteArrayOutputStream errors() {
-            return this.errors;
+        private OutputStream errors() {
+            return this.errors.sink();
+        }
+
+        /**
+         * Flushes and closes all seven sinks, so the staged files are complete on disk.
+         *
+         * <p>Assumptions: this is the analogue of the reference's {@code 4100-CLOSE-FILES} at
+         * {@code app/cbl/CBIMPORT.cbl:458-463}, and it is separate from {@link #close()} for the reason
+         * that paragraph exists: closing an output is what makes it readable by anything else, so it must
+         * happen before the puts and not after them. {@code close} then deletes.</p>
+         *
+         * @throws IOException if a sink cannot be flushed or closed, which would mean a staged artefact is
+         *     short of the records appended to it
+         */
+        private void closeSinks() throws IOException {
+            for (Staged staged : this.byType.values()) {
+                staged.sink().close();
+            }
+            this.errors.sink().close();
+        }
+
+        /**
+         * Returns the staged file one record type's artefact was assembled in.
+         *
+         * @param recordType the record type whose staged file is wanted; must not be {@code null}
+         * @return that type's staged path; never {@code null}
+         */
+        private Path pathFor(RecordType recordType) {
+            return this.byType.get(recordType).path();
+        }
+
+        /**
+         * Returns the staged file the diagnostic artefact was assembled in.
+         *
+         * @return the staged diagnostic path; never {@code null}
+         */
+        private Path errorPath() {
+            return this.errors.path();
+        }
+
+        /**
+         * Closes every sink and removes every staged file.
+         *
+         * <p>Assumptions: closing is attempted before deleting and a close failure is swallowed here,
+         * because by the time this runs the puts have either happened or been abandoned -- so a close
+         * failure has nothing left to protect and must not replace the outcome the caller is being told
+         * about. Closing an already-closed stream is a no-op, which is what lets the successful path close
+         * the sinks before publishing and still reach this method afterwards.</p>
+         */
+        @Override
+        public void close() {
+            try {
+                closeSinks();
+            } catch (IOException ignored) {
+                LOG.warn("event=batch.import.staging-not-closed failure={}",
+                        ThrowableDigest.of(ignored));
+            }
+            discardAll();
+        }
+
+        /** Removes every staged file created so far, whichever of them exist. */
+        private void discardAll() {
+            List<Staged> created = new ArrayList<>(this.byType.values());
+            if (this.errors != null) {
+                created.add(this.errors);
+            }
+            for (Staged staged : created) {
+                DatasetPayloadWriter.discard(staged.path());
+            }
+        }
+    }
+
+    /**
+     * One staged artefact: the file it is assembled in and the buffered sink it is appended through.
+     *
+     * @param path the staging file, deleted when the run ends however it ends
+     * @param sink the buffered stream records are appended through
+     */
+    private record Staged(Path path, OutputStream sink) {
+
+        /**
+         * Creates a staging file and opens a buffered sink over it.
+         *
+         * @param stem the filename stem naming the artefact, so a surviving file is attributable
+         * @return the staged artefact; never {@code null}
+         * @throws UncheckedIOException if the file cannot be created or opened
+         */
+        private static Staged create(String stem) {
+            Path path = DatasetPayloadWriter.stage("import-" + stem);
+            try {
+                return new Staged(path,
+                        new BufferedOutputStream(java.nio.file.Files.newOutputStream(path),
+                                READ_BUFFER));
+            } catch (IOException unopened) {
+                // WHY : Assumptions: the file is discarded before the failure propagates, because
+                //       DatasetPayloadWriter.stage has already CREATED it -- an empty file left behind by
+                //       a failed open would never be reached by the resource block, which is only entered
+                //       once construction succeeds.
+                DatasetPayloadWriter.discard(path);
+                throw new UncheckedIOException("the staged import artefact " + stem + " could not be"
+                        + " opened for writing, so the run is abandoned", unopened);
+            }
         }
     }
 
@@ -2014,7 +2545,6 @@ public class ImportJob {
                 return new ImportStamp(suppliedTimestamp);
             }
 
-            // WHAT: the only clock read in this class, and it is reported.
             // WHY : Trade-offs: a warning rather than silence, because this is the branch that gives up
             //       the one verification this stream has -- see divergence D-8 on this record. The
             //       message names the property to set, so an operator who wants a reproducible artefact

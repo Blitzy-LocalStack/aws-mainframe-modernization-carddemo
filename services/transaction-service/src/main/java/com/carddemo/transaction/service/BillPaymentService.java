@@ -6,9 +6,12 @@ import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.BillPaymentOutcome;
+import com.carddemo.transaction.dto.BillPaymentPreview;
 import com.carddemo.transaction.dto.BillPaymentRequest;
 import com.carddemo.transaction.dto.BillPaymentResponse;
 import com.carddemo.transaction.mapper.BillPaymentMapper;
+import com.carddemo.transaction.repository.AccountBalanceRepository;
 import com.carddemo.transaction.repository.TransactionRepository;
 import java.time.Clock;
 import java.time.LocalDateTime;
@@ -16,6 +19,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,11 +44,12 @@ import org.springframework.transaction.annotation.Transactional;
  *       identifier. None of that survives a stateless handler.</li>
  *   <li>{@code PROCESS-ENTER-KEY} at line 154 — {@link #payBalanceInFull(BillPaymentRequest)}.</li>
  *   <li>{@code GET-CURRENT-TIMESTAMP} at line 249 — {@link #paymentTimestamp()}.</li>
- *   <li>{@code READ-ACCTDAT-FILE} at line 343 — {@link #readBalance(String)}.</li>
+ *   <li>{@code READ-ACCTDAT-FILE} at line 343 — {@link #readBalance(String, boolean)}, whose
+ *       {@code forUpdate} argument carries the {@code UPDATE} option line 351 declares.</li>
  *   <li>{@code UPDATE-ACCTDAT-FILE} at line 377 — {@link #applyBalanceChange(String, Money)}.</li>
  *   <li>{@code READ-CXACAIX-FILE} at line 408 — {@link #resolveCardNumber(String)}.</li>
- *   <li>{@code STARTBR-TRANSACT-FILE} at line 441 — subsumed into {@link #nextTransactionId()}.</li>
- *   <li>{@code READPREV-TRANSACT-FILE} at line 472 — subsumed into {@link #nextTransactionId()}.</li>
+ *   <li>{@code STARTBR-TRANSACT-FILE} at line 441 — replaced by {@link #nextTransactionId()}.</li>
+ *   <li>{@code READPREV-TRANSACT-FILE} at line 472 — replaced by {@link #nextTransactionId()}.</li>
  *   <li>{@code ENDBR-TRANSACT-FILE} at line 501 — no member. It closes a browse cursor, and the
  *       maximum-key query that replaces the browse holds none to close.</li>
  *   <li>{@code WRITE-TRANSACT-FILE} at line 510 — {@link #persist(Transaction)}.</li>
@@ -83,59 +88,65 @@ import org.springframework.transaction.annotation.Transactional;
  * and one owner is what keeps them byte-exact. The inventory is recorded above so a reader can audit
  * the mapper against the reference without opening this class again.</p>
  *
- * <h2>The account context boundary is crossed twice, by one seam, for two different reasons</h2>
+ * <h2>The account boundary is crossed two different ways, on purpose</h2>
  *
  * <p>Assumptions: three of the records this screen touches belong to the account context under
- * schema-per-service — the card cross-reference read at line 408, the account master read at line 343
- * and the balance rewrite at line 377 — and this package's charter states that a seam is the only way
- * to reach them. {@link AccountContextClient} is that seam. The two crossings remain distinguishable
- * here even though they share one seam: the cross-reference and balance READS are lookups whose answers
- * this class then decides on, while the balance CHANGE is a write that must stand or fall with the
- * ledger row, which is why it is issued last and inside the same transaction.</p>
+ * schema-per-service -- the card cross-reference read at line 408, the account master read at line 343
+ * and the balance rewrite at line 377. They are NOT reached the same way, and the split is the whole
+ * design of this class. The cross-reference read stays on {@link AccountContextClient}, the REST seam,
+ * because it is a lookup whose answer this class then decides on. The balance read and the balance
+ * change go through {@link AccountBalanceRepository}, which issues two schema-qualified statements on
+ * this module's own entity manager, because they must stand or fall with the ledger insert.</p>
  *
- * <p>Alternatives Considered: issuing the balance read-for-update and rewrite as schema-qualified native
- * SQL — {@code SELECT ... FROM account.accounts ... FOR UPDATE} followed by an
- * {@code UPDATE account.accounts} — on this module's own entity manager, so that the lock, the
- * ledger insert and the balance change would share one local transaction. It was evaluated first
- * because it is the only arrangement that makes the balance change genuinely atomic with the row, and
- * it was rejected on evidence: this service connects as {@code carddemo_ledger}, and
- * {@code data-migration/sql/V0__schemas_and_roles.sql} grants that role {@code USAGE} on the
- * {@code ledger} schema alone. The cross-schema grants it does contain — {@code USAGE} on four schemas
- * and {@code UPDATE ON account.accounts} — are issued to {@code carddemo_batch} and are justified in
- * that file by the nightly posting and interest programs, not by an online screen. Probing a database
- * provisioned from that script confirms it: for {@code carddemo_ledger},
- * {@code has_schema_privilege('account','USAGE')} is false and both {@code SELECT} and {@code UPDATE}
- * on {@code account.accounts} are denied. That script's own note records what follows — without schema
- * {@code USAGE} a table-level privilege is unreachable and the error names the schema — so the
- * statements would not resolve at run time. Widening the grant is not an available remedy: this class
- * issues no grant statement and does not edit that script, which is the single owner of the privilege
- * graph.</p>
+ * <p>⚠️ Refactoring Rationale: the balance path was previously on the REST seam too, through a seam
+ * operation named {@code applyPayment}, and that arrangement was wrong in two independent ways. The
+ * visible one: the endpoint it addressed, {@code POST /api/v1/accounts/payments}, was never published by
+ * account-service -- that service exposes an account lookup, a view, an update and a cross-reference
+ * list, and no payment route -- so every confirmed payment failed. The invisible one, which publishing
+ * that endpoint would not have fixed: a separate connection is a separate transaction, so the balance
+ * change committed on its own. The previous note acknowledged that and narrowed it by issuing the seam
+ * call LAST, so a refusal would roll the ledger row back; ordering closes one direction and cannot close
+ * the other, because a balance reduced by its owner followed by a local commit that then fails leaves
+ * exactly the state the baseline cannot produce. Lines 233 and 235 sit inside one CICS syncpoint, so a
+ * payment recorded against an unchanged balance and a reduced balance with no payment to show for it are
+ * both unreachable in the reference, and only one commit reproduces that.</p>
  *
- * <p>Alternatives Considered: three further routes to the balance, each rejected for its own reason. A
- * fifth entity type for the account in this module — rejected because the sibling domain charter
- * fixes exactly four entity types and an account entity here would claim ownership of a table another
- * context owns. A saga, or a transactional outbox with a compensating reversal — rejected because both
+ * <p>⚠️ Refactoring Rationale: the previous note also rejected the local-SQL route on evidence, and the
+ * evidence was correct at the time and has been acted on rather than argued with. It observed that this
+ * service connects as {@code carddemo_ledger} and that
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} granted that role privileges inside the
+ * {@code ledger} schema alone, so the statements would not resolve at run time; and it observed that
+ * this class issues no grant and does not edit that script. Both remain true. What changed is the
+ * script: section 4b now grants {@code carddemo_ledger} {@code USAGE} on the {@code account} schema plus
+ * {@code SELECT} and {@code UPDATE} on {@code account.accounts} and nothing else, with the reasoning
+ * recorded there beside the grant. AAP section 0.4.1.3 sanctions exactly that -- a genuinely
+ * multi-record unit of work stays one ACID commit under narrowly scoped cross-schema grants -- and the
+ * nightly posting chain already holds the same shape of grant for the same reason.</p>
+ *
+ * <p>Alternatives Considered: three further routes to the balance, each still rejected for its own
+ * reason. A saga, or a transactional outbox with a compensating reversal -- rejected because both
  * replace one commit with a sequence of committed steps, which makes a partly-applied payment
- * observable when the baseline has no such state. A second {@code DataSource} — rejected because a
- * separate connection is a separate transaction, which forfeits the atomicity that was the whole point
- * of reaching for SQL.</p>
+ * observable where the baseline has no such state; AAP section 0.4.1.3 rejects them on the same ground
+ * for the posting job. A fifth entity type for the account in this module -- rejected because the
+ * sibling domain charter fixes exactly four entity types and an entity here would claim ownership of a
+ * table another context owns, whereas two native statements over two named columns claim nothing. A
+ * second {@code DataSource} -- rejected because a separate connection is a separate transaction, which
+ * forfeits the atomicity that was the point of reaching for SQL.</p>
  *
- * <p>Trade-offs: the accepted cost is that the balance change is applied by its owner rather than in
- * this transaction, so it is not atomic with the ledger insert in the way lines 233 and 235 are atomic
- * under one CICS syncpoint. The exposure is bounded in the one direction that matters and the bound is
- * deliberate: the change is issued LAST, and a failure of it propagates, so the enclosing transaction
- * rolls the ledger row back and a written payment never stands beside an unchanged balance. What
- * remains is the converse — a balance reduced and the local commit then failing — and it is narrowed by
- * ordering the change immediately before the commit. This is a divergence from the reference's single
- * syncpoint and is recorded as one rather than presented as equivalent.</p>
+ * <p>Trade-offs: the accepted cost is that this module now names a table it does not own, so a column
+ * rename in {@code account.accounts} breaks a statement the owning module's compiler cannot see. The
+ * exposure is bounded to two column names and one table name, all in one class, and it is the smaller
+ * of the two available costs: the alternative was a payment that either could not complete at all or
+ * could complete halfway. The privilege graph bounds it further, because the grant admits no other
+ * table and no other verb.</p>
  *
- * <p>Alternatives Considered: a circuit breaker in front of the seam. Rejected because the hop is
- * in-network to a service behind an internal load balancer and both of its timeouts are bounded by
- * configuration, so a stalled dependency already surfaces as a refused request within seconds. A
- * breaker would add a state machine that can refuse a call the dependency would have served, which is
- * a new failure mode in exchange for none removed. No resilience library is introduced and no retry is
- * declared on this path: a retry of a payment is a retry of money movement, and the seam offers no
- * idempotency key to make one safe.</p>
+ * <p>Alternatives Considered: a circuit breaker in front of the remaining seam call. Rejected because
+ * the hop is in-network to a service behind an internal load balancer and both of its timeouts are
+ * bounded by configuration, so a stalled dependency already surfaces as a refused request within
+ * seconds. A breaker would add a state machine that can refuse a call the dependency would have served,
+ * which is a new failure mode in exchange for none removed. No resilience library is introduced and no
+ * retry is declared on this path: a retry of a payment is a retry of money movement, and the seam
+ * offers no idempotency key to make one safe.</p>
  *
  * <h2>State that does not travel</h2>
  *
@@ -184,20 +195,29 @@ public class BillPaymentService {
      */
     public static final String MESSAGE_PAYMENT_ADD_FAILED = "Unable to Add Bill pay Transaction...";
 
-    /**
-     * The identifier the reference derives when the transaction file holds no record.
-     *
-     * <p>Assumptions: the reference reaches this by moving zeros into the identifier on an end-of-file
-     * condition at line 488 and then adding one at line 217, so an empty file yields one rather than
-     * zero.</p>
-     */
-    public static final long FIRST_TRANSACTION_ID = 1L;
-
-    /** The rows this service writes the payment transaction into and reads the highest key from. */
+    /** The rows this service writes the payment transaction into and allocates its key from. */
     private final TransactionRepository transactions;
 
-    /** The seam onto the account-owned cross-reference, balance and balance change. */
+    /**
+     * The seam onto the account-owned card cross-reference, and nothing else.
+     *
+     * <p>Refactoring Rationale: the balance read and the balance change were taken off this seam and
+     * moved to {@link #accountBalances}, for the reason the class note records: they have to share the
+     * ledger insert's transaction and a separate connection cannot. What remains here is the one
+     * account-owned read that does NOT need to -- the cross-reference lookup whose answer this class
+     * merely decides on -- so the seam is kept rather than removed, and the boundary it enforces still
+     * applies to every record this class has no grant on.</p>
+     */
     private final AccountContextClient accounts;
+
+    /**
+     * The two statements over {@code account.accounts} that share this method's transaction.
+     *
+     * <p>Assumptions: this collaborator is what makes the payment one commit. Its own file carries the
+     * grant it depends on, the alternatives weighed against it and the reason the optimistic-lock
+     * revision is advanced by the reduction.</p>
+     */
+    private final AccountBalanceRepository accountBalances;
 
     /** The boundary that composes the payment row, its response and its confirmation sentence. */
     private final BillPaymentMapper billPaymentMapper;
@@ -206,26 +226,31 @@ public class BillPaymentService {
     private final Clock clock;
 
     /**
-     * Builds the service over its four collaborators.
+     * Builds the service over its five collaborators.
      *
-     * <p>Assumptions: all four arrive through the constructor and are final, so an instance is fully
+     * <p>Assumptions: all five arrive through the constructor and are final, so an instance is fully
      * formed before it can serve a request and holds no mutable state. Field injection was not used:
      * it would leave a partially constructed instance observable and would let a test build one without
-     * the seam, which is the collaborator every branch below depends on.</p>
+     * a collaborator every branch below depends on.</p>
      *
-     * @param transactions the repository over the owned {@code ledger.transactions} table, used to read
-     *     the highest existing key and to write the payment row; must not be {@code null}
-     * @param accounts the seam onto the account context, used for the cross-reference read, the balance
-     *     read and the balance change; must not be {@code null}
+     * @param transactions the repository over the owned {@code ledger.transactions} table, used to
+     *     allocate the payment row's identifier and to write the row; must not be {@code null}
+     * @param accounts the seam onto the account context, used for the cross-reference read alone; must
+     *     not be {@code null}
+     * @param accountBalances the two statements over {@code account.accounts} that read the balance and
+     *     reduce it inside this service's own transaction; must not be {@code null}
      * @param billPaymentMapper the record and response boundary that applies the eight literals, the
      *     money contract and the identifier widths; must not be {@code null}
      * @param clock the clock the single payment timestamp is read from; must not be {@code null}
-     * @throws NullPointerException if any of the four collaborators is {@code null}
+     * @throws NullPointerException if any of the five collaborators is {@code null}
      */
     public BillPaymentService(TransactionRepository transactions, AccountContextClient accounts,
-            BillPaymentMapper billPaymentMapper, Clock clock) {
+            AccountBalanceRepository accountBalances, BillPaymentMapper billPaymentMapper,
+            Clock clock) {
         this.transactions = Objects.requireNonNull(transactions, "transactions must not be null");
         this.accounts = Objects.requireNonNull(accounts, "accounts must not be null");
+        this.accountBalances =
+                Objects.requireNonNull(accountBalances, "accountBalances must not be null");
         this.billPaymentMapper =
                 Objects.requireNonNull(billPaymentMapper, "billPaymentMapper must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
@@ -257,27 +282,30 @@ public class BillPaymentService {
      * therefore raises with one field and one sentence, and the shared advice renders the one-element
      * per-field array from it.</p>
      *
-     * <p>Assumptions: exactly ONE transactional boundary spans this method, because lines 233 and 235
-     * sit inside one CICS syncpoint. The annotation is on this method rather than on a narrower inner
-     * one for a mechanical reason, not a stylistic one: the transaction is applied by a proxy, and a
-     * private method invoked from within this class is invoked on {@code this} rather than through that
-     * proxy, so a narrower annotated method would be silently untransacted — the worst available
-     * outcome, since it would look correct and commit each write separately. A rollback is signalled the
-     * way the reference signals it at lines 4095 to 4104 of the account-update program, by letting the
-     * failure propagate rather than by returning a status.</p>
+     * <p>Assumptions: exactly ONE transactional boundary spans this method, and it now spans a unit of
+     * work that is genuinely indivisible. Lines 233 and 235 sit inside one CICS syncpoint, and both of the
+     * effects they stand for — the payment row in {@code ledger.transactions} and the balance reduction in
+     * {@code account.accounts} — are issued on this method's own connection, so the commit that ends this
+     * method either applies both or applies neither. The annotation is on this method rather than on a
+     * narrower inner one for a mechanical reason, not a stylistic one: the transaction is applied by a
+     * proxy, and a private method invoked from within this class is invoked on {@code this} rather than
+     * through that proxy, so a narrower annotated method would be silently untransacted — the worst
+     * available outcome, since it would look correct and commit each write separately. A rollback is
+     * signalled the way the reference signals it at lines 4095 to 4104 of the account-update program, by
+     * letting the failure propagate rather than by returning a status.</p>
      *
-     * <p>Trade-offs: because the boundary is this whole method, the two seam reads execute inside it and
-     * hold a pooled connection across a network wait. That cost is accepted and bounded rather than
-     * ignored: both the connect and the read timeout are set from configuration, so a silent dependency
-     * fails the request in seconds instead of holding a connection indefinitely. The reads are also
-     * ordered before the write so that a submission refused on its balance never opens the write path at
-     * all.</p>
+     * <p>Trade-offs: because the boundary is this whole method, the ONE remaining seam read executes
+     * inside it and holds a pooled connection across a network wait. That cost is accepted and bounded
+     * rather than ignored: both the connect and the read timeout are set from configuration, so a silent
+     * dependency fails the request in seconds instead of holding a connection indefinitely. It is also
+     * reached only on the confirmed path, so a submission refused on its confirmation or its balance
+     * never crosses the network at all.</p>
      *
      * @param request the submitted payment, already bean-validated by the API layer, carrying the
      *     account identifier and the one-character confirmation and no amount; must not be {@code null}
-     * @return the posted acknowledgement when the payment was made, and otherwise the preview shape
-     *     carrying the balance together with the reference's prompt, its nothing-to-pay advisory or no
-     *     sentence at all; never {@code null}
+     * @return {@link BillPaymentResponse} when the payment was made, and otherwise
+     *     {@link BillPaymentPreview} -- carrying the balance together with the reference's prompt or its
+     *     nothing-to-pay advisory, or carrying neither on the refused turn; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if the account identifier was never supplied, answered with line 161,
      *     or the confirmation carries a value outside the four the reference accepts, answered with
@@ -291,7 +319,7 @@ public class BillPaymentService {
      *     answered with line 399
      */
     @Transactional
-    public BillPaymentResponse payBalanceInFull(BillPaymentRequest request) {
+    public BillPaymentOutcome payBalanceInFull(BillPaymentRequest request) {
         Objects.requireNonNull(request, "request must not be null");
 
         String accountId = request.accountId();
@@ -345,10 +373,30 @@ public class BillPaymentService {
             //       reference's gating. Line 197 re-tests the error flag that line 181 has just set, so
             //       a refused payment on an account with nothing to pay is answered with no sentence
             //       rather than with the nothing-to-pay advisory.
-            return previewOf(accountId, readBalance(accountId), null);
+            // WHY : ⚠️ Refactoring Rationale: this branch now performs ZERO account interactions, where
+            //       it previously read the balance and reported it. Two things were wrong with reading
+            //       here. The reference does not: only lines 177 and 184 reach READ-ACCTDAT-FILE at line
+            //       343, and this branch is line 178, so the read charged the account context for an
+            //       access the reference never performs. And the read can FAIL -- an identifier naming
+            //       no account raises the not-found condition below -- so a refusal on an unknown
+            //       identifier was answered 404, and a refusal during an account-context outage was
+            //       answered 500, where the baseline clears the screen and says nothing either time. It
+            //       also reported a balance that CLEAR-CURRENT-SCREEN at line 180 had just blanked,
+            //       which is data the reference deliberately removes from the operator's view.
+            return BillPaymentPreview.cleared(accountId);
         }
 
-        Money payableBalance = readBalance(accountId);
+        // WHY : Assumptions: the lock is taken on the paying turn ONLY, and the asymmetry is deliberate.
+        //       The reference reads for update on both remaining branches -- line 351 carries the UPDATE
+        //       option and lines 177 and 184 both reach it -- and it can afford to, because a CICS task
+        //       ends at the screen and releases the lock with it. Here the transaction spans one request,
+        //       so locking the row to answer a turn that writes nothing would let one operator's
+        //       unconfirmed preview block another operator's payment for the whole of that request. The
+        //       paying turn reads under its own lock, which is what makes the read and the reduction
+        //       indivisible; the reporting turn reads without one and may therefore report a balance
+        //       that is superseded before the operator confirms -- already true of the baseline, where
+        //       the two turns are two tasks with two locks.
+        Money payableBalance = readBalance(accountId, affirmative);
 
         // WHY : Assumptions: the comparison is INCLUSIVE and the inclusivity is the single easiest thing
         //       on this path to get wrong, because a strict test reads perfectly well in review. Line
@@ -366,7 +414,8 @@ public class BillPaymentService {
             //       reference reaches it by the same mechanism it reaches the prompt below -- lines 200
             //       to 204 move the sentence and send the screen, exactly as lines 236 to 242 do -- so
             //       both are ordinary turns of the same transaction and neither is an abend.
-            return previewOf(accountId, payableBalance, BillPaymentMapper.MESSAGE_NOTHING_TO_PAY);
+            return BillPaymentPreview.reporting(accountId, payableBalance,
+                    BillPaymentMapper.MESSAGE_NOTHING_TO_PAY);
         }
 
         if (!affirmative) {
@@ -375,7 +424,8 @@ public class BillPaymentService {
             //       this branch at line 184 precisely so the balance can be displayed at lines 193 and
             //       194 beside the prompt it moves at lines 237 and 238, which is why the balance is
             //       reported here and no payment is attempted.
-            return previewOf(accountId, payableBalance, BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT);
+            return BillPaymentPreview.reporting(accountId, payableBalance,
+                    BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT);
         }
 
         return pay(request, accountId, payableBalance);
@@ -440,19 +490,21 @@ public class BillPaymentService {
 
         Transaction stored = persist(row);
 
-        // WHY : Refactoring Rationale: the amount to subtract is transmitted, not a computed new
-        //       balance, and that is what preserves the reference's arithmetic. Line 234 computes
+        // WHY : Refactoring Rationale: the AMOUNT is subtracted, not a computed new balance assigned, and
+        //       that is what preserves the reference's arithmetic. Line 234 computes
         //       ACCT-CURR-BAL = ACCT-CURR-BAL - TRAN-AMT, so the subtraction is performed against the
-        //       balance as it then stands. Sending zero instead -- the algebraically identical answer
+        //       balance as it then stands. Assigning zero instead -- the algebraically identical answer
         //       today, since the amount IS the whole balance -- would replace that subtraction with an
         //       assignment, which transformation rule T4 forbids because it discards the form the
-        //       baseline computes in; it would also overwrite rather than adjust, so a balance that
-        //       moved between the read and the write would be silently zeroed instead of reduced.
-        // WHY : Assumptions: this is issued LAST and its failure propagates, which is what makes the
-        //       ordering protective rather than incidental. Because it is inside this method's
-        //       transaction, a refusal here rolls the row written above back, so the state the reference
-        //       cannot produce -- a payment recorded against an unchanged balance -- cannot be reached
-        //       from this path.
+        //       baseline computes in; it would also overwrite rather than adjust, so a balance that moved
+        //       would be silently zeroed instead of reduced.
+        // WHY : Assumptions: this is issued LAST, on the same connection as the write above and inside
+        //       this method's one transaction, and its failure propagates. Both directions of half-applied
+        //       state are therefore unreachable: a failure here discards the row written above, and a
+        //       failure of the commit itself discards BOTH. The second direction is the one the previous
+        //       arrangement could not close -- the change was remote, so a local commit failure left the
+        //       balance reduced with no payment row against it -- and closing it is why the change is
+        //       issued here rather than asked of another service.
         applyBalanceChange(accountId, payableBalance);
 
         // WHY : Assumptions: the confirmation sentence is ASSEMBLED from its fragments rather than written
@@ -468,72 +520,88 @@ public class BillPaymentService {
     }
 
     /**
-     * Builds the answer for a turn on which no payment was made.
-     *
-     * <p>Purpose: three branches end without paying -- the refusal at lines 178 to 181, the
-     * nothing-to-pay advisory at lines 200 to 204 and the confirmation prompt at lines 236 to 239 -- and
-     * all three answer with the balance and at most one sentence. Composing that shape once keeps the
-     * three from drifting apart in what they report.</p>
-     *
-     * <p>Assumptions: no identifier is reported and the paid discriminator is false, because no row was
-     * written. The canonical constructor is used rather than the record's posted factory precisely
-     * because that factory fixes the discriminator to the affirmative value, which none of these three
-     * branches may claim.</p>
-     *
-     * <p>Assumptions: an absent sentence is {@code null} and never spaces. Line 30 of
-     * {@code app/cpy/CVCRD01Y.cpy} attaches a low-values condition to the 75-character return message
-     * at line 29 alone, so absence is representable for that field and null is what represents it. The
-     * message field this program moves its sentences into is {@code WS-MESSAGE PIC X(80)} at line 39,
-     * which is working storage rather than a contract width and is truncated into {@code ERRMSGI PIC
-     * X(78)} at line 78 of {@code app/cpy-bms/COBIL00.CPY} on its way to the screen; the carried
-     * contract is therefore the 75 characters of line 29, and every sentence passed here is well inside
-     * it.</p>
-     *
-     * @param accountId the validated account identifier being reported back; must not be {@code null}
-     * @param payableBalance the balance as read, reported so the operator sees what would be paid; must
-     *     not be {@code null}
-     * @param returnMessage the reference's sentence for this turn, or {@code null} on the refusal branch,
-     *     which emits none
-     * @return the preview shape with its discriminator false and no identifier; never {@code null}
-     */
-    private BillPaymentResponse previewOf(String accountId, Money payableBalance,
-            String returnMessage) {
-        return new BillPaymentResponse(null, accountId, payableBalance, false, returnMessage);
-    }
-
-    /**
-     * Reads the account's current balance through the seam.
+     * Reads the account's current balance from this module's own transaction.
      *
      * <p>Purpose: this is {@code READ-ACCTDAT-FILE} at line 343 of {@code app/cbl/COBIL00C.cbl}, reached
      * from the affirmative branch at line 177 and from the withheld branch at line 184.</p>
      *
-     * <p>Assumptions: the reference's read carries the {@code UPDATE} option at line 351 with
-     * {@code RIDFLD(ACCT-ID)} at line 349, so it takes a lock the rewrite at line 379 then consumes.
-     * That lock is not reproduced here, and it cannot be from this side: the row belongs to the account
-     * context and this service holds no privilege on its schema, as the class note records. The
-     * protection that replaces it is on the seam's change operation, which is given the amount to
-     * subtract rather than a computed balance, so the owner applies the arithmetic against the current
-     * value instead of overwriting a value this side read earlier.</p>
+     * <p>⚠️ Refactoring Rationale: the read is LOCAL rather than over the seam, and it now reproduces the
+     * reference's lock instead of documenting why it could not. The reference's read carries the
+     * {@code UPDATE} option at line 351 with {@code RIDFLD(ACCT-ID)} at line 349, so it takes a lock the
+     * rewrite at line 379 consumes -- and a read issued over HTTP cannot take a lock this transaction
+     * holds, because the answer arrives after the remote transaction has already ended. The previous note
+     * said so and offered a substitute: the seam's change operation was given the amount to subtract
+     * rather than a computed balance, so the owner applied the arithmetic against the then-current value.
+     * That substitute protects the ARITHMETIC and not the DECISION -- the over-limit-style test at line
+     * 198 is taken on the value this side read, so a balance that moved between the read and the change
+     * could be paid on a stale verdict. Reading through {@link AccountBalanceRepository} under
+     * {@code SELECT ... FOR UPDATE} makes the verdict and the write share one view of the row.</p>
+     *
+     * <p>Assumptions: the identifier is parsed to a number before it is bound, because the column is
+     * {@code account_id BIGINT} at line 215 of
+     * {@code services/account-service/src/main/resources/db/migration/V1__account.sql} while the request
+     * carries eleven digit characters. The parse cannot fail here: the request component is constrained
+     * to exactly eleven digits by its own pattern, and the guard at the top of the calling method has
+     * already refused a never-supplied value. It is written as an explicit parse rather than left to a
+     * driver coercion so that the comparison the database performs is between like types and can use the
+     * primary-key index.</p>
      *
      * <p>Assumptions: absence and failure are different answers and are reported differently, because
      * the reference answers them differently -- a not-found status is met with line 361 and any other
-     * status with line 368. The seam reports absence as an empty optional and failure as its own
-     * exception, and it selects no sentence itself, so the two sentences are chosen here.</p>
+     * status with line 368. An empty optional is absence; a data-access failure, which includes the
+     * permission error a database provisioned without section 4b's grants raises, is the failure.</p>
      *
-     * @param accountId the validated account identifier to read; must not be {@code null}
-     * @return the balance the account context reported; never {@code null}
+     * @param accountId the validated account identifier to read, as eleven digit characters; must not be
+     *     {@code null}
+     * @param forUpdate {@code true} on the paying turn, which takes the row lock the reduction consumes,
+     *     and {@code false} on the reporting turn, which writes nothing
+     * @return the balance the row carries; never {@code null}
      * @throws NoSuchElementException if no account carries that identifier, answered with line 361
-     * @throws IllegalStateException if the account context could not answer, answered with line 368
+     * @throws IllegalStateException if the row could not be read, answered with line 368
      */
-    private Money readBalance(String accountId) {
+    private Money readBalance(String accountId, boolean forUpdate) {
+        long numericAccountId = Long.parseLong(accountId.trim());
         try {
-            return this.accounts.findAccountBalance(accountId)
-                    .map(AccountContextClient.AccountBalance::currentBalance)
-                    .orElseThrow(() -> new NoSuchElementException(
-                            BillPaymentMapper.MESSAGE_ACCOUNT_NOT_FOUND));
-        } catch (AccountContextClient.AccountContextUnavailableException unavailable) {
+            Optional<Money> balance = forUpdate
+                    ? this.accountBalances.lockCurrentBalance(numericAccountId)
+                    : this.accountBalances.findCurrentBalance(numericAccountId);
+            return balance.orElseThrow(() -> new NoSuchElementException(
+                    BillPaymentMapper.MESSAGE_ACCOUNT_NOT_FOUND));
+        } catch (DataAccessException unreadable) {
+            // WHY : Assumptions: the framework's own data-access family is caught rather than the
+            //       provider's, because the repository is reached through a Spring-managed entity
+            //       manager whose exceptions are already translated. Catching the provider's type
+            //       instead would miss the translated form, which is the form that actually arrives.
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_ACCOUNT_LOOKUP_FAILED,
-                    unavailable);
+                    unreadable);
+        }
+    }
+
+    /**
+     * Converts the submitted account identifier into the numeric key the account master is keyed on.
+     *
+     * <p>Assumptions: the conversion happens once, here, rather than at each of the three statements that
+     * need it. The submitted field is {@code ACCT-ID PIC 9(11)} at line 5 of
+     * {@code app/cpy/CVACT01Y.cpy}, a NUMERIC picture, and the owning migration declares the column
+     * {@code BIGINT} for that reason; the request record constrains the value to digits at that width
+     * before this method can be reached, so the conversion cannot fail on a value that arrived over the
+     * published contract.</p>
+     *
+     * <p>Assumptions: the failure sentence is the read's own rather than a new one, because a caller that
+     * reached here with a non-numeric identifier has produced a condition the reference has no branch for
+     * — the field is numeric, so a non-numeric value is not representable in the baseline at all — and
+     * inventing a sentence would put text in front of an operator that no line of the reference emits.</p>
+     *
+     * @param accountId the validated account identifier; must not be {@code null}
+     * @return the identifier as the numeric key the account master is keyed on
+     * @throws IllegalStateException if the identifier does not hold digits
+     */
+    private static long accountKeyOf(String accountId) {
+        try {
+            return Long.parseLong(accountId.strip());
+        } catch (NumberFormatException notNumeric) {
+            throw new IllegalStateException(BillPaymentMapper.MESSAGE_ACCOUNT_LOOKUP_FAILED,
+                    notNumeric);
         }
     }
 
@@ -568,133 +636,172 @@ public class BillPaymentService {
     }
 
     /**
-     * Asks the account context to reduce the balance by the amount paid.
+     * Reduces the account balance by the amount paid, inside this method's own transaction.
      *
      * <p>Purpose: this is {@code UPDATE-ACCTDAT-FILE} at line 377 of {@code app/cbl/COBIL00C.cbl}, whose
-     * {@code EXEC CICS REWRITE} at lines 379 to 382 consumes the lock the read for update took.</p>
+     * {@code EXEC CICS REWRITE} at lines 379 to 382 consumes the lock the read for update took. The
+     * statement it issues consumes the lock {@link #readBalance} took on the paying turn, which is the
+     * same relationship expressed with the same two steps.</p>
      *
-     * <p>Assumptions: the reference distinguishes two failures here and this method carries only one of
-     * them onward. A not-found status is answered at line 392 with the same sentence the read uses, and
-     * it is unreachable on this path because the read at line 343 has already established that the
-     * account exists and this call follows it within the same request. Any other status is answered at
-     * line 399 with the update-specific sentence, which is what a refusal from the seam becomes.</p>
+     * <p>⚠️ Refactoring Rationale: the change is issued LOCALLY rather than asked of the account
+     * context. The previous form called a seam operation named {@code applyPayment}, and the class note
+     * records the two independent reasons that could not work: the endpoint it addressed was never
+     * published, and even published it would have committed on its own connection, leaving the split
+     * commit the baseline's single syncpoint has no state for. This statement runs in the transaction
+     * that wrote the payment row, so the two stand or fall together.</p>
+     *
+     * <p>Assumptions: the reference distinguishes two failures here and BOTH are now expressible. A
+     * not-found status is answered at line 392 with the same sentence the read uses, and it presents here
+     * as an affected-row count of zero -- unreachable in practice, because the locking read has already
+     * established the row and holds it, which is exactly why the reference's own branch is unreachable
+     * too. Any other status is answered at line 399 with the update-specific sentence, which is what a
+     * data-access failure becomes.</p>
      *
      * <p>Assumptions: the privilege graph this depends on is owned elsewhere and is not created here.
      * {@code data-migration/sql/V0__schemas_and_roles.sql} is the single owner of every schema, role and
-     * grant in this deployment, and it grants this service's role privileges inside the {@code ledger}
-     * schema only. This method therefore reaches the account master through its owner rather than
-     * directly, and this class issues no grant statement of any kind.</p>
+     * grant in this deployment, and its section 4b grants this service's role {@code SELECT} and
+     * {@code UPDATE} on {@code account.accounts} and nothing else. This class issues no grant statement
+     * of any kind, and a database provisioned without that section raises a permission failure here that
+     * is reported as the update-specific sentence rather than as a bare driver error.</p>
      *
-     * @param accountId the validated account identifier whose balance is being reduced; must not be
-     *     {@code null}
-     * @param paidAmount the amount to subtract, being the whole balance as read; must not be
-     *     {@code null}
-     * @throws IllegalStateException if the account context refused or could not apply the change,
-     *     answered with line 399, raised so that the enclosing transaction rolls the payment row back
+     * @param accountId the validated account identifier whose balance is being reduced, as eleven digit
+     *     characters; must not be {@code null}
+     * @param paidAmount the amount to subtract, being the whole balance as read under the lock; must not
+     *     be {@code null}
+     * @throws IllegalStateException if the statement could not be executed, or changed a number of rows
+     *     other than zero or one, answered with line 399 and raised so that the enclosing transaction
+     *     rolls the payment row back
+     * @throws NoSuchElementException if the statement changed NO row, which is the reference's
+     *     not-found status on the rewrite at line 392 and carries that line's own sentence
      */
     private void applyBalanceChange(String accountId, Money paidAmount) {
+        int changed;
         try {
-            this.accounts.applyPayment(accountId, paidAmount);
-        } catch (AccountContextClient.AccountContextUnavailableException unavailable) {
+            changed = this.accountBalances.reduceCurrentBalance(Long.parseLong(accountId.trim()),
+                    paidAmount);
+        } catch (DataAccessException unwritable) {
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_ACCOUNT_UPDATE_FAILED,
-                    unavailable);
+                    unwritable);
+        }
+
+        // WHY : Assumptions: a count other than one is refused rather than accepted quietly, and the
+        //       count is checked even though the locking read makes zero unreachable. The reference
+        //       checks the equivalent status at line 391 for the same reason: a rewrite that changed
+        //       nothing has not applied the payment, and letting it pass would commit a ledger row
+        //       against an unchanged balance -- the one state the single syncpoint at lines 233 and 235
+        //       makes impossible.
+        // WHY : ⚠️ Assumptions: ZERO is tested BEFORE the inequality, and the order is load-bearing
+        //       rather than stylistic. The two counts carry DIFFERENT sentences because the reference
+        //       selects different ones: line 392 answers a not-found status on the rewrite with
+        //       'Account ID NOT found...', the same string lines 361 and 425 emit, and line 399 is
+        //       reserved for any other status. An inequality tested first swallows the zero case, so the
+        //       not-found branch becomes unreachable and every vanished account is reported with the
+        //       update-failure wording -- which is a reworded branch rather than a missing one, and no
+        //       reader of the code would see it.
+        if (changed == 0) {
+            throw new NoSuchElementException(BillPaymentMapper.MESSAGE_ACCOUNT_NOT_FOUND);
+        }
+
+        // WHY : Assumptions: the remaining refusal is written as inequality rather than as "greater than
+        //       one" so that any count the primary-key predicate cannot produce is refused instead of
+        //       being read as success.
+        if (changed != 1) {
+            throw new IllegalStateException(BillPaymentMapper.MESSAGE_ACCOUNT_UPDATE_FAILED);
         }
     }
 
     /**
-     * Derives the identifier for the payment row as one above the highest already stored.
+     * Allocates the identifier for the payment row from the database's own allocator.
      *
-     * <p>Purpose: this replaces the three browse paragraphs the reference uses as a maximum-key
-     * generator. Lines 212 to 217 move high values into the key, start a browse at line 441, read
+     * <p>Purpose: this stands where the three browse paragraphs the reference uses as a maximum-key
+     * generator stand. Lines 212 to 217 move high values into the key, start a browse at line 441, read
      * backwards once at line 472, end the browse at line 501, move the key into the numeric work field
      * {@code WS-TRAN-ID-NUM} declared at line 57, and add one. The three verbs are not a cursor -- there
-     * is no {@code READNEXT} anywhere in the program -- so a single maximum-key query expresses the same
-     * intent with one round trip.</p>
+     * is no {@code READNEXT} anywhere in the program -- so the whole sequence is a read-then-add over the
+     * table's highest key.</p>
      *
-     * <p>Refactoring Rationale: the value is derived here rather than by the repository, and it is
-     * carried as digit characters rather than as a number. The repository reports the highest stored key
-     * and nothing else, which is the division its own query note records; adding one is this layer's
-     * work because it is where the reference performs it. The type matters because the entity's
-     * identifier is a {@code String} over a fixed-width character column, and the baseline settles the
-     * same question the same way -- {@code TRAN-ID} is {@code PIC X(16)} at line 5 of
-     * {@code app/cpy/CVTRA05Y.cpy} while the work field it is derived through is numeric -- so the value
-     * is parsed to increment and re-padded to its declared width immediately afterwards. A numeric
-     * identifier would drop the leading zeros that the stored form carries.</p>
+     * <p>⚠️ Refactoring Rationale: this method used to perform that read-then-add literally, through
+     * {@link TransactionRepository#findMaxTranId()}, and its own note accepted the resulting race on the
+     * ground that "two payments deriving the same value concurrently is exactly the condition the
+     * reference's own duplicate-key and duplicate-record branches at lines 533 and 534 exist to answer".
+     * That reading of those branches is wrong. They answer a WRITE whose key was already taken, which on
+     * a screen that derives its own key can only arise from a race this side created; the reference could
+     * not reach them that way at all, because CICS serialised this program and the capture program inside
+     * one region, so read-then-add was indivisible there in effect. Two Fargate tasks behind a load
+     * balancer are not serialised: both read the same maximum, both add one, and the loser is refused a
+     * payment for a reason it did nothing to cause and can only answer by resubmitting. The allocator that
+     * {@link TransactionRepository#allocateTransactionId()} publishes makes the increment indivisible, so
+     * two concurrent payers receive different identifiers without either waiting on the other.</p>
      *
-     * <p>Assumptions: an empty table yields one. The reference reaches that by moving zeros into the key
-     * on an end-of-file condition at line 488 and then adding one at line 217, so the first payment on an
-     * empty ledger is identifier one, zero-padded to sixteen characters.</p>
+     * <p>Assumptions: the duplicate branches are still reproduced and are still reachable, so nothing the
+     * published contract promises is withdrawn. {@link #persist} continues to distinguish a taken
+     * identifier from any other write failure and continues to answer it with line 536's sentence; what
+     * changes is only that this side stops manufacturing that condition for itself. A row loaded by the
+     * cutover ETL, or one written by a batch job that composes identifiers rather than allocating them,
+     * can still collide, which is why the branch remains rather than being deleted as unreachable.</p>
      *
-     * <p>Trade-offs: reading a maximum and adding one is not collision-proof, and the exposure is
-     * accepted rather than removed. Two payments deriving the same value concurrently is exactly the
-     * condition the reference's own duplicate-key and duplicate-record branches at lines 533 and 534
-     * exist to answer, so this path relies on the same mechanism -- reported by {@link #persist} -- in
-     * place of introducing an allocator the baseline has no analogue for. The compromise is that a
-     * colliding caller is refused and must resubmit, which is what the reference does.</p>
+     * <p>Assumptions: the value is carried as digit characters, not as a number. The entity's identifier
+     * is a {@code String} over a fixed-width character column because {@code TRAN-ID} is {@code PIC X(16)}
+     * at line 5 of {@code app/cpy/CVTRA05Y.cpy}, so leading zeros are part of the value and the allocated
+     * number is padded to the declared width immediately. The baseline settles the same question the same
+     * way, holding the key alphanumerically and the work field it increments through numerically.</p>
+     *
+     * <p>Assumptions: the allocator's own migration positions the sequence past the loaded extract, so its
+     * first value on a seeded database is above every identifier that extract carries. The reference's
+     * empty-file arm at line 488, which moves zeros into the key so that line 217 yields one, therefore
+     * needs no counterpart here and none survives in this method.</p>
+     *
+     * <p>Trade-offs: an allocated identifier is not returned to the sequence when the enclosing
+     * transaction rolls back, so an abandoned payment leaves a gap in the identifier space. The gap is
+     * accepted because nothing in the reference tree reads identifier arithmetic as meaningful -- the
+     * report job at {@code app/jcl/TRANREPT.jcl} lines 41 and 42 orders by processing timestamp and card
+     * number -- and gapless allocation would require serialising every writer behind one lock, which is
+     * the cost this method exists to avoid.</p>
      *
      * <p>Trade-offs: an exhausted key space is refused rather than wrapped. The reference's work field is
      * {@code PIC 9(16)} with no size-error clause, so adding one to the highest expressible value
-     * truncates silently and would resume at zero, overwriting the oldest rows. Refusing is a documented
-     * divergence chosen because the alternative destroys ledger history, and it is unreachable at any
-     * realistic volume.</p>
+     * truncates silently and would resume at zero, overwriting the oldest rows. The sequence declares
+     * {@code MAXVALUE 9999999999999999} and this method asserts the same bound, so the refusal happens
+     * twice over; it is a documented divergence chosen because the alternative destroys ledger history,
+     * and it is unreachable at any realistic volume.</p>
      *
      * @return the next identifier as exactly sixteen digit characters, zero-padded; never {@code null}
-     * @throws IllegalStateException if the highest stored identifier could not be read or does not hold
-     *     digits, answered with the browse-failure sentence at lines 463 and 492, or if the sixteen-digit
-     *     key space is exhausted
+     * @throws IllegalStateException if the allocation could not be performed or reported no value, or if
+     *     the allocated value needs more than the sixteen digits the column holds, each answered with the
+     *     browse-failure sentence at lines 463 and 492
      */
     private String nextTransactionId() {
-        Optional<String> highestStored;
+        Long allocated;
         try {
-            highestStored = this.transactions.findMaxTranId();
-        } catch (RuntimeException lookupFailure) {
-            // WHY : Assumptions: the browse-failure sentence is the reference's answer for this
-            //       condition, and it is UPPERCASE here. Lines 463 and 492 emit 'Unable to lookup
-            //       Transaction...' where the list screen's own lookup failures at lines 615, 649 and
-            //       683 of app/cbl/COTRN00C.cbl emit the same words with a lower-case t. Two programs,
-            //       two strings; the constant carried here is this program's.
+            allocated = this.transactions.allocateTransactionId();
+        } catch (RuntimeException allocationFailure) {
+            // WHY : Assumptions: the browse-failure sentence is the reference's answer for a derivation
+            //       that could not be completed, and it is UPPERCASE here. Lines 463 and 492 emit
+            //       'Unable to lookup Transaction...' where the list screen's own lookup failures at
+            //       lines 615, 649 and 683 of app/cbl/COTRN00C.cbl emit the same words with a lower-case
+            //       t. Two programs, two strings; the constant carried here is this program's.
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED,
-                    lookupFailure);
+                    allocationFailure);
         }
 
-        // WHY : Assumptions: the stored value is trimmed before it is parsed because the column is a
-        //       fixed-width character type, so a driver may return it padded to its declared width. The
-        //       digit test is separate from the parse so that a value which is not a number is reported
-        //       with the reference's own browse-failure sentence rather than surfacing as an arithmetic
-        //       complaint naming no field.
-        long highest = FIRST_TRANSACTION_ID - 1L;
-        if (highestStored.isPresent()) {
-            String stored = highestStored.get().strip();
-            if (stored.isEmpty() || !stored.chars().allMatch(Character::isDigit)) {
-                throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED);
-            }
-            highest = Long.parseLong(stored);
-        }
-
-        long next = highest + 1L;
-        if (numberOfDigits(next) > BillPaymentMapper.IDENTIFIER_WIDTH) {
+        // WHY : Assumptions: a null return is a failed allocation rather than a zero. The statement
+        //       selects one value from a sequence and cannot legitimately answer with nothing, so a null
+        //       means the query did not do what it says; defaulting to zero would then derive identifier
+        //       one over a populated table and collide on the first attempt.
+        if (allocated == null) {
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED);
         }
 
-        // WHY : Assumptions: sixteen digits is the widest value this can produce and it fits a signed
-        //       64-bit integer with four orders of magnitude to spare, so the increment above cannot
-        //       overflow before the width guard above rejects it. That is why no arbitrary-precision
-        //       type is used for what is arithmetic on a bounded key.
-        return String.format("%0" + BillPaymentMapper.IDENTIFIER_WIDTH + "d", next);
-    }
+        // WHY : Assumptions: sixteen digits is the widest value the column holds and it fits a signed
+        //       64-bit integer with four orders of magnitude to spare, so no arbitrary-precision type is
+        //       used for what is a bounded key. The guard turns a value the column cannot hold into the
+        //       reference's own sentence rather than into a truncated key or a database error naming no
+        //       field.
+        if (Long.toString(allocated).length() > BillPaymentMapper.IDENTIFIER_WIDTH) {
+            throw new IllegalStateException(BillPaymentMapper.MESSAGE_TRANSACTION_LOOKUP_FAILED);
+        }
 
-    /**
-     * Counts the decimal digits a non-negative identifier value occupies.
-     *
-     * <p>Assumptions: this exists so the width guard above reads as the contract it enforces rather than
-     * as a comparison against a magnitude literal. It is called only with a value derived from a stored
-     * key plus one, which is why it is not written to handle a negative input.</p>
-     *
-     * @param value the identifier value to measure, never negative
-     * @return the number of decimal digits the value occupies, at least one
-     */
-    private int numberOfDigits(long value) {
-        return Long.toString(value).length();
+        return String.format("%0" + BillPaymentMapper.IDENTIFIER_WIDTH + "d", allocated);
     }
 
     /**
@@ -783,7 +890,15 @@ public class BillPaymentService {
         }
 
         try {
-            return this.transactions.save(row);
+            // WHY : Refactoring Rationale: the write is FLUSHED here rather than left to the transaction's
+            //       end, and the change closes a defect the deferred form hid. With the insert deferred, a
+            //       key collision that slipped past the guard above was raised at commit time, OUTSIDE
+            //       these catch blocks, so it reached the shared advice as an unclassified failure and was
+            //       answered with the generic internal sentence instead of the refusal the reference emits
+            //       at line 536. Flushing also puts the insert at the position line 233 gives it, before
+            //       the balance change at line 235, so the two statements reach the database in the order
+            //       the reference issues them.
+            return this.transactions.saveAndFlush(row);
         } catch (DataIntegrityViolationException duplicate) {
             // WHY : Assumptions: this is re-raised unchanged rather than wrapped, which is the whole
             //       point of catching it separately. Wrapping it would present a key collision as an

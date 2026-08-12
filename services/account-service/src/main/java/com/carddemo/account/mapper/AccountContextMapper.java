@@ -4,6 +4,7 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.dto.AccountContextView;
 import com.carddemo.account.dto.AccountViewResponse;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefView;
 import com.carddemo.common.money.Money;
 import java.time.LocalDate;
@@ -18,11 +19,13 @@ import org.springframework.stereotype.Component;
  * decisions belonging to the contract rather than to the row -- which fields cross at all, which are
  * withheld, and how an exact amount is represented -- are made once and justified where they happen.</p>
  *
- * <p>Assumptions: every projection here NARROWS. Nothing this class produces carries a field the consumer
- * does not read, and two of the three published operations carry strictly fewer fields than the row they
- * come from. That direction is deliberate: a projection that carried the whole row would be indistinguishable
- * from returning the entity, and the first field a consumer started reading by accident would become part of
- * the contract without anyone deciding it had.</p>
+ * <p>Assumptions: every projection here carries what its own consumer reads and nothing further, which for
+ * all but one of them means it NARROWS the row. That direction is deliberate: a projection that carried the
+ * whole row would be indistinguishable from returning the entity, and the first field a consumer started
+ * reading by accident would become part of the contract without anyone deciding it had. The single exception
+ * is {@link #toCardXrefByAccountView(CardXref)}, which carries all three cross-reference columns because its
+ * consumer reads all three; the reason is recorded on that method, and it is stated as an exception rather
+ * than allowed to weaken the rule for the rest.</p>
  *
  * <p>Assumptions: this class is a {@code @Component} with no state and no collaborators. It is a bean rather
  * than a holder of static methods so that a controller receives it by constructor injection and can be
@@ -53,6 +56,36 @@ public class AccountContextMapper {
     public CardXrefView toCardXrefView(CardXref row) {
         Objects.requireNonNull(row, "row must not be null");
         return new CardXrefView(row.getAccountId(), row.getCustomerId());
+    }
+
+    /**
+     * Projects a cross-reference row onto the shape the ACCOUNT-keyed lookup publishes.
+     *
+     * <p>Refactoring Rationale: this projection exists because the account-keyed operation used to reuse
+     * {@link #toCardXrefView(CardXref)}, and that projection deliberately drops the card number. Dropping it
+     * is right for a caller that supplied the card and wrong for a caller that supplied the account: the
+     * account-keyed consumer transcribes {@code READ-CXACAIX-FILE} at lines 576 to 604 of
+     * {@code app/cbl/COTRN02C.cbl}, which takes {@code XREF-CARD-NUM} from the record it reads and writes the
+     * posted transaction under it, so the one field it needs was the one field the shared projection removed.
+     * The two operations now have one projection each, and each carries exactly what its own consumer
+     * reads.</p>
+     *
+     * <p>Trade-offs: this is the ONE projection in this class that does not narrow -- it carries all three of
+     * the row's columns. That breaks the class-level rule stated above, and the rule is restated with its
+     * exception rather than quietly relaxed: a projection carrying a whole row is indistinguishable from
+     * returning the entity, so the justification has to be that the consumer reads all three, which here it
+     * does. The record it answers with is nonetheless a separate published type and not the entity, so the
+     * row's identity, its lifecycle and any column added to it later stay on this side of the boundary.</p>
+     *
+     * @param row the stored cross-reference row; must not be {@code null}
+     * @return the published projection carrying the account, the customer and the card number in full, never
+     *     {@code null}
+     * @throws NullPointerException if {@code row} is {@code null}, because an absent row is a not-found
+     *     answer that the caller decides on, not a value to project
+     */
+    public CardXrefByAccountView toCardXrefByAccountView(CardXref row) {
+        Objects.requireNonNull(row, "row must not be null");
+        return new CardXrefByAccountView(row.getAccountId(), row.getCustomerId(), row.getCardNum());
     }
 
     /**

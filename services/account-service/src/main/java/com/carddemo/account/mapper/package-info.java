@@ -21,18 +21,15 @@
  *
  * <h2>What this package translates</h2>
  *
- * <p>Refactoring Rationale: this roster named TWO projections, was corrected to FOUR, and the package
- * holds FIVE. The omissions were never incidental -- {@code CustomerMapper} is the only cryptography
- * boundary in the service and the only place either protected identifier is masked,
- * {@code CardXrefMapper} is where the primary account number is masked to its last four digits, and
- * {@code AccountMapper} owns the other half of the account-update request that {@code CustomerMapper}
- * does not. A charter that listed the concerns and then omitted the files performing them would send a
- * reader looking for the masking rule to the files that do not hold it. Twice corrected by hand is
- * twice too many, so the enumeration is now MEASURED rather than counted: the marker line below and
- * every class name enumerated under it are checked against this directory on every build by
+ * <p>Assumptions: the enumeration below is MEASURED rather than counted -- the marker line and every
+ * class name under it are checked against this directory on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so a sixth translation authored without an entry here fails the build instead of quietly making this
- * paragraph wrong a third time.</p>
+ * so a sixth translation authored without an entry here fails the build rather than quietly making this
+ * roster wrong. Measuring it matters because an omission here misdirects a reader looking for a specific
+ * rule: {@code CustomerMapper} is the only cryptography boundary in the service and the only place either
+ * protected identifier is masked, {@code CardXrefMapper} is where the primary account number is masked to
+ * its last four digits, and {@code AccountMapper} owns the half of the account-update request that
+ * {@code CustomerMapper} does not.</p>
  *
  * <p>Five translations are authored here, and each is cited by what it actually converts rather than by
  * what its name suggests:
@@ -342,100 +339,6 @@
  * documentation gate, the test runner and the architecture test each either pass or fail. A build here
  * is therefore never described as green at a warn level, because no such outcome exists to describe.
  * </p>
- *
- * <h2>Why this descriptor exists</h2>
- *
- * <p>Assumptions: two independent obligations put this file here, and either alone would be enough.
- * The project Explainability rule requires a docstring on every module entry point at its L15, and in
- * Java a package declaration is that entry point, so a package descriptor is the only compilation unit
- * in which a package-level docstring can be written at all. There is no alternative location for
- * it.</p>
- *
- * <p>The second obligation is mechanical and it is build-fatal, and it takes two checks rather than
- * one. {@code JavadocPackage} is declared at L245 of {@code config/checkstyle/checkstyle.xml}, at
- * Checker level and therefore outside the tree walker that opens at L259, which makes it a file-set
- * check: it demands that a package descriptor FILE EXIST in any directory holding a processed
- * compilation unit, and this directory holds two. {@code MissingJavadocPackage} is declared at L378,
- * inside that tree walker, and it demands that the file CARRY Javadoc. A descriptor holding nothing but
- * a bare package statement satisfies the first and fails the second, so neither omitting this file nor
- * emptying it was available. The gate runs under execution id
- * {@code checkstyle-documentation-gate} at {@code services/pom.xml} L854, bound to the Maven
- * {@code validate} phase at L855, with {@code failOnViolation} true at L944,
- * {@code violationSeverity} at warning at L945 and {@code includeTestSourceDirectory} true at L972,
- * against a Checkstyle engine pinned to 13.8.0 at L461. It therefore fails closed, before compilation,
- * on every developer machine rather than only in continuous integration, and the suppression filter it
- * loads is declared non-optional at L228 of the ruleset so a missing suppression file cannot silently
- * disable it.</p>
- *
- * <p>Assumptions: the parameter, return-value and exception elements the rule enumerates at its L19 to
- * L21 describe callable code and have no counterpart on a package declaration, so they are omitted
- * here deliberately rather than written out empty; L21 is itself qualified as applying where
- * applicable. Fabricating a block tag to look compliant would add unverifiable content and would
- * offend the rule's own prohibition on vague rationale at L41. No authorship or version tag appears
- * either: the formatting checks that would require one are absent from the ruleset, and the written
- * convention at {@code docs/CODE_DOCUMENTATION_STANDARD.md} enumerates four docstring elements, none
- * of which is such a tag.</p>
- *
- * <p>Assumptions: the exception obligation on the methods in this package rests on the rule's L21
- * together with the house convention at {@code tests/README.md} L544 to L549 and the
- * {@code validateThrows} property set true at L455 of the ruleset. It does not rest on the rule's
- * validation gate at L43, whose triad names purpose, parameters and return values and does not
- * mention exceptions. A method here that validates an argument or decodes a width does raise, so the
- * obligation is live even though the gate sentence omits it.</p>
- *
- * <p>Assumptions: the rule's adjacency requirement at L27 asks that a justification sit beside the
- * code it explains, and a package descriptor has no code beside it, so the equivalent here is a
- * labelled sentence inside this block. That equivalence does not travel into the classes. In a mapper
- * method the labelled justification belongs AT THE MAPPING SITE, on the statement that masks, drops,
- * renames, truncates or converts, and not gathered into a class header where a reviewer cannot tell
- * which of several decisions it was written for.</p>
- *
- * <p>Every rationale in this block carries one of exactly four labels, written plural,
- * unparenthesised, colon-terminated and without emphasis markup, as
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes them at L203 to L226 and as the rule itself words
- * them at L31 to L34. Assumptions: a singular or parenthesised variant of a label is read by search
- * before it is read by a person, so a variant form is not a stylistic difference but a rationale that
- * an audit does not find. The abbreviated singular forms are named at L218 to L219 of that standard as
- * not permitted, and the ASCII hyphen in the fourth label is required because the surrounding
- * documentation elsewhere in the repository uses a non-breaking hyphen that no ordinary search
- * matches.</p>
- *
- * <h2>What a passing build does and does not establish</h2>
- *
- * <p>Trade-offs: the gate mechanises the docstring half of the rule thoroughly and the rationale half
- * not at all, and stating where the line falls is worth more than a claim of full coverage. It reaches
- * further than it first appears to: {@code MissingJavadocMethod} at L363 of the ruleset is configured
- * at private scope with its allowed-annotations list explicitly cleared, so an overriding method and a
- * private helper are both audited rather than exempted, and inherit-documentation alone satisfies
- * none of the rule's docstring elements. That matters directly here, because the reply encoder in this
- * package carries four private helpers.</p>
- *
- * <p>Assumptions: the rule's concession at its L23, permitting a single-line docstring on a trivial
- * accessor, is a concession about FORMAT and not a waiver of the obligation, and it is restated here
- * because reading it as a waiver is the likelier mistake. A one-line docstring is still a docstring and
- * must still state the purpose the rule's L18 asks for. Two further limits apply in this package. The
- * concession reaches a trivial accessor only, so none of the helpers here qualifies: a method that
- * decodes a sign convention, applies a declared width or masks a value is carrying a decision and
- * needs the fuller form. And the concession remains usable at all only because
- * {@code SingleLineJavadoc} is absent from the ruleset, which is what keeps a compact block legal
- * rather than a violation; were that module ever added, the format the rule expressly permits would
- * start failing the build.</p>
- *
- * <p>What the gate cannot do is enumerated in the ruleset's own header at L61 to L93, and none of it is
- * delegated away silently. It cannot judge whether a comment explains why rather than what; it cannot
- * detect a comment that merely restates the code beside it; it cannot verify that one of the four
- * categories was actually documented, nor that a category which is named was written in the canonical
- * form; it cannot identify which implementation choices are non-obvious, and so cannot detect one left
- * undocumented; and it detects a vague rationale only inside a Javadoc summary. The exception check has
- * its own blind spots for the same reason: it carries no knowledge of an exception hierarchy, so a
- * documented supertype and the exact type raised are indistinguishable to it.</p>
- *
- * <p>The consequence is the single most useful sentence a mapper author can read here, and it follows
- * from the rule's validation gate at L43 being CONJUNCTIVE. The docstring requirement and the
- * inline-rationale requirement fail review independently, so a method carrying a complete docstring
- * and an unexplained masking decision fails, and it fails while the build is green. A green
- * {@code validate} is evidence that the docstrings are present, and it is not evidence that the rule is
- * satisfied.</p>
  *
  * <h2>What this package never contains</h2>
  *

@@ -92,30 +92,15 @@
  * excluded, because a charter is documentation rather than delivery -- and a test compares that
  * document's number against this subtree, so the two cannot drift apart silently.
 
- * <p>Refactoring Rationale: the figure read 42 across 8 packages and now reads 53 across 10, and
- * the eleven-class difference is entirely the context's BATCH half, which was missing. The
- * orchestrator dispatches three {@code --job=} tokens at this task definition and this module's
- * runner accepted and validated all three -- but no bean answered to any of the three names, so a
- * dispatched run resolved nothing and an accepted report submission produced no artifact. What
- * landed is 3 task components plus the artifact publisher they share ({@code .task}), 3
- * object-store sinks ({@code .sink}), and 2 configuration classes: the storage client and the
- * keyed tokeniser the artifact object key is derived through, so that no key carries an account
- * identifier or any part of a card number.
- *
- * <p>Refactoring Rationale: an earlier revision of this section recorded 21 landed classes of a
- * target 32 and listed eleven behavioural types as planned and not yet authored. All eleven have
- * since landed and the delivered figure is 42 rather than 32, so the section is replaced rather
- * than adjusted. Two reasons account for the ten-class difference and neither is scope creep.
- * Three of them are transport aggregates in {@code .dto} -- {@code ReportSubmissionOutcome},
- * {@code TransactionDetailReport} and {@code StatementDocument} -- each existing because one
- * published operation returns two populations or a discriminated outcome that no single
- * pre-existing record could carry; a body claiming a submission while carrying no run handle
- * would otherwise have been read differently by two conforming clients. The other three are
- * view projections in {@code .domain} -- {@code AccountView}, {@code CustomerView} and
- * {@code CardXrefView} -- which the statement path reads and which the domain charter had
- * always named, so they close a stated roster rather than extending one. The remaining
- * difference is a fifth repository role, {@code TransactionReportRepository}, carrying the
- * four-way join the detail report needs.
+ * <p>Assumptions: the two packages a reader may not expect to find under a reporting context are
+ * {@code .task} and {@code .sink}, and they are this context's BATCH half rather than an extension of
+ * its API half. The orchestrator dispatches three {@code --job=} tokens at this module's task
+ * definition, so a bean has to answer to each of the three names or a dispatched run resolves nothing
+ * and an accepted report submission produces no artifact. {@code .task} holds the three task components
+ * and the artifact publisher they share, {@code .sink} holds the three object-store sinks, and two of
+ * the configuration classes exist for the same half: the storage client, and the keyed tokeniser the
+ * artifact object key is derived through, so that no key carries an account identifier or any part of a
+ * card number.
  *
  * <p>Trade-offs: stating a measured count at all ties this charter to the moment it was
  * measured, and a later class added without updating it would make it wrong. That cost is
@@ -206,16 +191,14 @@
  * {@code v_card_xref}. A view absent at runtime is a defect to report against
  * data-migration, never to work around from here.
  *
- * <p>Refactoring Rationale: the paragraph above previously ended by recording that "neither
- * those views nor most of those migrations exist at this checkpoint". Both halves are now
- * false and both were checkable when written down, which is why the sentence is replaced by
- * the file name rather than merely deleted: {@code V1__reporting_views.sql} declares all
- * seven views, and every one of the seven per-service migrations it depends on is present --
- * {@code V1__account.sql}, {@code V1__auth.sql}, {@code V1__authorization.sql},
- * {@code V1__batch.sql}, {@code V1__card.sql}, {@code V1__reference.sql} with its
- * {@code V2__seed_reference.sql} companion, and {@code V1__ledger.sql}. A charter recording
- * a dependency as absent when it is present is worse than one recording nothing: it invites
- * the reader to treat a working path as unavailable and to route around it.
+ * <p>Assumptions: that ordering is satisfiable today rather than aspirational, and it is named by
+ * file so a reader can check it: {@code V1__reporting_views.sql} declares all seven views, and every
+ * one of the seven per-service migrations it depends on is present -- {@code V1__account.sql},
+ * {@code V1__auth.sql}, {@code V1__authorization.sql}, {@code V1__batch.sql}, {@code V1__card.sql},
+ * {@code V1__reference.sql} with its {@code V2__seed_reference.sql} companion, and
+ * {@code V1__ledger.sql}. The dependency is recorded as a required ORDER rather than as a risk,
+ * because a view absent at runtime is a defect to report against data-migration and never one to route
+ * around from here.
  *
  * <p>Agreement with the other contexts runs through
  * the physical views and that grant, never through code: no module in this reactor declares

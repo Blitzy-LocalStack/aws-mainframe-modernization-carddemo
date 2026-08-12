@@ -157,6 +157,96 @@ logging:
     #       file, so the replacement is expressed here rather than deferred.
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5p [%X{traceId:-} %X{spanId:-} %X{correlationId:-} %X{requestId:-}] %logger{36} : %msg%n"
 
+  level:
+    # WHY : (1) Refactoring Rationale: this ONE framework logger is switched off,
+    #       and it is switched off because it defeats every redaction this
+    #       repository owns. The pinned starter's message sink logs
+    #       `error("Error processing message {}.", id, throwable)` with the
+    #       throwable as its trailing argument -- verified from the compiled
+    #       class, io.awspring.cloud.sqs.listener.sink
+    #       .AbstractMessageProcessingPipelineSink -- so the logging facade
+    #       renders the exception, then every cause, then their MESSAGES. Those
+    #       messages are not written here: they come from a JDBC driver quoting
+    #       the statement it could not run, a codec quoting the bytes it could not
+    #       read, a validation library naming the value it rejected. Any of them
+    #       can carry a primary account number or a whole request record, and this
+    #       is the queue-side counterpart of exactly the exposure
+    #       com.carddemo.common.observability.ThrowableDigest exists to close on
+    #       the servlet side.
+    #       (2) Assumptions: the line is unreachable by any other means. It fires
+    #       from inside the framework whether or not a listener registers an
+    #       error handler, so a handler cannot suppress it; and this repository
+    #       ships no logback-spring.xml -- deliberately, because one would take
+    #       over the appender chain wholesale -- so there is no filter to install
+    #       instead. A level of `off` is the only mechanism that reaches it, and
+    #       it is declarative and resolved before the logging system initialises.
+    #       (3) Assumptions: nothing diagnostic is lost, because a replacement
+    #       record is written by code this repository owns. Each of the three
+    #       consuming contexts -- account-service, authorization-service and
+    #       reference-service -- publishes
+    #       com.carddemo.common.messaging.RethrowingDigestErrorHandler as
+    #       an ErrorHandler bean, which the starter's own factory method takes from
+    #       the context and installs. It logs the failure as a ThrowableDigest --
+    #       the chain of TYPES and the frames, with no message text -- and then
+    #       rethrows, so the delivery semantics are untouched: the message becomes
+    #       visible again after its visibility timeout and reaches the dead-letter
+    #       queue at the fifth receive exactly as before. The rethrow is not
+    #       stylistic. The starter installs its error-handler stage as a RECOVERY
+    #       step, so a handler that returned normally would leave the pipeline
+    #       result successful and the acknowledgement stage that runs after it
+    #       would DELETE the message; that case has its own test.
+    #       (4) Trade-offs: this pins one logger by its fully qualified name, so a
+    #       future starter version that renames or relocates that class would
+    #       silently stop the suppression. Accepted because the alternative --
+    #       switching off the whole `io.awspring.cloud.sqs.listener.sink` package
+    #       -- would also silence the sink's legitimate lifecycle records, and
+    #       because a rename is caught by common-lib's own
+    #       MessageSinkSuppressionTest, which loads the class by that exact name,
+    #       reads its logger field and asserts the logger carries that same name,
+    #       and resolves this very property through the same config-data import a
+    #       service uses. A rename upstream, a moved class or an edited key each
+    #       fail there rather than silently restoring the exposure.
+    io.awspring.cloud.sqs.listener.sink.AbstractMessageProcessingPipelineSink: "off"
+
+server:
+  error:
+    # WHY : (1) Refactoring Rationale: the request path is withheld from the
+    #       framework's FALLBACK error body, and it was not. Spring Boot defaults
+    #       server.error.include-path to `always` while defaulting the message,
+    #       the exception, the stack trace and the binding errors to withheld, so
+    #       the path was the one attacker-supplied value the fallback body echoed.
+    #       That body is produced for the errors the shared advice does not see --
+    #       a dispatcher 404, a container-level failure -- and the path there is
+    #       assembled by whoever sent the request, so a caller inventing
+    #       /api/v1/4111111111111111 had it reflected back verbatim.
+    #       (2) Assumptions: this does NOT weaken the diagnostics the shared
+    #       advice produces. com.carddemo.common.error.ApiError carries its own
+    #       path member and the advice populates it through
+    #       com.carddemo.common.security.CardNumberMasker, so the handled path
+    #       keeps a masked path and this key governs only the unhandled fallback
+    #       -- two bodies, two owners, and the one without a masker is the one
+    #       silenced.
+    #       (3) Alternatives Considered: masking the fallback path instead, by
+    #       contributing a DefaultErrorAttributes subclass. Rejected as more
+    #       moving parts for less: it would add a bean to every service to
+    #       improve a body no client of this system reads, where every published
+    #       operation answers through the advice. Withholding is the simpler
+    #       control and it cannot be bypassed by an error arising before the bean
+    #       is reachable.
+    include-path: never
+
+    # WHY : Assumptions: the framework's own defaults for these four are already
+    #       `never`/false, and they are PINNED here rather than left implicit
+    #       because they are the other four members of the same body and an
+    #       upstream default change to any of them would reopen the same class of
+    #       exposure with nothing in this repository recording it. Stating them
+    #       costs four lines and makes the whole fallback body's contract
+    #       readable in one place.
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+    include-exception: false
+
 management:
   logging:
     export:

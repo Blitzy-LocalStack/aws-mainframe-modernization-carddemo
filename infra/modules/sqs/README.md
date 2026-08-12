@@ -496,10 +496,25 @@ so a root does not have to reconstruct it:
 | `authorization-service` | `pauth_request` | `pauth_reply` |
 | `account-service` | `account_inquiry_request` | `inquiry_reply`, `error` |
 | `reference-service` | `date_inquiry_request` | `inquiry_reply`, `error` |
+| `batch-service` | *(nothing)* | `error` |
 
 Assumptions: callers pass only the exact per-service subset into `ecs-service`.
 Granting `values(queue_arns)` instead would hand every service every queue and
 defeat the boundary the split request queues exist to create.
+
+Refactoring Rationale: the `batch-service` row did not exist, and its absence was
+the IAM half of a producer that could not publish. `batch-service` carries a queue
+configuration whose only purpose is to notify this terminal sink that a nightly run
+failed — the migration plan scopes such a configuration to exactly two bounded
+contexts, batch and authorization — and the task role it ran under held no
+`sqs:SendMessage` statement for any queue at all, so the first send the producer
+ever attempted would have been refused on the failure path. The receive column is
+empty and stays empty: `batch-service` declares no listener of any kind, selecting
+its work from a command argument the orchestrator supplies and from its own tables,
+so a receive grant it has no consumer for could only be used to drain a queue
+another context is the sole consumer of. `ecs-service` derives the cardinality of
+its queue policy from the length of each list, so a send-only entry produces a
+send-only statement rather than an empty receive statement.
 
 ## Validation
 
@@ -708,5 +723,5 @@ table, and regenerate with the command in
 | <a name="output_queue_arns"></a> [queue\_arns](#output\_queue\_arns) | Map of logical queue name to queue ARN for all twelve queues, keyed identically to queue\_urls. Callers pass only the exact per-service subset into ecs-service's sqs\_send\_queue\_arns and sqs\_receive\_queue\_arns; using values(...) for all queues would defeat the confused-deputy boundary. |
 | <a name="output_queue_names"></a> [queue\_names](#output\_queue\_names) | Map of logical queue name to bare queue name for all twelve queues, keyed identically to queue\_urls. CloudWatch dimensions SQS metrics on QueueName, so the split account/date request keys also split their depth, age and dead-letter signals. |
 | <a name="output_queue_urls"></a> [queue\_urls](#output\_queue\_urls) | Map of logical queue name to queue URL for all twelve queues, keyed by the resource labels main.tf uses. The account\_inquiry\_request and date\_inquiry\_request keys are intentionally separate so each consumer resolves only its own work queue. |
-| <a name="output_service_queue_permissions"></a> [service\_queue\_permissions](#output\_service\_queue\_permissions) | Exact per-service SQS IAM boundaries. authorization-service receives pauth\_request and sends only pauth\_reply; account-service receives only account\_inquiry\_request and sends only inquiry\_reply/error; reference-service receives only date\_inquiry\_request and sends only inquiry\_reply/error. Pass these lists to ecs-service rather than granting values(queue\_arns). |
+| <a name="output_service_queue_permissions"></a> [service\_queue\_permissions](#output\_service\_queue\_permissions) | Exact per-service SQS IAM boundaries. authorization-service receives pauth\_request and sends only pauth\_reply; account-service receives only account\_inquiry\_request and sends only inquiry\_reply/error; reference-service receives only date\_inquiry\_request and sends only inquiry\_reply/error; batch-service receives NOTHING and sends only error. Pass these lists to ecs-service rather than granting values(queue\_arns). |
 <!-- END_TF_DOCS -->

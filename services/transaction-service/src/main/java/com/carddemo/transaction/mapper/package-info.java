@@ -38,19 +38,25 @@
  *       themselves landed in the sibling {@code dto} package.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: this census previously read "three files, of which ONE is
- * landed", marked both mappers PLANNED and described {@code BillPaymentResponse} as not yet
- * authored. All four statements were untrue of the directory beside it:
- * {@code TransactionMapper} was present, {@code BillPaymentResponse} was present, and
- * {@code BillPaymentMapper} was the only genuine absence. A charter is the one place a reader
- * consults to find out what converts what, so a census that under-reports is worse than none
- * -- it makes a present class look missing and gives a reader no way to tell an unauthored
- * contract from a mislaid one. The inventory is still closed at three; every entry is now
- * marked against the file that is actually there, and {@code BillPaymentMapper} has been
- * authored to close the one real gap.
+ * <p>Assumptions: the sibling {@code dto} package now holds a THIRD payment shape,
+ * {@code BillPaymentPreview}, and this package deliberately does not serve it -- so the inventory is
+ * still closed at three and no fourth mapper is missing. That shape carries an account identifier, a
+ * balance and a sentence, and all three are already in hand at the service that answers the turn: none
+ * is read from a copybook layout, none is padded, narrowed, masked or renamed, and there is therefore
+ * no representation concern for this package to absorb. A mapper method for it would translate nothing,
+ * which is the one thing this package's own charter says a mapper must not be. Its construction site is
+ * the withheld factory on the record itself, which fixes the discriminator the published schema
+ * declares constant -- the same discipline {@code BillPaymentResponse.posted} applies on the other
+ * arm, reached from this package rather than from the service only because that shape genuinely does
+ * convert a ledger row.</p>
  *
- * <p>Assumptions: each mapper was authored alongside the conversion it governs rather than ahead of
- * it, which is why this roster moved rather than the plan. A mapper with no shape to convert into
+ * <p>Assumptions: the inventory is closed at three compilation units and every entry is marked
+ * against the file that is actually there. A charter is the one place a reader consults to find out
+ * what converts what, so a census that under-reports is worse than none -- it makes a present class
+ * look missing and gives a reader no way to tell an unauthored contract from a mislaid one.
+ *
+ * <p>Assumptions: each mapper is authored alongside the conversion it governs rather than ahead of
+ * it. A mapper with no shape to convert into
  * converts nothing that can be exercised, and this package's whole purpose is to be the one place
  * where copybook representation concerns are justified at the point of decision -- masking, padding,
  * narrowing, renaming. Those decisions are written when the conversion they govern is written, and
@@ -70,9 +76,13 @@
  * is one mapper per persistence entity, which would make six files rather than
  * three, because {@code domain} holds four entities. It is not available, and
  * the reason is a fact about the sibling package rather than a preference here.
- * The {@code dto} package is a closed inventory of eight files, seven of them
- * records -- all seven authored -- and those seven serve
- * the four migrated online screens only. No
+ * The {@code dto} package is a closed inventory of twelve files, nine of them
+ * records -- all nine authored -- and those nine serve
+ * the four migrated online screens only. Two of the nine are the preview shapes
+ * the two write screens answer their non-writing turns with, and they need no
+ * mapper of their own: neither converts a stored row, because on those turns no
+ * row exists, so each is composed directly by the service from the value its own
+ * validation derived. No
  * transfer object exists for {@code DailyTransaction}, for
  * {@code TransactionCategoryBalance} or for {@code TransactionReject}, so a
  * mapper for any of the three would have nothing on the far side to map to and
@@ -93,17 +103,13 @@
  *
  * <p>Assumptions: three counts of a small number meet in this module and are
  * kept textually distinct throughout. The module holds eight Java packages and
- * therefore eight package charters. The {@code dto} package holds eight files,
- * which is a different quantity that happens to share a digit. This package
+ * therefore eight package charters. The {@code dto} package holds twelve files,
+ * which is a different quantity that once happened to share a digit and no longer
+ * does -- that quantity moved to twelve when each write screen's non-writing turn
+ * gained its own shape, while the package count did not move at all. This package
  * holds three files. None of the three figures is derivable from either of the
- * others, so each is stated where it is owned rather than restated here.
- *
- * <p>Refactoring Rationale: the {@code dto} figure above previously read "six of the seven
- * authored at this checkpoint". All seven records are present, and the understatement mattered
- * because the sentence's own argument is that a mapper cannot exist without a transfer object
- * on the far side -- so an under-reported {@code dto} census reads as a reason a mapper is
- * absent when no such reason exists. The count is verified against the directory rather than
- * inherited from the previous revision.
+ * others, so each is stated where it is owned rather than restated here, and each is
+ * verified against its own directory rather than inherited.
  *
  * <h2>Why two mappers and not one</h2>
  *

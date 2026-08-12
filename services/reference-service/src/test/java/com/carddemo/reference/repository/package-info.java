@@ -112,15 +112,30 @@
  * deliberately absent from {@code config/checkstyle/checkstyle.xml}, recorded there at lines 568 to
  * 576.</p>
  *
- * <h2>The inventory this package owns, and the shared base that is not a further file</h2>
+ * <h2>The inventory this package owns, and the shared base that has a file of its own</h2>
  *
- * <p>Assumptions: the closed set is <b>eight compilation units</b> -- this charter and seven
- * integration-test classes, one per repository interface. The naming rule is that a class takes the
- * name of the interface it covers with {@code IT} appended, so the set is
+ * <p>Assumptions: the closed set is <b>eleven compilation units</b> -- this charter, the shared
+ * container fixture {@code ReferencePersistenceBase}, and nine integration-test classes. The naming rule
+ * is that a class takes the name of the interface it covers with {@code IT} appended, and the nine are
  * {@code TransactionTypeRepositoryIT}, {@code TransactionCategoryRepositoryIT},
  * {@code DisclosureGroupRepositoryIT}, {@code UsPhoneAreaCodeRepositoryIT},
- * {@code PhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT} and
- * {@code UsStateZipPrefixRepositoryIT}.</p>
+ * {@code PhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT},
+ * {@code UsStateZipPrefixRepositoryIT}, {@code StateRepositoryIT} and
+ * {@code StateZipPrefixRepositoryIT}.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph claimed eight units and named seven classes while the
+ * directory held ten, and both halves of the discrepancy are corrected here rather than one of them.
+ * The count moved to eleven for two independent reasons. The shared fixture became a file of its own,
+ * which is recorded in the paragraph below. And the roster was already two classes short of the
+ * directory: {@code StateRepositoryIT} and {@code StateZipPrefixRepositoryIT} exist and were never
+ * listed, even though the paragraph further down names their unprefixed forms as <b>not</b> the names
+ * to use. Assumptions: the discrepancy is recorded as a measurement rather than resolved by deleting
+ * files, because those two classes hold nine asserting cases between them and removing a passing
+ * assertion is a behavioural decision this charter is not the place to take. Trade-offs: the package
+ * therefore holds two pairs of classes reading the same two seeded tables -- the prefixed and unprefixed
+ * forms over {@code reference.us_states} and {@code reference.us_state_zip_prefixes} -- which is one
+ * more engine-backed class per table than the naming rule intends and is stated here so that a reader
+ * meets it as a known duplication rather than as a surprise.</p>
  *
  * <p>Refactoring Rationale: this set was seven units covering six interfaces, and it grew by one when
  * the main tree reinstated {@code PhoneAreaCodeRepository} as the classification-scoped membership
@@ -141,16 +156,17 @@
  * reach for, and a class named for a subject it does not cover breaks the property the whole naming
  * rule buys: that the interface under test is derivable from the test's own name.</p>
  *
- * <p>Alternatives Considered: <b>the shared container fixture is declared as a second, package-private,
- * top-level type inside {@code TransactionTypeRepositoryIT.java} rather than as an eighth file.</b>
- * A separate file would take the set to eight and break the closed-set property above, which the
- * sibling packages of this module rely on when they state their own inventories. A second top-level
- * type in one file is legal Java, since the restriction is one <em>public</em> top-level type per
- * file, and it passes the audit here specifically because
- * {@code config/checkstyle/checkstyle.xml} configures neither the one-top-level-type module nor the
- * outer-type-filename module; both are among the exclusions recorded in that file. Trade-offs: the
- * base type is then findable only by opening the class that hosts it, which is the cost accepted, and
- * it is the reason the hosting file is named here rather than left to a search.</p>
+ * <p>⚠️ Refactoring Rationale: <b>the shared container fixture now has a file of its own,
+ * {@code ReferencePersistenceBase.java}.</b> It was previously a second, package-private, top-level type
+ * inside {@code TransactionTypeRepositoryIT.java}, and this charter argued for that arrangement on the
+ * ground that a separate file would grow the closed set. The argument omitted the cost: an auxiliary
+ * top-level type accessed from another source file raises a compiler diagnostic in every accessing file,
+ * and all eight classes that extend the fixture raised one -- they were the only warnings this module
+ * emitted. Checkstyle's silence on the arrangement, which the old paragraph cited in its favour, is not
+ * evidence the compiler is silent too. A charter naming eleven files serves the enumerability the closed
+ * set exists for exactly as well as one naming eight, so the count is restated and the warnings are
+ * gone. Assumptions: the fixture keeps its name and stays package-private, because the nine test classes
+ * resolve it by simple name with no import between them and it.</p>
  *
  * <h2>The runner split is carried by the class-name suffix alone</h2>
  *
@@ -335,15 +351,17 @@
  *       bypassed.</li>
  * </ul>
  *
- * <h2>The envelope, and why backward availability is inferred</h2>
+ * <h2>The envelope, and how backward availability is answered</h2>
  *
  * <p>Assumptions: the published shape is {@code com.carddemo.common.web.PageResponse}, a record with
- * <b>exactly four components</b> in this order: the rows, the leading boundary token, the trailing
- * boundary token, and the further-page flag. It declares <b>no backward-availability component and no
- * page-size or total component</b>, and none is to be added from here. Backward availability is
- * therefore inferred from the presence of the leading token together with the caller's own position,
- * and an assertion here reads it that way; reaching for an accessor that does not exist is the mistake
- * this paragraph prevents.</p>
+ * <b>exactly five components</b> in this order: the rows, the leading boundary token, the trailing
+ * boundary token, the further-page flag and the earlier-page flag. It declares <b>no
+ * page-size or total component</b>, and none is to be added from here. Refactoring Rationale: this
+ * paragraph previously said the envelope had no backward-availability component and that an assertion
+ * here should infer one from the presence of the leading token. Both halves are superseded: the
+ * component exists and is settled by the read that produced the page, and the inference it replaced
+ * announced an earlier page on the opening page, because every page returning rows names its own
+ * leading row. An assertion here reads the accessor rather than reconstructing the answer.</p>
  *
  * <p>Assumptions: the two boundary components are opaque sealed tokens rather than raw keys, minted by
  * {@code com.carddemo.common.web.CursorToken} in the layer that assembles the envelope. The repository
@@ -352,9 +370,10 @@
  * token, never a token's text, because the text is an authenticated encoding and not the key.</p>
  *
  * <p>Assumptions: the envelope's own constructor already rejects an inconsistent instance -- a raw key
- * in a boundary position, a non-empty page missing a boundary, and a further-page claim without a
- * trailing boundary. A test here therefore asserts the query's row selection and ordering, and leaves
- * envelope well-formedness to the type that enforces it, rather than restating those three rules as
+ * in a boundary position, a non-empty page missing a boundary, a further-page claim without a
+ * trailing boundary, and an earlier-page claim without a leading one. A test here therefore asserts the
+ * query's row selection and ordering, and leaves
+ * envelope well-formedness to the type that enforces it, rather than restating those four rules as
  * assertions that would pass by construction.</p>
  *
  * <h2>Two test suites, two result models, and the quarantine between them</h2>

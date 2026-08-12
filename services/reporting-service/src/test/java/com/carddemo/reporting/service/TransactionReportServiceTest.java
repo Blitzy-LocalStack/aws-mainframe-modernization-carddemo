@@ -220,9 +220,10 @@ class TransactionReportServiceTest {
 
         assertThat(page.items()).hasSize(1);
         assertThat(page.items().get(0).transactionId()).isEqualTo("0000000000000001");
-        assertThat(page.hasPrevious())
-                .as("the opening page advertises no previous page")
-                .isFalse();
+        assertThat(page.firstKey())
+                .as("the opening page publishes the position a backward step is issued from, and makes no"
+                        + " claim about what waits there -- that is the caller's page ordinal to answer")
+                .isNotNull();
         verify(reports, never()).streamReportLinesWithin(any(), any());
     }
 

@@ -2,10 +2,7 @@
 // services/reference-service/src/test/java/com/carddemo/reference/repository/TransactionTypeRepositoryIT.java
 // -----------------------------------------------------------------------------
 // Purpose:
-//      The container-backed integration tests of TransactionTypeRepository, and
-//      the host of ReferencePersistenceBase -- the one engine fixture every
-//      class in this package shares, declared below as a second top-level type
-//      rather than as a further file.
+//      The container-backed integration tests of TransactionTypeRepository.
 //
 // WHY (non-obvious design decisions):
 //  (1) Assumptions: the four rationale labels below are written in the PLURAL
@@ -15,15 +12,19 @@
 //      singular spellings mean the same thing and are deliberately not used, so
 //      that the labels can be found by grep before they are read by a person.
 //      This equivalence is stated once here and nowhere restated.
-//  (2) Alternatives Considered: giving the shared fixture a file of its own,
-//      which is where a reader would look for it first. Rejected because it
-//      would take this package's closed set from eight compilation units to
-//      nine, which package-info.java rules against at its lines 144 to 153,
-//      and because the fixture's NAME is load-bearing: six sibling classes
-//      extend ReferencePersistenceBase by same-package resolution with no
-//      import, so moving or renaming it breaks all six at once. The remaining
-//      alternative, one engine per class, is answered beside the static
-//      initialiser further down this file.
+//  (2) Refactoring Rationale: the shared fixture used to be hosted HERE, as a
+//      second top-level type, on the argument that a file of its own would take
+//      this package's closed set from eight compilation units to nine. It now
+//      has its own file, ReferencePersistenceBase.java, because the arrangement
+//      cost eight compiler warnings: an auxiliary top-level type accessed from
+//      another source file raises one per accessing file, and every one of the
+//      eight sibling classes that extends the fixture raised it. Those were the
+//      only warnings this module produced. The fixture keeps its NAME and stays
+//      package-private, because the eight subclasses resolve it by simple name
+//      with no import, so a rename would be eight edits for nothing. The
+//      closed-set count is restated as nine in package-info.java rather than
+//      quietly abandoned. The remaining alternative, one engine per class, is
+//      answered in that file beside the static initialiser.
 //  (3) Alternatives Considered: the persistence-only test slice, which loads no
 //      configuration or component beans and is the narrower instrument for a
 //      repository assertion. Two concrete costs decided against it. It
@@ -69,6 +70,7 @@ package com.carddemo.reference.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.carddemo.reference.domain.TransactionCategory;
@@ -79,18 +81,10 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.SpringBootConfiguration;
-import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
-import org.springframework.boot.persistence.autoconfigure.EntityScan;
-import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
-import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * Verifies the transaction-type queries against a real PostgreSQL engine.
@@ -368,9 +362,30 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
      * violation states exactly the property that matters and does not depend on which of the two the
      * seeded row's version happens to produce.</p>
      *
+     * <p>Refactoring Rationale: this case is {@code @Transactional} so its write is ROLLED BACK, and that
+     * is a correction rather than a preference. Without it the repository call ran outside any transaction,
+     * so Spring Data opened one of its own and COMMITTED it -- the merge wrote a changed description into
+     * the first seeded row and left it there for every case that followed. The damage was not theoretical:
+     * a later case in this class had chosen a different subject row specifically to step around it, and
+     * recorded the avoidance as its reason, so the class was order-dependent and one of its assertions was
+     * shaped by the accident rather than by the property it meant to state. Rolling back leaves the seeded
+     * table exactly as the migration left it, which is what lets any case read any row.</p>
+     *
+     * <p>Assumptions: the property under test survives the rollback intact, because {@code saveAndFlush}
+     * flushes inside the transaction and the flush is where an integrity violation would be raised. What is
+     * given up is only the commit, and no assertion here depends on one.</p>
+     *
+     * <p>Alternatives Considered: wrapping the call in the class's own commit template with
+     * {@code setRollbackOnly}. Rejected because the annotation is the idiom the rest of this class already
+     * uses for a case that must not persist, and one mechanism read twice is easier to audit than two
+     * mechanisms doing the same thing. Also considered: re-seeding the mutated row afterwards, which was
+     * rejected because a repair step runs only when the case reaches it, so a failure part-way through
+     * would leave the very contamination it was added to undo.</p>
+     *
      * <p>It takes no parameter and returns no value.</p>
      */
     @Test
+    @Transactional
     @DisplayName("a save cannot insert this entity, so the duplicate never reaches the integrity branch")
     void aSaveCannotInsertThisEntity() {
         Optional<TransactionType> seeded =
@@ -384,6 +399,51 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
                 () -> this.types.saveAndFlush(duplicate)))
                 .as("a save reaches merge, so the duplicate does not arrive as an integrity violation")
                 .isNull();
+    }
+
+    /**
+     * Confirms no case in this class has committed a change into the seeded rows.
+     *
+     * <p>Purpose: several cases here write, and the ones that must not persist rely on a rollback to
+     * ensure they do not. A rollback that stopped working would not fail any of them -- each asserts what
+     * happened during its own transaction -- so the contamination would appear only as a later case
+     * failing on ORDER, which is the least informative way for it to surface. This case reads the seeded
+     * descriptions back and states the invariant directly, so a lost rollback fails here and names the
+     * column it changed.</p>
+     *
+     * <p>Refactoring Rationale: this exists because the contamination was real rather than hypothetical.
+     * {@code aSaveCannotInsertThisEntity} ran its repository call outside any transaction, so Spring Data
+     * opened and COMMITTED one, and the merge left a changed description on the first seeded row for the
+     * rest of the run. Nothing detected it; a later case had simply been written against a different row.
+     * Fixing that case was necessary but not sufficient -- a future edit could drop the annotation again --
+     * so the invariant it depends on is asserted rather than assumed.</p>
+     *
+     * <p>Assumptions: the seven descriptions are the ones {@code V2__seed_reference.sql} inserts, taken in
+     * turn from {@code app/data/ASCII/trantype.txt}, and they are compared in key order so a failure names
+     * the row. They are written out rather than read from the migration, because a comparison of the
+     * database against the file the database was loaded from would agree with itself no matter what any
+     * case here had written.</p>
+     *
+     * <p>Assumptions: this case does not carry {@code @Transactional}. It only reads, and reading in the
+     * same transaction as nothing else is what makes it observe COMMITTED state rather than any case's
+     * uncommitted work.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("every seeded description is still the one the migration inserted")
+    void everySeededDescriptionIsStillTheSeededOne() {
+        assertThat(this.types.findAllByOrderByTypeCdAsc(Limit.of(SEEDED_TYPES + 1)))
+                .as("a case that wrote without rolling back would show here and nowhere else")
+                .extracting(TransactionType::getTypeCd, TransactionType::getDescription)
+                .containsExactly(
+                        tuple("01", "Purchase"),
+                        tuple("02", "Payment"),
+                        tuple("03", "Credit"),
+                        tuple("04", "Authorization"),
+                        tuple("05", "Refund"),
+                        tuple("06", "Reversal"),
+                        tuple("07", "Adjustment"));
     }
 
     /**
@@ -572,11 +632,18 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
      * against DATABASE contents and why the line endings must not be assumed uniform across the three
      * datasets the reference seed draws on.</p>
      *
-     * <p>Assumptions: code {@code 06} is the subject rather than the first seeded row, and the choice is
-     * deliberate. The case above named {@code aSaveCannotInsertThisEntity} reaches
-     * {@code EntityManager.merge} against the FIRST seeded row outside any transaction, so it commits a
-     * changed description for that row; a case asserting a description against that same row would then
-     * pass or fail on test ORDER. No case in this package writes to {@code 06} outside a transaction.</p>
+     * <p>Assumptions: code {@code 06} is the subject because it is the code the seed gives children to, so
+     * one constant serves this case and the foreign-key and filtered-paging cases that need a referenced
+     * row. Its description is also the one that discriminates the two candidate seed lineages, which is
+     * what the second assertion below turns on.</p>
+     *
+     * <p>Refactoring Rationale: this paragraph used to justify the subject differently -- {@code 06} was
+     * chosen to step AROUND a sibling case that committed a changed description into the first seeded row
+     * outside any transaction, which made an assertion against that row depend on test ORDER. That was an
+     * accurate description of a real defect, and the defect has been fixed at its source: the sibling is now
+     * rolled back, so no case in this class mutates seeded state and no subject needs avoiding. The former
+     * reason is recorded rather than deleted because an avoidance removed without explanation invites the
+     * next reader to reintroduce what it was avoiding.</p>
      *
      * <p>It takes no parameter and returns no value.</p>
      */
@@ -991,101 +1058,5 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
             current = current.getCause();
         }
         return null;
-    }
-}
-
-/**
- * The container fixture every repository integration test in this package shares.
- *
- * <p>Assumptions: this is declared as a second, package-private, top-level type in this file rather than
- * as a file of its own, exactly as {@code package-info.java} in this package rules. A separate file would
- * take the package's closed set from eight compilation units to nine and break the property the sibling
- * test packages of this module rely on when they state their own inventories. A second top-level type in
- * one file is legal Java -- the restriction is one PUBLIC top-level type per file -- and it passes the
- * audit because {@code config/checkstyle/checkstyle.xml} configures neither the one-top-level-type module
- * nor the outer-type-filename module.
- *
- * <p>Assumptions: the container field is {@code static} on this base, so ONE engine is started for the
- * whole package rather than one per test class. Seven containers would multiply the slowest part of the
- * build by seven and would additionally run Flyway seven times over identical migrations.
- *
- * <p>Trade-offs: the base type is findable only by opening the class that hosts it, which is the cost
- * accepted for the closed-set property above, and it is why the hosting file is named in the package
- * charter rather than left to a search.
- */
-@SpringBootTest(
-        classes = ReferencePersistenceBase.ReferencePersistenceTestApplication.class,
-        webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@ActiveProfiles("test")
-abstract class ReferencePersistenceBase {
-
-    // WHY : Assumptions: the image is named by DIGEST rather than by the tag postgres:17-alpine, for the
-    //       reason the ledger context's integration tests record at length: that tag pins the MAJOR line
-    //       only, and the properties under test here are engine behaviours -- the collation a
-    //       declared-width character column is ordered in, and how a like clause with an escape
-    //       character treats a caller's own metacharacter. A moving tag would let either change between
-    //       two runs of unchanged repositories, so a failure could not be attributed and a silently
-    //       altered ordering could keep every assertion green while proving something different.
-    // WHY : Assumptions: this is the SAME digest the ledger context pins, so the two suites cannot
-    //       disagree about engine behaviour, and the image is already present wherever either has run.
-    // WHY : Trade-offs: a digest is unreadable, so the engine version it denotes survives only in this
-    //       comment and has to be updated with the value. That is the trade this repository's workflows
-    //       already accept when they pin an action to a commit identifier with the tag written beside it.
-    /** PostgreSQL 17 on Alpine, pinned by manifest digest rather than by a moving tag. */
-    private static final String POSTGRES_IMAGE =
-            "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
-
-    // WHY : Refactoring Rationale: the engine is started HERE, in a static initialiser, and the class
-    //       carries neither @Testcontainers nor @Container. Those two were tried first and produced a
-    //       failure worth recording, because it does not look like a lifecycle problem: the JUnit
-    //       extension owns a @Container field for the duration of ONE test class, so the engine was
-    //       stopped when the first class in this package finished while the framework's cached
-    //       application context -- which is shared across all six classes, because they declare the same
-    //       configuration and profile -- went on pointing at it. Every later class then failed on
-    //       connection acquisition after a ten-second pool timeout, reporting an empty pool rather than a
-    //       stopped container, so the reported cause named the pool and not the lifecycle.
-    // WHY : Assumptions: nothing stops the engine explicitly and nothing needs to. Testcontainers'
-    //       companion reaper container removes it when the test JVM exits, which is the mechanism the
-    //       annotation-driven form relies on for its own cleanup too; the difference here is only WHEN
-    //       the shutdown is triggered, not whether it happens.
-    // WHY : Alternatives Considered: keeping @Container and letting each class start its own engine.
-    //       Rejected because it multiplies the slowest part of this module's build by six and runs the
-    //       same two migrations six times, and because the framework would still cache one context
-    //       across the six classes -- so the later classes would be pointed at the FIRST engine while
-    //       five more sat idle.
-    // WHY : Assumptions: the connection details reach the context DECLARATIVELY, through
-    //       @ServiceConnection, and this is the mechanism this module's own
-    //       src/test/resources/application-test.yml already depends on. That file deliberately omits
-    //       spring.flyway.user and spring.flyway.password and records why: the container's
-    //       @ServiceConnection is adapted into a Flyway connection-details bean, so the container's own
-    //       generated credential migrates the schema and no stand-in credential has to be invented.
-    // WHY : Alternatives Considered: @DynamicPropertySource, which this package's charter ruled for on
-    //       the grounds that no dependency should be added to obtain a shorter annotation. Tried, and
-    //       measured to fail: publishing the three spring.datasource keys leaves spring.flyway.user bound
-    //       to an unset placeholder, and every context load failed authenticating as the literal
-    //       placeholder text. Publishing Flyway's two keys as well would restate keys the same charter
-    //       forbids a class here from restating, so the ruling could not be met in either direction. The
-    //       ruling is withdrawn in that charter rather than worked around here.
-    /** The one engine every test class in this package runs against, started once for the JVM. */
-    @ServiceConnection
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
-
-    static {
-        POSTGRES.start();
-    }
-
-    /**
-     * The minimal application this package's tests are bootstrapped from.
-     *
-     * <p>Assumptions: entities and repositories are scanned explicitly rather than the service's own
-     * entry point being used, because that entry point pulls in the security chain, the messaging
-     * listener and the interface document, none of which a persistence test exercises and each of which
-     * would then need configuration a persistence test has no reason to supply.
-     */
-    @SpringBootConfiguration
-    @EnableAutoConfiguration
-    @EntityScan("com.carddemo.reference.domain")
-    @EnableJpaRepositories("com.carddemo.reference.repository")
-    static class ReferencePersistenceTestApplication {
     }
 }

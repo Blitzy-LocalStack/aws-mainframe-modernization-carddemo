@@ -2,30 +2,28 @@
  * Verifies the shared kernel money type against the exact fixed-point contracts the reference
  * baseline states, and against the textual form an amount takes when it leaves the process.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>What this package contains</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Assumptions: every inventory, file name, class name and count in this charter is a
+ * MEASUREMENT of the directory beside it, not a target. The package holds this descriptor,
+ * {@code MoneyTest} and {@code MoneyModuleTest}, and the charter is maintained against those files
+ * in the same change that adds or withdraws one. A count stated here that a reader cannot confirm
+ * by listing the directory is a defect in this file rather than a plan for the directory. The marker
+ * line below is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which counts the {@code .java} files beside this descriptor and holds the figures to them, so the
+ * claim is enforced rather than merely stated:</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <pre>
+ * this directory: 3 java files = 2 tests + 1 charter
+ * </pre>
  *
  * <p>Five contracts are exercised here, and they are deliberately five rather than one. Money is
  * exact fixed point carried at scale 2, and the kernel re-establishes that scale half-up wherever a
- * scale reduction is needed. The monthly interest accrual is held to that same single mode, applied
- * once, after a full-precision product has been divided, and it needs its own expectations because
- * it is the one computation where the mode is observable at all. Posting weighs an amount against a
- * credit limit on an inclusive boundary. A disclosure-group key that is not found selects a named
+ * general scale reduction is needed. The monthly interest accrual is the one exception and needs its
+ * own expectations: it truncates, once, after a full-precision product has been divided, because that
+ * is what the reference statement does, and it is the one computation where the mode is observable at
+ * all. Posting weighs an amount against a credit limit on an inclusive boundary. A disclosure-group key that is not found selects a named
  * default group's rate rather than failing the run. And an amount crosses an interface as
  * characters, never as a bare number. Each is asserted separately, because each fails independently
  * of the other four and a single aggregate expectation would report only that something differed
@@ -40,36 +38,29 @@
  * which requires a fixture record to match its copybook layout exactly, sign overpunch included.
  * Those artifacts are read as evidence and are never modified.</p>
  *
- * <h2>The monthly accrual reduces scale half-up, once, and the vector that proves it</h2>
+ * <h2>The monthly accrual truncates, once, and the vector that proves it</h2>
  *
  * <p>{@code app/cbl/CBACT04C.cbl} line 168 declares {@code 05 WS-MONTHLY-INT PIC S9(09)V99.}, a
  * receiving field of scale 2, and lines 464 and 465 compute
  * {@code ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} into it carrying no {@code ROUNDED} phrase, so the
- * reference discards the excess fraction digits rather than rounding them. The target does not
- * inherit that from the statement. Transformation rule T3 pins Java money to scale 2 with
- * {@code RoundingMode.HALF_UP} and admits no exception; the money-invariant table and the
- * arithmetic-order section of {@code docs/architecture/data-model-and-schema-mapping.md} state the
- * same rule for this accrual specifically, that the target multiplies at full precision, divides
- * once, and applies scale 2 with half-up at that single point; and the illustrative example at line
- * 226 of {@code docs/CODE_DOCUMENTATION_STANDARD.md} documents a monthly interest return value as
- * scaled to two decimal places, half-up. Expectations here assert that single mode. The gap between
- * it and the reference statement is a behavioural divergence, and it is registered as one in
- * {@code docs/architecture/cobol-to-service-traceability.md} rather than absorbed into a second
- * rounding mode; that registration is why a test here may assert half-up without contradicting the
- * parity oracle.</p>
+ * reference discards the excess fraction digits rather than rounding them. The target reproduces that
+ * exactly: {@code Money#monthlyInterest} reduces its quotient with {@code BASELINE_INTEREST_ROUNDING},
+ * which truncates toward zero, while every general scale reduction elsewhere in the type uses
+ * {@code GENERAL_ROUNDING}, which is half-up. Expectations here pin both modes and pin which one
+ * governs the accrual, because the two constants make the choice explicit in one place and a caller
+ * cannot select a mode from any accrual signature.</p>
  *
  * <p>Assumptions: the mode is only observable on a quotient whose third fraction digit is five or
  * greater, so an expectation that does not reach that input class asserts nothing about rounding at
  * all. This is not a theoretical caution: the reference fixtures do not reach it. The happy-path
  * interest fixture supplies a category balance of {@code 1000.00} against a disclosure-group rate of
  * {@code 15.00}, where the formula yields {@code 12.5000} exactly, and at a rate of {@code 2.50}
- * against the same balance the quotient is {@code 2.08333...}; a truncating implementation returns
- * the required figure on both. Expectations here therefore carry a discriminating vector alongside
- * the fixture vectors: a category balance of {@code 1000.80} at a rate of {@code 2.50}, whose
- * quotient is {@code 2.0850} exactly and whose required result is {@code 2.09}. A truncating
- * implementation returns {@code 2.08} on that input and fails, which is the whole point of writing
- * it down. Without that vector the suite would report a passing rounding contract while never having
- * exercised the rounding.</p>
+ * against the same balance the quotient is {@code 2.08333...}; truncation and half-up agree on both.
+ * Expectations here therefore carry a discriminating vector alongside the fixture vectors: a category
+ * balance of {@code 1000.80} at a rate of {@code 2.50}, whose quotient is {@code 2.0850} exactly. The
+ * required result is {@code 2.08} -- what the reference field receives -- where half-up would yield
+ * {@code 2.09}, so the vector fails on any implementation that reaches for the general mode. Without
+ * it the suite would report a passing rounding contract while never having exercised the rounding.</p>
  *
  * <p>The operand order is part of the same contract and is asserted with it. The product is formed
  * at full precision and only then divided, which is the order lines 464 and 465 use. Dividing
@@ -206,14 +197,11 @@
  * inside the expectations rather than copied into a test resource directory, so this package owns
  * no resources and introduces no nested directory.</p>
  *
- * <p>Refactoring Rationale: this paragraph declared a two-file target contract and recorded that at
- * its authoring checkpoint the directory held this descriptor alone. Both statements are
- * superseded: {@code MoneyTest} landed, the two production classes it covers landed with it, and
- * {@code MoneyModuleTest} arrived beside it as a third file the earlier contract did not admit.
- * The roster is restated at three rather than kept at two with an exception noted underneath,
- * because a contract that excludes a file which exists reads as governance while the governed
- * thing sits outside it -- and this package's whole purpose is to be the one place the money rule
- * is checked, so a reader must be able to see every file that checks it.</p>
+ * <p>Assumptions: the roster is stated at three and admits every file present, rather than at a
+ * smaller number with an exception noted underneath. A contract that excludes a file which exists
+ * reads as governance while the governed thing sits outside it -- and this package's whole purpose
+ * is to be the one place the money rule is checked, so a reader must be able to see every file that
+ * checks it.</p>
  *
  * <h2>Relationship to the reference test suite</h2>
  *

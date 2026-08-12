@@ -118,7 +118,17 @@ import org.springframework.transaction.PlatformTransactionManager;
  * precisely so that this file remains the single owner of the boundary; a second boundary opened
  * down there would let a rule commit independently of the writes it informed.</p>
  *
- * <h2>Divergence D-6: the reference can post partially, and this cannot</h2>
+ * <h2>Divergence D-POSTING-ATOMIC-NO-REJECT-109: the reference can post partially, and this
+ * cannot</h2>
+ *
+ * <p>Refactoring Rationale: this heading read "Divergence D-6" and named the wrong difference. The
+ * register binds {@code D-6} to the authorization context's distributed commit, and every other
+ * citation of that identifier in the repository -- in {@code AuthorizationApplication},
+ * {@code FraudMarkingService}, {@code OutboxMessage} and three test charters -- means that one. A
+ * second difference under the same letter makes every one of those citations ambiguous in exactly
+ * the direction the register's reconcile-by-search discipline depends on, and the register states
+ * that its letter scheme is closed for that reason. The difference below is therefore cited by the
+ * descriptive identifier the register now carries for it.</p>
  *
  * <p>Refactoring Rationale: this is the strongest correctness improvement in the file, and it is a
  * DIVERGENCE rather than a transcription, so it is stated plainly. In the reference,
@@ -130,8 +140,21 @@ import org.springframework.transaction.PlatformTransactionManager;
  * reject writer, and {@code :208} clears the reason before the next record. The reference can
  * therefore leave a category balance updated and a transaction posted while the account update
  * silently failed -- a state no output file records. The single transaction makes that state
- * unreachable: a failed account update rolls all three writes back. The divergence is registered in
+ * unreachable: a failed account update rolls all three writes back. The divergence is registered as
+ * {@code D-POSTING-ATOMIC-NO-REJECT-109} in
  * {@code docs/architecture/cobol-to-service-traceability.md}, which this class does not author.</p>
+ *
+ * <p>Assumptions: rolling back is the WHOLE of the divergence, and no reject row is written for this
+ * failure. Reason {@code 109} is as unreachable here as it is in the reference: this class opens one
+ * transaction boundary for the pass and wraps the account write in no handler, so the failure
+ * propagates and the orchestrator's per-state retry re-runs the step, while the reject writer is
+ * reached only from the validation branch. Alternatives Considered: writing a durable reason-109 row
+ * from outside the rolled-back unit of work so the failure were queryable. Rejected because it needs
+ * a second transaction boundary inside the one file that declares itself the sole owner of the
+ * boundary, and because a row the reference's stream does not carry would break the byte-for-byte
+ * reject-stream comparison the golden masters make -- and the failure is already observable as a
+ * failed batch state carrying this step's own logged exception. The register records that reasoning
+ * in full and records the withdrawn identifier the earlier design was registered under.</p>
  *
  * @see PostingValidationService for the reject predicates this job counts the outcomes of
  * @see CategoryBalanceService for the create-versus-update arms this job drives
@@ -150,7 +173,7 @@ public class PostTransactionsJob {
     public static final String JOB_NAME = BatchJobName.POST_TRANSACTIONS.token();
 
     /** The step name the durable ledger records this job's progress under. */
-    public static final String STEP_NAME = "post-transactions-step";
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /**
      * The banner the reference writes before opening any file, reproduced verbatim.
@@ -339,7 +362,8 @@ public class PostTransactionsJob {
         LOG.info(START_BANNER);
 
         BatchStepLedger.StepOutcome outcome = this.ledgerOfSteps.runStep(
-                runId, STEP_NAME, () -> postEveryFeedRecord(runId, businessDate));
+                runId, STEP_NAME, BatchJobName.POST_TRANSACTIONS,
+                () -> postEveryFeedRecord(runId, businessDate));
 
         // WHY : Assumptions: the exit status is set from the ledger's recorded return code rather
         //       than from the counters this invocation produced, so a redriven step that the ledger
@@ -378,8 +402,6 @@ public class PostTransactionsJob {
         long processed = 0L;
         long rejected = 0L;
 
-        // WHAT: the reject stream is accumulated into a temporary file for the whole pass and staged
-        //       once at the end, rather than appended to remotely per record.
         // WHY : Trade-offs: an object store has no append, so a per-record write would either rewrite
         //       the whole object each time -- quadratic in the reject count -- or leave one object per
         //       reject, which is not the single fixed-length dataset app/jcl/POSTTRAN.jcl:34-38
@@ -517,7 +539,6 @@ public class PostTransactionsJob {
         Account posting = decision.account().orElseThrow(() -> new IllegalStateException(
                 "validation accepted a record whose cross-reference resolved to no account"));
 
-        // WHAT: the three writes of the posting unit of work, in the reference's order.
         // WHY : Assumptions: the ORDER is category balance, then account, then ledger, transcribing
         //       app/cbl/CBTRN02C.cbl:440, :441 and :442 in sequence. It is preserved even though a
         //       single commit makes the order invisible to any reader of the committed state, for two

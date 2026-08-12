@@ -121,8 +121,8 @@ class TransactionListServiceCursorBindingTest {
         when(transactionRepository.findByTranIdGreaterThanOrderByTranIdAsc(eq(BOUNDARY_KEY), any()))
                 .thenReturn(List.of());
         when(transactionMapper.orderForDisplay(any(), any())).thenReturn(List.of());
-        when(transactionMapper.toListPage(any(), any(), any(), anyBoolean(), anyBoolean()))
-                .thenReturn(new PageResponse<>(List.of(), null, null, false, false));
+        when(transactionMapper.toListPage(any(), any(), any(), anyBoolean()))
+                .thenReturn(new PageResponse<>(List.of(), null, null, false));
 
         TransactionListRequest replay = new TransactionListRequest(null, sealedCursor,
                 TransactionListRequest.Direction.NEXT);
@@ -210,15 +210,15 @@ class TransactionListServiceCursorBindingTest {
         List<Transaction> rows = List.of(rowNamed(BOUNDARY_KEY));
         when(transactionRepository.findAllByOrderByTranIdAsc(any(Limit.class))).thenReturn(rows);
         when(transactionMapper.orderForDisplay(any(), any())).thenReturn(rows);
-        when(transactionMapper.toListPage(any(), any(), any(), anyBoolean(), anyBoolean()))
-                .thenReturn(new PageResponse<>(List.of(), null, null, false, false));
+        when(transactionMapper.toListPage(any(), any(), any(), anyBoolean()))
+                .thenReturn(new PageResponse<>(List.of(), null, null, false));
 
         service.listTransactions(new TransactionListRequest(null, null, null), cursorToken, subject);
 
         ArgumentCaptor<String> firstKeyToken = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> lastKeyToken = ArgumentCaptor.forClass(String.class);
         verify(transactionMapper).toListPage(any(), firstKeyToken.capture(), lastKeyToken.capture(),
-                anyBoolean(), anyBoolean());
+                anyBoolean());
 
         // Refactoring Rationale: the two ends are compared as the KEYS THEY OPEN TO and no longer as
         //   the sealed strings themselves. CursorToken.seal stamps each token with the epoch second it

@@ -339,6 +339,41 @@ variable "cloudfront_distribution_id" {
   }
 }
 
+# WHY : Refactoring Rationale: the distribution alarm's cardinality used to be
+#       selected by testing cloudfront_distribution_id against null, and that
+#       could not be decided during plan. Both roots pass
+#       module.cloudfront_spa.distribution_id, which does not exist before the
+#       distribution is created, so the identifier is unknown and `unknown !=
+#       null` is itself unknown -- Terraform refused the plan with `Invalid count
+#       argument`. The DASHBOARD widget is unaffected and still keys off the
+#       identifier, because a widget is one attribute of one resource rather than
+#       a resource count, and an unknown value inside a rendered document is
+#       resolved at apply without any cardinality question.
+# WHY : Assumptions: a caller that supplies an identifier wants the alarm, so
+#       both roots set this true; it is a separate input rather than derived
+#       because deriving it is exactly what could not be decided. The region half
+#       of the guard stays in main.tf, since the provider's own region is known
+#       during plan.
+variable "create_cloudfront_alarm" {
+  description = <<-EOT
+    Whether to create the distribution server-error-rate alarm. Set from
+    root-owned topology rather than inferred from cloudfront_distribution_id,
+    whose value is unknown until the distribution exists. The alarm is
+    additionally conditional inside the module on the provider region being
+    us-east-1, because CloudFront publishes distribution metrics there alone.
+  EOT
+  type        = bool
+  default     = false
+
+  # WHY : Assumptions: checked in the one direction the inputs can decide. A
+  #       literal null identifier with the flag set is refused; an identifier that
+  #       is merely unknown leaves this unknown, which Terraform defers.
+  validation {
+    condition     = !var.create_cloudfront_alarm || var.cloudfront_distribution_id != null
+    error_message = "create_cloudfront_alarm is true, so cloudfront_distribution_id must also be supplied; the alarm has no DistributionId dimension without it."
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Encryption
 # -----------------------------------------------------------------------------

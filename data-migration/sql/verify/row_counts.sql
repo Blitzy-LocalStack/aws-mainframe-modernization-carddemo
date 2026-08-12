@@ -130,7 +130,7 @@
 --       -v ON_ERROR_STOP=1 on the command line instead, and with a single
 --       statement there is no second statement for that switch to skip. Pure
 --       SQL is the settled convention for this directory, recorded at
---       V0__schemas_and_roles.sql L130-L135.
+--       V0__schemas_and_roles.sql L139-L144.
 --       (11) Alternatives Considered: counts are exact rather than estimated,
 --       and the full scan that costs is accepted. Detail at the counting
 --       branches.

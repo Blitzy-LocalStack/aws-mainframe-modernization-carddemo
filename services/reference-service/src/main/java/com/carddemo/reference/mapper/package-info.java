@@ -104,39 +104,55 @@
  * illustration, so that a reviewer auditing the tree by literal search finds only labels that are
  * actually in use. The two forms are never mixed inside one file.</p>
  *
- * <h2>The eight mappers, and why four of them are static</h2>
+ * <h2>The seven mappers, and why three of them are static</h2>
  *
- * <p>Assumptions: eight mappers are landed as compilation units beside this charter, and the closed
- * set of this package is those eight plus this file. Nothing is outstanding, so a reader who cannot
- * open one of the eight has found a gap rather than the expected state. The count is measured against
+ * <p>Assumptions: seven mappers are landed as compilation units beside this charter, and the closed
+ * set of this package is those seven plus this file. Nothing is outstanding, so a reader who cannot
+ * open one of the seven has found a gap rather than the expected state. The count is measured against
  * the directory on every build:</p>
  *
  * <pre>
- * this directory: 9 java files = 8 classes + 1 charter
+ * this directory: 8 java files = 7 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section said five, and enumerated five, while
  * {@code UsPhoneAreaCodeMapper} stood beside it. Two things made that worse than an ordinary stale
  * count. The first is that three sibling classes cite this charter by line number, so a reader
  * arriving from one of them is being told the set is closed by the document those citations point at.
- * The second is specific to the omitted class: it renders the same entity as {@code LookupMapper}'s
- * area-code member, so a reader who took "the closed set is those five" literally would conclude a
- * duplicate conversion had been added in the wrong place -- and would be half right, which is the
- * hardest kind of wrong document to act on. What is actually true is recorded in its entry below,
- * including that it has no caller today. The marker line above is measured by
+ * The second is specific to the omitted class: it rendered the same entity as the then-present
+ * {@code LookupMapper}'s area-code member, so a reader who took "the closed set is those five"
+ * literally would conclude a duplicate conversion had been added in the wrong place -- and would be
+ * half right, which is the hardest kind of wrong document to act on. What is actually true is recorded
+ * in its entry below. The marker line above is measured by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
  * so a further mapper arriving without an entry here now fails the build.</p>
  *
  * <p>Refactoring Rationale: the same correction is recorded a second time rather than folded into the
  * paragraph above, because two occurrences are evidence of a pattern where one was evidence of a slip.
  * This section then said six, and enumerated six, as {@code UsStateMapper} was added beside it. That
- * class stands to {@code LookupMapper}'s state member in exactly the relation
- * {@code UsPhoneAreaCodeMapper} stands in to its area-code member, so the identical misreading was
+ * class stood to the deleted {@code LookupMapper}'s state member in exactly the relation
+ * {@code UsPhoneAreaCodeMapper} stood in to its area-code member, so the identical misreading was
  * available: a reader trusting the closed set would have taken a second implementation of one
- * conversion for a misplacement. The entries below therefore state the duplication and the caller
- * position outright rather than leaving either to be inferred. Assumptions: the marker line is the
- * only figure here a build can check, so the heading and the three sentences in this section that
- * carry a number are kept in step with it by hand, and they are the places that has to happen.</p>
+ * conversion for a misplacement. The entries below therefore state the caller position outright rather
+ * than leaving it to be inferred. Assumptions: the marker line is the only figure here a build can
+ * check, so the heading and the three sentences in this section that carry a number are kept in step
+ * with it by hand, and they are the places that has to happen.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the count moved DOWN for the first time, from eight to seven, and the
+ * reason is the one the two paragraphs above kept recording without resolving. Three of the mappers
+ * enumerated below duplicated three members of a static {@code LookupMapper}, and each entry said so
+ * and then said the duplicate had no caller. Two implementations of one conversion, with the reached
+ * one carrying no reasoning and the unreached one carrying all of it, is not a state a charter can fix
+ * by describing it more clearly -- which is what the two corrections above were each an attempt to do.
+ * {@code LookupMapper} is therefore deleted and the three per-entity beans are the sole implementation
+ * of their conversions, reached from
+ * {@code com.carddemo.reference.service.AddressLookupService}. The pair that survived is the pair that
+ * carried the cited-baseline rulings about why each of these keys crosses at its declared width; the
+ * class that was reached carried a summary of them. Alternatives Considered: deleting the three beans
+ * instead and keeping the one static class, which is the smaller edit. Rejected because it would have
+ * discarded the three per-entity headers and the list members, and because the list member is what a
+ * paged route needs -- so the static class would have had to grow one back, arriving at the beans by a
+ * longer path.</p>
  *
  * <dl>
  *   <dt>{@code TransactionTypeMapper}</dt>
@@ -154,10 +170,6 @@
  *       caller asked for and the group that supplied the rate so that a fallback is visible in the
  *       reply. Outbound only.</dd>
  *
- *   <dt>{@code LookupMapper}</dt>
- *   <dd>Renders the three seeded lookup entities -- {@code UsPhoneAreaCode}, {@code UsState} and
- *       {@code UsStateZipPrefix} -- as their response shapes. Outbound only.</dd>
- *
  *   <dt>{@code DateInquiryReplyMapper}</dt>
  *   <dd>Renders the date-conversion reply line of the message-driven inquiry flow, transcribed from
  *       {@code app/app-vsam-mq/cbl/CODATE01.cbl}, and frames it to the declared message length. It
@@ -165,78 +177,75 @@
  *
  *   <dt>{@code UsPhoneAreaCodeMapper}</dt>
  *   <dd>Renders one seeded area-code row, with the sub-list it belongs to, as
- *       {@code PhoneAreaCodeResponse}, and renders a list of them. Assumptions: this is the SAME
- *       conversion {@code LookupMapper}'s area-code member performs, and the duplication is stated
- *       rather than glossed, because a reader finding two implementations of one conversion needs to
- *       know which is reached. {@code AddressLookupController} calls {@code LookupMapper} on all three
- *       lookup routes, so this class has <b>no caller in the delivered code</b>. It carries the
- *       classification filtering and the list member that a paged area-code route would need, which is
- *       the reason it exists as a bean rather than as a fifth static member on
- *       {@code LookupMapper}. Trade-offs: an unreached conversion is dead weight and is recorded as
- *       such here rather than defended; removing it or routing the controller through it are both
- *       single-caller changes, and either is preferable to leaving a reader to guess which member the
- *       area-code route uses.</dd>
+ *       {@code PhoneAreaCodeResponse}, and renders a list of them. ⚠️ Refactoring Rationale: this entry
+ *       used to state that the conversion was <b>also</b> implemented by a static {@code LookupMapper}
+ *       member, that the controller reached that member on all three lookup routes, and that this class
+ *       therefore had no caller. All three of those facts have been closed out together: the static
+ *       class is deleted, and {@code com.carddemo.reference.service.AddressLookupService} injects this
+ *       bean and reaches it on both area-code operations. It is now the only implementation of this
+ *       conversion. What made it the survivor is what the entry previously described as its surplus --
+ *       the classification-carrying single member and the list member a paged route needs.</dd>
  *
  *   <dt>{@code UsStateMapper}</dt>
  *   <dd>Renders one seeded state or territory code as {@code UsStateResponse}, and renders a list of
- *       them. Assumptions: this is the SAME conversion {@code LookupMapper}'s state member performs at
- *       its L53 to L55, and the duplication is stated for the same reason as the entry above.
- *       {@code AddressLookupController} routes both state operations through {@code LookupMapper} -- as
- *       a method reference on the paged route at its L287 and directly on the single-code route at its
- *       L306 -- so this class has <b>no caller in the delivered code</b> either. What it adds is the
- *       list member and a per-entity home for the two rulings its own header records: that the
+ *       them. ⚠️ Refactoring Rationale: as with the entry above, this class was a second implementation
+ *       of a conversion the controller reached elsewhere, and it is now the only one --
+ *       {@code AddressLookupService} injects it and reaches it on both state operations. What it
+ *       contributes, and the reason it is the member that survived, is the list member and a per-entity
+ *       home for the two rulings its own header records: that the
  *       two-character code crosses at its declared width, evidenced by the contrast between the state
  *       edit at {@code app/cbl/COACTUPC.cbl} L2493 to L2495 and the trimmed area-code edit at L2296 to
  *       L2297 of that same program; and that no membership test is applied here, because the
  *       authoritative membership is the seeded table together with {@code VALID-US-STATE-CODE} at
- *       {@code app/cpy/CSLKPCDY.cpy} L1013. Trade-offs: the same dead-weight cost as the entry above
- *       is accepted on the same terms, and the two classes are deliberately symmetrical so that a
- *       reader who has understood one has understood both.</dd>
+ *       {@code app/cpy/CSLKPCDY.cpy} L1013. Assumptions: the two classes are deliberately symmetrical
+ *       so that a reader who has understood one has understood both.</dd>
  *
  *   <dt>{@code UsStateZipPrefixMapper}</dt>
  *   <dd>Renders one seeded state-and-postal-prefix combination as
- *       {@code UsStateZipPrefixResponse}, and renders a list of them. Assumptions: this is the SAME
- *       conversion {@code LookupMapper}'s combination member performs at its L64 to L66, and the
- *       duplication is stated for the same reason as the two entries above.
- *       {@code AddressLookupController} reaches {@code LookupMapper} on both combination routes --
- *       by method reference at its L344 and directly at its L363 -- so this class has <b>no caller
- *       in the delivered code</b> either. What it adds is the list member and a per-entity home for
+ *       {@code UsStateZipPrefixResponse}, and renders a list of them. ⚠️ Refactoring Rationale: as with
+ *       the two entries above, this class was a second implementation of a conversion the controller
+ *       reached elsewhere, and it is now the only one -- {@code AddressLookupService} injects it and
+ *       reaches it on both combination operations. What it contributes, and the reason it is the member
+ *       that survived, is the list member and a per-entity home for
  *       the ruling its own header records: that the four characters are one indivisible value,
  *       evidenced by {@code VALID-US-STATE-ZIP-CD2-COMBO} standing over the whole
  *       {@code PIC X(4)} field at {@code app/cpy/CSLKPCDY.cpy} L1072 to L1073 and by the edit at
  *       {@code app/cbl/COACTUPC.cbl} L2537 to L2542, which assembles the value by concatenation and
- *       only then tests the assembled whole. Trade-offs: the same dead-weight cost as the two
- *       entries above is accepted on the same terms, and the three lookup classes are deliberately
- *       symmetrical.</dd>
+ *       only then tests the assembled whole. Assumptions: the three lookup classes are deliberately
+ *       symmetrical, for the reason the entry above gives.</dd>
  * </dl>
  *
- * <p>Alternatives Considered: the four entity conversions are {@code final} classes with a private
- * constructor and static members, while {@code DateInquiryReplyMapper} is a Spring
- * {@code @Component} with instance members. A uniform set of injected instance components was the
- * alternative, and the split is deliberate rather than residue. Each of the four is a total function
- * of its argument: it has no collaborator, no configuration and no state, so a static call site
- * states that honestly and leaves no constructor through which a dependency could later be
- * introduced without anyone noticing the class had stopped being a pure conversion. The other three
- * are not that shape, for two different reasons. {@code DateInquiryReplyMapper} delegates framing to
+ * <p>Alternatives Considered: three of the seven -- {@code TransactionTypeMapper},
+ * {@code TransactionCategoryMapper} and {@code DisclosureGroupMapper} -- are {@code final} classes with
+ * a private constructor and static members, while the other four are Spring {@code @Component}s with
+ * instance members. A uniform set of injected instance components was the alternative, and the split is
+ * deliberate rather than residue. Each of the three is a total function of its argument: it has no
+ * collaborator, no configuration and no state, so a static call site states that honestly and leaves no
+ * constructor through which a dependency could later be introduced without anyone noticing the class had
+ * stopped being a pure conversion. The four beans are not that shape, for two different reasons.
+ * {@code DateInquiryReplyMapper} delegates framing to
  * {@code com.carddemo.common.codec.InquiryRequestCodec} and is
  * consumed by the message listener in {@code com.carddemo.reference.service}, where being a bean is
  * what allows a listener test to supply a substitute without the listener changing.
- * {@code UsPhoneAreaCodeMapper} and {@code UsStateMapper} are beans because each was authored for
- * constructor injection into a per-entity lookup route, and each one's own header records that choice;
- * they are the two members of this package whose shape is justified by a consumer that does not reach
- * them, which is why both entries above say so plainly instead of letting the static/bean split look
- * uniform. Assumptions: the static/bean split therefore does not divide pure conversions from impure
- * ones -- all three beans are as pure as the four static classes -- it divides classes a call site
- * injects from classes a call site names, and reading it any other way would make the two lookup
- * beans look like a mistake.</p>
+ * {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper} and {@code UsStateZipPrefixMapper} are beans
+ * because each was authored for constructor injection into a per-entity lookup route, and each one's own
+ * header records that choice. ⚠️ Refactoring Rationale: this paragraph used to name only the first two
+ * of that trio and to describe them as "the two members of this package whose shape is justified by a
+ * consumer that does not reach them". Both halves of that sentence were wrong. It omitted
+ * {@code UsStateZipPrefixMapper}, which is the same case and had its own enumerated entry a hundred
+ * lines below, so the paragraph and the roster disagreed about how many beans this package holds; and
+ * the consumer it said did not reach them is now {@code AddressLookupService}, which injects all three.
+ * Assumptions: the static/bean split therefore does not divide pure conversions from impure ones -- all
+ * four beans are as pure as the three static classes -- it divides classes a call site injects from
+ * classes a call site names.</p>
  *
- * <p>Trade-offs: the four static classes are declared {@code final} with private constructors, so
+ * <p>Trade-offs: the three static classes are declared {@code final} with private constructors, so
  * nothing can subclass or proxy them, and a later cross-cutting concern that needed to wrap a
  * conversion would first have to convert them to instance members. A static member also cannot be
  * replaced in a slice test the way an injected bean can. Both costs are accepted on the same ground:
  * a conversion with no collaborator has no behaviour worth substituting, so a test asserts its output
- * directly and gains nothing from indirection. {@code DateInquiryReplyMapper} is correspondingly not
- * declared {@code final}, precisely so that it remains proxyable.</p>
+ * directly and gains nothing from indirection. The four beans are correspondingly not declared
+ * {@code final}, precisely so that they remain proxyable.</p>
  *
  * <p>Alternatives Considered: discrete mappers rather than one consolidated
  * {@code ReferenceMapper}. The evidence differs record by record -- three separate copybooks, one Db2
@@ -250,8 +259,8 @@
  * baseline manipulates most, and {@code TransactionCategoryMapper} calls it by qualified name.
  * Trade-offs: that makes the category mapper depend on a sibling rather than on a neutral utility,
  * which is the cost accepted for keeping one implementation of the rule. Every other mapper calls
- * it not at all: {@code LookupMapper}, {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper} and
- * {@code DisclosureGroupMapper} convert records that carry no
+ * it not at all: {@code UsPhoneAreaCodeMapper}, {@code UsStateMapper},
+ * {@code UsStateZipPrefixMapper} and {@code DisclosureGroupMapper} convert records that carry no
  * description, {@code DateInquiryReplyMapper} converts no record, so the trim boundary below never
  * reaches any of them and every value they publish is
  * verbatim.</p>
@@ -471,9 +480,12 @@
  * <h2>What this package does not do</h2>
  *
  * <p>Assumptions: mappers produce item types only. Assembling
- * {@code com.carddemo.common.web.PageResponse} -- its items together with the first key, the last key
- * and the more-pages indicator -- belongs to {@code com.carddemo.reference.service}, which is the only
- * layer that holds the keyset cursor and can therefore say whether a further page exists. A mapper is
+ * {@code com.carddemo.common.web.PageResponse} -- its five components, being the items together with
+ * the first key, the last key and the two availability indicators, one per direction, neither of them
+ * inferred from the key beside it -- belongs to
+ * {@code com.carddemo.reference.service}, which is the only
+ * layer that holds the keyset cursor and can therefore say whether an adjacent page exists in either
+ * direction. A mapper is
  * handed one row and knows nothing about the query that produced it, so it could not populate those
  * members even if it were asked to.</p>
  *
@@ -510,8 +522,8 @@
  *       {@code DateInquiryReplyMapper} is not that missing class and should not be mistaken for it: it
  *       serves the message-driven inquiry flow and renders a fixed-width reply line, which is a
  *       different artefact answering a different caller.</li>
- *   <li>Assumptions: {@code LookupMapper} and {@code DisclosureGroupMapper} carry no inbound member.
- *       The three lookup tables and the disclosure groups are seeded reference data, so the DTO
+ *   <li>Assumptions: the three lookup mappers and {@code DisclosureGroupMapper} carry no inbound
+ *       member. The three lookup tables and the disclosure groups are seeded reference data, so the DTO
  *       package publishes no create or update shape for them and there is nothing for an inbound
  *       member to accept.</li>
  *   <li>Assumptions: {@code DisclosureGroupMapper} has no list member either. The charter of
@@ -552,10 +564,13 @@
  * <p>Assumptions: one naming asymmetry is called out because it reads as a mistake and is not. The
  * entity is {@code UsPhoneAreaCode} but the response type published for it is
  * {@code PhoneAreaCodeResponse}, with no {@code Us} prefix, while the two response types beside it,
- * {@code UsStateResponse} and {@code UsStateZipPrefixResponse}, do keep theirs. All three conversions
- * live in {@code LookupMapper}, so the inconsistency is visible within a single class. The DTO package
- * owns those names, so this package follows them rather than renaming anything to make the group look
- * uniform.</p>
+ * {@code UsStateResponse} and {@code UsStateZipPrefixResponse}, do keep theirs. ⚠️ Refactoring
+ * Rationale: this used to add that "all three conversions live in {@code LookupMapper}, so the
+ * inconsistency is visible within a single class", which was the one thing that made the asymmetry easy
+ * to notice. Since that class is deleted the three conversions now sit in three files, so the
+ * inconsistency is no longer visible from any one of them -- which is why it is stated here instead.
+ * The DTO package owns those names, so this package follows them rather than renaming anything to make
+ * the group look uniform.</p>
  *
  * <p>Assumptions: the referential rule that relates the two transaction-reference records is named
  * here only as context for why they are converted by two mappers that share a helper.

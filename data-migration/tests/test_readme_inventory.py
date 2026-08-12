@@ -154,7 +154,7 @@ def test_the_readme_roster_is_exactly_the_suite_directory() -> None:
     declared = {name for name, _ in _declared_modules()}
     present = _present_modules()
 
-    # WHY (Assumptions): equality is asserted rather than containment, and both directions
+    # Assumptions: equality is asserted rather than containment, and both directions
     #   matter for different reasons. A module present and unlisted is the failure that occurred
     #   -- seven of them -- and it understates the suite; a module listed and absent is a dead
     #   link that tells a reader to open a file that is not there.
@@ -176,7 +176,7 @@ def test_every_roster_entry_links_to_the_file_it_names() -> None:
     """
     for name, target in _declared_modules():
         resolved = (_DATA_MIGRATION_ROOT / target).resolve()
-        # WHY (Assumptions): the label and the target are checked against each other as well as
+        # Assumptions: the label and the target are checked against each other as well as
         #   against the filesystem. A pair whose target exists but names a DIFFERENT module
         #   reads correctly and navigates wrongly, which no existence check alone would catch.
         assert resolved.name == name, (
@@ -195,7 +195,7 @@ def test_the_stated_module_counts_match_the_directory() -> None:
         failure.
     """
     stated = _COUNTS.search(_readme_text())
-    # WHY (Assumptions): the sentence's absence is a failure rather than a skip. Rewording it is
+    # Assumptions: the sentence's absence is a failure rather than a skip. Rewording it is
     #   the way this check would be silenced without anybody removing it, so the check reports
     #   the rewording instead of quietly passing.
     assert stated is not None, (

@@ -2,29 +2,20 @@
  * Job-boundary data transfer shapes for the CardDemo batch bounded context: the
  * argument, result and payload records that cross this module's edges.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every type name and every count below describes this package's
- * <b>target contract</b> as the migration plan assigns it, and not the set of
- * files sitting beside this charter today. The migration lands its artifacts in
- * plan order and a package charter is authored before the types it governs, so
- * at the checkpoint that authored this one the directory holds this file alone.
- * A type named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the
- * directory. The parent charter at {@code com.carddemo.batch} opens with the
- * same declaration for the same reason, so a reader moving between the two
- * meets one convention rather than two.</p>
+ * <p>Twelve compilation units sit in this directory: this charter and the eleven
+ * types the roster below enumerates. Every type name and count here is a
+ * measurement of that directory, and the marker line is re-measured on every
+ * build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which counts the {@code .java} files beside this charter and requires every
+ * enumerated name to be one of them, so a twelfth type arriving without an entry
+ * fails the build:</p>
  *
- * <p>Alternatives Considered: withholding this charter until the eleven types it
- * governs exist. Rejected, because this charter is what the authors of those
- * types work from -- which shape belongs here, which may not, and where the set
- * closes -- so writing it last would leave the package with no stated contract
- * during exactly the interval in which one is needed. The accepted cost is that
- * the inventory below reads as present tense unless the distinction is declared,
- * which is what this section is for; this is the single place a reader has to
- * look to tell a target from a measurement. The parent charter at
- * {@code com.carddemo.batch} reached the same decision for the same reason, so
- * the ordering is a subtree convention rather than a choice made once here.</p>
+ * <pre>
+ * this directory: 12 java files = 11 classes + 1 charter
+ * </pre>
  *
  * <h2>Purpose: the shapes that cross this module's job boundaries</h2>
  *
@@ -154,19 +145,14 @@
  * <p>Eleven types, and no twelfth. The list is closed, so the question "which
  * type owns this contract" keeps a definite answer as the package fills.</p>
  *
- * <p>Refactoring Rationale: each entry below states whether it is LANDED or PLANNED, and at this
- * revision ALL ELEVEN are landed -- {@code BatchJobName}, {@code BusinessDate},
- * {@code BatchJobParameters}, {@code BatchReturnCode}, {@code BatchRunSummary},
- * {@code DisclosureGroupKey}, {@code DatasetGeneration}, {@code BatchErrorEvent},
- * {@code InterestRateLookup}, {@code RejectReason} and {@code PostingValidationResult}. Four earlier
- * revisions of this paragraph were each wrong, and in alternating directions: the first stated all
- * eleven in the present tense before any existed; the second over-corrected to four landed while four
- * more were authored; the third counted eight and was accurate only until a ninth landed beside it;
- * the fourth counted nine and named {@code RejectReason} planned when its file was already present.
- * Every one of those failures costs a reader the same way in one of two directions -- routing a
- * question to a type that is not there, or writing a type that already is -- which is why the count
- * is now stated as a measurement against the directory rather than as a plan, and has to be
- * re-measured whenever a file is added to it.</p>
+ * <p>Assumptions: each entry below states LANDED, and all eleven are --
+ * {@code BatchJobName}, {@code BusinessDate}, {@code BatchJobParameters},
+ * {@code BatchReturnCode}, {@code BatchRunSummary}, {@code DisclosureGroupKey},
+ * {@code DatasetGeneration}, {@code BatchErrorEvent}, {@code InterestRateLookup},
+ * {@code RejectReason} and {@code PostingValidationResult}. A count in a roster like this one costs a
+ * reader in either direction it can be wrong -- it routes a question to a type that is not there, or
+ * it invites the writing of a type that already is -- which is why it is measured against the
+ * directory by the marker above rather than maintained by hand.</p>
  *
  * <p>Assumptions: no entry here was authored as an empty type to make the roster true. Each arrived
  * with the job or service that consumes it: {@code RejectReason} with the posting validation that

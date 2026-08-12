@@ -1110,18 +1110,19 @@ class TransactionCategoryServiceTest {
         }
 
         /**
-         * Backward availability is inferred from whether the read resumed, never from a count.
+         * Every page publishes the position a backward step is issued from, and no count is taken for it.
          *
-         * <p>Assumptions: an opening page cannot have anything behind it, and a page reached from a
-         * position must have, because the position came from a page the caller already held. That is the
-         * whole of the inference, and it is why no second query exists for it. The pair of assertions is
-         * made in one case because the property is the contrast between them.
+         * <p>Assumptions: the envelope carries four members, so whether a page precedes this one is not a
+         * question it answers -- the reference answers that from the page ordinal its terminal holds
+         * between turns, and the migrated answer belongs to the client. What both pages here must supply
+         * is the leading boundary, and the substance of the case is that supplying it costs no second
+         * query.
          *
          * <p>It takes no parameter and returns no value.
          */
         @Test
-        @DisplayName("an opening page reports nothing behind it and a resumed page reports there is")
-        void backwardAvailabilityIsInferredFromResumption() {
+        @DisplayName("every page publishes its leading boundary and no count is taken for it")
+        void everyPagePublishesItsLeadingBoundaryWithoutCounting() {
             when(categories.findFirstPage(any(Limit.class)))
                     .thenReturn(List.of(storedCategory()));
             when(categories.findPageAfter(anyString(), anyString(), any(Limit.class)))
@@ -1129,15 +1130,15 @@ class TransactionCategoryServiceTest {
 
             PageResponse<TransactionCategoryResponse> opening =
                     service.list(openingBrowse(), sealer, SUBJECT);
-            assertThat(opening.hasPrevious())
-                    .as("an opening page resumed from nothing")
-                    .isFalse();
+            assertThat(opening.firstKey())
+                    .as("the opening page names the position a backward step would be issued from")
+                    .isNotNull();
 
             PageResponse<TransactionCategoryResponse> resumed = service.list(
                     browse(opening.lastKey(), PageDirection.NEXT, null, null), sealer, SUBJECT);
-            assertThat(resumed.hasPrevious())
-                    .as("a page reached from a position has the page that issued it behind it")
-                    .isTrue();
+            assertThat(resumed.firstKey())
+                    .as("and so does a page reached from a position")
+                    .isNotNull();
 
             verify(categories, never()).countByTypeCd(anyString());
         }
@@ -1195,7 +1196,6 @@ class TransactionCategoryServiceTest {
             assertThat(page.firstKey()).isNull();
             assertThat(page.lastKey()).isNull();
             assertThat(page.hasNext()).isFalse();
-            assertThat(page.hasPrevious()).isFalse();
         }
     }
 

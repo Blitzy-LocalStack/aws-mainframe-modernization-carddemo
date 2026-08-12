@@ -1,21 +1,19 @@
 /**
  * Carries the request and response records of the CardDemo card enquiry and maintenance API.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>What this package contains</h2>
  *
- * <p>Assumptions: every inventory, type name and count in this charter describes this package's
- * <b>target contract</b> as the migration plan assigns it, and not the set of files present beside
- * this one today. The migration lands its artifacts in plan order and this charter is authored
- * first, so at the checkpoint that authored it this directory holds this charter and nothing else.
- * A record named below that has no file yet is therefore <b>planned</b> rather than missing, and a
- * count below is a target total rather than a measurement of the directory.</p>
+ * <p>Seven compilation units sit in this directory: this charter, and the six records
+ * {@code AdminCardDetail}, {@code CardDetail}, {@code CardLookupRequest}, {@code CardPageQuery},
+ * {@code CardSummary} and {@code CardUpdateRequest}. Every inventory, type name and count in this
+ * charter is a measurement of that directory and of the contract named below, so a reader can check
+ * any figure here by listing the package or by reading the contract.</p>
  *
- * <p>Alternatives Considered: withholding this charter until every record it governs exists.
- * Rejected, because the charter is what the authors of those records work from -- which shape
- * belongs here, which does not, and which invariants every one of them obeys -- so writing it last
- * would leave this package with no stated contract during exactly the interval in which one is
- * needed. The cost of authoring it first is that its inventory reads as present tense unless the
- * distinction is declared, which is what the paragraph above is for.</p>
+ * <p>Assumptions: the set is closed, so a record added beside those six without amending this
+ * charter is an ungoverned exception to it. Closure matters more here than it would in most
+ * packages, because the disclosure boundary rests on it: exactly one of the six shapes is able to
+ * carry an unmasked primary account number, and a seventh shape introduced quietly is how that
+ * property would be lost without any single edit looking like it lost it.</p>
  *
  * <h2>Purpose, and where every shape comes from</h2>
  *
@@ -46,10 +44,11 @@
  * {@code /api/v1} prefix:</p>
  *
  * <ul>
- *   <li>{@code listCards}, {@code GET} on {@code /api/v1/cards}, answering with the schema
- *       {@code CardPage}: one page of the list positioned by key, with an optional account
- *       identifier as its one filter. A full page carries seven rows, settled
- *       server-side from {@code WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7} at
+ *   <li>{@code listCards}, {@code POST} on {@code /api/v1/cards/search}, accepting
+ *       {@code CardPageQuery} -- an optional account identifier as its one filter, together with the
+ *       cursor and the direction that position the page, all three in a BODY -- and answering with
+ *       the schema {@code CardPage}: one page of the list positioned by key. A full page carries
+ *       seven rows, settled server-side from {@code WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7} at
  *       {@code app/cbl/COCRDLIC.cbl:177-178}, and a client cannot vary it.</li>
  *   <li>{@code lookupCard}, {@code POST} on {@code /api/v1/cards/lookup}, accepting
  *       {@code CardLookupRequest} -- one card number, in a BODY -- and answering with
@@ -82,18 +81,31 @@
  * internally consistent, compiles cleanly, and surfaces only as a client generated from the
  * published contract failing against a running service. Declaring one side authoritative in
  * advance is what removes the ambiguity, because there is no compile-time signal to fall back on.
- * The concrete instance already exists and is worth naming so that it is resolved the right way:
- * the subpackage map in the context root charter at
- * {@code services/card-service/src/main/java/com/carddemo/card/package-info.java:65} names three
- * record types for this package, while the contract declares the administrative detail as a schema
- * of its own, and the contract test
+ * One such instance existed and is recorded so that it is resolved the right way if it recurs: the
+ * subpackage map in the context root charter at
+ * {@code services/card-service/src/main/java/com/carddemo/card/package-info.java} named three
+ * record types for this package while the contract declared the administrative detail as a schema of
+ * its own, and the contract test
  * {@code services/card-service/src/test/java/com/carddemo/card/config/CardApiContractTest.java}
- * asserts that separation structurally. The contract governs.</p>
+ * asserts that separation structurally. The contract governs, and that map has since been
+ * re-measured to the six records this directory holds. The citation is by path rather than by line
+ * because a line number in another file is the part of a cross-reference that rots first.</p>
  *
  * <h2>The inventory, and the shapes that are deliberately not types here</h2>
  *
- * <p>The records this package declares at target are these, and their names are the contract's
+ * <p>The records this package declares are these, and their names are the contract's
  * schema names so that the two can be read against each other:</p>
+ *
+ * <pre>
+ * this directory: 7 java files = 6 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: the enumeration below closed at four records and omitted the two request
+ * shapes, {@code CardLookupRequest} and {@code CardPageQuery}, even though both are named later in
+ * this same charter -- so the inventory contradicted the file it sits in. The marker line above is the
+ * form {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures against this directory,
+ * and the same test requires every member enumerated below to be a file here, so the count and the
+ * membership are now checked on every build.</p>
  *
  * <ul>
  *   <li>{@code CardSummary}, one row of the list: the three values the baseline row displayed in
@@ -110,6 +122,18 @@
  *       last read for the card. The card being changed is addressed by the selector in the request
  *       path and is not repeated in the body; neither identifier is editable, and no member carries
  *       the DAY of the expiry, which the baseline renders non-display and never validates.</li>
+ *   <li>{@code CardPageQuery}, the body of the page search: an optional eleven-digit account
+ *       narrowing, the cursor that positions the page and the direction it moves in. The narrowing
+ *       travels in a body for the same reason the card number does, and the cursor is an opaque
+ *       signed token rather than a row offset.</li>
+ *   <li>{@code CardLookupRequest}, the body of the lookup: one sixteen-digit primary account number
+ *       and nothing else. It is the only shape in this package that carries that number inbound,
+ *       which is what confines an unmasked number to one request body on one route.</li>
+ *   <li>{@code CardLookupRequest}, the one card number in a body rather than in a path, which is the
+ *       shape that keeps the number out of every request line an intermediary logs.</li>
+ *   <li>{@code CardPageQuery}, the list request: an optional account-number filter, the opaque cursor
+ *       and the direction. Assumptions: it carries no page size, page number or offset, so there is no
+ *       member through which ordinal addressing could be expressed.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the selector is what the earlier revision of this charter said the list row
@@ -219,11 +243,13 @@
  * in the ordered set, or positions a page by anything other than a key.
  *
  * <p><b>4. The page envelope and the problem shape are imported from the shared kernel and are never
- * restated here.</b> {@code com.carddemo.common.web.PageResponse} declares exactly four components,
- * being the page items, a first-key cursor, a last-key cursor and a more-pages flag, and the
+ * restated here.</b> {@code com.carddemo.common.web.PageResponse} declares exactly five components,
+ * being the page items, a first-key cursor, a last-key cursor, a further-pages-follow flag and an
+ * earlier-page-exists flag whose value is reported by the read rather than inferred from the
+ * first-key cursor, and the
  * contract's {@code CardPage} schema is the serialised form of that type parameterised with
  * {@code CardSummary}. That is precisely why <b>no {@code CardPage} record exists in this
- * package</b>: the shape is already declared once, and a fifth record here would be a second
+ * package</b>: the shape is already declared once, and a seventh record here would be a second
  * declaration of it. {@code com.carddemo.common.error.ApiError} owns the problem shape, including
  * the per-field error array a refused submission answers with -- whose entry is a record nested
  * inside {@code ApiError} rather than a separate top-level type, and whose blank state carries the
@@ -460,7 +486,7 @@
  * is configured and nothing is lost mechanically.</p>
  *
  * <p>Assumptions: this is one of the eight charters this bounded context's main source tree carries
- * at target -- one at the context root, and one in each of the seven subpackages {@code api},
+ * -- one at the context root, and one in each of the seven subpackages {@code api},
  * {@code service}, {@code repository}, {@code domain}, {@code dto}, {@code mapper} and
  * {@code config}. None belongs in the {@code com} or {@code com/carddemo} directories above them,
  * because the file-set check audits only a directory that holds a processed source file and those

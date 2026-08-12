@@ -2,14 +2,20 @@
  * Test root of the batch bounded context, and the one test tree in this reactor whose results are
  * checked against committed reference output rather than against transcribed prose alone.
  *
- * <h2>What the five subpackages hold</h2>
+ * <h2>What the seven subpackages hold</h2>
  *
- * <p>Five subpackages, and no sixth:</p>
+ * <p>Seven subpackages, and no eighth:</p>
  *
  * <ul>
+ *   <li><b>{@code com.carddemo.batch.config}</b> -- no-container tests over this module's
+ *       configuration classes, asserting what a deployment's properties actually contribute. The
+ *       property gated on is the terminal error sink's address, which decides whether a queue client,
+ *       a validated sink binding and a failure-notification producer exist at all -- so the assertion
+ *       has to observe a context being built from properties, which is the one thing none of the six
+ *       packages below may do.</li>
  *   <li><b>{@code com.carddemo.batch.domain}</b> -- no-container tests over the persistence
- *       entities, covering the properties that neither the compiler nor the schema asserts. The one
- *       covered so far is diagnostic rendering: an entity's {@code toString} decides what reaches a
+ *       entities, covering the properties that neither the compiler nor the schema asserts. Among
+ *       them is diagnostic rendering: an entity's {@code toString} decides what reaches a
  *       log line, a log is readable by every holder of log access, and deleting an override breaks
  *       no build. A test here needs no database, because the property is a function of the
  *       instance's own members.</li>
@@ -18,23 +24,46 @@
  *       declaration that supplies or consumes it; the first such comparison holds the
  *       {@code BatchJobName} tokens against the {@code --job=} values accepted by
  *       {@code com.carddemo.batch.BatchApplication}.</li>
- *   <li><b>{@code com.carddemo.batch.service}</b> -- <b>[planned]</b>. Unit tests over the four
- *       transcribed-business-rule services of the production package of the same name. A test here
- *       will need neither a database nor a container: with the repositories supplied as test doubles,
- *       each rule is a function of its arguments, and constructor injection in the production
- *       package is what makes that substitution possible at all.</li>
- *   <li><b>{@code com.carddemo.batch.job}</b> -- <b>[planned]</b>. Tests over the seven Spring Batch
+ *   <li><b>{@code com.carddemo.batch.mapper}</b> -- no-container tests over the anti-corruption
+ *       layer, comparing a mapped object against the fixed-width record layout it was derived from.
+ *       A test here needs neither a database nor a container because a mapping is a function of the
+ *       bytes handed to it, which is exactly what makes a record-geometry error catchable here rather
+ *       than in an integration run.</li>
+ *   <li><b>{@code com.carddemo.batch.service}</b> -- unit tests over the transcribed-business-rule
+ *       services of the production package of the same name, and over the terminal-sink producer. A
+ *       test here needs neither a database nor a container: with the repositories and the transport
+ *       supplied as test doubles, each rule is a function of its arguments, and constructor injection
+ *       in the production package is what makes that substitution possible at all.</li>
+ *   <li><b>{@code com.carddemo.batch.job}</b> -- tests over the seven Spring Batch
  *       job definitions. A test here asserts step ordering, reader, processor and writer wiring, and
  *       the arguments a job accepts, and delegates every business-rule assertion downward to the
  *       service tests. That split mirrors the production split deliberately, so one behaviour is
  *       asserted in one place and a rule change breaks one test rather than eight.</li>
- *   <li><b>{@code com.carddemo.batch.repository}</b> -- <b>[planned]</b>. Testcontainers-backed
- *       integration tests over the eight Spring Data interfaces. These are the tests that require a
+ *   <li><b>{@code com.carddemo.batch.repository}</b> -- Testcontainers-backed
+ *       integration tests over the Spring Data interfaces. These are the tests that require a
  *       real PostgreSQL instance, because what they cover is the migrated form of the baseline's
  *       record access and a test double cannot disagree with a query the way a database can.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the roster reached four packages when
+ * <p>Refactoring Rationale: this roster was measurably wrong in two independent ways before
+ * {@code config} was added to it, and both are recorded rather than silently renumbered because a
+ * closed roster that has drifted is worse than an open list -- a reader trusts it. First,
+ * {@code mapper} was NEVER in it: the package and its charter existed while this heading counted five
+ * subpackages and the paragraph below declared "no sixth", so the roster excluded a package that was
+ * already there and the exclusion read as a deliberate boundary. Second, three bullets carried a
+ * {@code [planned]} marker -- {@code service}, {@code job} and {@code repository} -- and all three
+ * packages exist and hold tests, so a reader deciding where to file a test was told three of the
+ * available homes did not yet exist. The two bullets that named a fixed count of their subjects have
+ * had it removed rather than restated: "the four transcribed-business-rule services" and "the eight
+ * Spring Data interfaces" are figures a roster has no need to carry, and a figure restated away from
+ * the thing it counts is the shape both of the lapses above took.</p>
+ *
+ * <p>Refactoring Rationale: the roster reached seven packages when
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/config/SqsConfigTest.java}
+ * arrived, for a distinction the environment-based division above makes: that test observes a
+ * context being BUILT from properties, so it belongs neither with the no-container rule tests, which
+ * construct their subject directly, nor with the container-backed repository tests, which need a
+ * database it does not touch. It reached four packages when
  * {@code services/batch-service/src/test/java/com/carddemo/batch/dto/BatchJobNameTest.java}
  * arrived, because it compares two independently authored declarations at the process boundary
  * while a service test checks one transcribed business rule. It reached five when
@@ -57,33 +86,32 @@
  * the two can drift apart.</p>
  *
  * <p>This subtree carries one charter per package and no more: this one, and one in each of those
- * five subpackages, so six in all. Three are present -- this one and the charters in
- * {@code domain} and {@code dto} -- and the remaining three arrive with the packages they
- * govern. This directory holds no shared base class, no helper, no
+ * seven subpackages, so eight in all. All eight are present, so there is no longer any distinction
+ * between a planned charter and a missing one to draw. This directory holds no shared base class, no helper, no
  * fixture and no resource -- every such thing lives one level down, in the subpackage whose
  * environment it needs. It holds exactly one test class,
  * {@code BatchApplicationTest}, and that single exception is stated here rather than left to be
  * inferred from a directory listing.</p>
  *
- * <p>Refactoring Rationale: the charter count in the paragraph above said "one in each of those four
- * subpackages, so five in all", and four further sentences in this charter likewise reasoned over
- * "the four subpackages". All five were correct before {@code domain} joined the roster and none was
- * updated when it did, so this charter contradicted its own roster -- a list of five immediately
- * above, arithmetic over four immediately below. That is the specific failure a closed roster is
- * supposed to prevent, and it is worth recording rather than silently renumbering: the roster
- * paragraph was amended when the package arrived, which is what the expansion record two paragraphs
- * up documents, but the figures derived FROM the roster elsewhere in the file were not, so the
- * discipline held at the point of the edit and lapsed everywhere the count was restated. The
- * derived figures are now stated once against the roster, and the count of charters actually
- * present is given alongside the target so a reader can tell a planned charter from a missing
- * one.</p>
+ * <p>Refactoring Rationale: the count in the paragraph above has now lapsed TWICE in the same way,
+ * and the repetition is the reason it is recorded rather than just corrected. The first time, the
+ * charter count and four further sentences reasoned over "the four subpackages" after {@code domain}
+ * made five, so a list of five stood immediately above arithmetic over four. The second time -- the
+ * state this edit found -- the file reasoned over five while seven directories existed, still
+ * reported only three charters present when all of them were, and still described three of the
+ * packages as planned. In both lapses the roster paragraph itself was the part that got amended and
+ * every figure DERIVED from it was the part that did not, which is a property of restating a count
+ * away from the thing it counts rather than of any one author's carelessness. The derived figures are
+ * therefore stated once each, against the roster, and the phrase distinguishing a present charter
+ * from a planned one is withdrawn now that the distinction is empty -- a sentence that has to be
+ * revised every time a package arrives will eventually not be.</p>
  *
  * <p>Refactoring Rationale: this paragraph previously read that the directory holds no test class at
  * all, which was true when it was written and stopped being true when the entry point acquired
  * assertions of its own. The exception is admitted rather than avoided because the alternative was
  * worse in a specific way: {@code BatchApplication} is a compilation unit of the production package
  * of this same name, so a test of its argument sanitisation, its exit-status mapping and its outcome
- * reporting has no home in any of the five subpackages above without being misfiled. Filing it under
+ * reporting has no home in any of the seven subpackages above without being misfiled. Filing it under
  * {@code dto} was the closest candidate and is rejected -- that subpackage's charter scopes it to
  * comparisons between a production value and the independent declaration that supplies or consumes
  * it, and a test that captures log events and asserts a severity is not such a comparison. A test
@@ -93,15 +121,15 @@
  * <p>Assumptions: this exception does not weaken the environment-based division above, because the
  * class it admits needs no environment -- no container, no datasource and no migrated schema. Nor
  * does it reopen the question the shared-base-class paragraph below settles: a test class asserting
- * the entry point's own behaviour is not a helper the five subpackages share, so admitting it here
+ * the entry point's own behaviour is not a helper the seven subpackages share, so admitting it here
  * gives nothing at this level for a later edit to weaken on their behalf.</p>
  *
  * <p>Alternatives Considered: a shared base class or assertion helper at this level, which is where
- * one would naturally go if all five subpackages came to need it. Rejected, because such a helper
- * sits at the one level none of the five owns, and an assertion moved into it can afterwards be
+ * one would naturally go if all seven subpackages came to need it. Rejected, because such a helper
+ * sits at the one level none of the seven owns, and an assertion moved into it can afterwards be
  * weakened by an edit to the helper that reads as ordinary maintenance rather than as the
  * relaxation of a parity assertion that it would in fact be. Duplicating a few lines of set-up
- * across five subpackages is the accepted cost of keeping each assertion visible in the file that
+ * across seven subpackages is the accepted cost of keeping each assertion visible in the file that
  * depends on it. The one test class this directory does hold is not such a helper and is imported by
  * nothing: it covers the entry point that sits at this same level in the production tree, and the
  * paragraph above records why that is the only placement for it.</p>
@@ -221,7 +249,7 @@
  * stand-in either, because it would document an absence the construct is incapable of having.</p>
  *
  * <p>Assumptions: that exemption is this compilation unit's alone and does not travel into the
- * five subpackages, where a test class, a test method and a private helper alike do have
+ * seven subpackages, where a test class, a test method and a private helper alike do have
  * parameters, return values and thrown types to document. The obligation there rests on the rule's
  * docstring-elements clause, on the house convention the oracle suite states for every new test,
  * fixture builder, helper and mock, and on the shared ruleset's own at-clause validation, which

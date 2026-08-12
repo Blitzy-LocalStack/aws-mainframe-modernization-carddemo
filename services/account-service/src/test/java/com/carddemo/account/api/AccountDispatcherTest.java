@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -181,25 +182,33 @@ class AccountDispatcherTest {
     }
 
     /**
-     * The retired keyed machine read no longer answers, though the template still serves the update.
+     * No keyed account address is mounted under any method, for the read, the edit or the walk.
      *
      * @throws Exception if the request cannot be performed
      */
     @Test
-    @DisplayName("GET /api/v1/accounts/{accountId} is refused 405 while PUT on the same template stands")
-    void theRetiredKeyedAccountReadIsNotMounted() throws Exception {
-        // WHY : Assumptions: this is asserted rather than assumed, because leaving the keyed read mounted
-        //       beside the lookup would preserve the disclosure the move exists to remove -- the load
-        //       balancer composes its access record from the request line before any application code
-        //       runs, so a caller using the old shape would keep writing account identifiers into it.
-        // WHY : Trade-offs: 405 and not 404 is the honest expectation here, and the difference is
-        //       measured. PUT /api/v1/accounts/{accountId} is an END-USER route in the published contract
-        //       and stays mounted, so the template resolves and only the METHOD is unmapped. Expecting 404
-        //       would fail for a reason unrelated to the retirement, and weakening the assertion to
-        //       "not 200" would pass against a mounted read that merely returned an error.
-        assertMethodNotAllowed(get("/api/v1/accounts/11"));
+    @DisplayName("no keyed account address is mounted under any method")
+    void theRetiredKeyedAccountRoutesAreNotMounted() throws Exception {
+        // WHY : Assumptions: this is asserted rather than assumed, because leaving any keyed address
+        //       mounted would preserve the disclosure the moves exist to remove -- the load balancer
+        //       composes its access record from the request line before any application code runs, so a
+        //       caller using an old shape would keep writing account identifiers into it.
+        // WHY : Refactoring Rationale: this case expected 405 and asserted the keyed TEMPLATE survived
+        //       under a different method, because PUT /api/v1/accounts/{accountId} was then a mounted
+        //       end-user route. It is not one any more: the edit moved to POST /api/v1/accounts/update,
+        //       the human read to POST /api/v1/accounts/view and the cross-reference walk to
+        //       POST /api/v1/accounts/card-cross-references/search, each so that its identifier travels
+        //       in a body. No method is mapped at a keyed address now, so 404 is the honest expectation
+        //       and 405 would fail. All four verbs are driven rather than the one this case used to
+        //       drive, because a partial retirement -- one method left behind at a keyed address -- is
+        //       exactly the state a single-verb assertion would not see.
+        assertNoHandler(get("/api/v1/accounts/11"));
+        assertNoHandler(put("/api/v1/accounts/11"));
+        assertNoHandler(get("/api/v1/accounts/11/view"));
+        assertNoHandler(get("/api/v1/accounts/11/card-cross-references"));
 
         verify(this.reads, never()).readAccountContext(anyLong());
+        verify(this.reads, never()).readAccountView(anyLong());
     }
 
     /**
@@ -275,22 +284,6 @@ class AccountDispatcherTest {
     }
 
     /**
-     * Asserts that a request resolves a mounted address but finds its method unmapped there.
-     *
-     * <p>Assumptions: this is the correct expectation for a retired route whose TEMPLATE survives under a
-     * different method, and it is a stronger statement than 404 rather than a weaker one -- it says the
-     * address is still served and this particular verb is not. It is measured on the advice-free
-     * dispatcher for the same reason {@link #assertNoHandler} is: the advice would render the framework's
-     * method-not-supported signal through its catch-all and erase the distinction.</p>
-     *
-     * @param request the request to dispatch; must not be {@code null}
-     * @throws Exception if the dispatcher itself cannot be built or driven
-     */
-    private void assertMethodNotAllowed(RequestBuilder request) throws Exception {
-        adviceFreeDispatcher().perform(request).andExpect(status().isMethodNotAllowed());
-    }
-
-    /**
      * Builds a dispatcher carrying the two controllers and no exception advice.
      *
      * @return a dispatcher that renders framework dispatch failures rather than delegating them
@@ -308,7 +301,7 @@ class AccountDispatcherTest {
      * @throws Exception if the request cannot be performed
      */
     @Test
-    @DisplayName("GET /api/v1/accounts/0/view is refused 400 naming the accountId property")
+    @DisplayName("an all-zeroes selector is refused 400 naming the accountId property")
     void theAllZeroesKeyIsRefusedByTheEndUserView() throws Exception {
         // WHY : Assumptions: the edit is driven through the read path's own entry rather than stubbed to
         //       a boolean, because the sentence and the property name the response carries are the
@@ -318,7 +311,9 @@ class AccountDispatcherTest {
                 new ApiError.FieldError("accountId", FieldValidationFlag.NOT_OK,
                         "Account Filter must be a non-zero 11 digit number")));
 
-        this.mockMvc.perform(get("/api/v1/accounts/0/view"))
+        this.mockMvc.perform(post("/api/v1/accounts/view")
+                        .contentType("application/json")
+                        .content("{\"accountId\":0}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
@@ -336,12 +331,17 @@ class AccountDispatcherTest {
     void aNonZeroKeyReachesTheEndUserView() throws Exception {
         // WHY : Assumptions: the positive half is asserted beside the refusal because the refusal alone
         //       would pass against an edit that rejected EVERY value. Together they establish that the
-        //       published lower bound of one is the boundary the dispatcher actually applies.
+        //       all-zeroes boundary is one the dispatcher actually applies, and that it is applied by the
+        //       reference's own edit rather than by the binding layer: the submitted selector declares a
+        //       floor of ZERO, so a zero binds successfully and is refused afterwards with the sentence
+        //       app/cbl/COACTVWC.cbl moves into its message channel at L672.
         when(this.reads.accountFilterFieldErrors("00000000011")).thenReturn(List.of());
         when(this.reads.readAccountView(ACCOUNT_ID))
                 .thenThrow(new NoSuchElementException("the account master holds no such row"));
 
-        this.mockMvc.perform(get("/api/v1/accounts/11/view"))
+        this.mockMvc.perform(post("/api/v1/accounts/view")
+                        .contentType("application/json")
+                        .content("{\"accountId\":11}"))
                 .andExpect(status().isNotFound());
 
         verify(this.reads).readAccountView(ACCOUNT_ID);

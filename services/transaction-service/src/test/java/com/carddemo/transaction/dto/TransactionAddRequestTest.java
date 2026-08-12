@@ -3,6 +3,14 @@ package com.carddemo.transaction.dto;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.carddemo.common.money.Money;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
+import java.util.List;
+import java.util.Set;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -120,6 +128,140 @@ class TransactionAddRequestTest {
                 .doesNotContain("SEATTLE")
                 .doesNotContain("98101")
                 .doesNotContain("merchant");
+    }
+
+    /**
+     * The validation provider the key-selection cases drive, opened once for the class.
+     *
+     * <p>Assumptions: the real provider is used rather than the validator class being called directly,
+     * because half of what these cases assert is that the class-level annotation is PRESENT on the
+     * record at all. Invoking the validator by hand would pass even if the annotation were removed,
+     * which is the change most likely to be made by accident.</p>
+     */
+    private static ValidatorFactory factory;
+
+    /** The validator drawn from {@link #factory}. */
+    private static Validator validator;
+
+    /**
+     * Opens the validation provider.
+     */
+    @BeforeAll
+    static void openProvider() {
+        factory = Validation.buildDefaultValidatorFactory();
+        validator = factory.getValidator();
+    }
+
+    /**
+     * Closes the validation provider, releasing the expression factory it holds.
+     */
+    @AfterAll
+    static void closeProvider() {
+        if (factory != null) {
+            factory.close();
+        }
+    }
+
+    // WHY : Assumptions: these cases exist because the constraint they drive is PARITY with the
+    //       reference rather than a narrowing of it, and the narrowing that once stood here is
+    //       withdrawn. A D-ADD-KEY-EXCLUSIVE entry in section 7.4 of
+    //       docs/architecture/cobol-to-service-traceability.md registered the refusal of a capture
+    //       carrying both keys; it is withdrawn there, and these cases now pin the three arms of
+    //       app/cbl/COTRN02C.cbl VALIDATE-INPUT-KEY-FIELDS instead - either key alone accepted,
+    //       both accepted, neither refused. Assumptions: the register carries no entry for this
+    //       behaviour BECAUSE there is no difference to register, so a reader finding no identifier
+    //       cited here is seeing agreement rather than an omission.
+    /**
+     * Confirms that either key alone satisfies the pairing rule.
+     */
+    @Test
+    @DisplayName("either key alone satisfies the pairing rule")
+    void eitherKeyAloneSatisfiesThePairingRule() {
+        assertThat(keyViolations(keys(ACCOUNT_ID, null)))
+                .as("the account arm alone is what app/cbl/COTRN02C.cbl line 196 accepts")
+                .isEmpty();
+        assertThat(keyViolations(keys(null, CARD_NUMBER)))
+                .as("the card arm alone is what line 210 accepts")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms that a submission carrying BOTH keys is accepted, as the reference accepts it.
+     *
+     * <p>⚠️ Refactoring Rationale: this case previously asserted that both keys together were REFUSED,
+     * naming both fields, and pinned that refusal as a deliberate narrowing of the reference. The
+     * narrowing is withdrawn and the case now pins the reference. The reference accepts this submission:
+     * its construct at line 195 of {@code app/cbl/COTRN02C.cbl} is {@code EVALUATE TRUE}, so the account
+     * arm at line 196 fires whatever the card field holds, and line 209 then moves the cross-reference's
+     * own card number over the value the operator keyed. Refusing the pair changed an OUTCOME rather than
+     * a message -- a submission the screen accepts became a 400 -- and transformation rule T9 admits a
+     * behavioural change only as a documented divergence with a stated reason. The reason offered was that
+     * the request could not say which key the caller meant; the reference answers that question itself by
+     * resolving the account arm first, so the ambiguity was not real.</p>
+     *
+     * <p>Assumptions: the constraint that remains is that AT LEAST ONE key is supplied, which is the one
+     * arm of the three the reference also refuses.</p>
+     */
+    @Test
+    @DisplayName("both keys together are accepted, as the reference accepts them")
+    void bothKeysTogetherAreAcceptedAsTheReferenceAcceptsThem() {
+        assertThat(keyViolations(keys(ACCOUNT_ID, CARD_NUMBER)))
+                .as("app/cbl/COTRN02C.cbl line 196 fires whatever the card field holds")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms that a submission carrying neither key is refused, naming both fields.
+     *
+     * <p>Assumptions: this is the one arm of the three the reference also refuses, at lines 224 to 229
+     * with the sentence at line 226, so the message the violations carry is that sentence verbatim and
+     * is asserted as such.</p>
+     */
+    @Test
+    @DisplayName("neither key is refused with the reference's own sentence")
+    void neitherKeyIsRefusedWithTheReferenceSentence() {
+        Set<ConstraintViolation<TransactionAddRequest>> raised =
+                validator.validate(keys(null, null));
+
+        assertThat(keyViolations(keys(null, null)))
+                .containsExactlyInAnyOrder("accountId", "cardNumber");
+        assertThat(raised)
+                .anyMatch(violation ->
+                        TransactionAddRequest.KEY_FIELD_REQUIRED.equals(violation.getMessage()))
+                .as("line 226's sentence is carried verbatim, per transformation rule T8")
+                .isNotEmpty();
+    }
+
+    /**
+     * Returns the property names the pairing rule raised a violation against.
+     *
+     * <p>Assumptions: the set is filtered by the pairing rule's own message rather than taken whole,
+     * because a submission with no card number also breaks nothing else while one with both breaks
+     * nothing else either -- but a future component constraint could, and this helper must keep
+     * reporting the pairing rule alone.</p>
+     *
+     * @param request the submission to validate; must not be {@code null}
+     * @return the property names the pairing rule named, never {@code null}
+     */
+    private static List<String> keyViolations(TransactionAddRequest request) {
+        return validator.validate(request).stream()
+                .filter(violation ->
+                        TransactionAddRequest.KEY_FIELD_REQUIRED.equals(violation.getMessage()))
+                .map(violation -> violation.getPropertyPath().toString())
+                .toList();
+    }
+
+    /**
+     * Builds a submission whose only variables are the two key alternatives.
+     *
+     * @param accountId the account identifier to submit, or {@code null} to omit it
+     * @param cardNumber the card number to submit, or {@code null} to omit it
+     * @return a submission valid in every other respect, never {@code null}
+     */
+    private static TransactionAddRequest keys(String accountId, String cardNumber) {
+        return new TransactionAddRequest(accountId, "01", "0001", "POS", "GROCERY PURCHASE",
+                Money.of("125.50"), "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
+                "2026-01-15", "2026-01-16", "Y");
     }
 
     /**

@@ -387,7 +387,7 @@ public class PendingAuthSummaryService {
      */
     private PendingAuthListView unopenedAccountPage(Long accountId, String subject) {
         PendingAuthSummary zeroed = new PendingAuthSummary(accountId, UNKNOWN_CUSTOMER_ID);
-        return this.mapper.toListView(zeroed, List.of(), false, false, null, subject,
+        return this.mapper.toListView(zeroed, List.of(), false, null, subject,
                 customerDisplayOf(zeroed));
     }
 
@@ -415,11 +415,12 @@ public class PendingAuthSummaryService {
         List<PendingAuthDetail> read = this.details
                 .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId, pageLimit());
 
-        // WHY : Assumptions: the opening page reports NOTHING before it, which is the reference's own
-        //       top-of-page state at L381 rather than an inference from the page carrying a leading
-        //       boundary token. Every page that returned rows names its first row, so inferring from that
-        //       token would tell the client an earlier page exists on the very first display.
-        return page(summary, read, false, subject);
+        // WHY : Assumptions: nothing here tells the client whether an earlier page exists, because the
+        //       opening page is precisely the state the client itself recognises: it holds the page ordinal
+        //       the reference keeps in its communication area (cbl/COPAUS0C.cbl L122, tested at L365) and
+        //       renders the top-of-page sentence from L381 without asking. What this page owes it is the
+        //       leading boundary token to seek from, which the envelope carries.
+        return page(summary, read, subject);
     }
 
     /**
@@ -458,13 +459,11 @@ public class PendingAuthSummaryService {
             //       the sentence. The stateless equivalent is an empty page plus the sentence, and the
             //       published contract states the same thing on its boundary-message schema, so a
             //       conforming client keeps what it is displaying rather than clearing it.
-            return this.mapper.toListView(summary, List.of(), false, false,
+            return this.mapper.toListView(summary, List.of(), false,
                     PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE, subject,
                 customerDisplayOf(summary));
         }
-        // WHY : Assumptions: a forward move always has a page behind it -- the one whose closing position
-        //       the caller supplied -- so backward availability is settled without a second read.
-        return page(summary, read, true, subject);
+        return page(summary, read, subject);
     }
 
     /**
@@ -507,7 +506,7 @@ public class PendingAuthSummaryService {
             // WHY : Assumptions: the reference top-of-page state, reached at L381 when a backward move is
             //       attempted from the opening page, and informational on the same terms as the
             //       bottom-of-page state above.
-            return this.mapper.toListView(summary, List.of(), false, false,
+            return this.mapper.toListView(summary, List.of(), false,
                     PendingAuthListView.MESSAGE_TOP_OF_PAGE, subject,
                 customerDisplayOf(summary));
         }
@@ -531,11 +530,14 @@ public class PendingAuthSummaryService {
         boolean hasNext = !this.details.findOlderThan(accountId, last.getAuthDate(),
                 last.getAuthTime(), Limit.of(PROBE_ROWS)).isEmpty();
 
-        // WHY : Assumptions: on a backward move the look-ahead row IS the answer to backward
-        //       availability -- it is a row lying further back than the page -- so the read already
-        //       performed settles it and no second probe is issued.
-        boolean hasPrevious = ascending.size() > PAGE_SIZE;
-        return this.mapper.toListView(summary, nearest, hasNext, hasPrevious, null, subject,
+        // WHY : Refactoring Rationale: the look-ahead row of this backward read is NOT published as a
+        //       backward availability answer, because the shared envelope carries the backward POSITION and
+        //       not that answer. The reference asks the same question of its own communication area rather
+        //       than of the database -- cbl/COPAUS0C.cbl tests CDEMO-CPVS-PAGE-NUM at L365 and raises
+        //       'You are already at the top of the page...' at L381 -- so the answer belongs to the client
+        //       that holds the ordinal. The row itself is still read, because the same list is what the
+        //       page is trimmed from.
+        return this.mapper.toListView(summary, nearest, hasNext, null, subject,
                 customerDisplayOf(summary));
     }
 
@@ -560,18 +562,15 @@ public class PendingAuthSummaryService {
      *
      * @param summary the account's summary row, never {@code null}
      * @param read the rows the repository returned, up to one more than the page size, never {@code null}
-     * @param hasPrevious whether a page precedes this one, which on a forward move is settled by whether
-     *     the caller supplied a position: the predicate is strictly beyond that position and the position
-     *     names a row the caller was already shown
      * @param subject the authenticated principal the page's boundary tokens are sealed against; never
      *     {@code null}
      * @return the rendered page with no boundary sentence, never {@code null}
      */
     private PendingAuthListView page(PendingAuthSummary summary, List<PendingAuthDetail> read,
-            boolean hasPrevious, String subject) {
+            String subject) {
         boolean hasNext = read.size() > PAGE_SIZE;
         List<PendingAuthDetail> rows = hasNext ? read.subList(0, PAGE_SIZE) : read;
-        return this.mapper.toListView(summary, rows, hasNext, hasPrevious, null, subject,
+        return this.mapper.toListView(summary, rows, hasNext, null, subject,
                 customerDisplayOf(summary));
     }
 

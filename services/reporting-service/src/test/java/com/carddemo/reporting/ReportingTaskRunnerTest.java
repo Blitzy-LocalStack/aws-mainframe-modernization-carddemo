@@ -43,14 +43,29 @@ class ReportingTaskRunnerTest {
     private static final String STATE_MACHINE_SOURCE = "../../infra/modules/step-functions-batch/main.tf";
 
     /**
-     * Matches every {@code --job=<token>} literal the state machine builds inline.
+     * Matches every {@code --job=<token>} literal the state machine builds inline <em>at this module's
+     * own container</em>.
      *
      * <p>Assumptions: only the on-demand command is built this way. The two nightly commands are
      * interpolated from a Terraform map, which is why {@link #DECLARED_REPORTING_JOB} exists as well --
      * one pattern cannot see both forms, and a test that looked for only the literal form would have
      * declared the two nightly tokens unreachable.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this pattern was {@code "'--job=([a-z-]+)'"}, matching every inline
+     * token anywhere in the module, and that was safe only for as long as the reporting task was the one
+     * state dispatching an inline literal. It stopped being safe the moment the dataset round-trip states
+     * were added: those dispatch {@code --job=export} and {@code --job=import} inline at the BATCH
+     * container, so the unscoped pattern collected them and the containment assertion then demanded that
+     * this module accept two tokens aimed at a different image. The container name is now required on the
+     * preceding line, which makes the pattern say what this class's own documentation already claimed --
+     * that the assertion is about commands aimed at THIS task definition. Assumptions: the interpolated
+     * form at the reporting container is deliberately NOT matched by this pattern, because
+     * {@code --job=$&#123;job_config.job&#125;} has no lower-case token where the group expects one; that
+     * form is read from the map instead, which is the only place its value exists.</p>
      */
-    private static final Pattern DISPATCHED_JOB = Pattern.compile("'--job=([a-z-]+)'");
+    private static final Pattern DISPATCHED_JOB = Pattern.compile(
+            "Name\\s*=\\s*var\\.reporting_container_name\\s*\\R\\s*\"Command\\.\\$\"\\s*="
+                    + "\\s*\"States\\.Array\\('--job=([a-z-]+)'");
 
     /** Matches each {@code job = "<token>"} entry of the module's reporting-job map. */
     private static final Pattern DECLARED_REPORTING_JOB =
@@ -76,9 +91,11 @@ class ReportingTaskRunnerTest {
      *
      * <p>Assumptions: two forms are read, because the module builds the commands two ways. The on-demand
      * command is an inline literal, while the two nightly commands are interpolated from the module's
-     * reporting-job map, so the map's own entries are read for those. The daily chain's BATCH tokens are
-     * excluded by scanning only the reporting map's region and not the batch map's, which is what keeps
-     * this assertion about the commands aimed at THIS task definition.</p>
+     * reporting-job map, so the map's own entries are read for those. Tokens aimed at the BATCH container
+     * are excluded from BOTH forms, and by two different means: the map form by scanning only the
+     * reporting map's region and not the batch map's, and the inline form by requiring this module's own
+     * container name on the line above the command. Together those are what keep this assertion about the
+     * commands aimed at THIS task definition.</p>
      */
     @Test
     @DisplayName("every token the state machine dispatches at this module is accepted by it")

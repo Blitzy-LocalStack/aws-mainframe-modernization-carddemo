@@ -1218,6 +1218,157 @@ class OutboxPublisherTest {
     }
 
     /**
+     * Every claimed head is published before any group advances a second time.
+     *
+     * <p>Purpose: this is the fairness property the drain's own documentation described and its code did not
+     * have. The observable is the ORDER of the sends, because that order is what a requester's deadline is
+     * measured against: a group whose first reply is sent after four hundred and eighty other row-turns has
+     * missed a five-second deadline whatever the pass's totals say.</p>
+     *
+     * <p>Refactoring Rationale: the loop was DEPTH-first while its documentation claimed breadth. It reached
+     * the first claimed head and drained that group up to a per-group share -- twenty rows with the shipped
+     * defaults, each a claim, a send and a short transaction -- before touching the second head at all. A
+     * dead {@code followerBudget} local sat beside the loop as the only trace of the intended shape. This
+     * case fails against that loop and passes against the rotation that replaced it.</p>
+     *
+     * <p>Assumptions: the FIRST TWO sends must be one from each group, and that is asserted rather than the
+     * whole sequence being pinned. What the property guarantees is when each group's first reply goes out;
+     * the order the remaining rows of a busy group take among themselves is per-group ordering, which the
+     * cases beside this one already cover.</p>
+     *
+     * <p>Assumptions: the busy group is given FIVE rows and the quiet group ONE, both comfortably inside the
+     * per-group ceiling of twenty that the shipped defaults derive. The ceiling is therefore not what makes
+     * this case pass -- if it were, the case would be asserting the bound rather than the fairness.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a busy group does not delay the first reply of a quiet group claimed beside it")
+    void aBusyGroupDoesNotDelayAQuietGroupsFirstReply() {
+        approvedRow(1L, CARD_NUM, "TX0000000000101");
+        approvedRow(2L, CARD_NUM, "TX0000000000102");
+        approvedRow(3L, CARD_NUM, "TX0000000000103");
+        approvedRow(4L, CARD_NUM, "TX0000000000104");
+        approvedRow(5L, CARD_NUM, "TX0000000000105");
+        approvedRow(6L, OTHER_CARD_NUM, "TX0000000000201");
+
+        assertThat(this.publisher.drain())
+                .as("every row of both groups is inside the pass budget, so all six are published")
+                .isEqualTo(6);
+
+        ArgumentCaptor<SendMessageRequest> sent =
+                ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(6)).sendMessage(sent.capture());
+        List<String> groupOrder = sent.getAllValues().stream()
+                .map(SendMessageRequest::messageGroupId)
+                .toList();
+
+        assertThat(groupOrder.subList(0, 2))
+                .as("the quiet group's only reply must go out in the head round, not behind five others")
+                .containsExactly(CARD_NUM, OTHER_CARD_NUM);
+        assertThat(groupOrder)
+                .as("the busy group's four remaining rows follow, in the rotation's remainder")
+                .containsExactly(CARD_NUM, OTHER_CARD_NUM, CARD_NUM, CARD_NUM, CARD_NUM, CARD_NUM);
+    }
+
+    /**
+     * Three groups of differing depth are advanced one row each per round, in claim order.
+     *
+     * <p>Purpose: two groups can be satisfied by an implementation that merely handles the FIRST row of each
+     * head before looping again over the same list. Three groups of three different depths pin the rotation
+     * itself: it must keep going round the survivors, dropping each group as it runs dry, rather than
+     * finishing one and then the next.</p>
+     *
+     * <p>Assumptions: the expected sequence is stated in full, because with the depths chosen there is
+     * exactly one order a round-robin can produce. Round one takes one row from each of the three; round two
+     * takes one row from the two that still have rows; round three takes the last row of the deepest. A
+     * depth-first loop produces a completely different sequence and a per-group-share loop produces another,
+     * so the assertion distinguishes all three.</p>
+     *
+     * <p>Assumptions: the deduplication identifiers are distinct across every row, because the reply queue
+     * suppresses a duplicate identifier within its interval and a case reusing one would be asserting on a
+     * send the queue would have discarded.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the follower rotation advances every surviving group once per round, in claim order")
+    void theFollowerRotationAdvancesEverySurvivingGroupOncePerRound() {
+        approvedRow(1L, CARD_NUM, "TX0000000000301");
+        approvedRow(2L, CARD_NUM, "TX0000000000302");
+        approvedRow(3L, CARD_NUM, "TX0000000000303");
+        approvedRow(4L, OTHER_CARD_NUM, "TX0000000000401");
+        approvedRow(5L, OTHER_CARD_NUM, "TX0000000000402");
+        approvedRow(6L, THIRD_CARD_NUM, "TX0000000000501");
+
+        assertThat(this.publisher.drain()).isEqualTo(6);
+
+        ArgumentCaptor<SendMessageRequest> sent =
+                ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(6)).sendMessage(sent.capture());
+        assertThat(sent.getAllValues().stream().map(SendMessageRequest::messageGroupId).toList())
+                .as("round one takes one of each, round two the two that remain, round three the deepest")
+                .containsExactly(CARD_NUM, OTHER_CARD_NUM, THIRD_CARD_NUM,
+                        CARD_NUM, OTHER_CARD_NUM, CARD_NUM);
+    }
+
+    /**
+     * A group whose send fails leaves the rotation and never delays or reorders the groups beside it.
+     *
+     * <p>Purpose: the rotation must drop a failed group rather than carry it, and it must not let that failure
+     * cost the other groups their turns. Both halves matter and they pull in opposite directions: stopping the
+     * failed group is what preserves per-card order, and continuing the others is what stops one unreachable
+     * reply erasing every other group's progress.</p>
+     *
+     * <p>Assumptions: the failing group is the FIRST claimed, so a rotation that abandoned the pass on a
+     * failure would publish nothing at all and a rotation that carried the failed group would send its second
+     * row. Placing it last would let both faults pass unnoticed.</p>
+     *
+     * <p>Assumptions: the surviving group's BOTH rows are expected, because the failed group's departure
+     * returns its share of the remainder rather than stranding it. A rotation that reserved a private share
+     * per group would leave the second row of the survivor unsent.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a failed group leaves the rotation while the groups beside it keep their turns")
+    void aFailedGroupLeavesTheRotationWithoutCostingTheOthers() {
+        approvedRow(1L, CARD_NUM, "TX0000000000601");
+        approvedRow(2L, CARD_NUM, "TX0000000000602");
+        approvedRow(3L, OTHER_CARD_NUM, "TX0000000000701");
+        approvedRow(4L, OTHER_CARD_NUM, "TX0000000000702");
+
+        // WHY : Assumptions: the failure is bound to the FAILING GROUP's identity rather than to a call
+        //       ordinal, so the case states which group cannot be reached instead of which turn fails. A
+        //       call-ordinal stub would silently move to a different group the moment the rotation's order
+        //       changed, which is exactly the property under test.
+        when(this.sqs.sendMessage(any(SendMessageRequest.class))).thenAnswer(invocation -> {
+            SendMessageRequest request = invocation.getArgument(0);
+            if (CARD_NUM.equals(request.messageGroupId())) {
+                throw new IllegalStateException("the reply queue for this group is unreachable");
+            }
+            return null;
+        });
+
+        assertThat(this.publisher.drain())
+                .as("the reachable group's two rows are published and the unreachable group's none")
+                .isEqualTo(2);
+
+        ArgumentCaptor<SendMessageRequest> sent =
+                ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(3)).sendMessage(sent.capture());
+        List<String> groupOrder = sent.getAllValues().stream()
+                .map(SendMessageRequest::messageGroupId)
+                .toList();
+        assertThat(groupOrder)
+                .as("the failed group is attempted once and then dropped, so its second row is never sent")
+                .containsExactly(CARD_NUM, OTHER_CARD_NUM, OTHER_CARD_NUM);
+        assertThat(groupOrder.stream().filter(CARD_NUM::equals).count())
+                .as("advancing a group whose send failed would place a newer reply ahead of an older one")
+                .isEqualTo(1L);
+    }
+
+    /**
      * Writes one pending reply row carrying an approved body into the simulated table.
      *
      * @param outboxId the identity to assign, as a {@code long}, standing in for the generated key
@@ -1423,4 +1574,3 @@ class OutboxPublisherTest {
         return fixedNow().plusSeconds(5L);
     }
 }
-

@@ -133,8 +133,8 @@
  * build:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
+ * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 3 + time 1 + validation 2 + messaging 4 + control 4 = 43
+ * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 4 + time 2 + validation 3 + messaging 5 + control 5 = 54
  * </pre>
  *
  * <p>Assumptions: this subpackage is not named by the migration plan's section 0.4.1.2, and the root

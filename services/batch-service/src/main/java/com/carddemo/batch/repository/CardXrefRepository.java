@@ -28,8 +28,8 @@ import org.springframework.data.repository.Repository;
  * {@code app/cbl/CBTRN02C.cbl:383}, {@code app/cbl/CBACT04C.cbl:394} and
  * {@code app/cbl/CBTRN01C.cbl:229} -- and not one of them issues a write or a rewrite against it.
  * The target states the same restriction through privileges rather than through style:
- * {@code data-migration/sql/V0__schemas_and_roles.sql:1168} grants this module's role
- * {@code SELECT} on the tables of the {@code account} schema, and line 1179 grants {@code UPDATE}
+ * {@code data-migration/sql/V0__schemas_and_roles.sql:1215} grants this module's role
+ * {@code SELECT} on the tables of the {@code account} schema, and line 1226 grants {@code UPDATE}
  * on {@code account.accounts} BY NAME, so no insert, update or delete privilege on the
  * cross-reference reaches this module at all. A mutator here would compile, deploy, and then be
  * refused by the database. {@link CardXref} declares no version column for the same reason -- there

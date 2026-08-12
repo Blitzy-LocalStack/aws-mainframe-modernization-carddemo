@@ -59,48 +59,31 @@ import tools.jackson.databind.json.JsonMapper;
  * owns the conventions this file obeys. Both are cited rather than restated, because a second copy
  * of a convention is a second thing to keep in step.
  *
- * <h2>Assertions about a transfer object's own constraints are somewhere else</h2>
+ * <h2>What this class deliberately does not assert</h2>
  *
- * <p>Assumptions: the directory charter draws two lines this file stays inside. A transfer object's
- * declared constraints belong to {@code com.carddemo.transaction.dto}, and a declared-width
- * record's geometry belongs to {@code com.carddemo.transaction.domain}. Where a component
- * inventory is asserted below it is asserted as a property of the CONVERSION -- that this class
- * produces neither more nor fewer members than the record has fields to fill -- and never as a
- * restatement of a constraint annotation.
- *
- * <h2>No test here asserts a misspelling correction</h2>
+ * <p>Assumptions: a transfer object's declared constraints belong to
+ * {@code com.carddemo.transaction.dto} and a declared-width record's geometry to
+ * {@code com.carddemo.transaction.domain}. Where a component inventory appears below it is asserted
+ * as a property of the CONVERSION -- that this class produces neither more nor fewer members than
+ * the record has fields to fill -- and never as a restatement of a constraint annotation.
  *
  * <p>Assumptions: no field is renamed in this module, and the absence of a rename assertion is a
- * decision rather than an oversight. A reader arriving from a neighbouring service will expect
- * one, because the wider migration renames three misspelled baseline names in its own target
- * columns: {@code ACCT-EXPIRAION-DATE} in the account context, {@code CARD-EXPIRAION-DATE} in the
- * card context and {@code PA-MERCHANT-CATAGORY-CODE} in the authorization context. None of the
- * three occurs in {@code app/cpy/CVTRA05Y.cpy}. The reference material is unambiguous on the first
- * of them: {@code app/cbl/CBTRN02C.cbl} reads at its line 414
- * {@code IF ACCT-EXPIRAION-DATE >= DALYTRAN-ORIG-TS (1:10)} and uses the misspelled name exactly as
- * it stands. A test asserting a rename here would assert behaviour this module does not have and
- * would pass only against an implementation that had invented a divergence from the reference
- * layout.
+ * decision rather than an oversight. A reader arriving from a neighbouring service will expect one,
+ * because the wider migration corrects three misspelled baseline names in the account, card and
+ * authorization contexts; none of the three occurs in {@code app/cpy/CVTRA05Y.cpy}, and
+ * {@code app/cbl/CBTRN02C.cbl} uses the misspelled account name at its line 414 exactly as it
+ * stands. A rename asserted here would pass only against an implementation that had invented a
+ * divergence from the reference layout.
  *
- * <h2>These assertions are additive, and answerable to a cited line</h2>
+ * <p>Assumptions: no case below is a golden-master parity check, because no committed output exists
+ * to difference this module against. The four programs it migrates are online programs, and
+ * {@code tests/README.md} records at its lines 43 to 45 that those cannot be exercised end to end
+ * without a transaction monitor the runner does not provide. Every case is answerable instead
+ * to the reference line it cites and to the seed bytes it quotes, and a cited batch line is
+ * evidence of a rule rather than an oracle this class is differenced against.
  *
- * <p>Assumptions: no committed output exists to difference this module against. The four programs
- * it migrates -- {@code app/cbl/COTRN00C.cbl}, {@code app/cbl/COTRN01C.cbl},
- * {@code app/cbl/COTRN02C.cbl} and {@code app/cbl/COBIL00C.cbl} -- are online programs, and
- * {@code tests/README.md} records at its lines 43 to 45 that the online programs cannot be
- * exercised end to end without a transaction monitor the runner does not provide. Every case below
- * is therefore answerable to the reference source line it cites and to the seed bytes it quotes,
- * and none of them may be described as a golden-master parity check. Where a batch line is cited it
- * is cited as evidence of a rule, not as an oracle this class is differenced against.
- *
- * <h2>Parameters, return values, exceptions or errors</h2>
- *
- * <p>A test class declares no constructor a caller invokes, yields no value and raises nothing
- * outside the test engine, so the type itself carries no parameter, no result and no exception
- * at-clause. The inapplicability is declared rather than passed over, because user-specified Rule 1
- * forbids at its line 39 a docstring that omits parameters, return values or purpose, and a reader
- * has to be able to tell a declared inapplicability from an omission. Every member below carries
- * its own at-clauses.
+ * <p>A test class takes no parameter, returns no value and raises nothing outside the test engine,
+ * so the type carries no at-clause of its own; every member below carries its own.
  */
 @DisplayName("TransactionMapper: the 350-byte record's conversions, its paddings and its withholdings")
 class TransactionMapperTest {
@@ -141,9 +124,7 @@ class TransactionMapperTest {
      *
      * <p>Assumptions: the twenty-six bytes starting at one-based position 279 of record 1 read
      * {@code 2022-06-10 19:27:53.000000}, so this value is the feed's own stamp rather than a
-     * reading of any clock. Nothing in this class reads ambient time: the module's test profile
-     * records at lines 68 to 78 of {@code application-test.yml} that determinism for the
-     * twenty-six-character form is supplied as a value and never as a property.
+     * reading of any clock. Nothing in this class reads ambient time.
      */
     private static final LocalDateTime SEED_ORIGIN_TS = LocalDateTime.of(2022, 6, 10, 19, 27, 53);
 
@@ -198,12 +179,10 @@ class TransactionMapperTest {
     /**
      * Builds a stored row from the first seed record's own field values.
      *
-     * <p>Assumptions: the thirteen arguments are the record's thirteen named fields in the
-     * declaration order of lines 5 to 17, and there is no fourteenth argument for the padding at
-     * line 18. The row is fabricated inline rather than read through a builder because the
-     * directory charter reserves fixture material for
-     * {@code services/transaction-service/src/test/resources/fixtures} and requires the figures a
-     * case supplies to be visible in the case that supplies them.
+     * <p>Assumptions: the thirteen constructor arguments are the record's thirteen named fields in
+     * declaration order, with no fourteenth for the padding at line 18. The row is fabricated
+     * inline rather than drawn from the module's fixture tree, because the directory charter asks
+     * that the figures a case supplies be visible in the case that supplies them.
      *
      * @param cardNumber the sixteen-digit card number to store, supplied per case so that a case
      *     about a leading zero can differ from one about masking
@@ -225,10 +204,9 @@ class TransactionMapperTest {
      * Builds the stored row every case uses unless it needs a different card or a different stamp.
      *
      * <p>Assumptions: the default pairs the feed's originating instant with a distinct processing
-     * instant, because {@code app/cbl/CBTRN02C.cbl} assigns the two from different sources -- the
-     * feed's own stamp at its line 436 and a generated stamp at its lines 437 to 438. Defaulting
-     * both to one value would quietly bias every case that names no stamp toward the bill-payment
-     * shape, where a single move feeds two receivers.
+     * instant, because {@code app/cbl/CBTRN02C.cbl} assigns the two from different sources.
+     * Defaulting both to one value would quietly bias every case that names no stamp toward the
+     * bill-payment shape, where a single move feeds two receivers.
      *
      * @return a row carrying the first seed record's card number, its originating instant and a
      *     distinct processing instant
@@ -345,14 +323,11 @@ class TransactionMapperTest {
      * screen moves occupy lines 178 to 190, against the record declaration at lines 5 to 17 of
      * {@code app/cpy/CVTRA05Y.cpy}.
      *
-     * <p>Assumptions: the RECORD order governs and the screen-move order does not, and the two are
-     * genuinely different rather than incidentally so. The reference paragraph moves the card number
-     * second, at line 179, and the description seventh, at line 184, whereas the record declares the
-     * card number eleventh at line 15 and the description fifth at line 9. Asserting the two
-     * positions explicitly is what makes the divergence a fact of this file rather than a claim: a
-     * reader following the moves would order the components the other way, and every component
-     * involved is a string, so a transposition would compile, run and publish two values under each
-     * other's names.
+     * <p>Assumptions: the RECORD order governs and the screen-move order does not, and the two
+     * genuinely differ rather than differing incidentally -- the two positions the assertions below
+     * name are that divergence. A reader following the moves would order the components the other
+     * way, and every component involved is a string, so a transposition would compile, run and
+     * publish two values under each other's names.
      */
     @Test
     @DisplayName("the detail view publishes the record's thirteen fields in record order")
@@ -391,13 +366,10 @@ class TransactionMapperTest {
      * {@code app/cpy/CVTRA05Y.cpy}, whose twenty bytes occupy one-based positions 331 to 350.
      *
      * <p>Assumptions: those twenty bytes pad the record to the length its header line 2 declares
-     * rather than carrying a value, so the target is narrower than the source by exactly that much
-     * and the shortfall is accounted for here rather than left for a reader to notice. The thirteen
-     * named widths are summed against the declared length in the same case, because the drop is only
-     * demonstrably deliberate if the arithmetic closes: a reader reconciling a 350-byte record
-     * against a thirteen-component list needs the twenty bytes named. The sweep covers the entity as
-     * well as the four transfer objects, since a padding member retained on the entity would still
-     * reach a log line.
+     * rather than carrying a value, so the drop is only demonstrably deliberate if the arithmetic
+     * closes -- a reader reconciling a 350-byte record against a thirteen-component list needs the
+     * twenty bytes named. The sweep covers the entity as well as the four transfer objects, since a
+     * padding member retained on the entity would still reach a log line.
      */
     @Test
     @DisplayName("the twenty padding bytes have no component and no member in either direction")
@@ -432,9 +404,7 @@ class TransactionMapperTest {
      * <p>Assumptions: because the record declares none, this module has no path that could return
      * one and suppresses nothing. The prohibition is asserted anyway because this class is the only
      * place a value joined from another context could enter one of these shapes, so the sweep is
-     * what stops such a join being added silently. The one administrative endpoint this migration
-     * documents as returning an unmasked card belongs to the card context, so no unmasked path
-     * exists here to assert either.
+     * what stops such a join being added silently.
      */
     @Test
     @DisplayName("no mapped shape names a card verification value")
@@ -452,17 +422,12 @@ class TransactionMapperTest {
      * <p>Pins paragraph {@code POPULATE-TRAN-DATA} of {@code app/cbl/COTRN00C.cbl}, whose row fill
      * reads {@code TRAN-ORIG-TS} at line 384, against the row fields the map declares.
      *
-     * <p>Assumptions: the selection marker is not row data, and the reference proves it by moving the
-     * marker somewhere else. {@code app/cbl/COTRN00C.cbl} appends an extension to the communication
-     * area at its lines 62 to 70, declaring {@code CDEMO-CT00-TRN-SEL-FLG PIC X(01)} at line 69 and
-     * {@code CDEMO-CT00-TRN-SELECTED PIC X(16)} at line 70, and lines 150 and 151 move the marker
-     * and the chosen identifier into that extension. The marker is therefore navigation state
-     * travelling between turns, not a value belonging to a row, which is why no component carries it.
-     *
-     * <p>Assumptions: the row carries no message either, because a message is a screen-wide value
-     * rather than a row-wide one and the envelope this row travels in has no place for one. Both
-     * absences are asserted rather than left implicit, since either could be added by an author
-     * reading the screen rather than the record.
+     * <p>Assumptions: the selection marker is not row data, and the reference proves it by keeping
+     * the marker somewhere else -- lines 62 to 70 of {@code app/cbl/COTRN00C.cbl} append it to the
+     * communication area, where it travels between turns as navigation state rather than as a value
+     * belonging to a row. A message is likewise screen-wide rather than row-wide, and the envelope
+     * this row travels in has no place for one. Both absences are asserted rather than left
+     * implicit, since either could be added by an author reading the screen rather than the record.
      */
     @Test
     @DisplayName("the list row carries four members and neither a marker nor a message")
@@ -497,12 +462,9 @@ class TransactionMapperTest {
      * derivation occupies lines 444 to 451.
      *
      * <p>Assumptions: the identifier is generated rather than submitted, and the reference generates
-     * it by a browse the client cannot perform. Line 444 positions at the high end of the key with
-     * {@code MOVE HIGH-VALUES TO TRAN-ID}, lines 445 to 447 start the browse, read the previous
-     * record and end it, line 448 moves that identifier into {@code WS-TRAN-ID-N}, line 449 adds one
-     * and line 451 moves the numeric result back onto the character field. The screen map
-     * {@code app/cpy-bms/COTRN02.CPY} declares no identifier field at all, so a component here would
-     * publish an input the reference has nowhere to read.
+     * it by a backward browse to the high end of the key that no client can perform. The screen map
+     * {@code app/cpy-bms/COTRN02.CPY} declares no identifier field at all, so a component here
+     * would publish an input the reference has nowhere to read.
      */
     @Test
     @DisplayName("the submission carries no transaction identifier")
@@ -563,11 +525,9 @@ class TransactionMapperTest {
      * comparing equal in every arithmetic test.
      *
      * <p>Refactoring Rationale: the arithmetic contract is read off
-     * {@code com.carddemo.common.money.Money} rather than restated here. The directory charter
-     * records the reference suite's own rule, which {@code tests/README.md} states at its lines 540
-     * to 542 -- never duplicate a layout, keep it single-sourced -- and a rounding mode or a scale
-     * copied into this file would be a second declaration able to drift from the one the conversion
-     * actually applies.
+     * {@code com.carddemo.common.money.Money} rather than restated here, following the reference
+     * suite's own rule never to duplicate a layout; a scale or rounding mode copied into this file
+     * would be a second declaration able to drift from the one the conversion actually applies.
      */
     @Test
     @DisplayName("money crosses as an exact decimal held at two decimal places")
@@ -684,30 +644,22 @@ class TransactionMapperTest {
      * {@code app/cpy/CVTRA05Y.cpy} and the balance declaration {@code TRAN-CAT-BAL PIC S9(09)V99} at
      * line 9 of {@code app/cpy/CVTRA01Y.cpy}, both eleven bytes wide.
      *
-     * <p>Assumptions: the four spans are read out of committed files rather than invented, and each is
-     * quoted with the offset it was taken from. The span reading {@code 0000000000} closed by a
-     * left-brace character is the eleven bytes starting at one-based position 18 of record 1 of
-     * {@code app/data/ASCII/tcatbal.txt}, where all fifty balances close with that same character.
-     * The span reading {@code 0000001000} closed by a left-brace character is the same eleven bytes
-     * of record 1 of {@code tests/fixtures/posting/happy_path/tcatbal.txt}. The span reading
-     * {@code 0000009190} closed by a right-brace character and the span {@code 0000005047G} are the
-     * eleven bytes starting at one-based position 133 of records 2 and 1 of
-     * {@code app/data/ASCII/dailytran.txt}. The last of the four appears as a known-answer doctest at
-     * lines 81 and 82 of {@code tests/helpers/record_codec.py}, and the two brace characters are the
-     * zero entries of the two overpunch tables at lines 66 and 67 of that file -- a left brace
-     * carrying the digit 0 with a positive sign and a right brace the digit 0 with a negative one.
+     * <p>Assumptions: the four spans are read out of committed files rather than invented. The two
+     * left-brace spans are the balance field of record 1 of {@code app/data/ASCII/tcatbal.txt} and
+     * of {@code tests/fixtures/posting/happy_path/tcatbal.txt}; the right-brace span and
+     * {@code 0000005047G} are the eleven bytes at one-based position 133 of records 2 and 1 of
+     * {@code app/data/ASCII/dailytran.txt}. The braces are the zero entries of the two overpunch
+     * tables at lines 66 and 67 of {@code tests/helpers/record_codec.py} -- a left brace carrying
+     * the digit 0 with a positive sign, a right brace the digit 0 with a negative one.
      *
-     * <p>Assumptions: the expected values are the arithmetic of the picture and not a reading of the
-     * digits, which matters because the two readings look alike and differ by a factor of ten. Nine
-     * integer positions consume the first nine bytes and two decimal positions consume the last two,
-     * of which the second is the trailing-sign overpunch. The span reading {@code 0000001000} closed
-     * by a left brace therefore splits as integer {@code 000000100} and decimals {@code 0} and
-     * {@code 0}, giving 100.00 rather than 10.00; the span reading {@code 0000009190} closed by a
-     * right brace splits as integer {@code 000000919} and decimals {@code 0} and {@code 0}, giving
-     * -919.00 rather than -91.90. Three sources agree on those two values independently of this file:
-     * the shared codec the assertion calls, the reference decoder at
-     * {@code tests/helpers/record_codec.py}, and the class documentation of the production mapper,
-     * which states -919.00 for that same seed record.
+     * <p>Assumptions: the expected values are the arithmetic of the picture and not a reading of
+     * the digits, which matters because the two readings look alike and differ by a factor of ten.
+     * Nine integer positions consume the first nine bytes and two decimal positions the last two, of
+     * which the second is the trailing-sign overpunch, so {@code 0000001000} closed by a left brace
+     * denotes 100.00 rather than 10.00 and {@code 0000009190} closed by a right brace denotes
+     * -919.00 rather than -91.90. Three sources agree on those two values independently of this
+     * file: the shared codec the assertion calls, the reference decoder at
+     * {@code tests/helpers/record_codec.py}, and the production mapper's own class documentation.
      *
      * <p>Assumptions: the negative span is the one that carries the case, because a sign misread is
      * silent. {@code tests/README.md} records at its lines 273 and 274 that the compiler's default
@@ -716,10 +668,8 @@ class TransactionMapperTest {
      * the 300 amount spans in that file, 250 carry a positive overpunch and 50 carry a negative one.
      *
      * <p>Refactoring Rationale: the shared codec decodes the span and no overpunch table is written
-     * here. The canonical tables are stated once, at lines 66 and 67 of
-     * {@code tests/helpers/record_codec.py} and again as the two index strings at its lines 137 and
-     * 138, and a third copy in a test would be able to disagree with the one the service applies
-     * while the test went on passing against its own copy.
+     * here. A third copy of a table the reference decoder already states canonically could disagree
+     * with the one the service applies while this test went on passing against its own copy.
      *
      * @param span the eleven zoned-decimal bytes exactly as the committed file holds them
      * @param expected the exact decimal those bytes denote under the nine-and-two picture
@@ -747,13 +697,11 @@ class TransactionMapperTest {
      * <p>Pins {@code TRAN-CAT-CD PIC 9(04)} at line 7 and {@code TRAN-MERCHANT-ID PIC 9(09)} at line
      * 11 of {@code app/cpy/CVTRA05Y.cpy}, neither of which carries a leading {@code S}.
      *
-     * <p>Assumptions: the absence of the {@code S} is what decides the encoding, and
-     * {@code tests/helpers/record_codec.py} states the rule at its lines 69 and 70 -- an unsigned
-     * field contains plain digits with no overpunch. The committed data agrees: records 1 and 2 of
-     * {@code app/data/ASCII/dailytran.txt} hold {@code 0001} at one-based positions 19 to 22 and
-     * {@code 800000000} at positions 144 to 152, both of which are digits throughout. Reading these
-     * two as signed would take the final digit for a sign character and yield a different number, so
-     * the geometry is asserted from the declaration rather than inferred from the bytes.
+     * <p>Assumptions: the absence of the {@code S} is what decides the encoding -- an unsigned
+     * field contains plain digits with no overpunch, and the committed data agrees at both offsets
+     * the constants above quote. The geometry is asserted from the declaration rather than inferred
+     * from the bytes, because reading either field as signed would take its final digit for a sign
+     * character and yield a different number.
      *
      * <p>Assumptions: the merchant identifier is the one component of the detail view that is NOT a
      * pass-through, which is worth asserting because it sits between two that are. Its column is a
@@ -795,19 +743,16 @@ class TransactionMapperTest {
      * <p>Pins paragraph {@code ADD-TRANSACTION} of {@code app/cbl/COTRN02C.cbl}, whose
      * numeric-to-character moves at lines 218 to 221 produce a fully zero-padded card number.
      *
-     * <p>Assumptions: a numeric Java type would be wrong on the evidence of the data rather than as a
-     * matter of taste. Record 2 of {@code app/data/ASCII/dailytran.txt} holds
-     * {@code 0927987108636232} at the sixteen bytes starting at one-based position 263, and 30 of
-     * that file's 300 records carry a card number beginning with a zero. The case demonstrates the
-     * loss directly, by rendering the same characters through a numeric type and showing that the
-     * result is one position shorter, so the reason for the string type is executable rather than
-     * asserted in prose.
+     * <p>Assumptions: a numeric Java type would be wrong on the evidence of the data rather than as
+     * a matter of taste, because 30 of the 300 committed records carry a card number beginning with
+     * a zero. The case demonstrates the loss directly, rendering the same characters through a
+     * numeric type and showing that the result is one position shorter, so the reason for the
+     * string type is executable rather than asserted in prose.
      *
-     * <p>Assumptions: the reference itself treats the value as characters on the wire and as a number
-     * only for arithmetic. {@code app/cpy/CVCRD01Y.cpy} declares {@code CC-CARD-NUM PIC X(16)} at
-     * line 37 with {@code VALUE SPACES} at line 38 and redefines the same bytes as
-     * {@code CC-CARD-NUM-N PIC 9(16)} at line 39, which is that treatment written down. It is cited
-     * as a house idiom only, because none of the four programs this module migrates copies that book.
+     * <p>Assumptions: the reference itself treats the value as characters on the wire and as a
+     * number only for arithmetic -- {@code app/cpy/CVCRD01Y.cpy} declares the field {@code X(16)}
+     * at its line 37 and redefines the same bytes as {@code 9(16)} at line 39. It is cited as a
+     * house idiom only, because none of the four programs this module migrates copies that book.
      */
     @Test
     @DisplayName("the card number keeps its leading zero through the appended row")
@@ -888,27 +833,23 @@ class TransactionMapperTest {
      * lines 436 to 438, which is where the posting path fills the two stamps.
      *
      * <p>Assumptions: the two stamps have two different sources in that path, so they differ rather
-     * than agreeing. Line 436 passes the feed's own {@code DALYTRAN-ORIG-TS} straight through into
-     * {@code TRAN-ORIG-TS}; line 437 performs {@code Z-GET-DB2-FORMAT-TIMESTAMP} to obtain a separate
-     * value and line 438 moves that into {@code TRAN-PROC-TS}. Line 438 is the only site in that
-     * program where the processing stamp is assigned at all, which is what settles that the two are
-     * not one value written twice.
+     * than agreeing -- line 436 passes the feed's own stamp straight through, while line 437
+     * obtains a separate value that line 438 moves into the processing stamp. Line 438 is the only
+     * site in that program assigning the processing stamp at all, which settles that the two are not
+     * one value written twice.
      *
-     * <p>Assumptions: this case deliberately does NOT assert that the two stamps are equal, and does
-     * not assert a zero sub-second component for either. Equality and a zero sub-second component
-     * belong to a different path: {@code app/cbl/COBIL00C.cbl} assembles one value, moves zeros into
-     * its microsecond component at line 266 and then moves that one value into BOTH stamps in a single
-     * statement with two receivers at its lines 231 and 232. Folding either property onto this path
-     * would pass against an implementation that had lost the distinction, and nothing in the build
-     * would report it, which is why the three forms are asserted separately and never normalised
-     * together.
+     * <p>Assumptions: this case deliberately does NOT assert that the two stamps are equal, and
+     * does not assert a zero sub-second component for either. Both belong to the bill-payment path,
+     * where {@code app/cbl/COBIL00C.cbl} moves one assembled value into both stamps. Folding either
+     * property onto this path would pass against an implementation that had lost the distinction,
+     * and nothing in the build would report it, which is why the three forms are asserted
+     * separately and never normalised together.
      *
      * <p>Refactoring Rationale: the twenty-six-character form is rendered by
-     * {@code com.carddemo.common.time.TimestampFormatter} and no pattern is written here. The form is
-     * a group of thirteen items at lines 42 to 55 of {@code app/cpy/CSDAT01Y.cpy} whose separators
-     * survive only because {@code INITIALIZE} leaves {@code FILLER} untouched -- the space at line 48
-     * and the period at line 54 are never written by any statement -- so a second pattern declared
-     * here could produce a value whose separator positions were blank while looking correct.
+     * {@code com.carddemo.common.time.TimestampFormatter} and no pattern is written here. The
+     * reference form's separators survive only because {@code INITIALIZE} leaves {@code FILLER}
+     * untouched, so a second pattern declared here could produce a value whose separator positions
+     * were blank while looking correct.
      */
     @Test
     @DisplayName("the two stored timestamps are read independently and may differ")
@@ -937,12 +878,11 @@ class TransactionMapperTest {
      * 438, by asserting the state that exists before that line has run.
      *
      * <p>Assumptions: the absent state is real rather than defensive, and the committed feed is the
-     * evidence. Every one of the 300 records of {@code app/data/ASCII/dailytran.txt} carries
-     * twenty-six spaces at the processing-stamp field, the twenty-six bytes starting at one-based
-     * position 305, because a staged transaction has not been processed; the originating stamp at
-     * position 279 is populated in the same records. Twenty-six spaces denote no value, so decoding
-     * them to a zero instant would date an unprocessed transaction to 1970 and make it
-     * indistinguishable from one processed at an absurd time.
+     * evidence -- every one of the 300 records of {@code app/data/ASCII/dailytran.txt} carries
+     * twenty-six spaces at the processing-stamp field while its originating stamp is populated,
+     * because a staged transaction has not been processed. Spaces denote no value, so decoding them
+     * to a zero instant would date an unprocessed transaction to 1970 and make it indistinguishable
+     * from one processed at an absurd time.
      *
      * <p>Assumptions: the originating stamp is asserted present in the same case, because the property
      * is that the two are reported independently. A conversion that reported both absent, or both
@@ -968,13 +908,10 @@ class TransactionMapperTest {
      * 465, which fill the two record stamps from the screen.
      *
      * <p>Assumptions: the screen supplies ten characters and the record field holds twenty-six, so
-     * the value the reference stores is a date followed by padding. Line 464 moves {@code TORIGDTI}
-     * and line 465 moves {@code TPROCDTI}, both declared {@code PIC X(10)} at lines 102 and 108 of
-     * {@code app/cpy-bms/COTRN02.CPY}, into two fields declared {@code PIC X(26)} at lines 16 and 17
-     * of {@code app/cpy/CVTRA05Y.cpy}. A ten-byte value moved into a twenty-six-byte character field
-     * is followed by sixteen spaces, so a transaction captured through that screen holds no time
-     * component, and a microsecond-precision column therefore renders midnight for it rather than an
-     * invented submission time.
+     * the value the reference stores is a date followed by sixteen spaces. Both cited lines move a
+     * {@code PIC X(10)} screen field into a {@code PIC X(26)} record field, so a transaction
+     * captured through that screen holds no time component, and a microsecond-precision column
+     * renders midnight for it rather than an invented submission time.
      *
      * <p>Assumptions: the reference span for this path is asserted to carry no period at all, which is
      * the property that distinguishes it from the zero-microsecond form. That form belongs to
@@ -1039,12 +976,11 @@ class TransactionMapperTest {
      * <p>Pins paragraph {@code VALIDATE-INPUT-DATA-FIELDS} of {@code app/cbl/COTRN02C.cbl} at its
      * lines 383 to 386, together with the record write at its line 458.
      *
-     * <p>Assumptions: the reference re-renders the amount before showing it back, so the operator sees
-     * a canonical form rather than the characters typed. Line 383 computes {@code WS-TRAN-AMT-N} from
-     * {@code FUNCTION NUMVAL-C} of the screen field, line 385 moves that through the edited field
-     * {@code WS-TRAN-AMT-E PIC +99999999.99} and line 386 moves the edited value back onto the screen
-     * field. Line 458 writes the same normalised value into the record, so reading the amount off the
-     * appended row reproduces what the screen shows.
+     * <p>Assumptions: the reference re-renders the amount before showing it back, so the operator
+     * sees a canonical form rather than the characters typed -- it converts the screen field, moves
+     * that through the edited field {@code WS-TRAN-AMT-E PIC +99999999.99} and writes the same
+     * normalised value into the record, so reading the amount off the appended row reproduces what
+     * the screen shows.
      *
      * <p>Assumptions: a value carrying one decimal place is submitted, because the normalisation is
      * only observable on a value the canonical form changes. A figure already at two decimal places
@@ -1109,9 +1045,8 @@ class TransactionMapperTest {
     /**
      * The two spellings of the lookup failure remain distinct, and the doubled space is not tidied.
      *
-     * <p>Pins {@code app/cbl/COTRN00C.cbl} at its lines 615, 649 and 683 against
-     * {@code app/cbl/COTRN01C.cbl} at its line 292 and {@code app/cbl/COTRN02C.cbl} at its lines 664
-     * and 693, together with the assembled sentence at lines 727 to 733 of the add program.
+     * <p>Pins the same reference literals the case above cites, this time for the property that
+     * the two spellings and the doubled space are not normalised into one another.
      *
      * <p>Assumptions: asserting that each spelling survives is not the same as asserting that the two
      * remain different from each other, and the second is the property a consolidation would break. A
@@ -1235,10 +1170,8 @@ class TransactionMapperTest {
      * Lists the identifiers of a page's rows in the order the page carries them.
      *
      * <p>Assumptions: the envelope preserves the row order the conversion produced rather than
-     * sorting on read, which is the property that lets a case assert display order at all. The
-     * reference fills its rows in scan order under the loop at lines 349 to 352 of
-     * {@code app/cbl/COTRN00C.cbl}, so a resorting envelope would let an ascending assertion pass
-     * for a page that is actually descending.
+     * sorting on read, which is the property that lets a case assert display order at all; a
+     * resorting envelope would let an ascending assertion pass for a page that is descending.
      *
      * @param page the page to read
      * @return the identifier of each row, in page order
@@ -1300,21 +1233,16 @@ class TransactionMapperTest {
      * are filled at lines 290 to 297 and whose boundaries are captured at line 393 and lines 437 to
      * 439.
      *
-     * <p>Assumptions: the page size is the reference screen's own and is transcribed rather than
-     * configured. Line 290 clears ten slots {@code UNTIL WS-IDX &gt; 10}, line 297 fills them forward
-     * {@code UNTIL WS-IDX &gt;= 11}, and lines 349 and 351 fill the same ten backward, so a different
-     * page size would change which rows a given cursor returns and therefore which rows a client sees.
+     * <p>Assumptions: the page size is the reference screen's own ten row slots, transcribed rather
+     * than configured, because a different page size would change which rows a given cursor returns
+     * and therefore which rows a client sees.
      *
-     * <p>Assumptions: forward availability is the reference's own read-one-past-the-page result and is
-     * taken from the caller rather than counted from the rows. Lines 305 to 320 perform one further
-     * read after the ten slots are filled: line 308 issues it, line 310 sets the further-page condition
-     * when it succeeded and line 312 clears it when it did not. The probe read belongs to whoever ran
-     * the query, so the indicator is passed in.
+     * <p>Assumptions: forward availability is the reference's own read-one-past-the-page result and
+     * is taken from the caller rather than counted from the rows, because the probe read belongs to
+     * whoever ran the query.
      *
-     * <p>Assumptions: the boundaries arrive already sealed and this conversion mints none. The envelope
-     * refuses a raw keyset cursor outright, so a real sealer over synthetic key material is used rather
-     * than a substitute; a substitute would let this case assert a page the production envelope would
-     * have rejected.
+     * <p>Assumptions: the boundaries arrive already sealed and this conversion mints none, so the
+     * case seals its own through {@link #sealed(String)} rather than through a substitute.
      */
     @Test
     @DisplayName("a page carries one list row per stored row, in order, with both sealed boundaries")
@@ -1328,7 +1256,7 @@ class TransactionMapperTest {
         String lastKeyToken = sealed("0000000000000003");
 
         PageResponse<TransactionListItemResponse> page =
-                this.mapper.toListPage(displayOrdered, firstKeyToken, lastKeyToken, true, false);
+                this.mapper.toListPage(displayOrdered, firstKeyToken, lastKeyToken, true);
 
         assertThat(page.items()).hasSameSizeAs(displayOrdered);
         assertThat(identifiersOf(page))
@@ -1362,14 +1290,14 @@ class TransactionMapperTest {
     @DisplayName("an exhausted page carries no rows, no boundary and no further page")
     void anExhaustedPageReportsNoFurtherPageAndNoBoundary() {
         PageResponse<TransactionListItemResponse> exhausted =
-                this.mapper.toListPage(List.of(), null, null, false, false);
+                this.mapper.toListPage(List.of(), null, null, false);
 
         assertThat(exhausted.items()).isEmpty();
         assertThat(exhausted.firstKey()).isNull();
         assertThat(exhausted.lastKey()).isNull();
         assertThat(exhausted.hasNext()).isFalse();
 
-        assertThatThrownBy(() -> this.mapper.toListPage(List.of(), null, null, true, false))
+        assertThatThrownBy(() -> this.mapper.toListPage(List.of(), null, null, true))
                 .as("COTRN00C line 315 denies a further page whenever the fill read nothing")
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("hasNext");
@@ -1378,24 +1306,22 @@ class TransactionMapperTest {
     /**
      * A raw keyset cursor is refused as a boundary, so a key cannot travel as a token.
      *
-     * <p>Pins the cursor declaration the reference carried in its communication area, which
-     * {@code app/cbl/COTRN00C.cbl} appends at its lines 62 to 70 as
-     * {@code CDEMO-CT00-TRNID-FIRST PIC X(16)} at line 63 and {@code CDEMO-CT00-TRNID-LAST PIC X(16)}
-     * at line 64.
+     * <p>Pins the two raw sixteen-character cursor keys the reference carried in the communication
+     * area it appends at lines 62 to 70 of {@code app/cbl/COTRN00C.cbl}.
      *
-     * <p>Refactoring Rationale: the reference echoed those two raw keys to the terminal between turns,
-     * so any of the online programs could move a value into them and nothing could reject an
-     * inconsistent one. The target publishes an opaque authenticated token in their place, and the
-     * refusal is asserted here because this conversion is the crossing at which a raw key would
-     * otherwise be handed to the envelope. What was wrong with the older arrangement is that a client
-     * holding the boundary could resume a scan the token was never issued for.
+     * <p>Refactoring Rationale: the reference echoed those two raw keys to the terminal between
+     * turns, so any online program could move a value into them, nothing could reject an
+     * inconsistent one, and a client holding a boundary could resume a scan it was never issued.
+     * The target publishes an opaque authenticated token in their place, and the refusal is
+     * asserted here because this conversion is the crossing at which a raw key would otherwise
+     * reach the envelope.
      */
     @Test
     @DisplayName("a raw keyset cursor is refused as a boundary")
     void aRawKeysetCursorIsRefusedAsABoundary() {
         assertThat(CursorToken.hasSealedShape("0000000000000001")).isFalse();
         assertThatThrownBy(() -> this.mapper.toListPage(threeRowsAscending(),
-                "0000000000000001", "0000000000000003", false, false))
+                "0000000000000001", "0000000000000003", false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("CursorToken");
     }

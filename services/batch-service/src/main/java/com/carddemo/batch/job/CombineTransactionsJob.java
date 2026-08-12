@@ -139,7 +139,7 @@ public class CombineTransactionsJob {
     public static final String JOB_NAME = BatchJobName.COMBINE_TRANSACTIONS.token();
 
     /** The step name the durable ledger records this job's progress under. */
-    public static final String STEP_NAME = "combine-transactions-step";
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /** The name of the single object each staged generation of this family holds. */
     public static final String DATASET_OBJECT_NAME = "transact.combined";
@@ -234,7 +234,8 @@ public class CombineTransactionsJob {
         //       the usual idempotency argument: a second pass would allocate a second generation and
         //       consume one of the five that app/jcl/DEFGDGB.jcl:55-57 retains, so the run would silently
         //       shorten the history an operator can restore from.
-        this.ledgerOfSteps.runStep(runId, STEP_NAME, () -> combineIntoNewGeneration(runId, businessDate));
+        this.ledgerOfSteps.runStep(runId, STEP_NAME, BatchJobName.COMBINE_TRANSACTIONS,
+                () -> combineIntoNewGeneration(runId, businessDate));
         return RepeatStatus.FINISHED;
     }
 
@@ -258,7 +259,7 @@ public class CombineTransactionsJob {
         //       app/jcl/COMBTRAN.jcl names TRANSACT.COMBINED(+1) TWICE, at :37 as the sort output and
         //       again at :44 as the copy's input, and within one job a relative reference addresses the
         //       same physical generation -- which is precisely how the reference's second step reads what
-        //       its first step wrote. This job no longer has that second consumer, but the semantic is
+        //       its first step wrote. This job carries no such second consumer, but the semantic is
         //       stated because it is what a reader has to know to follow the driver, and because any
         //       later step needing the generation this run produced depends on it holding.
         DatasetGeneration target = this.generations.allocateNewGeneration(
@@ -271,7 +272,7 @@ public class CombineTransactionsJob {
             // WHY : Assumptions: the temporary file is removed on every path, including a failed upload,
             //       because a batch task's ephemeral disk is finite and a failed step is retried. Leaving
             //       it would let a sequence of retries fill the volume and turn a transient upload failure
-            //       into a task that can no longer start.
+            //       into a task that cannot start at all.
             deleteQuietly(staged);
         }
 

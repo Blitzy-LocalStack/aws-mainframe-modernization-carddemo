@@ -14,14 +14,11 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * money type. Its consumer is {@code com.carddemo.reference.service}, which resolves which row
  * answered before calling; this class reads no store, decides no rule and holds no state.</p>
  *
- * <p>Every class in this package is written by hand and no code generator is involved in any of them.
- * The package-scope rulings applied below -- that charter, the boundary at which a value may be
- * trimmed, the register of padding items that are not carried across, and the rate contract -- are
- * settled once in this package's own {@code package-info.java} and are cited from here rather than
- * re-argued. What this file adds is the evidence particular to the fifty-byte record it converts,
- * which is the richest in the package because the same three values are declared four times over: in
- * the copybook, in the cluster definition that loads it, in the seed extract itself, and in the
- * migration that receives it.</p>
+ * <p>Assumptions: the package-scope rulings applied below -- hand-written conversions with no code
+ * generator, the boundary at which a value may be trimmed, the register of padding items that are not
+ * carried across, and the rate contract -- are settled once in this package's own
+ * {@code package-info.java} and are cited from here rather than re-argued. What this file adds is the
+ * evidence particular to the fifty-byte record it converts.</p>
  *
  * <h2>The rate is carried across exactly, and nothing here adjusts it</h2>
  *
@@ -74,12 +71,10 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * the {@code Money.GENERAL_ROUNDING} half up that governs every other reduction. That mode belongs to
  * the accrual and not to this conversion, which applies neither.</p>
  *
- * <p>Refactoring Rationale: this paragraph recorded a cent of difference registered as divergence
- * {@code C-ROUNDING}. There is no difference now and the divergence is withdrawn; the identifier
- * survives only as a withdrawal record in
- * {@code docs/architecture/cobol-to-service-traceability.md} section 7.5. The sentence above it,
- * which says two reduction contracts exist in {@code Money} and that neither is this class's to
- * exercise, was already the accurate description and needed no change.</p>
+ * <p>Assumptions: the migrated accrual therefore differs from the reference by no cent at all, which
+ * is why this path carries no registered rounding divergence. The identifier {@code C-ROUNDING} appears
+ * in {@code docs/architecture/cobol-to-service-traceability.md} section 7.5 as a withdrawal record and
+ * nowhere as a live divergence, and a reader who finds it there should read it that way.</p>
  *
  * <p>Assumptions: no binary floating-point type appears anywhere on this path, and unlike the same
  * prohibition in some sibling contexts it is mechanised rather than left to review. Rule A3 of
@@ -103,17 +98,13 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * <h2>The three key components are published verbatim</h2>
  *
  * <p>Assumptions: the account group identifier occupies all ten of its declared positions and its
- * trailing spaces belong to the stored key rather than to formatting. The seed extract settles this
- * by literal rather than by argument: {@code app/data/ASCII/discgrp.txt} holds exactly three distinct
- * values in the first ten bytes of its 51 rows -- {@code A000000000}, then {@code DEFAULT} followed
- * by three spaces, then {@code ZEROAPR} followed by three spaces -- so two of the three depend on
- * that padding to reach their declared width. The reference program produces the padded form without
- * being asked to: {@code app/cbl/CBACT04C.cbl} L437 moves the seven-character literal
- * {@code 'DEFAULT'} into the field its L79 declares as {@code 10 FD-DIS-ACCT-GROUP-ID PIC X(10)}, and
- * a shorter literal moved into a longer alphanumeric item is left-justified and space-filled.
- * {@code V1__reference.sql} L311 carries that across as {@code acct_group_id CHAR(10)}, and
- * {@code V2__seed_reference.sql} seeds the default rows under the ten-character literal for the same
- * reason.</p>
+ * trailing spaces belong to the stored key rather than to formatting. The seed extract settles it by
+ * literal: {@code app/data/ASCII/discgrp.txt} holds three distinct values in the first ten bytes of its
+ * 51 rows -- {@code A000000000}, and {@code DEFAULT} and {@code ZEROAPR} each followed by three spaces
+ * -- so two of the three depend on that padding to reach their declared width, and
+ * {@code app/cbl/CBACT04C.cbl} L437 produces the padded form by moving a seven-character literal into a
+ * {@code PIC X(10)} field. {@code V1__reference.sql} carries it across as
+ * {@code acct_group_id CHAR(10)}.</p>
  *
  * <p>Trade-offs: the published payload therefore carries trailing spaces inside an identifier, which
  * reads oddly to anyone inspecting the reply. Trimming for tidiness was the alternative and it is
@@ -124,58 +115,38 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * one.</p>
  *
  * <p>Assumptions: the two-character type code and the four-character category code are published on
- * the same terms, verbatim and untrimmed. {@code V1__reference.sql} L313 and L319 declare them
- * {@code tran_type_cd CHAR(2)} and {@code tran_cat_cd CHAR(4)}, and L339 to L340 make all three
- * components one composite primary key, so no component of a key is altered in transit. The category
- * code is a {@code String} and never a numeric type: {@code app/cpy/CVTRA02Y.cpy} L8 declares
- * {@code 10 DIS-TRAN-CAT-CD PIC 9(04)}, which reads as numeric, yet the codes stored in the seed
- * extract are zero-padded four-character values such as {@code 0001}, and only the character reading
- * publishes back the value a consumer of the reference system can observe today. The package charter
- * settles that type ruling for the whole package; the contrary declaration is named here so this file
- * stands on its own evidence.</p>
+ * the same terms, verbatim and untrimmed. {@code V1__reference.sql} declares them
+ * {@code tran_type_cd CHAR(2)} and {@code tran_cat_cd CHAR(4)} and makes all three components one
+ * composite primary key, so no component of a key is altered in transit. The category code is a
+ * {@code String} and never a numeric type: {@code app/cpy/CVTRA02Y.cpy} L8 declares
+ * {@code 10 DIS-TRAN-CAT-CD PIC 9(04)}, which reads as numeric, yet the seeded codes are zero-padded
+ * four-character values such as {@code 0001}, and only the character reading publishes back the value a
+ * consumer of the reference system can observe.</p>
  *
  * <h2>The padding item that is not carried across</h2>
  *
  * <p>Assumptions: {@code app/cpy/CVTRA02Y.cpy} L10 declares {@code 05 FILLER PIC X(28)} and it is not
- * carried across, which the copybook rule requires be recorded rather than inferred. The arithmetic
- * makes the claim checkable instead of asserted: the L6 group identifier at ten positions, the L7 type
- * code at two, the L8 category code at four, the L9 rate at the six display positions it occupies, and
- * that 28-position padding sum to 10 + 2 + 4 + 6 + 28 = 50, the record length the copybook's own L2
- * header declares. No field is therefore left unexamined, and the dropped item is demonstrably
- * padding. Two independent corroborations agree: {@code app/cbl/CBACT04C.cbl} L82 models the whole
- * tail as one opaque {@code 05 FD-DISCGRP-DATA PIC X(34)}, which is the six positions of the rate
- * beside the 28 of the padding, and in the seed extract those 28 bytes hold ASCII zero characters on
- * every one of the 51 rows, which is what padding to a positional length looks like rather than data
- * a consumer could act on.</p>
- *
- * <p>Assumptions: {@code app/jcl/DISCGRP.jcl} is the reference job that defines and loads this
- * dataset, and it is cited only to establish the provenance of the layout above: its L41 declares
- * {@code RECORDSIZE(50 50)} and its L40 declares {@code KEYS(16 0)}, the sixteen bytes of the
- * composite key at offset zero, which is the ten plus two plus four the copybook groups together. Its
- * final step copies the flat extract into the indexed cluster, which is the load this migration
- * performs instead through the extract-transform-load package.</p>
+ * carried across, which the copybook rule requires be recorded rather than inferred. The arithmetic that
+ * makes the claim checkable, and the corroboration that those bytes hold ASCII zero characters on every
+ * seeded row, are recorded at the construction site below rather than twice.</p>
  *
  * <h2>Where the representation boundary runs, and why no decoder belongs here</h2>
  *
  * <p>Assumptions: the rate's reference form is six positions of zoned decimal carrying its sign as an
- * overpunch in the trailing byte. In {@code app/data/ASCII/discgrp.txt} that field occupies bytes 17
- * through 22 and holds exactly three distinct literals across all 51 rows, each ending in the same
- * brace character, which is the positive-zero overpunch carrying the final digit together with the
- * sign; they denote 0.00, 15.00 and 25.00 at scale two, and because that trailing byte is identical
- * everywhere no seeded rate is negative. Those bytes never reach this class. Decoding happens once, at
- * the migration edge, in {@code com.carddemo.common.codec.ZonedDecimalCodec} and the loader that uses
- * it, and what arrives at this method has already been read out of a {@code NUMERIC(6,2)} column. The
- * provenance is documented so a reader can trace the value; a second decoder for one encoding is how
- * two callers come to disagree about a rate, so none is added here.</p>
+ * overpunch in the trailing byte -- in {@code app/data/ASCII/discgrp.txt} three distinct literals across
+ * all 51 rows, each ending in the same brace character, denoting 0.00, 15.00 and 25.00 at scale two, so
+ * no seeded rate is negative. Those bytes never reach this class: decoding happens once, at the
+ * migration edge, in {@code com.carddemo.common.codec.ZonedDecimalCodec} and the loader that uses it,
+ * and what arrives here has already been read out of a {@code NUMERIC(6,2)} column. A second decoder for
+ * one encoding is how two callers come to disagree about a rate, so none is added here.</p>
  *
  * <h2>Two deliberate omissions</h2>
  *
  * <p>Assumptions: there is no list member. The charter of {@code com.carddemo.reference.dto} records
- * at its L150 to L154 that the published document exposes the disclosure rate as a read of one
- * three-part key and offers no browse over the group table, so no collection exists for a page
- * envelope to carry and this class never constructs one. That matches how the data is consumed:
- * {@code app/cbl/CBACT04C.cbl} resolves a single rate per balance row, falling back to the default
- * group, rather than enumerating rates.</p>
+ * that the published document exposes the disclosure rate as a read of one three-part key and offers no
+ * browse over the group table, so no collection exists for a page envelope to carry and this class never
+ * constructs one. That matches how the data is consumed: {@code app/cbl/CBACT04C.cbl} resolves a single
+ * rate per balance row, falling back to the default group, rather than enumerating rates.</p>
  *
  * <p>Assumptions: there is no inbound member either. Disclosure groups are seeded reference data, so
  * the DTO package publishes no create or replace shape for them and there is nothing for an inbound
@@ -210,8 +181,8 @@ public final class DisclosureGroupMapper {
      * exists to report. The reference program overwrites its own key to fall back --
      * {@code app/cbl/CBACT04C.cbl} L436 tests the keyed read for the miss status {@code '23'}, L437
      * moves the default literal into the group field, and L438 performs the re-read paragraph that
-     * opens at L443 -- so after the second read its field no longer records which group was asked
-     * about. Reading both values off the entity here would reproduce that loss and make a fallback
+     * opens at L443 -- so after the second read its field holds the substituted group rather than the one
+     * asked about. Reading both values off the entity here would reproduce that loss and make a fallback
      * indistinguishable from a direct hit.</p>
      *
      * <p>Assumptions: the fallback indicator is not derivable from the entity, which is why it is a

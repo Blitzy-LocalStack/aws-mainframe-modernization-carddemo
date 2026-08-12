@@ -253,8 +253,8 @@ variable "audit_log_retention_days" {
   }
 }
 
-# WHY the default is false, and why this input exists at all (Alternatives
-# Considered): defaulting to true was considered and rejected outright. The
+# Alternatives Considered: defaulting this input to true, and omitting the input
+# altogether, were both evaluated and rejected outright. The
 # state bucket is versioned, so a bucket holding any state history cannot be
 # removed until every object version in it is deleted; with force_destroy true a
 # single `terraform destroy` in this directory performs that deletion silently,

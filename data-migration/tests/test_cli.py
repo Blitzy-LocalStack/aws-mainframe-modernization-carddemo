@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -17,11 +18,18 @@ from carddemo_migration.config import (
     AuroraConnectionSettings,
     ConfigurationError,
     DatasetStagingSettings,
+    role_for_schema,
 )
 from carddemo_migration.copybook import ebcdic_codec, layouts
 from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXIT_USAGE
 from carddemo_migration.loaders.aurora import target_for
 from carddemo_migration.readers import usrsec
+from carddemo_migration.verify.row_counts import (
+    NO_DATASET_LABEL,
+    SEED_DATASET_BASELINES,
+    UNSEEDED_LAYOUT_NAME,
+    reporting_role,
+)
 
 if TYPE_CHECKING:
     from conftest import FakeAuroraDatabase
@@ -36,15 +44,22 @@ if TYPE_CHECKING:
 #   tuple is deliberately the work required to change the delivered surface: a test that read
 #   the parser back would have accepted the four new commands silently, and would equally have
 #   accepted their disappearance.
+# Refactoring Rationale: ``reconcile-sequences`` was added here when the transaction-identifier
+#   allocator's cutover ordering hazard was closed. Its position is REGISTRATION order, between
+#   ``apply-credentials`` and ``load-dataset``, which is also the order a cutover runs the three
+#   in -- credentials, then the allocator's own precondition step declared, then the loads -- and
+#   the tuple is compared in order precisely so a reordering that changed that reading fails.
 _IMPLEMENTED_SUBCOMMANDS = (
     "list-datasets",
     "decode-record",
     "stage-dataset",
     "apply-credentials",
+    "reconcile-sequences",
     "load-dataset",
     "verify-row-counts",
     "verify-checksum",
     "verify-money-parity",
+    "verify-row-count-report",
 )
 
 # Assumptions: the four load and verification commands are registered because their backing
@@ -75,6 +90,11 @@ _UNREGISTERED_SUBCOMMANDS = ("verify-all",)
 #   fixture this file wrote would only prove the file agreed with itself. The paths are
 #   resolved from this module's own location so the tests run from any working directory.
 _EBCDIC_DIRECTORY = Path(__file__).resolve().parents[2] / "app" / "data" / "EBCDIC"
+
+# Assumptions: the distribution root is the directory holding both `src` and `sql`, resolved from
+#   this file's own location so the tests run from any working directory. It is needed because this
+#   suite exercises the INSTALLED package, whose location carries no `sql` tree.
+_DISTRIBUTION_ROOT = Path(__file__).resolve().parents[1]
 _ACCOUNT_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.ACCTDATA.PS"
 _CARD_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.CARDDATA.PS"
 _USER_EXTRACT = _EBCDIC_DIRECTORY / "AWS.M2.CARDDEMO.USRSEC.PS"
@@ -834,7 +854,7 @@ def test_decode_record_withholds_account_money_and_its_postal_code(
         code renders as anything but a keyed tag of the declared width, or if an allowlisted
         field stops rendering in clear.
     """
-    # WHY (Assumptions): the account master carries no field any factory in layouts.py had
+    # Assumptions: the account master carries no field any factory in layouts.py had
     #   marked sensitive, so before the corpus disclosure allowlist existed this command printed
     #   every one of its thirteen fields in cleartext -- five money fields among them. The
     #   assertion is therefore made on the ABSENCE of the decoded cleartext rather than on the
@@ -1148,15 +1168,25 @@ def _bind_database(
         None
         """
         requested.append(schema)
-        return settings
+        # WHY : Assumptions: the returned settings are re-stamped with the schema's OWN login
+        #   role rather than answered verbatim, because the production path now refuses a
+        #   credential whose stored user is not the role the schema's tables were granted to. A
+        #   double answering one fixed user for every schema would make that refusal fire on every
+        #   command -- so the stub would be asserting the check exists rather than letting the
+        #   command under test run, and the realistic case (each schema's secret holds its own
+        #   role) would go untested.
+        return replace(settings, user=role_for_schema(schema))
 
-    def _connect(resolved: AuroraConnectionSettings) -> object:
-        """Open a recording connection from resolved settings.
+    def _connect(resolved: AuroraConnectionSettings, *, expected_role: str | None = None) -> object:
+        """Open a recording connection from resolved settings, honouring the role expectation.
 
         Parameters
         ----------
         resolved : AuroraConnectionSettings
             The settings the command resolved.
+        expected_role : str | None
+            The login role the command expects the credential to authenticate as, or ``None``
+            when it states no expectation.
 
         Returns
         -------
@@ -1166,9 +1196,18 @@ def _bind_database(
         Raises
         ------
         ConfigurationError
-            Propagated from the double if the parameters would not have verified the server
-            certificate.
+            If the resolved user is not the expected role, or propagated from the double if the
+            parameters would not have verified the server certificate.
         """
+        # WHY : Assumptions: the expectation is CHECKED here rather than accepted and dropped,
+        #   because a double that accepted the keyword and ignored it would let the production
+        #   check be deleted with every command test still passing. The check mirrors
+        #   ``aurora.connect``: agreement is required, and disagreement is a configuration fault.
+        if expected_role is not None and resolved.user != expected_role:
+            raise ConfigurationError(
+                f"the credential for this schema authenticates as {resolved.user!r} but"
+                f" {expected_role!r} was expected"
+            )
         # WHY : Assumptions: the parameters come from ``as_connection_params`` rather than being
         #   hand-built, so the double's TLS keyword checks are exercised on the same translation
         #   the production path performs. Hand-building the mapping is precisely how the
@@ -1234,7 +1273,7 @@ def test_load_dataset_loads_the_category_balance_seed_into_the_ledger_schema(
     #   so the load must authenticate as that context's role -- and asking for `account` would
     #   reach a role with no grant on the table, which fails at run time rather than here.
     assert requested == ["ledger"]
-    assert fake_aurora.copy_statements == [target_for("TCATBAL").copy_statement()]
+    assert fake_aurora.copy_statements == [target_for("TCATBAL").stage_copy_statement()]
     # WHY : Assumptions: the expected row count is DERIVED from the seed rather than written as
     #   50, so the assertion cannot agree with a reader that stopped early on a seed which later
     #   grew. It counts LINES and not bytes-over-record-length: this seed is the line-oriented
@@ -1330,3 +1369,222 @@ def test_every_verification_command_accepts_the_category_balance_dataset(
         " comparison could be attempted"
     )
     assert exit_code in {EXIT_OK, EXIT_FAILED}
+
+
+def _conforming_row_count_rows(short_dataset: str | None = None) -> list[tuple[object, ...]]:
+    """Build a row-count report covering every declared dataset, optionally one line short.
+
+    Purpose
+    -------
+    Give the report command a result set it can judge. The pass refuses a report that omits any
+    declared (dataset, table) pair, so a partial fixture would fail for coverage rather than for
+    the property under test.
+
+    Parameters
+    ----------
+    short_dataset : str | None
+        The dataset whose actual count is one below its baseline, producing a MISMATCH line, or
+        ``None`` for a report in which every line matches.
+
+    Returns
+    -------
+    list[tuple[object, ...]]
+        One six-column row per declared pair, in the order the query's own ordering produces them
+        being irrelevant to the pass, which keys on the dataset label.
+
+    Raises
+    ------
+    None
+        Composing rows from published declarations cannot fail.
+    """
+    # WHY : Assumptions: the pairs come from the PUBLISHED declarations -- SEED_DATASET_BASELINES
+    #   for the ten seeded lines, and the load target of UNSEEDED_LAYOUT_NAME for the one line
+    #   whose table has no seed extract. Listing eleven pairs literally here would put a second
+    #   copy of the migration's own inventory in a test file, where it would go stale silently.
+    unseeded = target_for(UNSEEDED_LAYOUT_NAME)
+    rows: list[tuple[object, ...]] = [
+        (
+            NO_DATASET_LABEL,
+            f"{unseeded.schema}.{unseeded.table}",
+            None,
+            7,
+            None,
+            "NO_BASELINE",
+        )
+    ]
+    for baseline in SEED_DATASET_BASELINES.values():
+        if baseline.target_table is None:
+            continue
+        actual = (
+            baseline.expected_rows - 1
+            if baseline.dataset == short_dataset
+            else baseline.expected_rows
+        )
+        delta = actual - baseline.expected_rows
+        rows.append(
+            (
+                baseline.dataset,
+                baseline.target_table,
+                baseline.expected_rows,
+                actual,
+                delta,
+                "MISMATCH" if delta else "MATCH",
+            )
+        )
+    return rows
+
+
+def test_the_row_count_report_command_runs_the_shipped_query_on_a_reporting_session(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Run the whole-migration report through the command, over the query file as shipped.
+
+    Purpose
+    -------
+    Prove the least-privilege verification path is REACHABLE from the command line. The pass was
+    delivered and unreached: nothing in the distribution called ``open_reporting_connection`` or
+    ``verify_row_counts``, so the only row-count command opened a schema-owner connection. This
+    drives the new command end to end -- argument parsing, the reporting connection, the shipped
+    query file, the six-column contract and the verdict.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to bind the reporting-connection seam to the double.
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the session probe and then the report.
+    capsys : pytest.CaptureFixture[str]
+        Captures the rendered report.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the command does not verify, does not read the shipped query, or leaves the connection
+        open.
+    """
+    fake_aurora.arrange_rows("current_user", [(reporting_role(),)])
+    # WHY : Assumptions: the rows are arranged against a fragment of the SHIPPED query --
+    #   the aggregate view it reads -- rather than against text this test supplies, because the
+    #   command deliberately takes no query argument. That makes the assertion cover
+    #   read_row_count_query over the real file: a query rewritten to read a different relation
+    #   would no longer match and the report would come back empty.
+    fake_aurora.arrange_rows("v_verification_row_counts", _conforming_row_count_rows())
+    connections: list[object] = []
+
+    def _open() -> object:
+        """Open a recording connection in place of one on the reporting role.
+
+        Returns
+        -------
+        object
+            A recording connection from the double.
+
+        Raises
+        ------
+        None
+        """
+        connection = fake_aurora.connect(
+            **{
+                "host": "aurora.carddemo.invalid",
+                "port": 5432,
+                "dbname": "carddemo",
+                "user": reporting_role(),
+                "sslmode": "verify-full",
+                "sslrootcert": "/nonexistent/synthetic-test-anchor.pem",
+            }
+        )
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(cli, "open_reporting_connection", _open)
+
+    # WHY : Assumptions: the root is passed explicitly because this suite runs against the
+    #   INSTALLED distribution, where the package-relative default cannot resolve -- the sql tree
+    #   ships beside the package rather than inside it, which is the documented behaviour and the
+    #   reason the option exists. Passing the checkout's own data-migration directory makes this
+    #   test read the same file an operator runs with psql, which is the point of the assertion
+    #   below on the shipped query's own relation name.
+    exit_code = cli.main(["verify-row-count-report", "--sql-root", str(_DISTRIBUTION_ROOT)])
+
+    assert exit_code == EXIT_OK
+    rendered = capsys.readouterr().out
+    assert "row count verification PASSED" in rendered
+    # WHY : the session probe is asserted to have been the FIRST statement executed. The guard's
+    #   whole value is that it runs before the query text does, and a probe made afterwards would
+    #   satisfy an exit-code assertion while the report had already run under whatever authority
+    #   the connection carried.
+    executed = fake_aurora.executed_sql()
+    assert "current_user" in executed[0]
+    assert any("v_verification_row_counts" in sql for sql in executed[1:])
+    # WHY : the connection is asserted CLOSED because the command opens it itself. A verification
+    #   step in the batch chain runs to completion and exits, so a leaked connection is not a leak
+    #   an operator would ever see -- it is one the cluster's connection limit sees during a rerun.
+    assert connections and all(getattr(each, "closed", False) for each in connections)
+
+
+def test_the_row_count_report_command_refuses_a_writable_session(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse to report at all when the session handed to the pass can write.
+
+    Purpose
+    -------
+    Assert the command fails closed on the exact condition the previous implementation shipped
+    with: a session on a role holding data-modifying privileges over the tables being certified.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to bind the reporting-connection seam to the double.
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the session probe with a writable role.
+    capsys : pytest.CaptureFixture[str]
+        Captures standard output, which must carry no report.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the command reports a verdict, or exits anything but FAILED.
+    """
+    # WHY : the role arranged is `carddemo_reference`, which is what the per-dataset command
+    #   genuinely connects as. An obviously wrong value such as "postgres" would pass this test
+    #   while leaving the real regression -- a plausible service role -- undetected.
+    fake_aurora.arrange_rows("current_user", [("carddemo_reference",)])
+    fake_aurora.arrange_rows("v_verification_row_counts", _conforming_row_count_rows())
+    monkeypatch.setattr(
+        cli,
+        "open_reporting_connection",
+        lambda: fake_aurora.connect(
+            **{
+                "host": "aurora.carddemo.invalid",
+                "port": 5432,
+                "dbname": "carddemo",
+                "user": "carddemo_reference",
+                "sslmode": "verify-full",
+                "sslrootcert": "/nonexistent/synthetic-test-anchor.pem",
+            }
+        ),
+    )
+
+    exit_code = cli.main(["verify-row-count-report", "--sql-root", str(_DISTRIBUTION_ROOT)])
+
+    assert exit_code == EXIT_FAILED
+    # WHY : the ABSENCE of a rendered report is asserted, not merely the exit code. A verdict
+    #   printed beside a non-zero status is the shape an operator skims and reads as a pass, and it
+    #   would be a verdict reached under an authority that could have changed what it measured.
+    assert "row count verification" not in capsys.readouterr().out
+    assert not any("v_verification_row_counts" in sql for sql in fake_aurora.executed_sql())

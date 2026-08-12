@@ -959,7 +959,18 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Renders the three conflict conditions as HTTP 409 and every other runtime failure as HTTP 500.
+     * Renders the three PROVIDER-RAISED conflict conditions as HTTP 409 and every other runtime failure
+     * as HTTP 500.
+     *
+     * <p>Assumptions: three and not four. The contention vocabulary
+     * {@link RecordConflictException.Kind} publishes has four members, and only three of them are
+     * recoverable from a provider exception's type name: an optimistic-lock failure, a pessimistic-lock
+     * failure and an integrity violation. {@link RecordConflictException.Kind#DUPLICATE_KEY} is reached
+     * only through {@link #onRecordConflict}, because a provider reports a duplicate key and a
+     * referenced row as the SAME integrity violation, so the two are distinguishable only by the service
+     * that knows which write it issued. Refactoring Rationale: this sentence read "the three conflict
+     * conditions", which described the whole vocabulary as three once the fourth member existed; the
+     * count is kept and narrowed to the branches this method actually carries.</p>
      *
      * <p>Alternatives Considered: declaring a handler per exception type, which is how such a mapping is
      * ordinarily written, and which would require this module to depend on the persistence abstraction
@@ -1662,7 +1673,9 @@ public class GlobalExceptionHandler {
         // WHY : Assumptions: the abend detail's own four components stay fixed even when the aggregate
         //       is the carried sentence. Those are operator-facing prose about where the failure was
         //       recognised rather than about what the caller asked for, and the reference's own abend
-        //       fields at lines 45 to 53 of app/cpy/CSMSG02Y.cpy carry the same kind of content.
+        //       fields at lines 21 to 29 of app/cpy/CSMSG02Y.cpy carry the same kind of content. That
+        //       range is stated rather than the 45 to 53 an earlier draft carried, because the copybook
+        //       is thirty-five lines long and the wider range resolves to nothing.
         String carried = failure.getClass() == IllegalStateException.class
                 ? referenceMessageOrNull(failure.getMessage())
                 : null;
@@ -1938,9 +1951,13 @@ public class GlobalExceptionHandler {
      * parses says the same thing and keeps the shape satisfiable. This is the concrete, satisfiable
      * form the reference contract's conflict schema describes.
      *
-     * <p>Assumptions: the subsystem is {@link ApiError.Subsystem#RELATIONAL} for all three kinds, which
+     * <p>Assumptions: the subsystem is {@link ApiError.Subsystem#RELATIONAL} for all FOUR kinds, which
      * is what the contracts declare. It is the relational store the contention is over even when this
-     * service, rather than the provider, is what noticed it.
+     * service, rather than the provider, is what noticed it. Refactoring Rationale: this paragraph said
+     * three while the enumeration carried four, having been written before
+     * {@link RecordConflictException.Kind#DUPLICATE_KEY} joined it; the count is corrected rather than
+     * dropped because it is what tells a reader the subsystem is uniform across the set instead of
+     * selected per condition.
      *
      * @param failure the contention a service raised, naming which condition and carrying the current
      *     version when the condition has one; never {@code null} on any path that reaches here
@@ -1953,9 +1970,14 @@ public class GlobalExceptionHandler {
             HttpServletRequest request) {
 
         // WHY : Assumptions: the sentence is selected here rather than held on the exception, so every
-        //       user-visible string in this layer stays in one place under transformation rule T8. The
-        //       switch is exhaustive over the enum, so a fourth condition cannot be added without this
-        //       method failing to compile -- which is the property that keeps the mapping complete.
+        //       user-visible string in this layer stays in one place under transformation rule T8.
+        // WHY : Assumptions: the switch has no default arm and yields a value, so the compiler requires
+        //       it to cover every constant of the enumeration -- which is what makes a FIFTH condition
+        //       impossible to add without this method failing to compile. Refactoring Rationale: this
+        //       note said "a fourth condition cannot be added", which stopped being true the moment
+        //       DUPLICATE_KEY was added as the fourth arm three lines below; the property the
+        //       exhaustiveness check actually gives is about whichever constant comes next, so it is now
+        //       stated that way rather than against a number that goes stale on every addition.
         String message = switch (failure.kind()) {
             case STALE_VERSION -> MESSAGE_RECORD_CHANGED;
             case LOCK_UNAVAILABLE -> MESSAGE_LOCK_UNAVAILABLE;

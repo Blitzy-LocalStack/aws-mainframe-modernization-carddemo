@@ -455,7 +455,7 @@ import jakarta.validation.constraints.Size;
  *     request is matched against is derived from the signed {@code cognito:groups} claim, not from
  *     {@code auth.users.user_type}, so this component is a request for an authority change and not a
  *     description of one. {@code com.carddemo.auth.mapper.UserMapper} refuses to apply a value here that
- *     differs from the row's, and {@code com.carddemo.auth.service.UserAuthorityService} is what moves
+ *     differs from the row's, and {@code com.carddemo.auth.service.IdentitySyncService} is what moves
  *     both together
  */
 // WHY : Refactoring Rationale: the two name components publish a non-whitespace pattern into the

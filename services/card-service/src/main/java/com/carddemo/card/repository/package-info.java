@@ -77,9 +77,17 @@
  *
  * <p>Forward paging walks strictly greater than the cursor in ascending key order; backward paging
  * walks strictly less than it in descending key order, which is what the reference's backward browse
- * does. Whether a further page exists is discovered by requesting one row beyond the page size and
- * observing whether it arrived, and the result travels in {@code com.carddemo.common.web.PageResponse}
- * through its {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext} components.</p>
+ * does. Whether an adjacent page exists is discovered by requesting one row beyond the page size in
+ * the direction walked and observing whether it arrived, and the result travels in
+ * {@code com.carddemo.common.web.PageResponse}
+ * through its {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext}
+ * components. Assumptions: the surplus row settles the ONE availability component the envelope
+ * carries, which is the forward one, and the envelope carries no backward availability component at
+ * all -- what a backward step needs from a page is the position to seek from, which is
+ * {@code firstKey}, and whether a row waits there is settled by the caller's own page ordinal
+ * exactly as the reference settles it at lines 902 and 903 without reading anything. A page that
+ * returned rows always names both of its boundaries, which is what makes that position available on
+ * every such page.</p>
  *
  * <p>Assumptions: that one extra row is the reference's own technique rather than an invention, which
  * is why the size-plus-one shape is stated as a contract here and not left to each query to improvise.

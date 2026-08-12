@@ -53,25 +53,45 @@
  *       milliseconds for a message at line 286.</li>
  * </ul>
  *
- * <h2>What this directory holds as this charter is written</h2>
+ * <h2>What this directory holds</h2>
  *
- * <p>Three test classes are present, and between them they carry all five rules
- * above. {@code ReferenceWriteBehaviourTest} groups its cases under four
- * headings, the strict replace, the category replace, the maintenance batch and
- * the rate lookup, so the transaction-type, transaction-category, batch-update
- * and disclosure-group assertions live there.
- * {@code DateInquiryMessageListenerTest} carries the date-conversion reply rule,
- * including the reply's exact bytes, the echoed correlation identifier and the
- * request dropped for having expired. {@code TransactionTypeBrowseTest} carries
- * the keyset browse of the transaction-type table. With this charter that is
- * four files in this directory, and there is no subdirectory beneath it.</p>
+ * <pre>
+ * this directory: 12 java files = 11 tests + 1 charter
+ * </pre>
  *
- * <p>Refactoring Rationale: this section named two classes and three files while
- * three classes and four sat in the directory, and it described the write class
- * as having three headings after a fourth was added. The figures live in a
- * different file from the thing they count, so the change that falsified them
- * never touched them -- which is the structural reason the section is kept apart
- * from the durable rules below rather than merged into them.</p>
+ * <p>Eleven test classes are present, and between them they carry all five rules above, with no
+ * subdirectory beneath this one:</p>
+ *
+ * <ul>
+ *   <li>{@code ReferenceWriteBehaviourTest} across 33 cases -- grouped under four headings, the
+ *       strict replace, the category replace, the maintenance batch and the rate lookup.</li>
+ *   <li>{@code TransactionTypeServiceTest} across 47 cases and
+ *       {@code TransactionCategoryServiceTest} across 43 -- the two maintained tables' own
+ *       behaviour, including the restrict-on-delete refusal.</li>
+ *   <li>{@code ReferenceBatchUpdateServiceTest} across 28 cases, with
+ *       {@code ReferenceBatchUpdateServiceIT} across 4 beside it -- the maintenance batch path,
+ *       unit-level and against a real database.</li>
+ *   <li>{@code DisclosureGroupServiceTest} across 16 cases -- the rate lookup and the padded
+ *       {@code DEFAULT} fallback.</li>
+ *   <li>{@code TransactionTypeBrowseTest} across 17 cases -- the keyset browse of the
+ *       transaction-type table.</li>
+ *   <li>{@code DateInquiryMessageListenerTest} across 18 cases -- the date-conversion reply rule,
+ *       including the reply's exact bytes, the echoed correlation identifier and the request dropped
+ *       for having expired.</li>
+ *   <li>{@code DateConversionServiceTest} across 6 cases -- the date edit rules themselves.</li>
+ *   <li>{@code ReferenceServiceStructureTest} across 3 cases and
+ *       {@code ReferenceQueueConsumerContractTest} across 1 -- the structural guards on this
+ *       package rather than on one rule.</li>
+ * </ul>
+ *
+ * <p>Refactoring Rationale: this section has been recounted twice. It first named two classes and
+ * three files while three classes and four sat in the directory; it was corrected to three and four,
+ * and by then ten classes and eleven files were present. The figures live in a
+ * different file from the thing they count, so the change that falsifies them
+ * never touches them -- which is why the marker line above is now the authority: it is the form
+ * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures against this directory, and
+ * the same test re-measures each declared case count against the class it names, so a third
+ * recount by hand is not what keeps this true.</p>
  *
  * <p>Refactoring Rationale: the two preceding sections are deliberately kept
  * apart rather than merged into one list. The first states the rules this

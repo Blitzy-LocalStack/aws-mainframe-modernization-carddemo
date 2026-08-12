@@ -14,6 +14,7 @@ import com.carddemo.account.domain.Account;
 import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
+import com.carddemo.account.dto.AccountUpdateResponse;
 import com.carddemo.account.mapper.AccountMapper;
 import com.carddemo.account.mapper.CustomerMapper;
 import com.carddemo.account.repository.AccountRepository;
@@ -290,10 +291,13 @@ class AccountUpdatePreservationTest {
      * method added later disclosed freely. The exact remaining text is pinned alongside the absence, so
      * emptying a message to satisfy the absence would fail.</p>
      *
-     * <p>Assumptions: this route DOES carry the identifier in its request line, since
-     * {@code PUT /api/v1/accounts/{accountId}} stays keyed for an end user. That is not a licence to
-     * repeat it: the contract governs what this system writes, and the correlation identifier already
-     * joins this record to the request that provoked it.</p>
+     * <p>Refactoring Rationale: this note used to concede that the route carried the identifier in its
+     * request line anyway, "since {@code PUT /api/v1/accounts/{accountId}} stays keyed for an end user".
+     * It does not stay keyed: the edit is now {@code POST /api/v1/accounts/update} and takes its key from
+     * the submitted record, so the absence asserted here and the address the caller uses now agree
+     * instead of the absence being defended against a disclosure elsewhere. The correlation identifier
+     * still joins this record to the request that provoked it, and now neither of the two holds the
+     * account.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -343,24 +347,192 @@ class AccountUpdatePreservationTest {
     }
 
     /**
-     * The revision the service publishes is the one it then accepts.
+     * The revision the service publishes is the one it then accepts, and the update republishes it.
      *
      * <p>Assumptions: this closes the loop between the two halves of the contract. A token the read path
      * publishes and the write path rejects would make every update fail, and neither half asserted alone
      * would catch it.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the presented token is now derived from the fixture's OWN stored rows
+     * through {@link AccountRevision}, where it was previously obtained by calling a
+     * {@code currentRevision} operation on the object under test. That operation has been removed, and its
+     * removal is why: the adapter used it as a SECOND read-only transaction to obtain an entity tag beside
+     * a body composed by a different one, so a caller could be handed a tag and a body describing two
+     * different states. Deriving the token here is also a stronger arrangement in its own right -- the
+     * object under test no longer supplies the input it is being tested against.</p>
+     *
+     * <p>Assumptions: the answer is asserted to carry a revision as well, because the round trip is only
+     * closed if the update publishes a token a NEXT edit can present. A caller performing consecutive
+     * edits has no other source for it.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the published revision is accepted by the update that follows it")
+    @DisplayName("the published revision is accepted by the update, which republishes the next one")
     void thePublishedRevisionIsAcceptedByTheUpdate() {
         Fixture fixture = new Fixture("12546     ");
 
-        String published = fixture.service.currentRevision(ACCOUNT_ID);
-        fixture.service.update(ACCOUNT_ID, fixture.request().build(), published);
+        String published = AccountRevision.of(fixture.account, fixture.customer);
+        AccountUpdateService.RevisionedAccountUpdate answer =
+                fixture.service.update(ACCOUNT_ID, fixture.request().build(), published);
 
         verify(fixture.customers).saveAndFlush(fixture.customer);
         verify(fixture.accounts).saveAndFlush(fixture.account);
+        assertThat(answer.response()).isNotNull();
+        assertThat(answer.revision())
+                .as("the update must publish the token a consecutive edit will present")
+                .isNotBlank();
+    }
+
+    /**
+     * An omitted account key is refused with the baseline's own wording, and nothing is written.
+     *
+     * <p>Purpose: the submitted account key was previously edited on ONE path only -- the branch an
+     * absent row selects, which the update path cannot reach because its loads either return a row or
+     * raise. On the live path the key was not edited at all, so an omitted one passed straight into the
+     * old-versus-new comparison.</p>
+     *
+     * <p>Assumptions: the wording asserted is the baseline's verbatim sentence for an absent key rather
+     * than the target-authored mismatch sentence, because the form edit runs first and this submission
+     * fails it. A caller who simply left the field out therefore still sees what the reference shows.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an omitted account key is refused with the baseline's absent-key sentence")
+    void anOmittedAccountKeyIsRefused() {
+        Fixture fixture = new Fixture("12546     ");
+        AccountUpdateRequest request = fixture.request().accountId(null).build();
+
+        assertThatThrownBy(() -> fixture.update(request))
+                .hasMessageContaining(AccountUpdateService.MESSAGE_ACCOUNT_NOT_PROVIDED);
+
+        verify(fixture.customers, never()).saveAndFlush(any());
+        verify(fixture.accounts, never()).saveAndFlush(any());
+    }
+
+    /**
+     * An account key naming a different account is refused, and nothing is written.
+     *
+     * <p>Purpose: this is the exact submission the earlier shape mishandled. The key is well formed, so
+     * every form edit passes; it names another account, so the old-versus-new comparison reported a
+     * CHANGE; every non-key field matched the stored row, so every remaining edit passed; and neither
+     * mapper assigns a key, so both rows were written back unchanged and the response carried the
+     * accepted sentence. The refusal replaces an answer that was wrong in the one direction a caller
+     * could exploit -- turning "nothing changed" into "update accepted".</p>
+     *
+     * <p>Assumptions: the wording asserted is the TARGET-AUTHORED mismatch sentence, because the
+     * baseline has none: its screen carries one account-number field, so the value it fetched by and the
+     * value it submits cannot disagree there. The refusal is registered as
+     * {@code D-UPDATE-BODY-KEY-MUST-NAME-ROW}.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an account key naming another account is refused and nothing is written")
+    void anAccountKeyNamingAnotherAccountIsRefused() {
+        Fixture fixture = new Fixture("12546     ");
+        AccountUpdateRequest request = fixture.request().accountId("10000000002").build();
+
+        assertThatThrownBy(() -> fixture.update(request))
+                .hasMessageContaining(AccountUpdateService.MESSAGE_ACCOUNT_KEY_NOT_ADDRESSED);
+
+        verify(fixture.customers, never()).saveAndFlush(any());
+        verify(fixture.accounts, never()).saveAndFlush(any());
+    }
+
+    /**
+     * An omitted customer key is refused, and nothing is written.
+     *
+     * <p>Purpose: the customer key was edited on NO path whatsoever. It participated in the
+     * old-versus-new comparison and in nothing else, which is the same defect as the account key's with
+     * one aggravation: the customer is not addressed by the caller at all, so it is the one component
+     * that names a row the caller did not select.</p>
+     *
+     * <p>Assumptions: one wording covers an absent key and a mismatched one, for the reason recorded on
+     * the edit itself -- the baseline has no sentence for either, and the remedy is identical.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an omitted customer key is refused and nothing is written")
+    void anOmittedCustomerKeyIsRefused() {
+        Fixture fixture = new Fixture("12546     ");
+        AccountUpdateRequest request = fixture.request().customerId(null).build();
+
+        assertThatThrownBy(() -> fixture.update(request))
+                .hasMessageContaining(AccountUpdateService.MESSAGE_CUSTOMER_KEY_NOT_LOADED);
+
+        verify(fixture.customers, never()).saveAndFlush(any());
+        verify(fixture.accounts, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A customer key naming a different customer is refused, and nothing is written.
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a customer key naming another customer is refused and nothing is written")
+    void aCustomerKeyNamingAnotherCustomerIsRefused() {
+        Fixture fixture = new Fixture("12546     ");
+        AccountUpdateRequest request = fixture.request().customerId("900000002").build();
+
+        assertThatThrownBy(() -> fixture.update(request))
+                .hasMessageContaining(AccountUpdateService.MESSAGE_CUSTOMER_KEY_NOT_LOADED);
+
+        verify(fixture.customers, never()).saveAndFlush(any());
+        verify(fixture.accounts, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A submission that changes nothing reports the no-change sentence, not the accepted one.
+     *
+     * <p>Purpose: this is the regression the key edits exist to make reachable again. With the keys
+     * unedited, a submission could reach the accepted sentence while changing nothing simply by omitting
+     * one of them, and no case asserted that the no-change sentence was still produced for a submission
+     * that genuinely matched the stored rows. It is asserted through the RESPONSE rather than through the
+     * verdict, because the response is what a caller sees and the two sentences are the whole of the
+     * observable difference between the two outcomes.</p>
+     *
+     * <p>Assumptions: the two protected identifiers are omitted from the submission, because the
+     * comparison requires them to be never supplied -- they are stored as ciphertext and a submission
+     * cannot restate them. Every other field is submitted at the stored row's own value.</p>
+     *
+     * <p>Assumptions: the postal code is submitted at its FIVE-character screen width while the stored
+     * column holds the same digits padded to ten, so this case also pins the comparison as one that
+     * trims padding on both sides. Submitting the padded ten characters instead would be refused by the
+     * mapper, which narrows the value to the five the reference field declares -- which is the evidence
+     * that the two widths are genuinely different fields and not one field spelled two ways.</p>
+     *
+     * <p>Assumptions: the customer key is submitted with a LEADING ZERO it is not stored with, so this
+     * case also pins the comparison as numeric rather than textual. The baseline's field is
+     * {@code PIC X(09)} redefined as {@code PIC 9(09)}, so both spellings are values of one field there
+     * too, and a textual comparison would refuse a submission the reference accepts and would then
+     * report a change where there is none.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a submission matching the stored rows reports NO CHANGES DETECTED")
+    void aSubmissionThatChangesNothingReportsNoChangesDetected() {
+        Fixture fixture = new Fixture("12546     ");
+        AccountUpdateRequest request = fixture.request()
+                .customerId("0900000001")
+                .submittingNoProtectedIdentifier()
+                .build();
+
+        // WHY : Assumptions: the revision is composed from the fixture's OWN rows through
+        //       AccountRevision, not read back from the object under test. The service publishes no
+        //       currentRevision(long) operation -- it was withdrawn because a caller that reads the
+        //       revision it is about to submit cannot detect a change made between the two calls -- and
+        //       every other case in this class composes it the same way.
+        AccountUpdateResponse response = fixture.service.update(ACCOUNT_ID, request,
+                AccountRevision.of(fixture.account, fixture.customer)).response();
+
+        assertThat(response.returnMessage())
+                .as("the no-change sentence, not the accepted one")
+                .isEqualTo(AccountUpdateService.MESSAGE_NO_CHANGES_DETECTED);
     }
 
     /** Wires the service over substituted repositories and one stored account, customer and card. */
@@ -394,9 +566,18 @@ class AccountUpdatePreservationTest {
                     new BigDecimal("5000.00"), new BigDecimal("500.00"),
                     LocalDate.of(2020, 1, 1), LocalDate.of(2027, 12, 31), LocalDate.of(2024, 6, 1),
                     BigDecimal.ZERO, BigDecimal.ZERO, "12345", "DEFAULT");
+            // WHY : Refactoring Rationale: the stored telephone number carries its PUNCTUATION and its
+            //   two-character trailing pad, being exactly the fifteen characters CustomerMapper composes
+            //   -- an opening character, the area code, a closing character, the exchange prefix, a
+            //   separator, the line number and two blanks. This fixture previously stored the same digits
+            //   WITHOUT the separator, which no case noticed because no case had compared a submitted
+            //   number against the stored one; the no-change case does compare them, and against the
+            //   unpunctuated value it reported a change that was not there. The corrected value is the
+            //   one the reference's own redefinition predicts at app/cbl/COACTUPC.cbl L725 through L731,
+            //   so the fixture now agrees with the layout every other reader of this column assumes.
             this.customer = new Customer(CUSTOMER_ID, "GRACE", null, "HOPPER",
                     "1 NAVY YARD", null, "ARLINGTON", "VA", "USA", storedPostalCode,
-                    "(703)5550101  ", null, STORED_NATIONAL_ID, STORED_GOVERNMENT_ID,
+                    "(703)555-0101  ", null, STORED_NATIONAL_ID, STORED_GOVERNMENT_ID,
                     LocalDate.of(1906, 12, 9), "0000000001", "Y", (short) 800);
 
             when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(this.account));
@@ -444,7 +625,13 @@ class AccountUpdatePreservationTest {
          * @param request the submitted edit; must not be {@code null}
          */
         void update(AccountUpdateRequest request) {
-            this.service.update(ACCOUNT_ID, request, this.service.currentRevision(ACCOUNT_ID));
+            // WHY : Assumptions: the precondition is derived from the fixture's own stored rows rather
+            //       than read back from the object under test. AccountRevision owns the format that both
+            //       published routes render and that the write path compares, so a token built here is
+            //       the same token a caller would have been given -- and building it here keeps the
+            //       object under test from supplying its own input.
+            this.service.update(ACCOUNT_ID, request,
+                    AccountRevision.of(this.account, this.customer));
         }
 
         /**
@@ -497,6 +684,12 @@ class AccountUpdatePreservationTest {
         /** The submitted third part of the national identifier. */
         private String ssnPart3 = "6789";
 
+        /** The submitted account key, which must name the account being updated. */
+        private String accountId = "10000000001";
+
+        /** The submitted customer key, which must name the customer that account holds. */
+        private String customerId = "900000001";
+
         /**
          * Sets the submitted postal code.
          *
@@ -535,17 +728,53 @@ class AccountUpdatePreservationTest {
         }
 
         /**
+         * Sets the submitted account key.
+         *
+         * @param value the eleven-character screen value, or {@code null} for an omitted field
+         * @return this builder, never {@code null}
+         */
+        RequestBuilder accountId(String value) {
+            this.accountId = value;
+            return this;
+        }
+
+        /**
+         * Sets the submitted customer key.
+         *
+         * @param value the nine-character screen value, or {@code null} for an omitted field
+         * @return this builder, never {@code null}
+         */
+        RequestBuilder customerId(String value) {
+            this.customerId = value;
+            return this;
+        }
+
+        /**
+         * Removes every field whose absence the no-change comparison requires.
+         *
+         * <p>Assumptions: the two protected identifiers are cleared rather than set to their stored
+         * values, because the comparison requires them to be NEVER SUPPLIED -- their stored form is
+         * ciphertext and a submission cannot restate it. That is the comparison's own rule and not a
+         * convenience of this builder.</p>
+         *
+         * @return this builder, never {@code null}
+         */
+        RequestBuilder submittingNoProtectedIdentifier() {
+            return ssn(null, null, null).governmentIssuedId(null);
+        }
+
+        /**
          * Builds the request.
          *
          * @return the assembled request, never {@code null}
          */
         AccountUpdateRequest build() {
             return new AccountUpdateRequest(
-                    "10000000001", "Y", "5000.00", "500.00", "100.00", "0.00", "0.00",
+                    this.accountId, "Y", "5000.00", "500.00", "100.00", "0.00", "0.00",
                     "2020", "01", "01",
                     "2027", "12", "31",
                     "2024", "06", "01",
-                    "DEFAULT", "900000001",
+                    "DEFAULT", this.customerId,
                     this.ssnPart1, this.ssnPart2, this.ssnPart3,
                     "1906", "12", "09",
                     "800",

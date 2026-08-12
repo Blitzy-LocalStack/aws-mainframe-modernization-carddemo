@@ -38,10 +38,21 @@ import software.amazon.awssdk.core.exception.SdkException;
  * post-commit application is the only construction that survives a process death between them.</p>
  *
  * <p>Assumptions: application is IDEMPOTENT by construction and not by convention, which is what makes a
- * retry safe. Provisioning tolerates an account that already exists and re-reads its subject rather than
- * failing; withdrawal treats an absent account as success; a projection assignment is an assignment and
- * has no accumulated state. The terminal status transition is refused by the entity on a task that is
- * already settled, so two overlapping appliers cannot both mark one task.</p>
+ * retry safe, and it holds for both of the operations a task can carry. A projection assignment ASSIGNS
+ * three attributes and, when the type moved, moves one group membership -- adding a member that is
+ * present and removing one that is absent both succeed at the provider -- so applying it twice reaches
+ * the state it reached the first time and accumulates nothing. Withdrawal treats an absent account and
+ * an absent credential entry as success. The terminal status transition is refused by the entity on a
+ * task that is already settled, so two overlapping appliers cannot both mark one task.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph asserted a third property, that "provisioning tolerates an
+ * account that already exists and re-reads its subject rather than failing", and that was not true of any
+ * code: the provisioner issues no {@code AdminGetUser}, and the provider's duplicate-username condition
+ * propagates untranslated. The claim was also about an operation this ledger cannot carry -- account
+ * creation is not among the two verbs a task admits, for the reason
+ * {@code V3__auth_identity_sync_operations.sql} records -- so it described a path that does not reach
+ * here. Stating an idempotence the code did not have is the more damaging half: a reader would have
+ * concluded a duplicated create was safe to retry.</p>
  *
  * <p>Assumptions: applying one task is THREE short units of work rather than one -- read the pending row,
  * call the provider with no transaction open, then settle the row -- and no single unit spans the provider
@@ -417,10 +428,18 @@ public class IdentitySyncService {
     /**
      * Issues the provider call one task expresses.
      *
-     * <p>Assumptions: the switch is EXHAUSTIVE over the three operations the column's own check constraint
+     * <p>Assumptions: the switch is EXHAUSTIVE over the two operations the column's own check constraint
      * admits, and its default arm refuses rather than ignoring. An unrecognised operation means the
      * constraint and this method disagree, which is a programming error and not a provider fault, so it
      * must not be counted as an attempt and retried four more times.</p>
+     *
+     * <p>Refactoring Rationale: there was a third arm, for a {@code PROVISION} intention, and it was
+     * unreachable -- no caller of {@link #record} ever named that operation, because the create path
+     * cannot record an intention it has already had to act on. The arm and the value were withdrawn
+     * together, by {@code V3__auth_identity_sync_operations.sql}, so the branches here and the column's
+     * domain are now the same set. Alternatives Considered: keeping the arm on the reasoning that the
+     * constraint still admitted the value. Declined because that reasoning is circular -- the constraint
+     * admitted it only because the arm existed.</p>
      *
      * @param task the pending task whose provider call is to be issued; must not be {@code null}
      * @throws SdkException if the provider rejects or cannot serve the call
@@ -428,8 +447,6 @@ public class IdentitySyncService {
      */
     private void call(IdentitySyncTask task) {
         switch (task.getOperation()) {
-            case IdentitySyncTask.OPERATION_PROVISION -> this.provisioning.provision(
-                    task.getUserId(), task.getFirstName(), task.getLastName(), task.getUserType());
             case IdentitySyncTask.OPERATION_SYNCHRONISE -> this.provisioning.synchronise(
                     task.getUserId(), task.getFirstName(), task.getLastName(),
                     task.getPreviousUserType(), task.getUserType());

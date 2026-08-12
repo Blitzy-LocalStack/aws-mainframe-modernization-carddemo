@@ -1,9 +1,10 @@
 /**
- * Owns the two request-scoped web contracts of the CardDemo shared kernel: the
- * correlation identity that travels with every request, and the keyset page
- * envelope that carries a browse cursor across a stateless boundary.
+ * Owns the three request-scoped web contracts of the CardDemo shared kernel: the
+ * correlation identity that travels with every request, the keyset page envelope
+ * that carries a browse cursor across a stateless boundary, and the ceiling on
+ * how many bytes one request body may carry.
  *
- * <p><b>Purpose.</b> Two concerns live here and nothing else does. A
+ * <p><b>Purpose.</b> Three concerns live here and nothing else does. A
  * correlation identity has to accompany a request from the edge through to the
  * log line, so that one unit of work can be reassembled afterwards out of
  * evidence scattered across services. A list response has to state where its
@@ -30,19 +31,48 @@
  *
  * <h2>What this package holds, and what it deliberately does not</h2>
  *
- * <p>Two production types sit beside this charter, and there is no third:
+ * <p>Three production types sit beside this charter:
  *
  * <ul>
- *   <li>{@code PageResponse} -- the keyset page envelope. It carries the rows
- *       of one page, the key of the first row, the key of the last row, and
- *       whether a further page exists.</li>
+ *   <li>{@code PageResponse} -- the keyset page envelope, a record of FIVE
+ *       components. It carries the rows of one page, the sealed token naming the
+ *       page's leading boundary, the sealed token naming its trailing boundary,
+ *       whether a further page follows, and -- as a component of its own rather
+ *       than as a derivation -- whether a page precedes it. Assumptions: the
+ *       backward indicator is established by the read that produced the page, in
+ *       the same way the forward one is, and is never inferred from the leading
+ *       token being present: every page that returns rows names its own first
+ *       row, so that inference announces an earlier page on the opening page and
+ *       a client following it replaces the rows it is showing with an empty
+ *       page. The canonical constructor admits each indicator only alongside the
+ *       token a request in that direction is issued from, which is the one state
+ *       in each direction a caller cannot act on.</li>
+ *   <li>{@code CursorToken} -- the sealing and opening of those boundary tokens.
+ *       It is what makes a cursor unforgeable by the client that holds it, and it
+ *       is the reason the envelope can refuse a raw composite key: the physical
+ *       browse key of the reference card list begins with a primary account
+ *       number, which must not travel in a response body to be replayed on the
+ *       next request.</li>
  *   <li>{@code CorrelationIdFilter} -- correlation identity in, logging context
  *       and response header out. It accepts an identity supplied on the inbound
  *       request, falls back to the request identifier the edge stamped when the
  *       caller supplied none, mints one when neither is available, publishes the
  *       result to the logging context for the life of the request, and echoes it
  *       on the response.</li>
+ *   <li>{@code RequestBodySizeFilter} -- the ceiling on one request body, in
+ *       bytes. It refuses an over-large body before the body is parsed and
+ *       before the security chain verifies a token, so the work an over-large
+ *       body would cause is never done.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this roster said TWO types and named the envelope and
+ * the correlation filter, while the directory held three -- the cursor sealer was
+ * present, tested and consumed by every browse endpoint, and listed as a
+ * deliberate addition in the kernel root's own charter, yet absent from the one
+ * document that claims to close this package's set. A roster that omits a type is
+ * worse than no roster: it is the document a reviewer consults when deciding
+ * whether a proposed class belongs here, so an omission reads as a judgement that
+ * the omitted type does not belong.</p>
  *
  * <p>Assumptions: the middle step of that resolution is what makes the identity
  * canonical rather than merely present. Without it a request carrying no
@@ -59,18 +89,42 @@
  * record codecs belong to {@code com.carddemo.common.codec}; the problem shape
  * and the structured abend detail belong to {@code com.carddemo.common.error}.
  * A page envelope carries whatever rows a caller puts into it and never
- * interprets one of their fields, so this package needs none of the three and
- * imports none of them. That is a deliberate boundary rather than an accident
- * of what has been written so far: the moment an envelope knows what a money
- * column is, every service returning a page of anything else inherits a
- * dependency it has no use for.
+ * interprets one of their fields, so nothing here needs the money types or the
+ * record codecs and nothing here imports them. That is a deliberate boundary
+ * rather than an accident of what has been written so far: the moment an
+ * envelope knows what a money column is, every service returning a page of
+ * anything else inherits a dependency it has no use for.
  *
- * <p>Assumptions: {@code CorrelationIdFilter} is registered by the consuming
- * service, not by anything shipped from here. This module is a library and not
- * a deployable -- it has no application entry point, no runtime configuration
- * resource, no schema migration, no API description document and no container
- * image of its own -- so a service wires the filter into its own chain, and
- * this package supplies only the behaviour being wired.
+ * <p>Refactoring Rationale: the third of those three is a different case, and
+ * this paragraph used to lump it in with the other two and claim that this
+ * package imports none of the three. It does import one. Both filters here
+ * refuse a request BEFORE the dispatcher runs -- one on a malformed correlation
+ * header, the other on an over-large body -- so neither refusal can reach the
+ * shared advice, which is invoked by propagation from inside the dispatcher.
+ * Every published contract declares the problem shape as the body of a refusal,
+ * so a refusal raised out here has to build that shape itself, which it does
+ * through {@code com.carddemo.common.error.ApiError} rather than by assembling
+ * JSON by hand. The dependency therefore points from {@code web} to
+ * {@code error} and never back, and the claim that it does not exist was simply
+ * false.
+ *
+ * <p>Assumptions: both filters are registered by
+ * {@code com.carddemo.common.CardDemoCommonAutoConfiguration}, which the kernel
+ * publishes as an auto-configuration, and NOT by each consuming service. The
+ * order and the url pattern of each are stated there rather than left to bean
+ * ordering, and a service that has a reason to place either one differently
+ * declares a registration under the same bean name and takes ownership of it.
+ *
+ * <p>Refactoring Rationale: this paragraph used to say the opposite -- that a
+ * service wires these filters into its own chain and this package supplies only
+ * the behaviour being wired -- and the reason it changed is the defect the
+ * auto-configuration was added to fix. A registration a service has to remember
+ * is one a service can omit, and omitting this one produced a service that
+ * started, served requests, and emitted every log line with no correlation
+ * identity at all. The claim that this module ships no runtime resource was true
+ * when it was written and is no longer: the module now carries the one
+ * registration file that names that class, and the departure is argued in the
+ * file itself.
  *
  * <h2>Lineage: four reference-only programs, only two of which browse</h2>
  *
@@ -242,7 +296,7 @@
  * <h2>The three contracts this package owns</h2>
  *
  * <p>Everything above reduces to three commitments, stated plainly so that they
- * can be checked against the two production types rather than inferred from
+ * can be checked against the three production types rather than inferred from
  * them:
  *
  * <ol>
@@ -250,21 +304,27 @@
  *       the underlying physical key is ordered -- card number before account
  *       identifier, per lines 230 to 232 of {@code app/cbl/COCRDLIC.cbl} -- and
  *       never in the order some screen happened to display.</li>
- *   <li><b>How a further page is discovered.</b> By reading one row beyond the
- *       page and letting the presence of that row set the indicator, exactly as
- *       the baseline does at line 1197 of {@code app/cbl/COCRDLIC.cbl} and again
- *       at lines 305 to 313 of {@code app/cbl/COTRN00C.cbl}. Two independent
- *       programs attest to it, which is why it is treated as a contract and not
- *       as one program's habit.</li>
+ *   <li><b>How an adjacent page is discovered, in EITHER direction.</b> By
+ *       reading one row beyond the page and letting the presence of that row set
+ *       the indicator, exactly as the baseline does at line 1197 of
+ *       {@code app/cbl/COCRDLIC.cbl} and again at lines 305 to 313 of
+ *       {@code app/cbl/COTRN00C.cbl}. Two independent programs attest to it,
+ *       which is why it is treated as a contract and not as one program's habit.
+ *       Refactoring Rationale: the commitment reads "either direction" because
+ *       the envelope now reports backward availability as a component. It
+ *       previously carried four components and left that answer to be inferred
+ *       from the leading token, which reported an earlier page on the opening
+ *       page -- the state the reference explicitly refuses at
+ *       {@code app/cbl/COCRDLIC.cbl:903}.</li>
  *   <li><b>Correlation width.</b> Twenty-four characters, per line 45 of
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}.</li>
  * </ol>
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>40 production classes</b> and <b>11</b> package
- * charters -- one at the kernel root and one for each subpackage -- for <b>51</b>
- * compilation units in total. This package contributes three of the forty
+ * <p>The shared kernel holds <b>42 production classes</b> and <b>11</b> package
+ * charters -- one at the kernel root and one for each subpackage -- for <b>53</b>
+ * compilation units in total. This package contributes four of the forty-two
  * and one of the eleven. The breakdown is given so that a reader can re-derive the
  * total instead of trusting it:
  *
@@ -274,8 +334,8 @@
  * money                              2
  * codec                              6
  * error                              7
- * web                                3
- * security                           8
+ * web                                4
+ * security                           9
  * observability                      3
  * time                               1
  * validation                         2
@@ -283,28 +343,28 @@
  * control                            4
  * </pre>
  *
- * <p>Those eleven sum to 40, the kernel root itself contributing one -- the
- * auto-configuration class that registers this package's filter, and the meter
- * filter, the money codec module and the error advice, in every service:
+ * <p>Those eleven sum to 42, the kernel root itself contributing one -- the
+ * auto-configuration class that registers this package's two filters, and the
+ * meter filter, the money codec module and the error advice, in every service:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
+ * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 3 + time 1 + validation 2 + messaging 4 + control 4 = 43
  * </pre>
  *
- * <p>Adding the eleven charters gives 51:
+ * <p>Adding the eleven charters gives 53:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
+ * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 4 + time 2 + validation 3 + messaging 5 + control 5 = 54
  * </pre>
  *
  * <p>This package's own share is:
  *
  * <pre>
- * this package: web 3 production + 1 charter = 4 compilation units
+ * this package: web 4 production + 1 charter = 5 compilation units
  * </pre>
  *
- * <p>Assumptions: the authoritative totals are <strong>39 production classes and
- * 50 compilation units, 11 of the latter being charters</strong>. The canon above
+ * <p>Assumptions: the authoritative totals are <strong>42 production classes and
+ * 53 compilation units, 11 of the latter being charters</strong>. The canon above
  * is stated as a breakdown and not merely as a total for a reason: a bare total
  * invites a reader to trust it, whereas a per-subpackage list can be re-derived,
  * so any figure that does not reproduce these two sums is wrong on its face.
@@ -316,16 +376,25 @@
  * table reached a figure the tree contradicts. An eleventh, {@code control}, has since
  * been added deliberately, and the distinction between the two events is the point: one
  * was a subpackage the table had failed to notice, the other a subpackage argued in with
- * a recorded reason and entered in the table in the same change. This package's own contribution of
- * three was the one row that was already right, which is exactly why a stale table is
- * dangerous: a correct row lends the wrong ones credibility. Every figure above is now
+ * a recorded reason and entered in the table in the same change. Every figure above is now
  * a measurement, and {@code SharedKernelInventoryTest} re-derives each labelled addend,
  * both totals and this package's own share from the directory on every build.
  *
- * <h2>Why these two types live in the shared kernel</h2>
+ * <p>Refactoring Rationale: the two figures in the breakdown that the test does NOT
+ * re-derive had both gone stale, which is worth recording because it says exactly
+ * where the guard reaches. The test reads the labelled sums and the own-share line,
+ * both of which are single lines in a fixed shape; it does not read the aligned table
+ * above them, and that table said this package held three classes when it held four
+ * and that {@code security} held eight when it held nine -- the second disagreeing
+ * with the labelled sum four lines below it. An earlier revision of this paragraph
+ * additionally claimed this package's row was the one that was already right, which
+ * was the wrong row to be confident about.
+ *
+ * <h2>Why these four types live in the shared kernel</h2>
  *
  * <p>Refactoring Rationale: the alternative is for each service to declare its
- * own page envelope and its own correlation filter. It deserves a precise answer
+ * own page envelope, its own cursor sealer, its own correlation filter and its
+ * own body bound. It deserves a precise answer
  * rather than a dismissal, because on the surface it removes a module from the
  * build and lets one team change an envelope without consulting seven others.
  *
@@ -424,8 +493,9 @@
  * and that hit would then have to be explained away on every audit. The
  * description is unambiguous -- a page positioned by counting rows from the
  * start of an ordered set, together with any running tally of how many rows or
- * how many pages exist altogether -- and the enforcement lives in the two types
- * and their tests rather than in this prose, because prose cannot fail a build.
+ * how many pages exist altogether -- and the enforcement lives in the two paging
+ * types and their tests rather than in this prose, because prose cannot fail a
+ * build.
  *
  * <p>Two identifier namespaces are kept textually distinct throughout, because
  * they collide by number. The user-specified rule is Explainability and is

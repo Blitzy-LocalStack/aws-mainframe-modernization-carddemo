@@ -23,6 +23,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.carddemo.account.config.SecurityConfig;
 import com.carddemo.account.dto.AccountLookupRequest;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
@@ -69,6 +70,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -256,7 +258,18 @@ class CardXrefControllerTest {
     /**
      * The number of members the published page envelope declares.
      */
-    private static final int ENVELOPE_MEMBER_COUNT = 5;
+    private static final int ENVELOPE_MEMBER_COUNT = 4;
+
+    /**
+     * The parameterised type a serialised envelope is read back as.
+     *
+     * <p>Assumptions: a {@link TypeReference} rather than {@code Map.class}, because the raw class literal
+     * makes the read an unchecked conversion and the compiler reports a diagnostic on it. The element types
+     * stated here are the ones the assertion already assumes, so nothing is asserted more loosely; what
+     * changes is that the assumption is written down where the compiler can check it.</p>
+     */
+    private static final TypeReference<Map<String, Object>> DOCUMENT_TYPE =
+            new TypeReference<>() { };
 
     /**
      * The number of rows every page fixture in this class carries.
@@ -385,6 +398,27 @@ class CardXrefControllerTest {
     private final JsonMapper json = JsonMapper.builder().build();
 
     /**
+     * The target type every body read in this class deserialises into.
+     *
+     * <p>Refactoring Rationale: the reads here formerly passed {@code Map.class}, which yields a RAW
+     * {@code Map}. A raw actual silently erases the assertion library's own type parameters, so
+     * {@code assertThat(rawMap)} resolves to the raw {@code AbstractMapAssert} and every key matcher called on
+     * it becomes an unchecked call -- three {@code javac -Xlint:unchecked} warnings per site, and, worse than
+     * the warnings, an assertion whose key arguments the compiler no longer checks at all. A member set
+     * asserted through an unchecked call is asserted by the runtime only, which is precisely the guarantee
+     * these cases exist to provide statically. Naming the parameterisation once restores it.</p>
+     *
+     * <p>Alternatives Considered: an inline {@code new TypeReference<Map<String, Object>>() {}} at each
+     * call site was rejected because it repeats a four-token generic signature at every read, and a reader
+     * comparing two reads then has to compare the signatures rather than read one name. A declared
+     * {@code JavaType} built from the mapper's type factory was rejected because it is constructed rather than
+     * declared, so it cannot be read as a type at a glance. {@code Map<String, Object>} rather than a narrower
+     * value type is deliberate: a body under test may legitimately carry a nested object or an array, and
+     * pinning the value type to {@code String} would make a correct body fail to bind.</p>
+     */
+    private static final TypeReference<Map<String, Object>> JSON_OBJECT = new TypeReference<>() { };
+
+    /**
      * Builds the substituted read path and the dispatcher that carries the deployed filter chain.
      *
      * <p>Trade-offs: the guarded context is built ONCE for the class rather than per case, because
@@ -401,7 +435,6 @@ class CardXrefControllerTest {
         guardedContext.register(GuardedSliceWiring.class);
         guardedContext.refresh();
 
-        // WHAT: wraps the security-enabled context in a dispatcher whose requests traverse the chain.
         // WHY : Assumptions: the configurer form is used rather than adding the chain filter by hand,
         //       because the request post-processor that mints an authentication publishes it through the
         //       test context repository this configurer installs. Adding the filter alone would leave
@@ -718,20 +751,29 @@ class CardXrefControllerTest {
      * @throws Exception if the request cannot be performed or the response body cannot be read
      */
     @Test
-    @DisplayName("the single account-keyed read resolves a row by account rather than by card")
+    @DisplayName("the single account-keyed read resolves a row by account and publishes its card number")
     void theSingleAccountKeyedReadResolvesByAccount() throws Exception {
         when(reads.resolveCardCrossReferenceByAccount(ACCOUNT_ID))
-                .thenReturn(new CardXrefView(ACCOUNT_ID, CUSTOMER_ID));
+                .thenReturn(new CardXrefByAccountView(ACCOUNT_ID, CUSTOMER_ID, CARD_KEY));
 
         String body = bodyOf(post(ACCOUNT_LOOKUP_ROUTE)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(ACCOUNT_BODY));
 
+        // WHY : Refactoring Rationale: this case previously asserted that the response carried NO card
+        //       digits, and that assertion was pinning the defect rather than a protection. The operation
+        //       is keyed BY the account, so the card is the one value its caller does not already hold and
+        //       is the value the caller needs: the consuming context transcribes READ-CXACAIX-FILE at
+        //       lines 576 to 604 of app/cbl/COTRN02C.cbl and the same read at line 414 of
+        //       app/cbl/COBIL00C.cbl, both of which take XREF-CARD-NUM from the record and write the row
+        //       they produce under it. Withholding it meant neither a posted transaction nor a bill
+        //       payment could be written at all. The withholding assertion now belongs to the CARD-keyed
+        //       lookup above, whose caller supplied the value and gains nothing from the echo.
         assertThat(body)
-                .as("a row reached by account publishes both identifiers and no card digits")
+                .as("a row reached by account publishes all three columns, the card number included")
                 .contains(String.valueOf(ACCOUNT_ID))
-                .doesNotContain(CARD_KEY)
-                .doesNotContain(WITHHELD_CARD_PREFIX);
+                .contains(String.valueOf(CUSTOMER_ID))
+                .contains(CARD_KEY);
 
         verify(reads).resolveCardCrossReferenceByAccount(ACCOUNT_ID);
         verifyNoMoreInteractions(reads);
@@ -771,7 +813,7 @@ class CardXrefControllerTest {
         List<CardXrefResponse> rows = pageOf(CARD_KEY, "4000123456789028", "4000123456789036");
 
         when(reads.listCardCrossReferences(eq(ACCOUNT_ID), isNull(), isNull(), eq(SUBJECT)))
-                .thenReturn(PageResponse.ofRows(rows, leading, trailing, true, false));
+                .thenReturn(PageResponse.ofRows(rows, leading, trailing, true));
 
         String body = this.mockMvc.perform(walk().content(ACCOUNT_BODY))
                 .andExpect(status().isOk())
@@ -784,7 +826,6 @@ class CardXrefControllerTest {
                 .andExpect(jsonPath("$.firstKey").value(leading))
                 .andExpect(jsonPath("$.lastKey").value(trailing))
                 .andExpect(jsonPath("$.hasNext").value(true))
-                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andReturn()
                 .getResponse()
                 .getContentAsString();
@@ -836,8 +877,7 @@ class CardXrefControllerTest {
                 .andExpect(jsonPath("$.items.length()").value(0))
                 .andExpect(jsonPath("$.firstKey").value(nullValue()))
                 .andExpect(jsonPath("$.lastKey").value(nullValue()))
-                .andExpect(jsonPath("$.hasNext").value(false))
-                .andExpect(jsonPath("$.hasPrevious").value(false));
+                .andExpect(jsonPath("$.hasNext").value(false));
     }
 
     /**
@@ -862,7 +902,7 @@ class CardXrefControllerTest {
         String trailing = sealedPosition("final-closing");
 
         when(reads.listCardCrossReferences(eq(ACCOUNT_ID), anyString(), eq(STEP_FORWARD), eq(SUBJECT)))
-                .thenReturn(PageResponse.ofRows(pageOf(CARD_KEY), leading, trailing, false, true));
+                .thenReturn(PageResponse.ofRows(pageOf(CARD_KEY), leading, trailing, false));
 
         this.mockMvc.perform(walk()
                         .param("cursor", sealedPosition("carried"))
@@ -871,7 +911,6 @@ class CardXrefControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(1))
                 .andExpect(jsonPath("$.hasNext").value(false))
-                .andExpect(jsonPath("$.hasPrevious").value(true))
                 .andExpect(jsonPath("$.firstKey").value(leading))
                 .andExpect(jsonPath("$.lastKey").value(trailing));
     }
@@ -907,10 +946,10 @@ class CardXrefControllerTest {
         when(reads.listCardCrossReferences(eq(ACCOUNT_ID), isNull(), isNull(), eq(SUBJECT)))
                 .thenReturn(PageResponse.ofRows(
                         pageOf(CARD_KEY, "4000123456789028", "4000123456789036"),
-                        leading, trailing, true, false));
+                        leading, trailing, true));
 
         String carried = this.json.readValue(
-                        bodyOf(walk().content(ACCOUNT_BODY)), Map.class)
+                        bodyOf(walk().content(ACCOUNT_BODY)), JSON_OBJECT)
                 .get("lastKey")
                 .toString();
 
@@ -923,7 +962,7 @@ class CardXrefControllerTest {
                 .thenReturn(PageResponse.ofRows(
                         pageOf("4000123456789044", "4000123456789051", "4000123456789069"),
                         sealedPosition("second-opening"), sealedPosition("second-closing"),
-                        false, true));
+                        false));
 
         this.mockMvc.perform(walk()
                         .param("cursor", carried)
@@ -956,7 +995,7 @@ class CardXrefControllerTest {
         when(reads.listCardCrossReferences(
                 eq(ACCOUNT_ID), eq(carried), eq(STEP_BACKWARD), eq(SUBJECT)))
                 .thenReturn(PageResponse.ofRows(pageOf(CARD_KEY),
-                        sealedPosition("prior-opening"), sealedPosition("prior-closing"), true, false));
+                        sealedPosition("prior-opening"), sealedPosition("prior-closing"), true));
 
         this.mockMvc.perform(walk()
                         .param("cursor", carried)
@@ -987,20 +1026,28 @@ class CardXrefControllerTest {
      * @throws Exception if the request cannot be performed or the response body cannot be read
      */
     @Test
-    @DisplayName("the published envelope declares the rows, both boundaries and both indicators only")
+    @DisplayName("the published envelope declares the rows, both boundaries and the indicator only")
     void thePublishedEnvelopeDeclaresNothingBeyondRowsBoundariesAndIndicators() throws Exception {
         assertThat(componentNamesOf(PageResponse.class))
-                .as("the envelope declares the rows, both boundaries and both availability indicators")
+                .as("the envelope declares the rows, both boundaries and the further-page indicator")
                 .hasSize(ENVELOPE_MEMBER_COUNT)
-                .containsExactly("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
+                .containsExactly("items", "firstKey", "lastKey", "hasNext");
 
         when(reads.listCardCrossReferences(eq(ACCOUNT_ID), isNull(), isNull(), eq(SUBJECT)))
                 .thenReturn(PageResponse.ofRows(pageOf(CARD_KEY),
-                        sealedPosition("only-opening"), sealedPosition("only-closing"), false, false));
+                        sealedPosition("only-opening"), sealedPosition("only-closing"), false));
 
-        assertThat(this.json.readValue(bodyOf(walk().content(ACCOUNT_BODY)), Map.class))
+        // WHY : ⚠️ Refactoring Rationale: the document is read through a TypeReference rather than
+        //       through Map.class. The raw class literal made this an unchecked conversion to
+        //       Map<String, Object>, so the compiler reported an unchecked-operation diagnostic on a
+        //       line whose whole purpose is to assert a serialised shape -- and a build that carries a
+        //       diagnostic it has decided to tolerate is a build in which the next real one is harder to
+        //       see. The parameterised form states the element types the assertion already assumes.
+        Map<String, Object> document =
+                this.json.readValue(bodyOf(walk().content(ACCOUNT_BODY)), DOCUMENT_TYPE);
+        assertThat(document)
                 .as("a serialised envelope must carry the declared members and no further one")
-                .containsOnlyKeys("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
+                .containsOnlyKeys("items", "firstKey", "lastKey", "hasNext");
     }
 
     /**
@@ -1183,7 +1230,7 @@ class CardXrefControllerTest {
                         .andExpect(status().isNotFound())
                         .andReturn()
                         .getResponse()
-                        .getContentAsString(), Map.class)
+                        .getContentAsString(), JSON_OBJECT)
                 .get("message")
                 .toString();
 

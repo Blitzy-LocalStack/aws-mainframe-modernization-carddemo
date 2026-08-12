@@ -743,15 +743,35 @@ for the batch database role, are narrower than "write access to two schemas":
 | `batch` | Owner | The step ledger and job history |
 | `ledger` | `SELECT`, `INSERT`, `UPDATE` on tables | Posts transactions and maintains category balances |
 | `account` | `SELECT` on the schema; `UPDATE` on `account.accounts` **by name only** | Applies the posting balance update and the interest flush |
-| `card` | `SELECT` only | Reads card data during validation |
 | `reference` | `SELECT` only | Reads disclosure groups for the interest rate |
 
 Assumptions: nothing in that table grants `DELETE` anywhere, and the only
 `UPDATE` outside `ledger` is on one named table. The runtime `search_path` spans
-`batch`, `ledger`, `account`, `card`, and `reference`, and the cross-schema
-mappings name their schema explicitly on the mapping rather than relying on that
-path, so a write into a schema this module has no right to fails as a permission
-error naming the table rather than resolving somewhere unexpected.
+`batch`, `ledger`, `account`, and `reference` — the same four schemas the table
+lists — and the cross-schema mappings name their schema explicitly on the mapping
+rather than relying on that path, so a write into a schema this module has no
+right to fails as a permission error naming the table rather than resolving
+somewhere unexpected.
+
+Refactoring Rationale: this table carried a fifth row, `SELECT` on `card`, and the
+sentence above it counted five schemas on the path. Both were removed, and the
+`GRANT USAGE ON SCHEMA ... card ... TO carddemo_batch` and
+`GRANT SELECT ON ALL TABLES IN SCHEMA card` that backed them were removed from
+`V0__schemas_and_roles.sql` with them. The row's stated reason — that validation
+reads card data — does not hold: `app/cbl/CBTRN01C.cbl` opens `CARD-FILE` at
+`:309` and closes it at `:417` without ever issuing a READ against it, its only
+three reads being the daily feed at `:203`, the cross-reference at `:229` and the
+account at `:243`. The cross-reference it does read is `CVACT03Y`, which this
+module maps to `account.card_xref` under the `account` grant already in the table,
+and no entity in this module declares a `card` schema. §9 had already dropped
+`card` from the documented `search_path` on that same evidence, which left this
+section contradicting it — the drift this removes. Trade-offs: an unused read
+grant on the schema holding the primary account number and the card verification
+value is not a harmless surplus, so the grant went rather than the sentence.
+[`CrossSchemaPrivilegeContractTest`](../common-lib/src/test/java/com/carddemo/common/architecture/CrossSchemaPrivilegeContractTest.java)
+now fails the build if a schema is granted to this role that its `search_path`
+does not name, or if a schema an entity maps to is left ungranted, so this table
+and that file cannot drift apart again silently.
 
 ### 5.4 Flyway needs two coordinates, not one
 
@@ -894,7 +914,60 @@ interest posting but a cross-cycle data defect that also leaves that account's
 over-limit basis carrying forward. The Java flushes the final account correctly,
 which restores both the interest and the reset.
 
-### 8.3 D-2 belongs elsewhere
+### 8.3 D-EXPORT-PROTECTED-SPANS-REDACTED — three protected spans cross as constants
+
+Three fields the baseline carries verbatim through the export/import round trip are
+written as constants in both directions and their values are never read: the
+customer's national identifier (`EXP-CUST-SSN`, `app/cpy/CVEXPORT.cpy:36`), the
+customer's government-issued identifier (`:37`), and the card verification value
+(`EXP-CARD-CVV-CD`). `CBEXPORT.cbl` moves all three out and `CBIMPORT.cbl` moves them
+back in at `:305`, `:306` and `:409`.
+
+The reason is that the destinations are not equivalent to the baseline's. In the
+target those three columns are `BYTEA` envelopes sealed under the Aurora
+customer-managed key, and **this module holds no decrypt grant for that key and must
+not acquire one** — an export path that could open every sealed value in the estate is
+precisely the grant this architecture wants narrowest. The artefacts are the second
+reason: they are durable objects in the dataset bucket, and a verification value may
+not be retained after authorisation whether or not the storage is encrypted, so no
+grant would make carrying it correct.
+
+The redaction is structural rather than a late filter. `Customer` maps neither
+protected column and `Card` maps none, so no query this module can issue selects one;
+every span keeps its declared width, so both record layouts stay byte-exact and every
+following field stays at its declared offset. Nothing downstream reads any of the
+three from these artefacts.
+
+### 8.4 D-IMPORT-TRUNCATION-REFUSED — a partial dataset publishes nothing
+
+A dataset whose length is not a whole multiple of the 500-byte record length is
+**refused before the first artefact is put**, where the baseline could not encounter
+the condition at all: its inputs are catalogued `RECFM=FB`, so their length is a whole
+multiple by construction. An object in a bucket carries no such guarantee, because a
+transfer or a multipart upload can end early and leave something well-formed as an
+object and truncated as a dataset.
+
+Both arms are checked — the declared object length before a byte is read, and a body
+that ends mid-record despite a well-formed declared length — and both raise. An earlier
+revision reproduced the baseline's diagnostic shape instead, writing one 132-byte line
+into the error artefact, excluding the short image from the records-read counter, and
+publishing all six artefacts with the clean tier. That combination is the worst
+available outcome: reconciliation balanced because the excluded image was excluded from
+both sides of it, so a partially-split credit-card master was indistinguishable from a
+complete one to every consumer reading the outputs positionally.
+
+### 8.5 D-EXPORT-STAGED-THROUGH-A-FILE — the round trip stages through files
+
+Both jobs assemble their output in a temporary file and upload the file, and the import
+streams its input rather than materialising it; the temporary files are removed on every
+path including a failed upload. Nothing observable changes, and the divergence is
+registered anyway because a reader comparing the two implementations would otherwise
+find a structural difference with no recorded reason. It restores the baseline's own
+property: `CBEXPORT.cbl` and `CBIMPORT.cbl` each hold one record area, so their working
+set is independent of the record count, and it is the same discipline the posting, backup
+and combine jobs of this module already apply.
+
+### 8.6 D-2 belongs elsewhere
 
 For completeness: **D-2** — the two unchecked statement tables in `CBSTM03A`,
 whose measured overflow thresholds are 512 same-card transactions and 51 distinct
@@ -908,7 +981,7 @@ the batch context.
 |---|---|---|
 | [`DataSourceConfig`](src/main/java/com/carddemo/batch/config/DataSourceConfig.java) | **Owned** | Binds the HikariCP pool from `spring.datasource.hikari`, and verifies once, before any step runs, that the connection's effective schema is the one Flyway was configured to migrate |
 | `BatchConfig` | **Owned** | Chunk-oriented step definitions and their reader, processor and writer wiring. **This is the only module in the repository that owns one.** See below for why it is a separate class rather than annotations spread across the jobs |
-| [`SqsConfig`](src/main/java/com/carddemo/batch/config/SqsConfig.java) | **Owned**, and publish-only | Send-side queue wiring for the one terminal error sink: a bounded synchronous client and the closed three-attribute set a published event carries. It declares no listener and no `@SqsListener`, because a job runs on command rather than on arrival — the listener flag itself is set in `application.yml`, where the lifecycle concern belongs |
+| [`SqsConfig`](src/main/java/com/carddemo/batch/config/SqsConfig.java) | **Owned**, and publish-only | Send-side queue wiring for the one terminal error sink: a bounded synchronous client, the validated sink binding that shapes one send with a closed three-attribute set, and the [`BatchErrorPublisher`](src/main/java/com/carddemo/batch/service/BatchErrorPublisher.java) bean that actually sends. It declares no listener and no `@SqsListener`, because a job runs on command rather than on arrival — the listener flag itself is set in `application.yml`, where the lifecycle concern belongs. The whole class is gated on `carddemo.messaging.error-queue-url`, so a deployment that publishes no sink address gets none of it |
 | `OpenApiConfig` | **Excluded** | See §9.1 |
 | `SecurityConfig` | **Excluded** | See §9.1 |
 
@@ -925,7 +998,7 @@ the contract rather than as an out-of-date listing.
 Assumptions: `DataSourceConfig`'s verification carries more weight in this module than in
 any sibling. Every other service initialises its connections with a single-schema search
 path, so an ordering mistake has nothing to resolve against and fails at the first
-unqualified statement. This module's path is `batch, ledger, account, reference` —
+unqualified statement. This module's path is `batch, ledger, account, reference, card` —
 four schemas, because the posting unit of work commits the transaction, the category
 balance and the account together and is kept a single ACID commit rather than fragmented
 into a saga, and the interest job reads the disclosure-group rate. Refactoring Rationale:
@@ -940,8 +1013,41 @@ Assumptions: `BatchConfig` is authored, and it was authored WITH the jobs rather
 ahead of them, because a step definition has nothing to define until the jobs exist.
 `job/` now holds all seven job classes §2 assigns it plus a shared dataset writer and its
 package charter, and `config/BatchConfig` carries exactly what those seven share: the time
-source the durable step ledger stamps its rows with, and one nested builder that wraps a
-job's unit of work in a ledger-guarded step. Alternatives Considered: authoring it earlier
+source the durable step ledger stamps its rows with, and one nested builder,
+`LedgerGuardedStep`, that wraps a job's unit of work in a ledger-guarded step.
+
+Assumptions: **every step in this module is a single transactional tasklet that
+returns `RepeatStatus.FINISHED` from its first invocation**, so one step invocation
+is one transaction and a whole pass commits exactly once. That shape is the
+load-bearing decision, not an implementation detail. A chunk-oriented
+read-process-write step commits per chunk, which would make a partially posted run
+observable and a redrive non-idempotent; the reference commits its three writes —
+the transaction, the category balance and the account — as one unit of work at
+`app/cbl/CBTRN02C.cbl:440-442`, and a single transactional tasklet is what
+preserves that, while the ledger row keyed `(runId, stepName)` is what makes a
+redrive of an already-completed step a no-op. Trade-offs: the accepted cost is that
+a very large run holds one transaction open for its duration; the alternative
+trades that for an observable intermediate state the golden masters would correctly
+flag as a parity failure. The feed page size the jobs read with therefore bounds a
+**read** and not a commit — it is the `Limit` of a keyset query, with no
+commit-per-page boundary anywhere in this module for it to set. Refactoring
+Rationale: the row above described this class as holding "chunk-oriented step
+definitions and their reader, processor and writer wiring", which was false of it
+in both directions — the class declares none of those four, as its own class
+Javadoc states, and the step model is the opposite of chunk-oriented. A reader who
+believed a page committed could reduce that page size expecting to shrink the
+failure window, which does nothing here.
+
+Assumptions: the builder is injected by **two** of the seven jobs — the export and
+import round-trips — and not by all seven, and the split is deliberate rather than
+partial adoption. Those two contribute a whole-pass body and nothing else, so
+handing the entire prebuilt step over is the smaller surface. The remaining five
+build their own tasklet with `StepBuilder` because their bodies grade themselves
+through the `StepContribution` the framework passes in, which a prebuilt step does
+not expose to them. Both routes reach the same place: one ledger row per
+`(runId, stepName)` pair and the same graded exit status.
+
+Alternatives Considered: authoring it earlier
 with the job repository and transaction manager registered in it. Rejected on two counts
 that still hold: Spring Boot already auto-configures both from the data source, so the
 registration would restate a framework default and then have to be kept in step with it;
@@ -995,15 +1101,76 @@ appears anywhere in the repository:
 | `SPRING_PROFILES_ACTIVE` | Which environment profile to load |
 | `CARDDEMO_ENVIRONMENT` | The parameter-store path segment for this environment |
 | `SPRING_DATASOURCE_URL` | The database location |
-| `SPRING_DATASOURCE_USERNAME` | The batch database role |
+| `SPRING_DATASOURCE_USERNAME` | The **runtime** batch database role, holding named DML only |
 | `SPRING_DATASOURCE_PASSWORD` | Injected from the secret store, never from a file in this repository |
+| `SPRING_FLYWAY_USER` | The **migration** database role, `carddemo_batch_migrator` — a different login from the runtime role above |
+| `SPRING_FLYWAY_PASSWORD` | That role's credential, injected from its own secret-store entry |
 | `CARDDEMO_DB_SSL_ROOT_CERT` | Path to the trust anchor for verified TLS; defaulted to the image's bundle |
 | `AWS_REGION` | The region for every client |
 | `CARDDEMO_BATCH_RUN_ID` | The orchestrator's execution name, published to the logging context so a night's tasks share one correlation identifier |
+| `CARDDEMO_DATASET_BUCKET` | The versioned bucket the generation-writing jobs stage a dataset into |
+| `CARDDEMO_MESSAGING_ERROR_QUEUE_URL` | The address of the one terminal error sink, and the **gate** on the whole of `SqsConfig` |
 
 Assumptions: connections require verified TLS, so the trust-anchor variable is not
 optional in any deployed environment — the database refuses an unencrypted
 connection outright.
+
+Assumptions: the two Flyway rows are a SECOND credential and not a duplicate of the
+first, which is why both appear. `data-migration/sql/V0__schemas_and_roles.sql`
+creates three tiers per bounded context — a `NOLOGIN` `carddemo_batch_owner` that
+owns the schema and its objects, a `carddemo_batch_migrator` login that is a member
+of that owner `WITH INHERIT FALSE`, and the `carddemo_batch` login this service
+serves work as, from which `CREATE` is explicitly revoked. Setting
+`spring.flyway.user` is also what makes Spring Boot derive a SEPARATE migration
+`DataSource` rather than borrowing the Hikari pool, so the `SET ROLE` the migration
+runs cannot leak onto a pooled connection that later serves a query. Neither row has
+a fallback, deliberately: a default would let the process migrate as an identity
+nobody chose, and the earlier arrangement — where these two keys did not exist —
+made the long-lived runtime credential the owner of every table it read.
+
+Trade-offs: an incomplete environment fails at startup, but not always by naming the
+absent variable. Spring Boot's binder leaves an unresolvable placeholder as its own
+literal text, so `spring.datasource.url` becomes the characters
+`${SPRING_DATASOURCE_URL}` and the first failure is `'url' must start with "jdbc"`.
+For the two Flyway rows the literal does travel into the failure — the driver is
+handed the username `${SPRING_FLYWAY_USER}` and reports an authentication failure
+containing it — so the variable is recoverable from the message without being
+announced as missing. Both are worth knowing before reading one of these failures for
+the first time.
+
+Assumptions: `CARDDEMO_MESSAGING_ERROR_QUEUE_URL` behaves differently from every other
+row above, and the difference is worth stating rather than discovering. It is not merely
+one of `SqsConfig`'s settings, it is the `@ConditionalOnProperty` condition ON that class —
+so an absent value does not degrade publishing, it removes the queue client, the sink
+binding and the producer bean together and the run reports its failure to the log stream
+alone. Both environment roots publish it from the queue module's error-queue address, and
+`infra/modules/ecs-service` **requires** it of this workload by name so a root that drops
+it fails at plan time rather than producing a task that silently cannot notify anything.
+The matching `sqs:SendMessage` grant on that one queue comes from the queue module's
+`batch_service` boundary; the address and the grant have to travel together, because the
+address without the action is an access-denied at the moment a failure is being reported
+and the action without the address is a permission nothing uses.
+
+Assumptions: the property is deliberately **not** declared in `application.yml`, and the
+reason is mechanical rather than stylistic. `@ConditionalOnProperty` matches any value
+other than the literal `false`, and the empty string is such a value — so a
+`${CARDDEMO_MESSAGING_ERROR_QUEUE_URL:}` placeholder would open the gate in every
+environment and then fail context refresh inside the binding, which refuses a blank
+address on purpose. An absent property closes the gate cleanly; there is no spelling that
+does both, so the base document carries a comment block in place of a key.
+
+Assumptions: three companion settings exist for the same sink —
+`carddemo.messaging.error-content-type`, `-error-source-application` and
+`-error-source-program` — and none is required. Each carries its default at its own
+`@Value` parameter, beside the property name it belongs to, so this table lists only the
+one variable a deployment must supply.
+
+Refactoring Rationale: this table listed neither `CARDDEMO_DATASET_BUCKET`, which the
+state machine has always supplied to every batch container override, nor the error-queue
+address, which no root supplied at all. The second omission was not a documentation gap on
+its own — it was the documentation half of a configuration class that no deployment ever
+selected and no production path ever called, so the module described a terminal error sink
+and put no message on it.
 
 ### 9.3 What is deliberately not on the classpath
 
@@ -1056,18 +1223,25 @@ expect on the classpath, and each is absent for a stated reason.
 # WHAT: build common-lib and this module, run the unit tests through Surefire,
 #       reach the Failsafe integration tier, and package the executable jar the
 #       container image copies.
-# WHY : Assumptions: the integration tier is reached but this module contributes
-#       nothing to it. Failsafe is bound in the parent POM and executes for both
-#       selected modules, and neither `common-lib` nor `batch-service` holds an
-#       `*IT` class, so it reports zero tests here. That matters because §10.4's
-#       container-backed atomicity assertion is NOT proven by this command --
-#       writing that the command "runs the repository integration tests" would let
-#       a reader believe otherwise. The reactor's integration tests are
-#       `services/common-lib/src/test/java/com/carddemo/common/CardDemoCommonAutoConfigurationIT.java`
-#       and
-#       `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRepositoryIT.java`;
-#       the second is the working reference for the shape this module's own `*IT`
-#       takes.
+# WHY : Assumptions: this command DOES prove the container-backed atomicity
+#       assertion of section 10.4, and that is why it is the one to run before
+#       trusting that section. Failsafe is bound in the parent POM and executes
+#       for both selected modules, and both contribute: `batch-service` holds
+#       three `*IT` classes -- `repository/PostingUnitOfWorkIT`,
+#       `repository/CrossSchemaFeedRepositoryIT` and
+#       `repository/BatchRunRepositoryIT` -- and `common-lib` holds
+#       `CardDemoCommonAutoConfigurationIT`. Each starts a real PostgreSQL
+#       container through Testcontainers rather than an in-memory engine, so the
+#       cross-schema grants and the single-transaction commit are exercised
+#       against the engine that enforces them.
+# WHY : Refactoring Rationale: this block previously stated that neither module
+#       held an `*IT` class, that the tier reported zero tests, and that section
+#       10.4's assertion was NOT proven here, pointing at `transaction-service`
+#       as the reference shape to copy. All of that was measured before the three
+#       integration classes landed and is now false in both directions. Left
+#       standing it was actively harmful: a reader auditing posting atomicity
+#       would have skipped the one command that demonstrates it, and an author
+#       would have re-implemented a class that already exists.
 # WHY : Assumptions: common-lib supplies both the main jar and the test artifact
 #       carrying the shared architecture rules, so it must be built first; -am
 #       builds it from the reactor rather than resolving a published version.
@@ -1162,10 +1336,22 @@ in-memory engine, deliberately. The property under test is multi-schema
 search-path resolution, real grant enforcement, and real transactional semantics —
 none of which an in-memory substitute reproduces faithfully, so a test that passed
 against one would prove nothing about the thing that matters. This is settled
-rather than open: the sibling `TransactionRepositoryIT` in `transaction-service`
-runs on a real PostgreSQL container under `@ServiceConnection` and applies the
-module's Flyway migration inside it, so the mechanism is demonstrated and this
-module's `*IT` follows it rather than choosing again.
+rather than open, and it is settled **in this module's own tree**: the last row is
+carried by three landed classes —
+[`PostingUnitOfWorkIT`](src/test/java/com/carddemo/batch/repository/PostingUnitOfWorkIT.java),
+which asserts that an accepted posting commits its category balance, account and
+ledger row together and that a rejected one leaves none of them behind;
+[`CrossSchemaFeedRepositoryIT`](src/test/java/com/carddemo/batch/repository/CrossSchemaFeedRepositoryIT.java),
+which exercises the cross-schema feed reads under the four-schema `search_path`;
+and
+[`BatchRunRepositoryIT`](src/test/java/com/carddemo/batch/repository/BatchRunRepositoryIT.java),
+which pins the durable step ledger's redrive idempotency. Each starts a real
+PostgreSQL container, so the grants and the transactional semantics are enforced by
+the engine rather than assumed. Refactoring Rationale: this paragraph closed by
+saying the mechanism was demonstrated only by the sibling `TransactionRepositoryIT`
+in `transaction-service` and that this module's `*IT` would follow it. That was
+true before these three landed and is now misleading in the costlier direction —
+it invites an author to write a fourth class for coverage that already exists.
 
 **Three assertions must be demonstrably green before this module is considered
 done:**
@@ -1276,19 +1462,27 @@ hide a blocked dependency.
   transcribed from a job.
 - **`CBACT04C` and `CBTRN01C` publish no return code of their own** (§12.3), so
   their migrated steps report only clean success or hard failure.
-- **The seven job beans, the business-rule services, and `BatchConfig` described in
-  §2, §4, and §9 are the module's target contract.** The process entry point,
-  `DataSourceConfig`, the closed set of job tokens, the business-date validation, the
-  cross-schema domain mappings, and the `batch` schema migration are authored; no
-  `Job` bean is registered yet, so once the §13.2 preconditions hold an invocation
-  with a valid token reaches a by-name resolution failure that reports both the
-  requested token and the registry's actual contents. Before those preconditions
-  hold it fails earlier, at startup mapping validation, naming the missing table.
-  Argument parsing, validation, and the usage diagnostic run without a database, a
-  credential, or a job bean at all. This is recorded
-  here because the token set is an orchestration contract that the state machine
-  and each job bean are authored against, and a reader has to be able to tell a
-  not-yet-registered bean from a misspelled token.
+- **All seven job beans are registered, so what limits a run is §13.2 and not this
+  module.** `com.carddemo.batch.job` holds seven `@Configuration` classes, each
+  contributing exactly one `@Bean` method that returns a `Job`:
+  `PreflightDailyTransactionsJob`, `PostTransactionsJob`, `CalculateInterestJob`,
+  `BackupTransactionsJob`, `CombineTransactionsJob`, `ExportJob` and `ImportJob`.
+  Each takes its registered name from the matching `BatchJobName` constant, so the
+  seven names are byte-identical to the seven `--job=` tokens §9 publishes.
+  Selection is a lookup rather than a switch: `BatchApplication.resolveJob`
+  iterates `context.getBeansOfType(Job.class).values()` and compares each bean's
+  own `getName()` against the validated token, raising with the requested token
+  **and** the registry's sorted contents when none matches. The bean identifier is
+  deliberately not part of that contract — a refactor may rename
+  `postTransactions` freely, while the token `post-transactions` is published to
+  the orchestration definition and to every runbook, and `JobRegistrationCensusTest`
+  fails the build if a declared token has no bean, a bean answers to an undeclared
+  name, or two beans answer to one name. What a run still needs is external: with no
+  reachable database the process fails at startup mapping validation naming the
+  missing table, and the §13.2 preconditions must hold before work completes.
+  Argument parsing, validation, and the usage diagnostic are the one exception and
+  run with no database and no credential, because they execute before the
+  application context is started.
 - **The shared ArchUnit rule set** referenced in §4.2 and §4.10 is authored once in
   `common-lib` and scanned into this module's test run by the aggregator's
   architecture-rules execution, against this module's own classes. Maven passes a
@@ -1378,6 +1572,9 @@ abbreviation is not an accepted variant.
 | The zoned codec runs in EBCDIC sign mode; the default silently corrupts negative balances | Assumptions: | `tests/README.md` §5.2 | §4.10 |
 | The export and import jobs key on a field the record actually contains, where the baseline declares one it does not; the baseline declaration stands and is the sole cause of the repository's warn-level green state | Refactoring Rationale: | `app/cbl/CBEXPORT.cbl:68`, `app/cbl/CBIMPORT.cbl:40`, key declared `app/cpy/CVEXPORT.cpy:16` | §8.1 |
 | The target flushes the final account's interest and performs the cycle-bucket reset with it, where the baseline does neither for that one account | Refactoring Rationale: | `app/cbl/CBACT04C.cbl:325-348` and `:219-220`; reset at `:350-356` | §8.2 |
+| Three protected spans — the two customer identifiers and the card verification value — cross the export boundary as constants in both directions, where the baseline carries their values | Refactoring Rationale: | `app/cpy/CVEXPORT.cpy:36-37`; moved back at `app/cbl/CBIMPORT.cbl:305`, `:306`, `:409` | §8.3 |
+| A dataset that is not a whole number of records is refused before any artefact is published, a condition the baseline's `RECFM=FB` inputs cannot present | Refactoring Rationale: | error record `app/cbl/CBIMPORT.cbl:106-109`; `LRECL=132` at `app/jcl/CBIMPORT.jcl:56-60` | §8.4 |
+| Both halves of the round trip stage through a temporary file rather than an in-memory buffer, restoring the baseline's record-at-a-time working set | Refactoring Rationale: | one record area each at `app/cbl/CBEXPORT.cbl:65-69`, `app/cbl/CBIMPORT.cbl:37-41` | §8.5 |
 | `batch_run` is an idempotency ledger — an improvement, not a port, because no baseline checkpoint contract exists | Refactoring Rationale: | `app/jcl/DEFGDGD.jcl:2` commented `RESTART=`; no `CHKPT=` in any of the 38 members | §5.2 |
 | `IDCAMS BLDINDEX` is retired rather than migrated, because indexes are maintained transactionally | Refactoring Rationale: | Transformation rule T6; `app/jcl/TRANBKP.jcl:43-44` for the object it built | §7 |
 | Ten generation families, not six, every one at `LIMIT(5)` | Assumptions: | `app/jcl/DEFGDGB.jcl:25-56`, `app/jcl/DEFGDGD.jcl:28-75`, `app/jcl/DALYREJS.jcl:24-28` | §6 |
@@ -1402,7 +1599,7 @@ abbreviation is not an accepted variant.
 | Interest is reduced per category row and then summed, not summed and then reduced | Assumptions: | `app/cbl/CBACT04C.cbl:464-467` | §4.4 |
 | The interest sequence counter increments before use and is never reset across the run | Assumptions: | `app/cbl/CBACT04C.cbl:474`, counter `:173` | §4.7 |
 | A two-character literal moved into a four-digit numeric field is stored as `0005` | Assumptions: | `app/cbl/CBACT04C.cbl:483`, field `app/cpy/CVTRA05Y.cpy:7` | §4.7 |
-| The repository integration test pays a real container start rather than using an in-memory engine | Trade-offs: | `app/cbl/CBTRN02C.cbl:440-442`; grants in `data-migration/sql/V0__schemas_and_roles.sql`; demonstrated by `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRepositoryIT.java` | §10.4 |
+| The repository integration tests pay a real container start rather than using an in-memory engine | Trade-offs: | `app/cbl/CBTRN02C.cbl:440-442`; grants in `data-migration/sql/V0__schemas_and_roles.sql`; demonstrated in this module by `src/test/java/com/carddemo/batch/repository/PostingUnitOfWorkIT.java`, `CrossSchemaFeedRepositoryIT.java` and `BatchRunRepositoryIT.java` | §10.4 |
 | The dataset bucket name is resolved from configuration and is absent from this document | Assumptions: | `services/batch-service/src/main/resources/application.yml` | §6.1, §9.2 |
 
 ## 16. Standing prohibitions

@@ -370,7 +370,7 @@ public class TransactionTypeService {
                 ? readBackwardWindow(typeCodeFilter, descriptionFilter, position, filtered, limit)
                 : readForwardWindow(typeCodeFilter, descriptionFilter, position, filtered, limit);
 
-        return ReferencePaging.page(rows, PAGE_SIZE, backward, position != null,
+        return ReferencePaging.page(rows, PAGE_SIZE, backward,
                 ReferencePaging.binding(CURSOR_BINDING, subject, true, typeCodeFilter,
                         descriptionFilter),
                 ReferencePaging.binding(CURSOR_BINDING, subject, false, typeCodeFilter,

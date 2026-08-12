@@ -10,8 +10,8 @@
 The current Python package implements configuration/trust validation, the
 normative layout catalogue, the twelve fixed-width record readers, the Aurora
 bulk loader and all three verification passes, and it exposes them as the
-`load-dataset`, `verify-row-counts`, `verify-checksum` and `verify-money-parity`
-subcommands used below. Every step in this runbook is executable and fails
+`load-dataset`, `verify-row-counts`, `verify-checksum`, `verify-money-parity` and
+`verify-row-count-report` subcommands used below. Every step in this runbook is executable and fails
 closed. Ten records are loadable, covering all eight schemas' seeded tables, and
 the two conditions a cutover still turns on are stated at the gate at the end.
 
@@ -255,15 +255,65 @@ cutover from a production extract, run it with the path the extract was staged t
 
 ```bash
 # WHAT: load the transaction master, ONLY on a cutover that supplies a real extract.
-# WHY : Assumptions: this is the one load that is safe to re-run as well as to skip.
-#       `ledger.transactions` has a second writer -- the posting job inserts into it --
-#       so the loader merges on `transaction_id` instead of failing on the primary key,
-#       which is what lets a redriven staging step re-enter without duplicating rows.
-#       Every other master above is single-writer and a second run there is expected to
-#       fail on its key rather than silently do nothing.
+# WHY : Assumptions: this load is safe to re-run as well as to skip. `ledger.transactions`
+#       has a second writer -- the posting job inserts into it -- so the loader merges on
+#       `transaction_id` instead of failing on the primary key, which is what lets a
+#       redriven staging step re-enter without duplicating rows.
+# WHY : Refactoring Rationale: this note used to end "every other master above is
+#       single-writer and a second run there is expected to FAIL on its key rather than
+#       silently do nothing", and that is no longer what happens. The seven single-writer
+#       masters are now guarded by a row count taken in the same transaction as the COPY: a
+#       second run finds the table populated, DECLINES, prints `declined <DATASET> ...`
+#       naming the count already there, and exits 0. The change was made because a commit
+#       can be AMBIGUOUS -- committed on the server, unacknowledged to the client -- so a
+#       retry is the normal case rather than an operator error, and two of the seven
+#       behaved badly on it: a primary-key violation reads as a decode fault, and
+#       `ledger.daily_transactions`, whose key is generated and whose source carries no
+#       natural key, would have accepted the rows and DOUBLED the daily feed. `declined` is
+#       therefore a success to read as "already loaded", never as "loaded now".
 python -m carddemo_migration.cli load-dataset \
   --dataset TRAN --source "$STAGING_ROOT/AWS.M2.CARDDEMO.TRANSACT.PS" --encoding ebcdic
 ```
+
+## Reconcile the Transaction-Identifier Allocator
+
+Run this after the **last** load into `ledger.transactions` and **before** writes are
+enabled. It is not optional on a cutover, and it is a no-op on a corpus-only
+deployment, so it belongs in the sequence unconditionally rather than in a
+decision.
+
+```bash
+# WHAT: advance ledger.transaction_id_seq past every sequence-format identifier the
+#       transaction master now holds, and report both allocator positions.
+# WHY : Assumptions: the allocator's STARTING position is derived by its own migration,
+#       services/transaction-service/src/main/resources/db/migration/
+#       V2__ledger_transaction_id_allocator.sql, from max(transaction_id) over
+#       ledger.transactions -- and on a cutover that migration runs BEFORE this runbook
+#       loads the extract, against an empty table, so it positions the allocator at 1.
+#       The load then writes the real master with its own identifiers. The first
+#       interactive transaction add or bill payment after writes are enabled therefore
+#       allocates an identifier the table already holds and fails on pk_transactions --
+#       and so does the next, for as many allocations as the loaded range is wide.
+# WHY : Trade-offs: this runs as the ledger MIGRATION login, not the service login. V0
+#       grants each service role USAGE, SELECT on its schema's sequences, which is
+#       nextval and currval; setval needs UPDATE, which only the NOLOGIN owner holds.
+#       Granting the service role UPDATE was rejected: it is a permanent privilege on a
+#       long-lived principal for a one-time step, and it is the dangerous direction --
+#       a role that can setval can REWIND the allocator and make the service reissue
+#       identifiers it has already stored.
+# WHY : Assumptions: the step only ever ADVANCES the allocator, so it is safe to re-run
+#       and safe to leave in a script. If writes have already been enabled, allocations
+#       have happened, and a rewind would reissue every identifier allocated since; a
+#       run against an allocator already past the data prints "nothing to reconcile" and
+#       issues no setval at all.
+python -m carddemo_migration.cli reconcile-sequences
+```
+
+Read the printed line before enabling writes. `advanced from 1 to 683581 past a
+largest stored identifier of 683580` means the hazard was present and is now closed;
+`already issues 900001 ... nothing to reconcile` means it was not present. A non-zero
+exit means the allocator could **not** be reconciled — do not enable writes, because
+the first interactive write will fail on the primary key.
 
 ## Run All Three Verification Passes
 
@@ -354,6 +404,30 @@ PGUSER=carddemo_reporting psql -v ON_ERROR_STOP=1 \
   -f data-migration/sql/verify/money_totals.sql
 ```
 
+The row-count half of that pair is ALSO reachable as a subcommand, and that is the
+form a batch step should use:
+
+```bash
+# WHAT: the whole-migration row-count report, judged rather than printed.
+# WHY : Assumptions: this is the same file the psql invocation above runs, executed
+#       verbatim -- the package reads the text and refuses one that is not a single
+#       pure-SQL statement rather than rewriting it, so the report an operator reads
+#       with psql and the report this judges are the same bytes.
+# WHY : Assumptions: prefer this form in an orchestrated step and the psql form at a
+#       terminal. This one opens its own session for carddemo_reporting, CHECKS with
+#       the server that the session really is that role before it runs anything, and
+#       reduces the report to a process exit status -- 0 when every line verified, 8
+#       when any did not. psql exits 0 for a report full of mismatches, so a state
+#       machine branching on it would treat a failed verification as a success.
+# WHY : Assumptions: `--sql-root .` is required in the container image and must be
+#       omitted in a source checkout. The `sql` tree ships BESIDE the installed
+#       package rather than inside it, so the image copies it to the working
+#       directory /opt/carddemo, while a checkout resolves it from the package's own
+#       location. Passing the wrong one fails closed, naming the path it looked at.
+python -m carddemo_migration.cli verify-row-count-report          # source checkout
+python -m carddemo_migration.cli verify-row-count-report --sql-root .   # in the image
+```
+
 ## Cutover Gate
 
 Do not switch application traffic based only on schema success. A production
@@ -380,6 +454,29 @@ Assumptions: this is stated as a gate condition because no verification pass can
 catch it. The row counts agree, the money totals agree, and the ciphertext is
 well-formed either way — the key identifier is not recoverable from the envelope by
 anything in this package, and the authentication failure is deferred to first read.
+
+⚠️ Refactoring Rationale — **a load of `account.customers` performed before the
+customer envelope was aligned must be discarded, not topped up.** Until that
+alignment, this package framed the two customer identifier columns with no marker
+and no version byte, reproducing a second Java writer that `account-service` has
+since deleted; the writer that remains frames a four-byte `CDCI` marker and a
+version byte first. Rows written under the earlier framing are five bytes short of
+what the service parses and will fail before decryption is attempted. **A re-run of
+`load-dataset CUSTOMER` does not repair them:** no role this package uses holds
+`DELETE` or `TRUNCATE` — [`sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+withholds both from every service role — so a populated table is refused rather
+than replaced. Repairing is an operator action on the cluster, taken with the
+account owner role: drop and recreate the schema from its Flyway baseline, or
+delete the affected rows, then re-run the load. Confirm at the gate either that
+`account.customers` has never been loaded by this package, or that it has been
+emptied since.
+
+Assumptions: this is a gate condition rather than a code change for the same reason
+as the key check above — nothing in the loader can tell a pre-alignment envelope
+from a post-alignment one without deciphering it, which this package deliberately
+cannot do. Teaching the account service to accept both framings was rejected: it
+would keep two formats alive in one column permanently, which is precisely the state
+the alignment ended.
 
 **2. The checksum pass covers three of the eleven records.**
 Row counts and money parity cover all eleven; the checksum pass covers the three

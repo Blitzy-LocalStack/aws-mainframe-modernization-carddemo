@@ -28,9 +28,44 @@
  * set and the caller passes it to `setAccessToken`, so there is one writer.
  */
 
-import { getApiClient } from './client';
-import { requestPath } from './types';
-import type { ContractOperation, PageDirection, PageResponse } from './types';
+import { getApiClient, requestPath } from './client';
+import type {
+  ContractOperation,
+  CreateUserRequest,
+  PageResponse,
+  SignOnChallengeRequest,
+  SignOnRequest,
+  SignOnResult,
+  SignOnTokens,
+  TokenRefreshRequest,
+  UpdateUserRequest,
+  UserListQuery,
+  UserResponse,
+  UserSummary,
+  CreatedUserResponse,
+} from './types';
+
+/*
+ * WHY : Refactoring Rationale: the sign-on and user wire shapes are RE-EXPORTED from ./types rather
+ *       than declared here, so this module's public surface is unchanged for every screen and hook
+ *       that imports from '../../api/auth' while each shape has a single definition beside the other
+ *       contracts' shapes.
+ */
+export type {
+  UserType,
+  SignOnRequest,
+  SignOnTokens,
+  SignOnChallenge,
+  SignOnResult,
+  TokenRefreshRequest,
+  SignOnChallengeRequest,
+  UserSummary,
+  UserResponse,
+  CreatedUserResponse,
+  CreateUserRequest,
+  UpdateUserRequest,
+  UserListQuery,
+} from './types';
 
 const SIGN_ON: ContractOperation = {
   method: 'POST',
@@ -97,15 +132,6 @@ export const AUTH_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   DELETE_USER,
 ];
 
-/**
- * The two user types the baseline admits, and the two Cognito groups they map to.
- *
- * Assumptions: exactly two members, 'A' and 'U', transcribed from `SEC-USR-TYPE` at
- * `app/cpy/CSUSR01Y.cpy` L22. The `auth.users` check constraint admits the same two, so a third value
- * is refused by the database as well as by the contract.
- */
-export type UserType = 'A' | 'U';
-
 /** Successful sign-on outcome discriminator, as the contract declares it. */
 export const SIGN_ON_AUTHENTICATED = 'AUTHENTICATED';
 
@@ -131,124 +157,12 @@ export const USER_ID_MAX_LENGTH = 8;
 export const PASSWORD_MAX_LENGTH = 256;
 
 /** The credentials a sign-on submits. */
-export interface SignOnRequest {
-  readonly userId: string;
-  readonly password: string;
-}
-
-/**
- * A completed sign-on, carrying the token set the SPA presents on every later request.
- *
- * Assumptions: `refreshToken` is nullable because the identity provider omits it on a renewal, which
- * is the flow that consumed the previous one. A caller that stored null over a held refresh token
- * would sign the user out at the next expiry, so a null must be treated as "keep what you have"
- * rather than as "the token was revoked".
- */
-export interface SignOnTokens {
-  readonly outcome: 'AUTHENTICATED';
-  readonly userId: string;
-  readonly accessToken: string;
-  readonly idToken: string;
-  readonly refreshToken: string | null;
-  readonly tokenType: string;
-  readonly expiresIn: number;
-}
-
-/**
- * A sign-on the provider will not complete until the credential is changed.
- *
- * Assumptions: `session` is an opaque continuation value and is passed back unread. It is a
- * credential-equivalent for the length of the exchange, which is why it travels in a body on the way
- * back as well as on the way out.
- */
-export interface SignOnChallenge {
-  readonly outcome: 'CHALLENGE';
-  readonly challengeName: 'NEW_PASSWORD_REQUIRED';
-  readonly session: string;
-  readonly userId: string;
-}
-
-/**
- * Which of the two sign-on outcomes occurred.
- *
- * Assumptions: the union is discriminated on `outcome`, which the contract declares as a constant on
- * each member and names as the discriminator property. Deriving the branch from the presence of
- * `accessToken` instead would work today and would break silently the moment a third outcome carried
- * one, whereas an unhandled constant is a compile error.
- */
-export type SignOnResult = SignOnTokens | SignOnChallenge;
 
 /** The identifier and refresh token a renewal submits. */
-export interface TokenRefreshRequest {
-  readonly userId: string;
-  readonly refreshToken: string;
-}
 
 /** The identifier, continuation session and replacement credential a challenge answer submits. */
-export interface SignOnChallengeRequest {
-  readonly userId: string;
-  readonly session: string;
-  readonly newPassword: string;
-}
-
-/**
- * One row of the user browse.
- *
- * Assumptions: four members and no credential among them. The baseline record carries an
- * eight-character plaintext password at `app/cpy/CSUSR01Y.cpy` L21; the migrated system does not carry
- * that field at all, so there is nothing here to omit rather than a member deliberately withheld.
- */
-export interface UserSummary {
-  readonly userId: string;
-  readonly firstName: string;
-  readonly lastName: string;
-  readonly userType: UserType;
-}
-
-/**
- * One user as the administration screens render it.
- *
- * Assumptions: `cognitoSub` is an OUTPUT and never an input. It is minted by the identity provider
- * when the account is provisioned, so a creation request that supplied one would be asserting an
- * identity it cannot have created -- which is why {@link CreateUserRequest} below declares four members
- * and this shape declares five.
- */
-export interface UserResponse extends UserSummary {
-  readonly cognitoSub: string;
-}
-
-/**
- * The fields a user creation accepts.
- *
- * Assumptions: FOUR members. No credential is among them, because this service creates none: the
- * identity provider is asked to provision the account and it mints the initial credential itself. No
- * subject is among them either, for the reason recorded on {@link UserResponse}.
- */
-export interface CreateUserRequest {
-  readonly firstName: string;
-  readonly lastName: string;
-  readonly userId: string;
-  readonly userType: UserType;
-}
-
-/**
- * The fields a user update accepts.
- *
- * Assumptions: three members, and the identifier is not one of them. It addresses the row from the
- * target, so admitting it in the body as well would create a request whose two halves could disagree
- * about which user is being changed.
- */
-export interface UpdateUserRequest {
-  readonly firstName: string;
-  readonly lastName: string;
-  readonly userType: UserType;
-}
 
 /** Criteria the user browse is read with. */
-export interface UserListQuery {
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
 
 /**
  * Exchanges a user identifier and password for a token set.
@@ -330,12 +244,21 @@ export async function listUsers(query: UserListQuery = {}): Promise<PageResponse
 
 /**
  * Creates one user and provisions the matching identity-provider account.
+ *
+ * Assumptions: the resolved value names the managed-secret entry the account's one-time credential was
+ * published to, and never the credential itself. A caller collects the value from that entry and presents
+ * it to the person the account is for. See {@link CreatedUserResponse} for why the handover works this
+ * way.
  * @param {CreateUserRequest} request - The four fields a creation accepts.
- * @returns {Promise<UserResponse>} The created user, carrying the subject the provider minted.
+ * @returns {Promise<CreatedUserResponse>} The created user, carrying the subject the provider minted
+ *   and the name of the managed-secret entry holding its one-time credential.
  * @throws {Error} If the request fails, including HTTP 409 when the identifier is already taken.
  */
-export async function createUser(request: CreateUserRequest): Promise<UserResponse> {
-  const response = await getApiClient().post<UserResponse>(requestPath(CREATE_USER), request);
+export async function createUser(request: CreateUserRequest): Promise<CreatedUserResponse> {
+  const response = await getApiClient().post<CreatedUserResponse>(
+    requestPath(CREATE_USER),
+    request,
+  );
   return response.data;
 }
 

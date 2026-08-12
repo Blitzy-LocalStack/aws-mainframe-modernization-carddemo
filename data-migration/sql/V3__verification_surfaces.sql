@@ -19,7 +19,7 @@
 --   a strictly smaller privilege than granting SELECT on the eleven base tables
 --   the passes would otherwise have to read.
 --
--- WHY this file exists (Refactoring Rationale):
+-- Refactoring Rationale: why this file exists.
 --   Both verification passes were written to be run "as the operator principal
 --   that applied V0, or as a verification role granted SELECT on exactly these
 --   tables", and both recorded, accurately, that carddemo_reporting could not run
@@ -57,7 +57,7 @@
 --   nothing on the source schemas can read through it. This file applies that
 --   established mechanism to the verification passes.
 --
--- WHY the auth relation is separate (Assumptions):
+-- Assumptions: why the auth relation is separate.
 --   carddemo_reporting_owner holds USAGE and SELECT on ledger, account, card and
 --   reference -- V0 L1265-L1285 -- and deliberately NOT on auth. The auth schema
 --   is held outside its grant graph because it carries the identity table, and

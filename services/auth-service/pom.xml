@@ -207,6 +207,39 @@
     </dependency>
 
     <!--
+      WHY : Purpose: a user created at run time needs a way to receive its first
+            credential, and this is the store that carries it. The pool account is
+            created in its force-change state with a generated temporary password,
+            and that password is published to a per-user managed-secret entry
+            encrypted with the customer-managed key rather than returned on the
+            response or written to a log. Without this coordinate the credential
+            has nowhere to go: the pool generates one it does not deliver, and the
+            account cannot be signed in to at all.
+      WHY : Assumptions: this is the same handover mechanism the seed identities
+            already use. infra/modules/cognito/seed_user_bootstrap.py generates a
+            policy-compliant temporary password, applies it with Permanent false
+            and writes it to that identity's own entry, so a runtime-created
+            account and a seeded one are reached the same way and an operator
+            learns one procedure rather than two.
+      WHY : Alternatives Considered: a Cognito delivery channel, meaning the pool
+            emails the temporary password, which would need no store at all.
+            Rejected because the pool's schema carries the two names and the
+            custom type and NO email or phone attribute, following
+            app/cpy/CSUSR01Y.cpy, which declares none either. Adding one would add
+            a field to the create contract that the reference record has no
+            analogue for, and a verified sending identity besides.
+      WHY : Trade-offs: one more SDK module on the image and two more actions on
+            the task role, against the alternative of an account nobody can sign
+            in to. The actions are scoped to the one name prefix this service
+            writes under, so the grant cannot reach the database credential or the
+            app-client secret held in the same store.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>secretsmanager</artifactId>
+    </dependency>
+
+    <!--
       WHY : Assumptions: two independent consumers poll it, the load balancer
             target group and the container image's own health check, so it is a
             deployment contract rather than a convenience and cannot be dropped

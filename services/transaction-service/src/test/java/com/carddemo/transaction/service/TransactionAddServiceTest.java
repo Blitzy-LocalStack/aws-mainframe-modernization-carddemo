@@ -18,6 +18,8 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.transaction.domain.Transaction;
+import com.carddemo.transaction.dto.TransactionAddOutcome;
+import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddRequest;
 import com.carddemo.transaction.dto.TransactionAddResponse;
 import com.carddemo.transaction.mapper.TransactionMapper;
@@ -230,14 +232,50 @@ class TransactionAddServiceTest {
     /** A different sixteen-digit card number, submitted so the precedence case can discard it. */
     private static final String SUBMITTED_CARD_NUMBER = "5500000000000004";
 
-    /** The stored maximum identifier the populated-table cases answer the probe with. */
+    /**
+     * The stored maximum identifier the COPY path's own read answers with.
+     *
+     * <p>⚠️ Refactoring Rationale: this constant now serves ONE purpose where it used to serve two. The
+     * copy path reads the highest stored identifier to find the row it copies, at line 1289 of the class
+     * under test, and that read survives unchanged because it is a genuine read of stored data. The
+     * append path no longer reads it at all: the identifier it writes comes from the database's own
+     * allocator instead of from a read-then-add, so the two concerns that happened to share a query now
+     * use different ones and this constant belongs only to the first.</p>
+     */
     private static final String STORED_MAXIMUM = "0000000000000008";
 
-    /** The identifier the populated-table cases expect, being the stored maximum plus one. */
+    /** The value the allocator answers the populated-table cases with, being one past that maximum. */
+    private static final long ALLOCATED_NEXT = 9L;
+
+    /** That allocated value rendered at the declared width, which the appended row must carry. */
     private static final String NEXT_IDENTIFIER = "0000000000000009";
 
-    /** The identifier an exhausted probe yields, being zero plus one at the declared width. */
+    /** The allocator's first value on a ledger the cutover extract left empty. */
+    private static final long ALLOCATED_FIRST = 1L;
+
+    /** That first value at the declared width, being the identifier the first append takes. */
     private static final String FIRST_IDENTIFIER = "0000000000000001";
+
+    /**
+     * The value the allocator issues on a fresh ledger.
+     *
+     * <p>Assumptions: one and not zero, because {@code V2__ledger_transaction_id_allocator.sql}
+     * declares {@code START WITH 1} and advances the sequence to {@code coalesce(max, 0) + 1}. That is
+     * the same value the reference reaches by a different route -- its backward read reports the file
+     * exhausted and moves zeros into the key at line 689 of {@code app/cbl/COTRN02C.cbl}, and the
+     * addition at line 449 makes it one -- so the two agree on the observable identifier while
+     * disagreeing on how it was produced.</p>
+     */
+    private static final long FIRST_ALLOCATION = 1L;
+
+    /**
+     * The value the allocator issues in the populated-ledger cases.
+     *
+     * <p>Assumptions: nine is chosen so that it renders as {@link #NEXT_IDENTIFIER} and so that it is
+     * one past {@link #STORED_MAXIMUM}. The second property is what lets the copy-path cases below
+     * distinguish an identifier that was ALLOCATED from one that was copied off the probed row.</p>
+     */
+    private static final long NEXT_ALLOCATION = 9L;
 
     /** The origination date every accepted submission carries, in the mask the screen declares. */
     private static final String ORIGIN_DATE = "2026-01-15";
@@ -455,21 +493,30 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * Supplies amounts no rendering of the reference's twelve-character edited picture can hold.
+     * Supplies amounts no rendering at the record's edited width can hold.
      *
-     * <p>Assumptions: the four alternatives at lines 340 to 343 test character POSITIONS -- the sign
-     * at one, eight digits from two, the point at ten, two digits from eleven -- and share a single
-     * action, so they form a disjunction that publishes one sentence. Each value below fails a
-     * different alternative, and each is expected to answer with the same sentence, which is what
-     * makes the disjunction observable from outside.</p>
+     * <p>Assumptions: the four alternatives at lines 340 to 343 test character POSITIONS -- the sign at
+     * one, the integer digits from two, the point after them, two digits after that -- and share a
+     * single action, so they form a disjunction that publishes one sentence. Each value below fails a
+     * different alternative, and each is expected to answer with the same sentence, which is what makes
+     * the disjunction observable from outside.</p>
+     *
+     * <p>Refactoring Rationale: these values carry TEN integer digits where they previously carried
+     * nine. Nine is what the record holds -- {@code TRAN-AMT PIC S9(09)V99} at line 10 of
+     * {@code app/cpy/CVTRA05Y.cpy} -- and is what the published contract and the request record both
+     * admit under divergence D-AMOUNT-RECORD-WIDTH, so a nine-digit value is now accepted and can no
+     * longer be a specimen for this family. Leaving nine-digit values here would have been the very
+     * defect this change removes, restated as a test: the service refusing a value the boundary calls
+     * valid. Ten integer digits is the narrowest width the record genuinely cannot hold, and the shared
+     * money type admits ten, so the specimens are constructible.</p>
      *
      * @return one argument per value, each carrying the amount and a label naming the alternative it
      *     fails, in the order the alternatives are written
      */
     private static Stream<Arguments> amountsTheEditedPictureCannotHold() {
         return Stream.of(
-                Arguments.of(Money.of("100000000.00"), "nine integer digits, line 341"),
-                Arguments.of(Money.of("-100000000.00"), "nine integer digits and a sign, line 341"),
+                Arguments.of(Money.of("1000000000.00"), "ten integer digits, line 341"),
+                Arguments.of(Money.of("-1000000000.00"), "ten integer digits and a sign, line 341"),
                 Arguments.of(Money.of("9999999999.99"), "the widest value the type admits, line 341"));
     }
 
@@ -650,19 +697,112 @@ class TransactionAddServiceTest {
                         new AccountContextClient.CardXref(ACCOUNT_ID, RESOLVED_CARD_NUMBER)));
     }
 
-    /** Arranges the descending probe to answer that the table holds no row. */
+    /**
+     * Arranges the COPY path's descending read to answer that the table holds no row.
+     *
+     * <p>Assumptions: this read belongs to {@code readLatestTransaction}, which the copy path uses to
+     * find the row it duplicates. It is NOT the identifier derivation -- that is
+     * {@link #theAllocatorAnswersWith(long)} -- and the two are kept separate here because the append
+     * path must be provably free of the read-then-add form.</p>
+     */
     private void theTableHoldsNoRow() {
         when(this.transactions.findMaxTranId()).thenReturn(Optional.empty());
     }
 
     /**
-     * Arranges the descending probe to answer with a stored maximum identifier.
+     * Arranges the COPY path's descending read to answer with a stored maximum identifier.
      *
-     * @param stored the identifier the probe answers with, of type {@code String}; must not be
+     * @param stored the identifier the read answers with, of type {@code String}; must not be
      *     {@code null}
      */
     private void theTableMaximumIs(String stored) {
         when(this.transactions.findMaxTranId()).thenReturn(Optional.of(stored));
+    }
+
+    /**
+     * Arranges the database's own identifier allocator to answer with one value.
+     *
+     * <p>⚠️ Refactoring Rationale: the append path used to derive its identifier by reading the highest
+     * stored key and adding one, a literal transcription of lines 655 to 660 of
+     * {@code app/cbl/COTRN02C.cbl}. That read-then-add is indivisible in the reference because CICS
+     * serialised the region; it is not indivisible across two Fargate tasks behind a load balancer, where
+     * both read the same maximum, both add one, and the loser is refused a capture for a reason it did
+     * nothing to cause. The allocator makes the increment atomic, so this helper arranges ONE answered
+     * value rather than a stored maximum.</p>
+     *
+     * @param allocated the value the allocator is to answer with, of type {@code long}, which the class
+     *     under test then renders at the sixteen character declared width
+     */
+    private void theAllocatorAnswersWith(long allocated) {
+        when(this.transactions.allocateTransactionId()).thenReturn(allocated);
+    }
+
+    /**
+     * Arranges the sequence allocator to issue the value a fresh ledger issues.
+     *
+     * <p>Refactoring Rationale: this names the FIRST allocation rather than arranging the descending
+     * probe, because the identifier is no longer derived from that probe -- the service draws from
+     * {@code ledger.transaction_id_seq}. Arranging the probe instead would leave the allocation
+     * unarranged, which under strict stubbing is an unused arrangement rather than a silently passing
+     * case.</p>
+     */
+    private void theAllocatorIssuesTheFirstIdentifier() {
+        theAllocatorAnswersWith(FIRST_ALLOCATION);
+    }
+
+    /**
+     * Arranges the sequence allocator to issue one nominated value.
+     *
+     * @param allocated the value the allocator issues, which the service renders to the declared key
+     *     width
+     */
+    private void theAllocatorIssues(long allocated) {
+        theAllocatorAnswersWith(allocated);
+    }
+
+    /** Arranges the copy path's descending probe to report that the ledger holds no row. */
+    private void theCopyProbeFindsNoRow() {
+        when(this.transactions.findMaxTranId()).thenReturn(Optional.empty());
+    }
+
+    /**
+     * Narrows an answer to the APPENDED shape, failing the case if nothing was captured.
+     *
+     * <p>⚠️ Refactoring Rationale: both entry points answer with the sealed
+     * {@link TransactionAddOutcome} rather than with one record, because a confirmed capture and an
+     * unconfirmed prompt publish two CLOSED schemas with different members -- the appended shape carries
+     * an identifier and a sentence, the prompt shape carries neither an identifier nor an absent one. The
+     * narrowing lives in a helper so that a case expecting an append and receiving a prompt fails with a
+     * sentence naming that, rather than with a cast trace a reader has to interpret.</p>
+     *
+     * @param answer the outcome the service produced, of type {@link TransactionAddOutcome}; must not be
+     *     {@code null}
+     * @return the {@link TransactionAddResponse} the append branch answers with; never {@code null}
+     */
+    private static TransactionAddResponse appended(TransactionAddOutcome answer) {
+        assertThat(answer)
+                .as("a confirmed, valid submission answers with the appended shape")
+                .isInstanceOf(TransactionAddResponse.class);
+        return (TransactionAddResponse) answer;
+    }
+
+    /**
+     * Narrows an answer to the PROMPT shape, failing the case if a row was captured.
+     *
+     * <p>Assumptions: narrowing by type is itself the load-bearing assertion here. The prompt shape
+     * declares no identifier member at all, so a case that once asserted a null identifier to prove
+     * nothing was appended now proves it by the shape of the answer -- which no absent value can
+     * imitate.</p>
+     *
+     * @param answer the outcome the service produced, of type {@link TransactionAddOutcome}; must not be
+     *     {@code null}
+     * @return the {@link TransactionAddPreview} the unconfirmed branch answers with; never {@code null}
+     */
+    private static TransactionAddPreview prompted(TransactionAddOutcome answer) {
+        assertThat(answer)
+                .as("a submission that captures nothing answers with the prompt shape")
+                .isInstanceOf(TransactionAddPreview.class);
+        return (TransactionAddPreview) answer;
     }
 
     /**
@@ -791,7 +931,7 @@ class TransactionAddServiceTest {
 
         verify(this.accounts, never()).findCardXrefByAccountId(any());
         verify(this.accounts, never()).findCardXrefByCardNumber(any());
-        verify(this.transactions, never()).findMaxTranId();
+        verify(this.transactions, never()).allocateTransactionId();
         verify(this.transactions, never()).saveAndFlush(any());
     }
 
@@ -818,7 +958,7 @@ class TransactionAddServiceTest {
     @DisplayName("both keys supplied: the account direction wins and replaces the submitted card")
     void theAccountDirectionWinsAndTheSubmittedCardIsSilentlyReplaced() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -849,7 +989,7 @@ class TransactionAddServiceTest {
     @DisplayName("card only: the card direction resolves and the account direction is never called")
     void theCardDirectionIsReachedOnlyWhenTheAccountFieldIsUnsupplied() {
         cardResolvesToItself();
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -929,7 +1069,7 @@ class TransactionAddServiceTest {
         assertThat(TransactionAddService.MESSAGE_ACCOUNT_NOT_FOUND)
                 .as("the two directions publish two sentences, per lines 593 and 626")
                 .isNotEqualTo(TransactionAddService.MESSAGE_CARD_NOT_FOUND);
-        verify(this.transactions, never()).findMaxTranId();
+        verify(this.transactions, never()).allocateTransactionId();
     }
 
     /**
@@ -953,7 +1093,7 @@ class TransactionAddServiceTest {
                 .isInstanceOf(NoSuchElementException.class)
                 .hasMessage(TransactionAddService.MESSAGE_CARD_NOT_FOUND);
 
-        verify(this.transactions, never()).findMaxTranId();
+        verify(this.transactions, never()).allocateTransactionId();
     }
 
     /**
@@ -1165,13 +1305,15 @@ class TransactionAddServiceTest {
      * alternatives share an action is a disjunction, so it publishes one sentence however many of the
      * four are satisfied.</p>
      *
-     * <p>Assumptions: the layout the four alternatives describe is twelve characters -- one sign, eight
-     * integer digits, one point, two fractional digits -- which is exactly the width
-     * {@code app/cpy-bms/COTRN02.CPY} declares for the screen field at line 96. The two readings agree,
-     * so the width is not taken from either alone.</p>
+     * <p>Assumptions: the layout the four alternatives describe on the SCREEN is twelve characters --
+     * one sign, eight integer digits, one point, two fractional digits -- which is exactly the width
+     * {@code app/cpy-bms/COTRN02.CPY} declares for the screen field at line 96. The width the target
+     * measures is thirteen, the same shape over the record's nine integer digits, under divergence
+     * D-AMOUNT-RECORD-WIDTH; what is preserved is the positional FORM of the test and the single
+     * sentence it publishes, not the digit count.</p>
      *
-     * @param amount the amount to submit, of type {@link Money}, chosen so that its rendering through
-     *     the reference's edited picture fails one of the four alternatives
+     * @param amount the amount to submit, of type {@link Money}, chosen so that its rendering at the
+     *     record's edited width fails one of the four alternatives
      * @param failedAlternative a label naming the alternative that value fails, of type
      *     {@code String}, so a failing case reads as the claim it makes
      */
@@ -1195,44 +1337,60 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * Nine integer digits fit the stored picture and are still refused by the screen edit.
+     * Nine integer digits fit the stored picture, and the shape test admits them and stores them.
      *
      * <p>Trade-offs: the reference carries TWO widths for one amount and they disagree by one digit.
      * Line 58 of {@code app/cbl/COTRN02C.cbl} declares the accumulator
      * {@code WS-TRAN-AMT-N PIC S9(9)V99}, nine integer digits, and line 10 of
      * {@code app/cpy/CVTRA05Y.cpy} declares the stored column {@code TRAN-AMT PIC S9(09)V99}, also
-     * nine; but the screen edit at line 341 tests only EIGHT digit positions. A value with nine integer
-     * digits therefore fits both the accumulator and the row and is still refused before it reaches
-     * either. The narrower width governs, and the compromise accepted is that the target refuses a
-     * value its own storage could hold -- which is the reference's behaviour, and widening the edit to
-     * match the accumulator would accept a value the reference screen refuses.</p>
+     * nine; but the screen EDIT at line 341 tests only eight digit positions, and only the echo at line
+     * 385 is that narrow. Divergence D-AMOUNT-RECORD-WIDTH resolves the disagreement in the record's
+     * favour, which is what {@code TransactionAddRequest} and
+     * {@code openapi/transaction-api.yaml} both publish. What is accepted is that a client rendering
+     * into a twelve-character column has to decide for itself what to do with the ninth digit, which is
+     * a client concern the baseline resolved by having only one client.</p>
+     *
+     * <p>Refactoring Rationale: this case asserted the OPPOSITE outcome and its own reasoning was the
+     * evidence against it. It argued that "the narrower width governs" while the request record and the
+     * published contract admitted nine, so the two authorities disagreed on one field and the narrower
+     * one ran second -- a nine-digit amount cleared the boundary, was refused after deserialization with
+     * a format sentence, and the divergence register described a width the service did not honour.
+     * Asserting the refusal made the inconsistency permanent rather than visible. Acceptance is asserted
+     * instead, and it is asserted through to the STORED row so that a service widened at the shape test
+     * but not at the rendering would still fail.</p>
      *
      * <p>Assumptions: the stored picture's acceptance is demonstrated rather than asserted from the
-     * declaration, by constructing the row type over the same value and observing that it normalises
-     * without complaint. Reading the width from the entity and asserting the entity agrees with it
-     * would assert nothing; the two readings have to be able to disagree.</p>
+     * declaration, by observing the value the append was handed. Reading the width from the entity and
+     * asserting the entity agrees with it would assert nothing; the two readings have to be able to
+     * disagree.</p>
+     *
+     * <p>Assumptions: the boundary is asserted at exactly nine digits and the case above asserts the
+     * refusal at exactly ten, so the two together pin the domain rather than one of its sides. A service
+     * that admitted every width would satisfy this case alone.</p>
      */
     @Test
-    @DisplayName("nine integer digits: accepted by the stored picture, refused by the screen edit")
-    void nineIntegerDigitsFitTheStoredPictureAndAreStillRefusedByTheScreenEdit() {
+    @DisplayName("nine integer digits: admitted by the shape test and carried into the stored row")
+    void nineIntegerDigitsFitTheStoredPictureAndAreAdmitted() {
         Money nineIntegerDigits = Money.of("100000000.00");
 
-        Transaction rowCarryingTheSameValue = new Transaction(FIRST_IDENTIFIER, "01", "0001",
-                "POS TERM", "GROCERY PURCHASE", nineIntegerDigits.amount(), 0L, "CORNER STORE",
-                "SEATTLE", "98101", RESOLVED_CARD_NUMBER, LocalDateTime.of(2026, 1, 15, 0, 0),
-                LocalDateTime.of(2026, 1, 16, 0, 0));
-        assertThat(rowCarryingTheSameValue.getTranAmt())
-                .as("line 10 of the record contract admits nine integer digits")
-                .isEqualByComparingTo(nineIntegerDigits.amount());
-
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        TransactionAddRequest deficient =
+        theAllocatorIssuesTheFirstIdentifier();
+        theAppendEchoesTheRow();
+        writeSpanRunsInline();
+        TransactionAddRequest widest =
                 withAmount(submission(ACCOUNT_ID, "", "Y"), nineIntegerDigits);
 
-        assertThatThrownBy(() -> this.service.addTransaction(deficient))
-                .as("line 341 tests eight digit positions, so the ninth is refused")
-                .isInstanceOf(ClientInputException.class)
-                .hasMessage(TransactionAddRequest.AMOUNT_FORMAT);
+        TransactionAddResponse answer = appended(this.service.addTransaction(widest));
+
+        assertThat(answer.amount())
+                .as("the record's nine integer digits are the accepted domain, per D-AMOUNT-RECORD-WIDTH")
+                .isEqualTo(nineIntegerDigits);
+        assertThat(appendedRow().getTranAmt())
+                .as("line 10 of the record contract admits nine integer digits, and the row carries them")
+                .isEqualByComparingTo(nineIntegerDigits.amount());
+        assertThat(TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS)
+                .as("the width the shape test measures is the record's, not the screen's eight")
+                .isEqualTo(9);
     }
 
     /**
@@ -1361,13 +1519,13 @@ class TransactionAddServiceTest {
                 .isTrue();
 
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
         TransactionAddRequest forgiven =
                 replacing(submission(ACCOUNT_ID, "", "Y"), dateField, OUT_OF_RANGE_DATE);
 
-        TransactionAddResponse answer = this.service.addTransaction(forgiven);
+        TransactionAddResponse answer = appended(this.service.addTransaction(forgiven));
 
         assertThat(answer.transactionId())
                 .as("a forgiven decline is suppressed, so the append is reached")
@@ -1388,7 +1546,9 @@ class TransactionAddServiceTest {
      * <p>Assumptions: the write-back happens BEFORE the confirmation is evaluated at line 169, so a
      * submission that is not confirmed still shows the normalised value. This case therefore submits a
      * non-affirmative confirmation on purpose: the amount it reads back cannot have come from a stored
-     * row, because no row was appended, so the only thing it can have come from is the write-back.</p>
+     * row, because no row was appended, so the only thing it can have come from is the write-back. That
+     * is also why the amount belongs on the PROMPT shape and not only on the acknowledgement -- a client
+     * that is being asked to confirm needs to see the value it is confirming.</p>
      *
      * <p>Assumptions: the value travels as the shared exact-decimal type at the scale that type
      * declares, and never as a binary approximation. The reference's own carrier is a display picture
@@ -1402,7 +1562,7 @@ class TransactionAddServiceTest {
         TransactionAddRequest oneFractionalDigit =
                 withAmount(submission(ACCOUNT_ID, "", "N"), Money.of("125.5"));
 
-        TransactionAddResponse answer = this.service.addTransaction(oneFractionalDigit);
+        TransactionAddPreview answer = prompted(this.service.addTransaction(oneFractionalDigit));
 
         assertThat(answer.amount())
                 .as("the value that survives lines 383 to 386, not the characters submitted")
@@ -1413,9 +1573,9 @@ class TransactionAddServiceTest {
         assertThat(answer.amount().toPlainString())
                 .as("rendered without an exponent, so no client has to re-derive the scale")
                 .isEqualTo("125.50");
-        assertThat(answer.transactionId())
+        assertThat(answer.written())
                 .as("no row was appended, so the amount cannot have come from one")
-                .isNull();
+                .isFalse();
         verify(this.transactions, never()).saveAndFlush(any());
     }
 
@@ -1435,13 +1595,13 @@ class TransactionAddServiceTest {
     @DisplayName("a negative amount keeps its sign through both conversions")
     void aNegativeAmountKeepsItsSignThroughBothConversions() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
         TransactionAddRequest refund =
                 withAmount(submission(ACCOUNT_ID, "", "Y"), Money.of("-125.50"));
 
-        TransactionAddResponse answer = this.service.addTransaction(refund);
+        TransactionAddResponse answer = appended(this.service.addTransaction(refund));
 
         assertThat(answer.amount().isNegative())
                 .as("the sign position of line 340 admits a leading minus")
@@ -1452,30 +1612,39 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * An exhausted probe yields the first identifier at the declared width.
+     * An empty ledger yields the first identifier at the declared width.
      *
-     * <p>This pins the file-exhausted arm of {@code READPREV-TRANSACT-FILE} at line 673 of
-     * {@code app/cbl/COTRN02C.cbl}: the construct opens at line 685, its normal arm continues at lines
-     * 686 and 687, and LINE 688's exhausted arm moves zeros into the key at line 689. Lines 448 and 449
-     * of {@code ADD-TRANSACTION} then move that key into the work field and add one, so an empty table
-     * yields one rather than failing.</p>
+     * <p>This pins the observable value the file-exhausted arm of {@code READPREV-TRANSACT-FILE} at line
+     * 673 of {@code app/cbl/COTRN02C.cbl} produces: the construct opens at line 685, its normal arm
+     * continues at lines 686 and 687, and LINE 688's exhausted arm moves zeros into the key at line 689,
+     * after which lines 448 and 449 of {@code ADD-TRANSACTION} move that key into the work field and add
+     * one -- so an empty file yields one rather than failing.</p>
      *
-     * <p>Assumptions: the two arms are expressed as one addition over a starting value rather than as
-     * two branches, so the reference's own single increment stays single. The observable consequence is
-     * the value below, padded to the sixteen characters the key column declares.</p>
+     * <p>⚠️ Refactoring Rationale: the zero sentinel has NO counterpart in the class under test, so this
+     * case asserts the observable value and not the mechanism. The allocator's own migration,
+     * {@code V2__ledger_transaction_id_allocator.sql}, positions the sequence past whatever the cutover
+     * extract loaded, so its first value on an empty ledger is one -- the same number the sentinel arm
+     * plus line 449 produces. Transcribing the sentinel as well would give one number two sources and let
+     * them disagree.</p>
+     *
+     * <p>Assumptions: the value is asserted at the sixteen characters the key column declares, because
+     * the allocator answers with a number while {@code TRAN-ID} is {@code PIC X(16)} at line 5 of
+     * {@code app/cpy/CVTRA05Y.cpy}. The padding is where a leading zero the stored form carries would
+     * otherwise be lost.</p>
      */
     @Test
-    @DisplayName("an exhausted probe yields the first identifier, per lines 688, 689 and 449")
-    void anExhaustedProbeYieldsTheFirstIdentifier() {
+    @DisplayName("an empty ledger yields the first identifier at the declared width")
+    void anEmptyLedgerYieldsTheFirstIdentifier() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        TransactionAddResponse answer = this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        TransactionAddResponse answer =
+                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
-                .as("zeros at line 689 plus one at line 449, at the key width")
+                .as("the allocator's first value, at the key width")
                 .isEqualTo(FIRST_IDENTIFIER);
         assertThat(answer.transactionId().length())
                 .as("the key column is sixteen characters, per line 5 of the record contract")
@@ -1483,46 +1652,61 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * A populated table yields the stored maximum plus one.
+     * A populated ledger yields the allocated value, and the read-then-add form is provably gone.
      *
-     * <p>This pins the derivation at lines 444 to 449 of {@code app/cbl/COTRN02C.cbl}. Line 444
-     * positions past the end of the key range, line 445 opens the browse, line 446 reads one record
-     * backwards, line 447 closes it, LINE 448 moves the key it landed on into the numeric work field
-     * declared at line 57, and LINE 449 adds one. The move and the addition are the derivation; citing
-     * the browse alone would describe how the maximum was found and omit how the next value was made.
-     * </p>
+     * <p>This pins the derivation at lines 444 to 449 of {@code app/cbl/COTRN02C.cbl} and what replaces
+     * it. Line 444 positions past the end of the key range, line 445 opens the browse, line 446 reads one
+     * record backwards, line 447 closes it, LINE 448 moves the key it landed on into the numeric work
+     * field declared at line 57, and LINE 449 adds one.</p>
      *
-     * <p>Alternatives Considered: expressing that probe as a query that skips a row count. Rejected,
-     * and the rejection is what keeps the derived value deterministic: the count of {@code READNEXT} in
-     * the program is zero, so this is a single descending row and not a page of them, and a query that
-     * counted rows past a position would answer with a different row than the key ordering does under a
-     * concurrent insert. Nothing here treats the probe as a page.</p>
+     * <p>⚠️ Refactoring Rationale: that sequence is NOT transcribed literally, and this case asserts the
+     * substitute together with the absence of the original. A read-then-add is indivisible in the
+     * reference because CICS serialised the region, so lines 448 and 449 could not interleave with
+     * another task's; two Fargate tasks behind a load balancer are not serialised, and both would read
+     * the same maximum, both add one, and one would be refused a capture for a reason it did nothing to
+     * cause. The allocator makes the increment atomic. The maximum-key read is therefore asserted
+     * UNTOUCHED, which is what makes a regression back to the racing form fail here rather than in
+     * production under concurrency.</p>
+     *
+     * <p>Alternatives Considered: expressing the derivation as a query that skips a row count. Rejected
+     * for a reason that survives the change: the count of {@code READNEXT} in the program is zero, so
+     * nothing about this is a page, and a query counting rows past a position would answer differently
+     * under a concurrent insert.</p>
      */
     @Test
-    @DisplayName("a populated table yields the stored maximum plus one, per lines 444 to 449")
-    void aPopulatedTableYieldsTheStoredMaximumPlusOne() {
+    @DisplayName("a populated ledger yields the allocated value, and no maximum-key read is issued")
+    void aPopulatedLedgerYieldsTheAllocatedValue() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        TransactionAddResponse answer = this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        TransactionAddResponse answer =
+                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
-                .as("line 448 takes the key, line 449 adds one")
+                .as("the allocated value, rendered at the key width")
                 .isEqualTo(NEXT_IDENTIFIER);
         assertThat(appendedRow().getTranId())
-                .as("and the derived value is what line 451 moves into the row")
+                .as("and that value is what line 451 moves into the row")
                 .isEqualTo(NEXT_IDENTIFIER);
+        verify(this.transactions).allocateTransactionId();
+        verify(this.transactions, never()).findMaxTranId();
     }
 
     /**
-     * A failing probe reports the reference's failed-read sentence, in its upper-case spelling.
+     * A failing allocation reports the reference's failed-read sentence, in its upper-case spelling.
      *
      * <p>This pins the two catch-all arms the derivation can fail through: lines 661 to 667 of
      * {@code app/cbl/COTRN02C.cbl}, inside {@code STARTBR-TRANSACT-FILE} at line 642, whose sentence is
      * at line 664; and lines 690 to 696, inside {@code READPREV-TRANSACT-FILE} at line 673, whose
      * sentence is at line 693. Both carry the same text, so one sentence covers both conditions.</p>
+     *
+     * <p>Assumptions: the MECHANISM that fails is now the sequence allocation and the SENTENCE is
+     * unchanged, and that pairing is deliberate rather than incidental. The operator's situation is
+     * identical in both worlds -- the next identifier cannot be produced and nothing they retype will
+     * change it -- so introducing a sentence for the new mechanism would put text on this screen that the
+     * reference never publishes, which transformation rule T8 forbids.</p>
      *
      * <p>Assumptions: the spelling is the UPPER-CASE one. Five sites in the reference tree carry it --
      * {@code app/cbl/COTRN01C.cbl} line 292, {@code app/cbl/COTRN02C.cbl} lines 664 and 693, and
@@ -1532,10 +1716,11 @@ class TransactionAddServiceTest {
      * change the text one of the two publishes.</p>
      */
     @Test
-    @DisplayName("a failing probe reports the upper-case failed-read sentence, never the lower-case")
-    void aFailingProbeReportsTheUpperCaseFailedReadSentence() {
+    @DisplayName("a failing allocation reports the upper-case failed-read sentence, never lower-case")
+    void aFailingAllocationReportsTheUpperCaseFailedReadSentence() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        when(this.transactions.findMaxTranId()).thenThrow(new IllegalStateException("unreadable"));
+        when(this.transactions.allocateTransactionId())
+                .thenThrow(new IllegalStateException("unreadable"));
         writeSpanRunsInline();
 
         assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
@@ -1550,25 +1735,38 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * A stored maximum outside the digit form this screen writes is reported as a failed read.
+     * An allocated value too wide for the key column is reported as a failed read, never truncated.
      *
-     * <p>This registers what the reference cannot represent. Line 448 of
-     * {@code app/cbl/COTRN02C.cbl} moves the sixteen-character key into a numeric work field declared
-     * {@code PIC 9(16)} at line 57, and a display-numeric move has no defined result for characters
-     * that are not digits. The reference's key column is populated only by this screen and by the
-     * nightly posting program, both of which write digits, so the state has no reference behaviour at
-     * all.</p>
+     * <p>This registers what the reference cannot represent, at the one place the change of mechanism
+     * moved it to. Line 448 of {@code app/cbl/COTRN02C.cbl} moves the sixteen-character key into a
+     * numeric work field declared {@code PIC 9(16)} at line 57, and line 449 adds one with no
+     * {@code ON SIZE ERROR} clause -- so a work field already at its widest value would truncate silently
+     * and resume at zero, overwriting the oldest rows.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case previously arranged a stored maximum whose characters were
+     * not all digits, which was reachable while the identifier came from a READ of a character column.
+     * It is not reachable now: the allocator answers with a number, so a non-digit value cannot arrive at
+     * all and a case arranging one would be asserting an impossible state. The surviving expression of
+     * the same concern is width -- an allocated value needing more than the sixteen digits the column
+     * holds -- and that is what is arranged here.</p>
      *
      * <p>Assumptions: the failed-read sentence is reused rather than a new one invented, because the
-     * operator's situation is identical to a probe that could not be performed -- the next identifier
-     * cannot be derived and nothing they can retype will change that. Inventing a sentence would put
-     * text on this screen that the reference never publishes.</p>
+     * operator's situation is identical to a derivation that could not be performed -- the next
+     * identifier cannot be produced and nothing they can retype will change that. Inventing a sentence
+     * would put text on this screen that the reference never publishes.</p>
+     *
+     * <p>Trade-offs: refusing rather than wrapping is a documented divergence. The reference truncates
+     * and would resume at zero; refusing is chosen because the alternative destroys ledger history, and
+     * the condition is unreachable at any realistic volume.</p>
      */
     @Test
-    @DisplayName("a stored maximum outside the digit form is reported as a failed read")
-    void aStoredMaximumOutsideTheDigitFormIsReportedAsAFailedRead() {
+    @DisplayName("an allocated value wider than the key column is reported as a failed read")
+    void anOverWideAllocatedValueIsReportedAsAFailedRead() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableMaximumIs("2026-01-15000001");
+
+        // WHY : Assumptions: seventeen digits is the smallest value the sixteen-character column cannot
+        //       hold, so it exercises the boundary rather than a value comfortably past it.
+        theAllocatorAnswersWith(10_000_000_000_000_000L);
         writeSpanRunsInline();
 
         assertThatThrownBy(() -> this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")))
@@ -1601,7 +1799,7 @@ class TransactionAddServiceTest {
     @DisplayName("the stored row carries all thirteen moves of lines 450 to 465")
     void theStoredRowCarriesEveryMoveTheReferenceMakes() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -1654,7 +1852,7 @@ class TransactionAddServiceTest {
     @DisplayName("the stored timestamps carry the date-only pattern of lines 464 and 465")
     void theStoredTimestampsCarryTheDateOnlyPattern() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -1700,11 +1898,12 @@ class TransactionAddServiceTest {
     @DisplayName("the acknowledgement keeps the two consecutive spaces of lines 728 to 733")
     void theAcknowledgementKeepsTheTwoConsecutiveSpaces() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        TransactionAddResponse answer = this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        TransactionAddResponse answer =
+                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.returnMessage())
                 .as("both literals are delimited by size, so both boundary spaces survive")
@@ -1737,11 +1936,12 @@ class TransactionAddServiceTest {
     @DisplayName("a successful append answers, and the sentence is none of the refusal sentences")
     void aSuccessfulAppendAnswersAndIsNotARefusal() throws IllegalAccessException {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
-        TransactionAddResponse answer = this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
+        TransactionAddResponse answer =
+                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.returnMessage())
                 .as("the sentence arrives as a value, which is line 727's observable form")
@@ -1781,7 +1981,7 @@ class TransactionAddServiceTest {
     @DisplayName("a duplicate identifier is a duplicate-key conflict, per lines 735, 736 and 738")
     void aDuplicateIdentifierIsADuplicateKeyConflictAndNeverAStaleVersionOne() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         when(this.transactions.saveAndFlush(any()))
                 .thenThrow(new DataIntegrityViolationException("duplicate key value"));
         writeSpanRunsInline();
@@ -1830,7 +2030,7 @@ class TransactionAddServiceTest {
     @DisplayName("a store failure reports the failed-add sentence of line 745")
     void aFailingWriteReportsTheFailedAddSentence() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         when(this.transactions.saveAndFlush(any()))
                 .thenThrow(new IllegalStateException("the store did not accept the row"));
         writeSpanRunsInline();
@@ -1863,12 +2063,12 @@ class TransactionAddServiceTest {
     @ValueSource(strings = {"Y", "y"})
     void eitherAffirmativeSpellingReachesTheAppend(String confirmation) {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation));
+                appended(this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation)));
 
         assertThat(answer.transactionId()).isEqualTo(FIRST_IDENTIFIER);
         verify(this.transactions).saveAndFlush(any());
@@ -1891,10 +2091,15 @@ class TransactionAddServiceTest {
      * class that pins the payment screen asserts the opposite of this case, and unifying the two would
      * break exactly one of them.</p>
      *
-     * <p>Assumptions: nothing is appended on this path, so the answer carries no identifier. The
-     * reference re-sends the same screen and asks again, which is not a refusal of the submission -- so
-     * the target answers rather than raises, and the amount it echoes is the normalised one line 386 put
-     * back before line 169 was reached.</p>
+     * <p>⚠️ Refactoring Rationale: nothing is appended on this path, and that is now carried by the SHAPE
+     * of the answer rather than by an absent identifier member. The earlier form answered with the
+     * acknowledgement record and asserted its identifier was null -- but that same record with a null
+     * identifier is indistinguishable, to a client reading the body, from a capture whose identifier the
+     * server failed to fill in, and its published schema declared the identifier required. A separate
+     * closed shape that declares no identifier at all cannot be misread that way. The reference re-sends
+     * the same screen and asks again, which is not a refusal of the submission -- so the target answers
+     * rather than raises, and the amount it echoes is the normalised one line 386 put back before line 169
+     * was reached.</p>
      *
      * @param confirmation the non-affirmative spelling under test, of type {@code String}, being one of
      *     the four values the reference groups into this arm
@@ -1904,19 +2109,19 @@ class TransactionAddServiceTest {
     void aRefusedConfirmationSharesThePromptWithANeverSuppliedOne(String confirmation) {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
 
-        TransactionAddResponse answer =
-                this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation));
+        TransactionAddPreview answer =
+                prompted(this.service.addTransaction(submission(ACCOUNT_ID, "", confirmation)));
 
         assertThat(answer.returnMessage())
                 .as("all four values of lines 173 to 176 publish the sentence of line 178")
                 .isEqualTo(TransactionAddService.MESSAGE_CONFIRM_ADD);
-        assertThat(answer.transactionId())
-                .as("the arm re-asks rather than appending, so no identifier is derived")
-                .isNull();
+        assertThat(answer.written())
+                .as("the arm re-asks rather than appending, so the discriminator reports no capture")
+                .isFalse();
         assertThat(answer.amount())
                 .as("the amount echoed is the normalised one line 386 wrote back before line 169")
                 .isEqualTo(Money.of("125.50"));
-        verify(this.transactions, never()).findMaxTranId();
+        verify(this.transactions, never()).allocateTransactionId();
         verify(this.transactions, never()).saveAndFlush(any());
     }
 
@@ -2005,7 +2210,7 @@ class TransactionAddServiceTest {
     @DisplayName("the cross-reference read precedes the write span, and the append follows inside it")
     void theCrossReferenceIsResolvedBeforeTheWriteSpanOpens() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -2014,7 +2219,7 @@ class TransactionAddServiceTest {
         InOrder order = inOrder(this.accounts, this.transactionManager, this.transactions);
         order.verify(this.accounts).findCardXrefByAccountId(ACCOUNT_ID);
         order.verify(this.transactionManager).getTransaction(any());
-        order.verify(this.transactions).findMaxTranId();
+        order.verify(this.transactions).allocateTransactionId();
         order.verify(this.transactions).saveAndFlush(any());
     }
 
@@ -2038,7 +2243,7 @@ class TransactionAddServiceTest {
         TransactionStatus span = new SimpleTransactionStatus();
         when(this.transactionManager.getTransaction(any())).thenReturn(span);
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
 
         this.service.addTransaction(submission(ACCOUNT_ID, "", "Y"));
@@ -2074,8 +2279,8 @@ class TransactionAddServiceTest {
         when(this.transactions.findById(STORED_MAXIMUM))
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
 
-        TransactionAddResponse answer =
-                this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "N"));
+        TransactionAddPreview answer =
+                prompted(this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "N")));
 
         assertThat(answer.returnMessage())
                 .as("line 495 re-enters the construct at line 169, which prompts for a refusal")
@@ -2083,48 +2288,60 @@ class TransactionAddServiceTest {
         assertThat(answer.amount())
                 .as("lines 481 and 485 copied the stored amount over the submitted one")
                 .isEqualTo(Money.of("42.75"));
-        assertThat(answer.transactionId()).isNull();
+
+        // WHY : ⚠️ Refactoring Rationale: the absence of an identifier is now carried by the SHAPE of the
+        //       answer rather than by a null member, and the shape is the stronger claim. The prompt
+        //       schema declares no identifier at all, so a client reading this body cannot mistake an
+        //       absent value for a captured one -- which an acknowledgement carrying a null identifier
+        //       invited, since that same shape means "captured" on the confirming turn.
         verify(this.transactions, never()).saveAndFlush(any());
     }
 
     /**
-     * The copy path's own probe adds nothing, so the appended identifier is the maximum plus ONE.
+     * The copy path's own probe consumes no identifier, so exactly ONE allocation happens.
      *
-     * <p>This pins the difference between the two probes the program performs. Lines 475 to 478 of
-     * {@code app/cbl/COTRN02C.cbl} position past the end of the key range, read one record backwards and
-     * close the browse -- and that is ALL they do: there is no move into the numeric work field and no
-     * addition, unlike lines 448 and 449 in {@code ADD-TRANSACTION}. The copy path then performs
-     * {@code PROCESS-ENTER-KEY} at line 495, which reaches {@code ADD-TRANSACTION} at line 442 and does
-     * its OWN derivation.</p>
+     * <p>This pins the difference between what the two probes the program performs are FOR. Lines 475 to
+     * 478 of {@code app/cbl/COTRN02C.cbl} position past the end of the key range, read one record
+     * backwards and close the browse -- and that is ALL they do: there is no move into the numeric work
+     * field and no addition, unlike lines 448 and 449 in {@code ADD-TRANSACTION}. The copy path then
+     * performs {@code PROCESS-ENTER-KEY} at line 495, which reaches {@code ADD-TRANSACTION} at line 442
+     * and does its OWN derivation.</p>
      *
-     * <p>Assumptions: exactly one increment happens across the whole copy path, and the appended
-     * identifier below is what makes that observable: with a stored maximum of eight the row is appended
-     * as nine and never as ten. A target that incremented at the copy probe as well would agree with
-     * every other case in this class while writing a row under the wrong key, and would leave a gap in
-     * the key sequence the reference does not leave.</p>
+     * <p>Assumptions: exactly one identifier is produced across the whole copy path, and the appended
+     * identifier below is what makes that observable: the row is appended under the allocated value and
+     * never under the copied row's key. A target that keyed the append from the row it copied would agree
+     * with every other case in this class while reproducing the duplicate condition at lines 735 and 736
+     * on every use of this path.</p>
      *
-     * <p>Assumptions: the probe is nevertheless performed twice, once for the copy and once for the
-     * derivation, which is why the read count below is two. Collapsing the two into one read would be a
-     * departure from the reference, which opens and closes a browse in each paragraph.</p>
+     * <p>⚠️ Refactoring Rationale: the two probes are now two DIFFERENT queries rather than the same query
+     * performed twice, and the read count below records that. The copy read survives as
+     * {@code findMaxTranId} because it is a genuine read of stored data -- it locates the row to copy --
+     * while the derivation moved to the allocator, so the copy path issues one of each rather than two of
+     * one. The earlier form asserted two maximum-key reads on the ground that the reference opens and
+     * closes a browse in each paragraph; that observation is still true of the reference and no longer
+     * describes the target, because only one of the two paragraphs was reading data.</p>
      */
     @Test
-    @DisplayName("the copy path's probe adds nothing: the maximum plus one, never plus two")
-    void theCopyPathsOwnProbeAddsNothingToTheDerivedIdentifier() {
+    @DisplayName("the copy path reads the row to copy, and allocates the key it appends under")
+    void theCopyPathReadsToCopyAndAllocatesToAppend() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
         theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorIssues(NEXT_ALLOCATION);
         when(this.transactions.findById(STORED_MAXIMUM))
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
         TransactionAddResponse answer =
-                this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y"));
+                appended(this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y")));
 
         assertThat(answer.transactionId())
-                .as("lines 475 to 478 carry no addition, so only line 449 increments")
+                .as("the allocated value, never the key of the row that was copied")
                 .isEqualTo(NEXT_IDENTIFIER)
-                .isNotEqualTo("0000000000000010");
-        verify(this.transactions, times(2)).findMaxTranId();
+                .isNotEqualTo(STORED_MAXIMUM);
+        verify(this.transactions, times(1)).findMaxTranId();
+        verify(this.transactions, times(1)).allocateTransactionId();
         verify(this.transactions).saveAndFlush(any());
     }
 
@@ -2156,8 +2373,10 @@ class TransactionAddServiceTest {
     void theCopiedSubmissionReplacesTheDataColumnsAndLeavesTheKeysAlone() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
         theTableMaximumIs(STORED_MAXIMUM);
+        theAllocatorIssues(NEXT_ALLOCATION);
         when(this.transactions.findById(STORED_MAXIMUM))
                 .thenReturn(Optional.of(storedRow(STORED_MAXIMUM)));
+        theAllocatorAnswersWith(ALLOCATED_NEXT);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
 
@@ -2183,7 +2402,7 @@ class TransactionAddServiceTest {
                 .as("the key phase filled this column, per line 459, not the copy block")
                 .isEqualTo(RESOLVED_CARD_NUMBER);
         assertThat(appended.getTranId())
-                .as("the identifier is derived at line 449 and is not among the twelve moves")
+                .as("the identifier is allocated, standing where line 449 stands, and is not copied")
                 .isEqualTo(NEXT_IDENTIFIER)
                 .isNotEqualTo(STORED_MAXIMUM);
     }
@@ -2202,15 +2421,16 @@ class TransactionAddServiceTest {
      * this screen that the reference never publishes, and reference message text is carried across
      * verbatim rather than extended.</p>
      *
-     * <p>Assumptions: the copy path answers this way while the ORDINARY path treats an exhausted probe
-     * as a starting point of zero, per lines 688, 689 and 449. The same reference arm therefore has two
-     * consequences depending on which paragraph reached it, and both are asserted in this class.</p>
+     * <p>Assumptions: the copy path answers this way while the ORDINARY path issues the first identifier
+     * on an empty ledger, per lines 688, 689 and 449 and per the sequence's own {@code START WITH 1}. The
+     * same emptiness therefore has two consequences depending on which path met it -- nothing to copy
+     * here, and a starting point there -- and both are asserted in this class.</p>
      */
     @Test
     @DisplayName("an empty table leaves the copy path nothing to copy, per lines 688 and 689")
     void theCopyPathWithNoStoredRowReportsTheFailedReadSentence() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        theTableHoldsNoRow();
+        theCopyProbeFindsNoRow();
 
         assertThatThrownBy(() ->
                 this.service.copyLastTransactionData(submission(ACCOUNT_ID, "", "Y")))

@@ -81,7 +81,7 @@ import org.springframework.context.annotation.Configuration;
  * surface: the rows, the leading cursor, the trailing cursor and the forward-availability flag, with
  * both cursors carried as opaque strings.</p>
  *
- * <p>WHY : Alternatives Considered: offset pagination -- a page number with a page size, or a skip
+ * <p>Alternatives Considered: offset pagination -- a page number with a page size, or a skip
  * count with a total -- was the alternative, and it is rejected. Under concurrent inserts an offset
  * both skips and repeats rows, because the ordinal a caller asks for names a different row once
  * anything has been inserted ahead of it; key-ordered browsing has no such behaviour, since a cursor
@@ -96,7 +96,7 @@ import org.springframework.context.annotation.Configuration;
  *
  * <h2>Widths this context does not share with its siblings</h2>
  *
- * <p>WHY : Assumptions: the message field in this context is <b>seventy-eight</b> characters wide, not
+ * <p>Assumptions: the message field in this context is <b>seventy-eight</b> characters wide, not
  * the seventy-five that appears in the wider migration documentation, and four declarations in the
  * reference tree agree on seventy-eight: {@code ERRMSGI PIC X(78)} at line 390 of
  * {@code app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy} with {@code ERRMSGO PIC X(78)} at its
@@ -312,10 +312,10 @@ public class OpenApiConfig {
     /** The authority model's member naming the class in which the field is enforced. */
     private static final String AUTHORITY_MODEL_ENFORCED_BY_KEY = "enforcedBy";
 
-    // Assumptions: the enforcing class's repository path is DERIVED from the class itself rather than
-    //   written out, so that renaming it or moving it between packages updates the published value
-    //   instead of leaving it naming a file that no longer exists. Only the source root is a literal,
-    //   because a class object carries its package but not the tree it was compiled from.
+    // Assumptions: the enforcing class's repository path is DERIVED from the class itself rather
+    // than written out, so renaming it or moving it between packages updates the published value
+    // instead of leaving a stale file name behind. Only the source root is a literal, because a
+    // class object carries its package but not the tree it was compiled from.
     /** The Maven source root beneath which this module's Java sources sit. */
     private static final String JAVA_SOURCE_ROOT = "services/authorization-service/src/main/java/";
 
@@ -526,14 +526,12 @@ public class OpenApiConfig {
      * so one value is stamped on all of them. The value names the class in which the rule is enforced
      * through the document-level model, so a reader who doubts the marker can go and read the rule.</p>
      *
-     * <p>Refactoring Rationale: this method used to stamp the ADMINISTRATIVE group on the fraud route and
-     * the ordinary one elsewhere, deciding which by matching each published path against the same pattern
-     * the filter chain guards. The discrimination is withdrawn because the rule it described has been
-     * withdrawn: the fraud route now admits either business group, which is the authority the baseline
-     * grants, and the reversal is argued at {@code SecurityConfig.fraudAccess()}. A document that kept
-     * advertising an administrative restriction the chain no longer applies would be the more dangerous of
-     * the two possible disagreements -- a caller would build an operator role around a restriction that is
-     * not enforced.
+     * Assumptions: no operation is stamped with the ADMINISTRATIVE group, because the fraud route
+     * admits either business group -- the authority the baseline grants, argued at {@code
+     * SecurityConfig.fraudAccess()}. Advertising an administrative restriction the filter chain
+     * does not apply would be the more dangerous of the two possible disagreements between document
+     * and chain, because a caller would build an operator role around a restriction that is not
+     * enforced.
      *
      * <p>Alternatives Considered: keeping the path match and stamping the same value from both arms, so the
      * mechanism stayed in place for a future re-narrowing. Rejected because a comparison whose two arms are

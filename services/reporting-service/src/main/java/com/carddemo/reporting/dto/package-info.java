@@ -125,8 +125,13 @@
  * <p>Refactoring Rationale: the paging envelope is imported from
  * {@code com.carddemo.common.web.PageResponse} and is never declared again here. Its shape is
  * {@code PageResponse<T>(List<T> items, String firstKey, String lastKey, boolean hasNext)} -
- * four components and one type parameter - where the two boundary keys and the more-to-come
- * flag are what the baseline kept in its communication area between screen turns. In this
+ * four components and one type parameter - where the two boundary keys and the one
+ * availability flag are what the baseline kept in its communication area between screen turns.
+ * Assumptions: that flag is settled by the read that produced the page, from one surplus row
+ * requested beyond the window, and the envelope publishes no backward availability answer at all -
+ * the baseline answers the backward question from the page ordinal it also kept in that area,
+ * refusing the step on the opening page without reading anything, and that ordinal's migrated home
+ * is the browser client's navigation state rather than a fifth component here. In this
  * context the position those keys mark is the two columns a report or statement query orders
  * by, the card number at {@code app/cpy/CVTRA05Y.cpy} L15 and byte 262 and the processing
  * timestamp at L17 and byte 304, so the envelope is not a generic convenience here but exactly

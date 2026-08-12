@@ -3,6 +3,8 @@ package com.carddemo.transaction.api;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.transaction.dto.TransactionAddRequest;
+import com.carddemo.transaction.dto.TransactionAddOutcome;
+import com.carddemo.transaction.dto.TransactionAddPreview;
 import com.carddemo.transaction.dto.TransactionAddResponse;
 import com.carddemo.transaction.dto.TransactionDetailResponse;
 import com.carddemo.transaction.dto.TransactionListItemResponse;
@@ -143,6 +145,21 @@ public class TransactionController {
 
     /** The member path one transaction is addressed by, relative to {@link #BASE_PATH}. */
     public static final String ITEM_PATH = "/{transactionId}";
+
+    /**
+     * The path the copy-last action is served at, relative to {@link #BASE_PATH}.
+     *
+     * <p>Assumptions: a literal segment rather than a variable, and it cannot collide with
+     * {@link #ITEM_PATH} even though both sit one level below the collection. That path admits exactly
+     * sixteen decimal digits through {@link #TRANSACTION_ID_PATTERN}, which no letter satisfies, and the
+     * two mappings answer different methods besides -- a GET for the member and a POST here.</p>
+     *
+     * <p>Assumptions: the segment is hyphenated rather than camel-cased, matching every other multi-word
+     * path segment this deployment publishes -- {@code /card-xrefs/lookup-by-account} and
+     * {@code /card-xrefs/search-by-account} in the account context among them -- so one convention
+     * governs the whole surface.</p>
+     */
+    public static final String COPY_LAST_PATH = "/copy-last";
 
     /** The path variable the addressed transaction identifier arrives in. */
     public static final String PATH_TRANSACTION_ID = "transactionId";
@@ -588,8 +605,9 @@ public class TransactionController {
      *     entered, and never {@code null}
      * @return a 201 response carrying the {@link TransactionAddResponse} for a written transaction, with
      *     the assigned identifier, the normalised amount and the baseline's acknowledgement sentence, and
-     *     a {@code Location} header addressing it; or a 200 response carrying the same shape without an
-     *     identifier when the confirmation was withheld and nothing was written; never {@code null}
+     *     a {@code Location} header addressing it; or a 200 response carrying the
+     *     {@link TransactionAddPreview} shape -- the normalised amount, the discriminator fixed false and
+     *     the prompt -- when the confirmation was withheld and nothing was written; never {@code null}
      * @throws NullPointerException if the deserialised body is {@code null}
      * @throws org.springframework.web.bind.MethodArgumentNotValidException if a submitted member breaks a
      *     constraint the request shape declares, which the shared advice renders as 400 with one entry per
@@ -609,27 +627,108 @@ public class TransactionController {
      *     carrying the sentence the baseline emits for that operation, rendered as 500
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<TransactionAddResponse> addTransaction(
+    public ResponseEntity<TransactionAddOutcome> addTransaction(
             @Valid @RequestBody TransactionAddRequest request) {
+        return answer(this.addService.addTransaction(request));
+    }
 
-        TransactionAddResponse outcome = this.addService.addTransaction(request);
+    /**
+     * Re-captures the most recently stored transaction as a new one.
+     *
+     * <p>Purpose: this publishes {@code COPY-LAST-TRAN-DATA} at line 471 of
+     * {@code app/cbl/COTRN02C.cbl}, which the baseline reaches from PF5 at lines 146 and 147. The action
+     * validates the key fields at line 473, reads the most recent record backwards across lines 475 to
+     * 478, copies eleven of its data columns across lines 480 to 493 and then re-enters
+     * {@code PROCESS-ENTER-KEY} at line 495 -- so a copied capture travels the full validation chain and
+     * is written or previewed by exactly the rule the capture operation follows.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this handler exists because the service method it calls was reachable
+     * from nothing. {@code TransactionAddService.copyLastTransactionData} was authored and unit-tested and
+     * no controller, contract or client addressed it, which reads from outside as a missing baseline
+     * capability and from inside as dead code. Publishing it is the cheaper of the two available
+     * corrections, the other being to delete a transcription of an action the baseline demonstrably has;
+     * AAP section 0.5.1.5 maps {@code COTRN02C} wholesale onto this context, so deleting it would have
+     * been a silent reduction of scope.</p>
+     *
+     * <p>Alternatives Considered: a member on the capture request -- a {@code copySource} discriminator
+     * on {@link TransactionAddRequest} -- rather than a route of its own. Rejected because the baseline
+     * reaches this action from a DIFFERENT attention identifier than Enter, so it is a separate action
+     * and not a variant of the capture, and because a flag would make eleven of that request's members
+     * conditionally meaningless with no schema able to express when.</p>
+     *
+     * <p>Assumptions: the authority required is the one the catch-all rule of this module's security
+     * chain applies, which is the same authority the capture operation requires. It is deliberately not
+     * narrowed to an administrative authority: the baseline binds this action to a function key on the
+     * ordinary capture screen, available to whoever may capture a transaction at all, so requiring more
+     * here would refuse an operator the baseline admits.</p>
+     *
+     * <p>Assumptions: the eleven data members of the submission are OVERWRITTEN from the copied record
+     * rather than merged with it, because lines 482 to 492 move the record's own columns over them
+     * unconditionally. They stay required by the request shape because line 473 validates the key fields
+     * against the same screen the operator was already on, so the submission is a full one either way.
+     * </p>
+     *
+     * @param request the submission whose key members select the account or card and whose confirmation
+     *     decides whether the copied capture is written; validated against its declared constraints
+     *     before this method is entered, and never {@code null}
+     * @return a 201 response carrying the {@link TransactionAddResponse} for a written transaction with a
+     *     {@code Location} header addressing it, or a 200 response carrying the
+     *     {@link TransactionAddPreview} shape when the confirmation was withheld; never {@code null}
+     * @throws NullPointerException if the deserialised body is {@code null}
+     * @throws org.springframework.web.bind.MethodArgumentNotValidException if a submitted member breaks a
+     *     constraint the request shape declares, rendered as 400
+     * @throws com.carddemo.common.error.ClientInputException if a key field, a copied data field or the
+     *     confirmation carries a value the baseline refuses, rendered as 400
+     * @throws java.util.NoSuchElementException if the supplied key resolves to no cross-reference entry,
+     *     or if the table holds no transaction to copy, rendered as 404
+     * @throws com.carddemo.common.error.RecordConflictException if the assigned identifier is already
+     *     stored, rendered as 409
+     * @throws IllegalStateException if a read or the append fails for a reason the caller cannot correct,
+     *     rendered as 500
+     */
+    @PostMapping(path = COPY_LAST_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<TransactionAddOutcome> copyLastTransaction(
+            @Valid @RequestBody TransactionAddRequest request) {
+        return answer(this.addService.copyLastTransactionData(request));
+    }
 
-        // WHY : Assumptions: the absence of an identifier is what identifies the unconfirmed outcome,
-        //       because that is the shape the service returns from its withheld-confirmation arm. It is
-        //       read rather than a separate flag being consulted, since the published prompt shape
-        //       declares no identifier at all and the created shape requires one, so the two published
-        //       bodies already differ by exactly this member.
-        if (outcome.transactionId() == null) {
-            return ResponseEntity.ok(outcome);
-        }
-
-        // WHY : Trade-offs: the path is composed by concatenation rather than by a URI builder reading
-        //       the current request. A builder would resolve against the host and scheme this task
-        //       observed, which behind an internal load balancer and an edge is not what the caller
-        //       used; concatenation yields the origin-relative form the contract publishes. The cost is
-        //       that this one path is written here as well as being declared in the mapping above, and
-        //       it is composed from the same constants the mapping uses so the two cannot diverge.
-        URI location = URI.create(BASE_PATH + "/" + outcome.transactionId());
-        return ResponseEntity.created(location).body(outcome);
+    /**
+     * Chooses the status, body and {@code Location} header for one capture outcome.
+     *
+     * <p>⚠️ Refactoring Rationale: the outcome is matched on its TYPE, where an earlier revision tested
+     * whether one record's identifier was null. That test worked only because the service returned the
+     * capture shape on both turns with the identifier absent on one of them -- a body the published
+     * {@code TransactionAddPreview} schema rejects outright, since it declares no {@code transactionId}
+     * and closes its object. Now that the two turns return the two published shapes, the identifier is
+     * present exactly where it exists and the discriminator is the type itself.</p>
+     *
+     * <p>Alternatives Considered: an {@code instanceof} test with a cast. Rejected because a switch over
+     * the sealed hierarchy is checked for exhaustiveness by the compiler, so a third outcome added to
+     * that hierarchy fails this method to compile rather than silently taking a default arm.</p>
+     *
+     * <p>Assumptions: this is a private helper rather than inline code in the handler, because two
+     * handlers answer with the same pair of shapes -- the capture operation and the copy-last operation
+     * -- and one of them assembling the {@code Location} header differently from the other is the kind of
+     * divergence nothing would catch.</p>
+     *
+     * @param outcome the service's answer, being either shape of the sealed hierarchy; must not be
+     *     {@code null}
+     * @return 201 with the {@code Location} header when a transaction was written, and 200 with the
+     *     preview body when none was; never {@code null}
+     */
+    private ResponseEntity<TransactionAddOutcome> answer(TransactionAddOutcome outcome) {
+        return switch (outcome) {
+            case TransactionAddPreview preview -> ResponseEntity.ok(preview);
+            // WHY : Trade-offs: the path is composed by concatenation rather than by a URI builder
+            //       reading the current request. A builder would resolve against the host and scheme
+            //       this task observed, which behind an internal load balancer and an edge is not what
+            //       the caller used; concatenation yields the origin-relative form the contract
+            //       publishes. The cost is that this one path is written here as well as being declared
+            //       in the mapping above, and it is composed from the same constant the mapping uses so
+            //       the two cannot diverge.
+            case TransactionAddResponse written ->
+                    ResponseEntity.created(URI.create(BASE_PATH + "/" + written.transactionId()))
+                            .body(written);
+        };
     }
 }

@@ -177,14 +177,13 @@ CREATE TABLE ledger.transactions (
     --   field can express, so a balance could differ from the baseline by a
     --   cent with nothing in the schema to reveal it. Bytes 133-143.
     --
-    -- Refactoring Rationale: NOT NULL, where an earlier revision left this
-    --   column nullable on the reasoning that a blank fixed-width field
-    --   decodes to an absent value at the load boundary. It does not: both
-    --   normative zoned codecs -- common-lib's ZonedDecimalCodec and the ETL's
-    --   carddemo_migration.copybook.zoned -- refuse a numeric body that is
-    --   blank or carries a non-digit, so a blank TRAN-AMT fails the load rather
-    --   than loading as NULL, and `PIC S9(09)V99` declares no absent state at
-    --   all. An amount is the reason a transaction row exists, so a row that
+    -- Refactoring Rationale: NOT NULL rather than nullable. The nullable reading
+    --   assumes a blank fixed-width field decodes to an absent value at the load
+    --   boundary, and it does not: both normative zoned codecs -- common-lib's
+    --   ZonedDecimalCodec and the ETL's carddemo_migration.copybook.zoned --
+    --   refuse a numeric body that is blank or carries a non-digit, so a blank
+    --   TRAN-AMT fails the load rather than loading as NULL, and
+    --   `PIC S9(09)V99` declares no absent state at all. An amount is the reason a transaction row exists, so a row that
     --   carries none is not a transaction with an unknown amount; it is a row
     --   the posting arithmetic at app/cbl/CBTRN02C.cbl L547 and L548-L552 has
     --   no reference behaviour for.
@@ -339,10 +338,10 @@ CREATE INDEX idx_transactions_proc_ts
 CREATE TABLE ledger.daily_transactions (
 
     -- Refactoring Rationale: this column is a TARGET-SIDE addition that no
-    --   copybook field corresponds to, and an earlier revision of this file
-    --   excluded exactly such a column "on principle". That exclusion was right
-    --   about the source and wrong about the target, and the distinction is the
-    --   whole reason this column exists. The source genuinely has no key:
+    --   copybook field corresponds to, and excluding such a column on principle
+    --   would be right about the source and wrong about the target. That
+    --   distinction is the whole reason this column exists. The source genuinely
+    --   has no key:
     --   app/cbl/CBTRN02C.cbl L29-L31 selects the feed as ORGANIZATION IS
     --   SEQUENTIAL with ACCESS MODE IS SEQUENTIAL and no RECORD KEY, and it reads
     --   front to back on an implicit file position, never holding two records at
@@ -388,7 +387,7 @@ CREATE TABLE ledger.daily_transactions (
     --   load site. BY DEFAULT still assigns the ordinal for an ordinary append and
     --   the primary key below still refuses a collision, so nothing is given up
     --   but the refusal.
-    -- Trade-offs: what this costs is that the table can no longer re-emit a
+    -- Trade-offs: what this costs is that the table cannot re-emit a
     --   byte-identical 350-byte record from its columns alone without ignoring
     --   this one. That cost is already paid elsewhere and in the same way: the
     --   version columns the design mandates on accounts, customers and cards are
@@ -428,14 +427,13 @@ CREATE TABLE ledger.daily_transactions (
     --   on either side of the posting boundary, so the value the feed
     --   carries and the value that posts are the same digits.
     --
-    -- Refactoring Rationale: NOT NULL, where an earlier revision left this
-    --   column nullable on the reasoning that a blank fixed-width field
-    --   decodes to an absent value at the load boundary. It does not: both
-    --   normative zoned codecs -- common-lib's ZonedDecimalCodec and the ETL's
-    --   carddemo_migration.copybook.zoned -- refuse a numeric body that is
-    --   blank or carries a non-digit, so a blank TRAN-AMT fails the load rather
-    --   than loading as NULL, and `PIC S9(09)V99` declares no absent state at
-    --   all. An amount is the reason a transaction row exists, so a row that
+    -- Refactoring Rationale: NOT NULL rather than nullable. The nullable reading
+    --   assumes a blank fixed-width field decodes to an absent value at the load
+    --   boundary, and it does not: both normative zoned codecs -- common-lib's
+    --   ZonedDecimalCodec and the ETL's carddemo_migration.copybook.zoned --
+    --   refuse a numeric body that is blank or carries a non-digit, so a blank
+    --   TRAN-AMT fails the load rather than loading as NULL, and
+    --   `PIC S9(09)V99` declares no absent state at all. An amount is the reason a transaction row exists, so a row that
     --   carries none is not a transaction with an unknown amount; it is a row
     --   the posting arithmetic at app/cbl/CBTRN02C.cbl L547 and L548-L552 has
     --   no reference behaviour for.
@@ -513,14 +511,13 @@ CREATE TABLE ledger.daily_transactions (
     --   identifiers in the current extract happen to be distinct, and that is a
     --   property of one extract rather than a contract, which is exactly why it
     --   must not become the key.
-    -- Refactoring Rationale: an earlier revision drew the conclusion that the
-    --   table should therefore carry NO key at all, and excluded a surrogate "on
-    --   principle" as a column no copybook field corresponds to. The premise was
-    --   correct and the conclusion did not follow. A keyless heap has no order to
-    --   resume, so the chunked reader ordered and resumed on transaction_id
+    -- Refactoring Rationale: concluding from that premise that the table should
+    --   carry NO key at all, and excluding a surrogate on principle as a column no
+    --   copybook field corresponds to, does not follow. A keyless heap has no order
+    --   to resume, so the chunked reader would order and resume on transaction_id
     --   instead -- and a strict cursor over a non-unique column drops every
-    --   duplicate that follows a chunk boundary, which is a silent loss of exactly
-    --   the physical occurrences the sequential read is defined to process. The
+    --   duplicate that follows a chunk boundary, a silent loss of exactly the
+    --   physical occurrences the sequential read is defined to process. The
     --   surrogate is what makes the source's actual contract expressible: every
     --   occurrence distinct, none unique by identifier, all in arrival order.
     -- Refactoring Rationale: keying the ordinal is also what makes the table safe
@@ -583,13 +580,13 @@ CREATE TABLE ledger.transaction_rejects (
     --   identifies the REJECT EVENT rather than the record that provoked it. It is
     --   added for the reason argued at length on
     --   ledger.daily_transactions.ingest_seq and for one additional reason
-    --   specific to this table. An earlier revision left this table keyless and
-    --   the consuming entity then mapped raw_record -- the 350-byte record image
-    --   -- as its identity, because the persistence provider requires one and no
-    --   other column denotes a record. That made two legitimately duplicate
-    --   rejects indistinguishable to the provider, which would collapse them, and
-    --   it made the identity a value a setter could reassign. Both consequences
-    --   contradict what this table is for: this stream exists to retain the bytes
+    --   specific to this table. Leaving it keyless would force the consuming
+    --   entity to map raw_record -- the 350-byte record image -- as its identity,
+    --   because the persistence provider requires one and no other column denotes
+    --   a record. That makes two legitimately duplicate rejects indistinguishable
+    --   to the provider, which would collapse them, and it makes the identity a
+    --   value a setter could reassign. Both consequences contradict what this
+    --   table is for: this stream exists to retain the bytes
     --   that caused a reject, and the same record rejected on two runs is two
     --   entries -- app/jcl/DALYREJS.jcl L24-L28 keeps five generations of exactly
     --   that. An occurrence sequence makes each entry addressable without making
@@ -641,9 +638,8 @@ CREATE TABLE ledger.transaction_rejects (
     --   trailer.
     --
     -- Refactoring Rationale: NOT NULL on all three of this table's
-    --   copybook-derived columns, where an earlier revision left every one of
-    --   them nullable. Nullability here is not a permissive reading of the
-    --   source but a contradiction of it. A reject row EXISTS because a record
+    --   copybook-derived columns. Nullability here is not a permissive reading of
+    --   the source but a contradiction of it. A reject row EXISTS because a record
     --   was rejected, and app/cbl/CBTRN02C.cbl L446-L451 writes it by moving two
     --   WHOLE group items -- DALYTRAN-RECORD into the 350-character
     --   REJECT-TRAN-DATA at L447, then WS-VALIDATION-TRAILER into the
@@ -831,9 +827,8 @@ CREATE TABLE ledger.transaction_category_balances (
     --   app/data/ASCII/tcatbal.txt bytes 18-28 hold 11 characters ending in
     --   a sign overpunch, `0000000000{` on the first record. Bytes 18-28.
     --
-    -- Refactoring Rationale: NOT NULL DEFAULT 0, where an earlier revision of
-    --   this column left it nullable to admit "a blank fixed-width field". That
-    --   premise does not hold for this field. `TRAN-CAT-BAL PIC S9(09)V99` is a
+    -- Refactoring Rationale: NOT NULL DEFAULT 0 rather than nullable to admit a
+    --   blank fixed-width field. That premise does not hold for this field. `TRAN-CAT-BAL PIC S9(09)V99` is a
     --   signed NUMERIC DISPLAY picture, not a character one, so a blank span is a
     --   malformed record rather than an absent balance -- and the measured
     --   evidence is the proof: all 50 records of app/data/ASCII/tcatbal.txt carry

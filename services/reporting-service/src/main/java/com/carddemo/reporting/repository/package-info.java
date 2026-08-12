@@ -56,10 +56,14 @@
  * interface per role, so keyset positioning is expressed once and reused rather than
  * open-coded at each call. The browse quartet {@code STARTBR}, {@code READNEXT},
  * {@code READPREV} and {@code ENDBR} collapses into a single keyed query per direction, and
- * the shared envelope {@code com.carddemo.common.web.PageResponse}, whose four components at
- * L231-L235 of that record are the item list, {@code firstKey}, {@code lastKey} and
- * {@code hasNext}, carries the cursor. That record declares no row-count member of any kind,
+ * the shared envelope {@code com.carddemo.common.web.PageResponse}, whose four components are the
+ * item list, {@code firstKey}, {@code lastKey} and {@code hasNext},
+ * carries the cursor. That record declares no row-count member of any kind,
  * which is the structural reason no ordinal-position addressing can be expressed through it.
+ * Assumptions: backward availability is NOT a component; the leading token is the POSITION a
+ * backward walk resumes from, and whether a row waits there is the caller's own page ordinal, which
+ * is where the reference keeps it. The layer that issues the walk settles {@code hasNext} from a
+ * surplus row read beyond the window, which is the reference's own technique.
  *
  * <h2>The closed inventory: this charter plus five interfaces</h2>
  *

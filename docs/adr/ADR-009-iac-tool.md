@@ -310,23 +310,19 @@ Because `dev` sets both arguments, the **effective floor is the later of the two
 to [ADR-003](ADR-003-datastore-targets.md), which delegates the pin here explicitly;
 this record owns the pin and not the capacity model.
 
-*WHY (Refactoring Rationale).* This read "a **zero** minimum database capacity
-requires a provider release at or after **5.81.0**," attributing the zero minimum to
-5.81.0. That attribution is wrong by one release: **5.80.0** introduced the zero
-minimum, and 5.81.0 introduced the auto-pause-seconds argument. The **conclusion**
-was right — 5.81.0 genuinely is the floor for *this* configuration — which is exactly
-what made the error durable: nothing downstream broke, so nothing surfaced it, and
-the pinned constraint needed no change. It still mattered, because it collapsed two
-independent feature gates into one and named the wrong feature for the binding
-release. A reader dropping the auto-pause argument would conclude the 5.81.0 floor
-still applied to their zero minimum when 5.80.0 would then suffice, and a reader
-debugging an auto-pause rejection on 5.80.0 would find no record that the argument
-had its own floor. `infra/README.md` and
+Assumptions: the two feature gates are named separately — **5.80.0** for the zero
+minimum, **5.81.0** for the auto-pause-seconds argument — rather than collapsed into
+the single 5.81.0 floor this configuration happens to need. Collapsing them is
+durable precisely because nothing downstream breaks: the pinned constraint needs no
+change either way. It still misleads in two directions. A reader dropping the
+auto-pause argument would conclude the 5.81.0 floor still applied to their zero
+minimum when 5.80.0 would then suffice, and a reader debugging an auto-pause
+rejection on 5.80.0 would find no record that the argument had its own floor. `infra/README.md` and
 [`infra/modules/aurora-postgresql/README.md`](../../infra/modules/aurora-postgresql/README.md)
 already stated the split correctly, so this record was contradicting the modules it
 governs.
 
-**Assumptions:** a provider below that floor does not warn — it fails at apply
+Assumptions: a provider below that floor does not warn — it fails at apply
 time, and it reports against the capacity argument rather than the provider
 version, so the cause of the failure is one step removed from its symptom. That is
 the whole reason the floor is written down rather than left to whatever resolves.
@@ -353,13 +349,12 @@ distinction belongs here because this record owns the provider pin: the provider
 generates the per-service database role passwords and the five symmetric
 application keys, while **RDS** generates the Aurora master password
 (`manage_master_user_password = true`) and a **Python script** generates the Cognito
-seed-user temporary passwords. *WHY (Refactoring Rationale):* this paragraph
-credited the random-value provider with "database and seed-user credentials," which
-is wrong for both the Aurora master password and the seed-user passwords — so it
-attributed to the pinned provider two credentials whose rotation it does not
-control. The per-credential table is in
+seed-user temporary passwords. Assumptions: the split above is named rather than
+summarised as "database and seed-user credentials", because that summary attributes
+to the pinned provider two credentials whose rotation it does not control — the
+Aurora master password and the seed-user passwords. The per-credential table is in
 [ADR-008](ADR-008-security-and-identity.md), which owns the mechanism set; this
-record now names only the split that bears on the pin.
+record names only the split that bears on the pin.
 
 ### 7. The surrounding tooling is what makes the Rule 1 HCL analogue checkable
 
@@ -368,8 +363,8 @@ HCL has no docstring, so the obligation is discharged by file-header blocks, a
 and a `README.md` in each of the sixteen modules and both environment roots — with
 [`infra/.tflint.hcl`](../../infra/.tflint.hcl) and
 [`infra/.terraform-docs.yml`](../../infra/.terraform-docs.yml) supplying the
-mechanical half and the pipeline running both as required steps. **Alternatives
-Considered:** leaving the analogue to review alone. Rejected because AAP §0.8.1
+mechanical half and the pipeline running both as required steps. Alternatives
+Considered: leaving the analogue to review alone. Rejected because AAP §0.8.1
 classes these files as rule-mandated, and a documentation rule enforced only by
 review is satisfied unevenly by construction — the point of naming a linter is
 that it decides the same way every time.
@@ -607,18 +602,16 @@ carry away, neither of them softened:
   `skip_destroy`**. An operator who expects to read a task log or a flow log after
   tearing an environment down will find neither.
 
-  *WHY (Refactoring Rationale).* This bullet previously said that "**log groups
-  persist for their retention period**" and grouped them with the final snapshot as
-  intended residue. That is the opposite of the configured behaviour, and the error
-  came from conflating two unrelated settings. `retention_in_days` governs how long
-  entries live **while the group exists**; whether the group survives `destroy` is
-  governed by `skip_destroy`, which is absent from all six. So retention was read as
-  if it outranked deletion, when it only applies until deletion. The consequence is
-  operational rather than cosmetic: the old text would lead someone to run `destroy`
-  before collecting evidence for a post-mortem, on the belief that the logs would
-  still be there afterwards. Anyone who needs logs to outlive the stack must export
-  them first, or set `skip_destroy` deliberately and accept that the groups then
-  survive and must be removed by hand.
+  Assumptions: retention and survival are two unrelated settings and are stated
+  separately, because reading one as the other inverts the configured behaviour.
+  `retention_in_days` governs how long entries live **while the group exists**;
+  whether the group survives `destroy` is governed by `skip_destroy`, which is absent
+  from all six. Treating retention as though it outranked deletion — when it only
+  applies until deletion — would lead someone to run `destroy` before collecting
+  evidence for a post-mortem, on the belief that the logs would still be there
+  afterwards. Anyone who needs logs to outlive the stack must export them first, or
+  set `skip_destroy` deliberately and accept that the groups then survive and must be
+  removed by hand.
 
 Trade-offs: the acceptance criterion is therefore *expressible and verifiable
 by an operator* through the documented commands, which is a different and weaker
@@ -658,18 +651,16 @@ The whole backend remains a **small** recurring cost, and it is provisioned **on
 a bootstrap shared by both environments** rather than per environment, so it does not
 scale with the number of environments.
 
-*WHY (Refactoring Rationale).* This section previously described the backend as
-"**a versioned, encrypted bucket and a lock table**," stated that "**both**" are
-charged on storage and requests, and concluded it was "the smallest recurring cost in
-the whole stack **by a wide margin**." The inventory was incomplete by three
-chargeable resources, and the two it omitted are precisely the two that break the
-conclusion's reasoning. A **customer-managed KMS key** carries a *fixed* monthly
-charge that does not shrink with the tiny object it protects, so the "state files are
-small" argument does not reach it. A **CloudTrail trail recording S3 data events** is
-billed per event, so its term scales with pipeline activity rather than with stored
-bytes — the one term here that can grow without the state growing at all. Describing
-a nineteen-resource bootstrap as two resources also understated what an operator must
-review before removing it, which matters because
+Assumptions: the chargeable inventory is enumerated in full rather than described as
+"a versioned, encrypted bucket and a lock table" both charged on storage and requests,
+because two of the resources that summary omits are the two that break its reasoning.
+A **customer-managed KMS key** carries a *fixed* monthly charge that does not shrink
+with the tiny object it protects, so the "state files are small" argument does not
+reach it. A **CloudTrail trail recording S3 data events** is billed per event, so its
+term scales with pipeline activity rather than with stored bytes — the one term here
+that can grow without the state growing at all. Describing a nineteen-resource
+bootstrap as two resources also understates what an operator must review before
+removing it, which matters because
 [the teardown section](#the-teardown-criterion-stated-exactly-as-far-as-it-goes)
 makes removing the bootstrap a separate deliberate act. The word "smallest" is kept
 because it remains true; "by a wide margin" is dropped because it was derived from an
@@ -836,17 +827,17 @@ lock correctly against the object store, and only then remove the `dynamodb_tabl
 argument and the table itself. Because both can run at once, there is no window in
 which state is unlocked.
 
-**Assumptions:** the deprecation is an upstream schedule this project does not
+Assumptions: the deprecation is an upstream schedule this project does not
 control, so the mitigation is to keep the replacement one argument away rather than
 to pre-empt it. The mechanics of the table — the `LockID` String key that is an
 external backend contract rather than a naming choice, and the on-demand billing that
 suits burst lock traffic — are recorded at their point of use in
 [`infra/bootstrap/README.md`](../../infra/bootstrap/README.md) and are not restated
-here. *WHY (Refactoring Rationale):* that README already documented the deprecation
-and the `use_lockfile` replacement, but this record's Risks section did not, so the
-one document a reader consults for the **durability** of the tooling decision was
-silent about a deprecation its own backend depends on. A risk recorded only in the
-module it affects is not discoverable from the decision that chose it.
+here. Assumptions: the deprecation is recorded in this record's Risks section as well
+as in that README, because the one document a reader consults for the **durability**
+of the tooling decision must not be silent about a deprecation its own backend depends
+on. A risk recorded only in the module it affects is not discoverable from the
+decision that chose it.
 
 ### Assumptions
 

@@ -20,10 +20,10 @@
 #   (the 500-byte customer record) and app/cpy/CVACT03Y.cpy (the 50-byte card
 #   cross-reference record), from which this module's three tables are derived.
 #
-#   State at this checkpoint, stated once here rather than repeated at every
-#   key that names one of them. Every artifact each key below depends on now
-#   exists, so nothing in this file is anticipatory and no key is a placeholder
-#   for a component that has yet to be written:
+#   The artifacts this file's keys depend on, stated once here rather than
+#   repeated at every key that names one of them. Every one of them EXISTS, so no
+#   key in this file is anticipatory and none is a placeholder for a component yet
+#   to be written:
 #     - AccountApplication.java, the Spring Boot entry point, so the keys below
 #       are read by a context that actually starts.
 #     - config/SecurityConfig.java, which binds five of the keys declared
@@ -47,18 +47,15 @@
 #       service/RestReferenceAddressLookup.java, the @Component that satisfies
 #       its nested ReferenceAddressLookup port.
 #
-# Refactoring Rationale: this section previously described five of the artifacts
-#   above as contracted but absent, and singled the port adapter out as the
-#   reason a context refresh did NOT complete, on the ground that a reader
-#   running the jar would meet an UnsatisfiedDependencyException rather than
-#   read about it. All of that is now obsolete and it is corrected here rather
-#   than left standing, because a header that under-reports what a module
-#   contains causes exactly the misreading it was written to prevent: a reader
-#   would size the deployment's required-variable list from the shorter list,
-#   and would take the springdoc keys to be publishing an empty document and the
-#   Flyway location to be resolving to nothing. Both are now false.
+# Assumptions: the inventory above is a MEASUREMENT of the module and every
+#   artifact it names is present, which is what makes the keys below readable as
+#   live wiring. A header that under-reported it would cause exactly the
+#   misreadings it exists to prevent: a reader would size the deployment's
+#   required-variable list from the shorter list, and would take the springdoc keys
+#   to be publishing an empty document and the Flyway location to be resolving to
+#   nothing.
 #
-#   Every key below is declared now, deliberately: these are the decisions a
+#   Every key below is declared deliberately: these are the decisions a
 #   module author needs settled BEFORE writing the first class, and a schema
 #   search path or a migration location retrofitted afterwards is exactly how a
 #   service ends up applying another context's migration into its own schema.
@@ -158,13 +155,22 @@
 #   DataSource whose every connection has its schema search path pinned to
 #   account and requires fully verified TLS; a Flyway run that applies
 #   db/migration/V1__account.sql into that schema before the JPA
-#   EntityManagerFactory is built, once that migration lands; a JWT
-#   resource-server configuration whose decoder additionally enforces the three
-#   Cognito claim checks; an SQS client able to serve a listener once one
-#   lands; an actuator surface answering GET /actuator/health, /actuator/info
-#   and the metrics scrape path; a served OpenAPI 3.1 document, once
-#   openapi/account-api.yaml lands; and the base log levels the two profiles
-#   adjust.
+#   EntityManagerFactory is built; a JWT resource-server configuration whose
+#   decoder additionally enforces the three Cognito claim checks; an SQS client
+#   serving service/InquiryMessageListener.java, which consumes the request queue
+#   named below and publishes its fixed-width reply to the reply queue; an
+#   actuator surface answering GET /actuator/health, /actuator/info and the
+#   metrics scrape path; the served OpenAPI 3.1 document at
+#   openapi/account-api.yaml; and the base log levels the two profiles adjust.
+#
+# WHY : Refactoring Rationale: three clauses above carried a "once ... lands"
+#   qualifier and all three have landed. The migration V1__account.sql exists and
+#   creates the three tables this schema owns; the contract document exists and
+#   publishes eleven operations; and the queue listener exists, so the SQS client
+#   is not merely "able to serve" one. The qualifiers are removed rather than
+#   left as harmless surplus, because each of them told a reader that a startup
+#   step would be SKIPPED -- so a reader debugging a Flyway or a listener failure
+#   would have ruled out the very step that had failed.
 #
 # Exceptions or errors:
 #   Startup failure modes a reader will actually meet, in the order the context
@@ -186,8 +192,15 @@
 #      would silently disable the corresponding check, which is why the class
 #      refuses it rather than accepting it.
 #   3. Missing region. The SQS client bean cannot be built without a region, so
-#      a context with no AWS_REGION fails even though this module sends no
-#      message today.
+#      a context with no AWS_REGION fails before any listener can start. WHY :
+#      Refactoring Rationale: this entry used to add "even though this module
+#      sends no message today", which is no longer true --
+#      service/InquiryMessageListener.java publishes a reply on every request it
+#      consumes, so the client is on the request path rather than merely
+#      constructed. The correction matters because the old wording implied the
+#      region requirement was incidental, which invited an operator to leave it
+#      unset in a local run and meet the failure at the first inquiry instead of
+#      at startup.
 #   4. Unreachable database. HikariCP abandons the first connection attempt
 #      after connection-timeout and the context fails to start, rather than the
 #      task going healthy and then failing every read it is sent.
@@ -201,39 +214,50 @@
 #      context instead of producing a service that rejects every token it is
 #      ever presented.
 #
-# WHY : the non-obvious decisions, each anchored to the key that records it in full.
-#   1. Flyway migrates the account schema and is deliberately NOT permitted to
-#      create it: data-migration/sql/V0__schemas_and_roles.sql is the exclusive
-#      authority for schemas, roles and grants, and its completion is a
+# WHY : Refactoring Rationale: this list is an INDEX of the non-obvious decisions
+#      below, each anchored to the key that records it in full, and every entry now
+#      carries the rationale category it belongs to. It previously carried none, so
+#      a reader could not tell an assumption from an accepted cost from a rejected
+#      alternative without opening the key each entry points at - which is exactly
+#      what an index exists to spare them - and a literal search for a category
+#      found the anchor sites while missing the summary that introduces them.
+#   1. Assumptions: Flyway migrates the account schema and is deliberately NOT
+#      permitted to create it: data-migration/sql/V0__schemas_and_roles.sql is the
+#      exclusive authority for schemas, roles and grants, and its completion is a
 #      precondition of this service starting. Recorded on
 #      spring.flyway.create-schemas.
-#   2. GET /actuator/health is at a single unchanging path and is not
+#   2. Trade-offs: GET /actuator/health is at a single unchanging path and is not
 #      token-protected, because the two things that poll it cannot present a
 #      token. Recorded on management.endpoints.web.
-#   3. Port 8080 is a contract with the container image and with the security
-#      groups, not a local preference. Recorded on server.port.
-#   4. Hibernate never emits DDL. Three characteristics these three tables
-#      genuinely need - the encrypted columns, the optimistic-locking version
-#      columns, and the secondary index replacing the CXACAIX alternate index -
-#      cannot be derived from a JPA entity. Recorded on
+#   3. Assumptions: port 8080 is a contract with the container image and with the
+#      security groups, not a local preference. Recorded on server.port.
+#   4. Assumptions: Hibernate never emits DDL. Three characteristics these three
+#      tables genuinely need - the encrypted columns, the optimistic-locking
+#      version columns, and the secondary index replacing the CXACAIX alternate
+#      index - cannot be derived from a JPA entity. Recorded on
 #      spring.jpa.hibernate.ddl-auto.
-#   5. Every pooled connection pins its schema search path to the one schema
-#      this context owns. Recorded on
+#   5. Assumptions: every pooled connection pins its schema search path to the one
+#      schema this context owns. Recorded on
 #      spring.datasource.hikari.connection-init-sql.
-#   5a. Every pooled connection also requires fully verified TLS, declared as
-#      driver properties rather than trusted to the injected URL, which matters
-#      here because the rows behind this pool carry the encrypted national
+#   5a. Assumptions: every pooled connection also requires fully verified TLS,
+#      declared as driver properties rather than trusted to the injected URL, which
+#      matters here because the rows behind this pool carry the encrypted national
 #      identifier and government-issued identifier columns. Recorded on
 #      spring.datasource.hikari.data-source-properties.
-#   6. Everything environment-specific is an unresolved placeholder with no
-#      fallback value, so absent configuration fails fast instead of starting
-#      against the wrong environment. Recorded on spring.datasource.
-#   7. This context runs NO transactional outbox, which is the exact opposite
-#      of authorization-service, and the difference is drawn from the baseline
-#      rather than from preference. Recorded on carddemo.account.inquiry.
-#   8. The property SHAPES in this file are identical in every environment; the
-#      two profiles vary values along four axes and no others. Recorded in the
-#      closing block at the end of the file.
+#   6. Trade-offs: everything environment-specific is an unresolved placeholder
+#      with no fallback value, so absent configuration fails fast instead of
+#      starting against the wrong environment. Recorded on spring.datasource.
+#   7. Alternatives Considered: this context runs NO transactional outbox, which is
+#      the exact opposite of authorization-service, and the difference is drawn
+#      from the baseline rather than from preference. It DOES run a durable reply
+#      CLAIM, in account.inquiry_reply_ledger, and the two are not the same
+#      mechanism: an outbox guarantees a reply exists for every committed decision,
+#      which this exchange does not need because its read commits nothing, while a
+#      claim guarantees one reply is not sent twice after a redelivery. Recorded on
+#      carddemo.account.inquiry.
+#   8. Assumptions: the property SHAPES in this file are identical in every
+#      environment; the two profiles vary values along four axes and no others.
+#      Recorded in the closing block at the end of the file.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -1095,16 +1119,16 @@ management:
       #   so a future orchestrator check can distinguish "started but not ready"
       #   from "failed". The aggregate at /actuator/health remains the path the two
       #   consumers above use, and none of this changes what the aggregate reports.
-      # Refactoring Rationale: this rationale previously said that enabling the
-      #   groups "adds" the two paths alongside the aggregate. That reads as a
-      #   statement about reachability, and it is false on this Boot version - a
-      #   reader sizing an ingress rule or a probe configuration from it would
-      #   conclude the two paths are absent unless this key is set, when they are
-      #   in fact reachable either way. The key is retained rather than deleted
-      #   because it still expresses the intended backing for the groups and
-      #   because the three sibling web contexts declare it identically; a no-op
-      #   deletion here would make this module differ from them for a reason no
-      #   reader of one file could see.
+      # Assumptions: the paragraph above deliberately does NOT say that enabling
+      #   the groups "adds" the two paths. That phrasing reads as a statement about
+      #   reachability and is false on this Boot version, so a reader sizing an
+      #   ingress rule or a probe configuration from it would conclude the two paths
+      #   are absent unless this key is set, when they are reachable either way.
+      # Alternatives Considered: deleting the key, since it changes no path. Rejected
+      #   on two grounds: it still expresses the intended backing for the groups, and
+      #   the three sibling web contexts declare it identically -- a no-op deletion
+      #   here would make this module differ from them for a reason no reader of one
+      #   file could see.
       probes:
         enabled: true
 
@@ -1145,17 +1169,15 @@ springdoc:
   #   source of truth - it is a check on the first. The two must agree, and any
   #   difference between them is a bug in whichever side drifted, not a formatting
   #   artifact to be tolerated.
-  # Refactoring Rationale: this block previously said that neither the contract nor
-  #   the controllers existed at this checkpoint, and that ui/src/api/accounts.ts
-  #   was to be written against the contract. All three statements are now wrong in
-  #   different ways. The contract exists at the path named above and declares ten
-  #   operations; the three controllers that answer them exist under
-  #   src/main/java/com/carddemo/account/api; and no browser client exists or will,
-  #   because this contract is internal only - its operations require a machine
-  #   token that InternalApiSecurityConfig demands and no browser can mint, and
-  #   ui/src/api/contracts.test.ts asserts that no browser client addresses any of
-  #   its paths. The keys below therefore describe a document served today rather
-  #   than settling where one will be published.
+  # Assumptions: the contract exists at the path named above and declares ten
+  #   operations, and the three controllers that answer them are under
+  #   src/main/java/com/carddemo/account/api, so the keys below describe a document
+  #   this service serves rather than settling where one will be published.
+  # Assumptions: NO browser client addresses this contract, by design rather than by
+  #   omission. Its operations require a machine token that InternalApiSecurityConfig
+  #   demands and no browser can mint, and ui/src/api/contracts.test.ts asserts that
+  #   no browser client addresses any of its paths, so a reader looking for an
+  #   accounts client under ui/src/api will not find one and is not missing a file.
   api-docs:
 
     # Assumptions: stated explicitly because the library's two defaults for this
@@ -1250,11 +1272,10 @@ logging:
     #   fault is reported and routine polling is not, and routine polling here is
     #   one receive every five seconds for the lifetime of every task.
     #
-    # Assumptions: this level is live today even though
-    #   service/InquiryMessageListener.java is authored at a later index. The SQS
-    #   client bean is built as the context is constructed, for the reason recorded
-    #   on spring.cloud.aws.region, so a client that cannot resolve its region
-    #   reports through this logger from the first run.
+    # Assumptions: this level is live from the first run, before any message is
+    #   consumed. The SQS client bean is built as the context is constructed, for the
+    #   reason recorded on spring.cloud.aws.region, so a client that cannot resolve
+    #   its region reports through this logger even on a task that receives nothing.
     io.awspring.cloud.sqs: WARN
 
     # Assumptions: statement logging is off in the base configuration because this
@@ -1393,9 +1414,7 @@ carddemo:
       #       to no purpose. These three are standard queues, each with a
       #       dead-letter queue at a maxReceiveCount of 5 and SSE-KMS, provisioned
       #       by infra/modules/sqs.
-      #       (4) Assumptions: delete-on-success acknowledgement plus the queue's
-      #       visibility timeout is the whole of the delivery contract for this
-      #       flow, and NO transactional outbox is needed. COACCT01 reads and
+      #       (4) Assumptions: NO transactional outbox is needed. COACCT01 reads and
       #       replies inside one unit of work - physical line 347 computes
       #       MQGMO-OPTIONS as MQGMO-SYNCPOINT and physical line 475 computes
       #       MQPMO-OPTIONS as MQPMO-SYNCPOINT - so there is no window in which the
@@ -1406,15 +1425,33 @@ carddemo:
       #       therefore does need an outbox to close that window. Reading the two
       #       flows as one discipline would either add machinery this service has no
       #       need of or drop machinery that service cannot do without.
-      #       (5) Refactoring Rationale: this note previously recorded that NO bean in
-      #       this module bound these three keys, that they therefore did NOT abort
-      #       startup when unset, and that a reader who assumed a consumer existed
-      #       would size the deployment's required-variable list wrongly. All three
-      #       statements are now obsolete and the note is corrected rather than left
-      #       standing, because it warned about precisely the mistake it would itself
-      #       have caused. service/InquiryMessageListener.java now exists: it binds
-      #       request-queue through its @SqsListener annotation and reply-queue and
-      #       error-queue through constructor @Value parameters with no defaults.
+      #       (4a) Refactoring Rationale: entry (4) previously also claimed that
+      #       delete-on-success plus the visibility timeout was the WHOLE of the
+      #       delivery contract for this flow, and that clause is withdrawn. It was
+      #       complete about one direction of the baseline's syncpoint bracket and
+      #       silent about the other: a unit of work spanning get, read and put rolls
+      #       the PUT back when it fails, so the baseline can neither lose a reply nor
+      #       send one twice, and delete-on-success reproduces only the first half.
+      #       The send is committed at the queue the moment it returns and the
+      #       acknowledgement is a separate call afterwards, so a task killed between
+      #       them leaves the request visible and the next delivery sends a SECOND
+      #       reply carrying the same correlation identifier as the first - a
+      #       divergence from the baseline rather than a property of it. The
+      #       account.inquiry_reply_ledger table created by
+      #       V2__account_inquiry_reply_ledger.sql closes it: the reply is recorded
+      #       under the requester's own identity and committed, then sent, then marked
+      #       sent, so a redelivery either suppresses its duplicate or re-sends the
+      #       recorded bytes. That is a CLAIM and not the outbox entry (4) rules out;
+      #       an outbox guarantees a reply exists for every committed decision, which
+      #       this read-only exchange does not need, and a claim guarantees a reply is
+      #       not sent twice, which it does.
+      #       (5) Assumptions: all three keys ARE bound, and by one bean --
+      #       service/InquiryMessageListener.java. It binds request-queue through its
+      #       @SqsListener annotation, and reply-queue and error-queue through
+      #       constructor @Value parameters carrying no defaults. That binding site is
+      #       named because it is what makes item (6) below true: a reader who took
+      #       these keys for unbound configuration would size the deployment's
+      #       required-variable list short by three.
       #       (6) Assumptions: all three are consequently STARTUP-CRITICAL. A
       #       placeholder read through @Value is resolved with
       #       resolveRequiredPlaceholders and raises, so a deployment missing any of
@@ -1437,21 +1474,21 @@ carddemo:
     #       Neither carries a default: a default would be a shared secret published in
     #       source, and anything able to read this repository could then mint a token
     #       this service accepts.
-    #       Refactoring Rationale: there is one key PER CALLER where there used to be
-    #       one shared by both, and this service selects between them by the subject a
-    #       presented token names. While the key was shared, either caller could mint a
-    #       token carrying the other's subject and this service could not tell, so its
-    #       refusal and audit records named a caller they had no way to verify. The
-    #       list of addresses a leaked key unlocks is also no longer one list: a key
-    #       unlocks only the families its own caller is permitted to scope, which for
-    #       the transaction context excludes the customer addresses entirely. The
-    #       authoritative enumeration is config/InternalApiSecurityConfig.java --
-    #       internalPaths() for the addresses and the closed table in common-lib
-    #       InternalServiceToken for which caller may reach which family -- and it is
-    #       anchored rather than copied here, because the copy is what went stale
-    #       before: this comment once named three addresses while five were claimed,
-    #       understating what a leak unlocks, which is the one direction a disclosure
-    #       statement must never err in.
+      #       Alternatives Considered: ONE key shared by both callers, which is the
+    #       obvious simplification. Rejected -- with shared bytes either caller can
+    #       mint a token carrying the other's subject and this service cannot tell,
+    #       so its refusal and its audit record would name a caller they had no way
+    #       to verify. One key PER CALLER lets this service select between them by
+    #       the subject a presented token names, and it makes the blast radius of a
+    #       leak specific rather than total: a key unlocks only the families its own
+    #       caller is permitted to scope, which for the transaction context excludes
+    #       the customer addresses entirely.
+    #       Assumptions: the authoritative enumeration is ANCHORED here rather than
+    #       copied -- config/InternalApiSecurityConfig.java internalPaths() for the
+    #       addresses, and the closed table in common-lib InternalServiceToken for
+    #       which caller may reach which family. A copied list understates what a
+    #       leak unlocks the moment an address is added, and understating that is
+    #       the one direction a disclosure statement must never err in.
     #       (2) Assumptions: config/InternalApiSecurityConfig.java reads this key
     #       through @Value with no default, refuses a blank value naming this
     #       property, and refuses one shorter than the digest width. The length check
@@ -1605,20 +1642,19 @@ carddemo:
 #   cluster needs; SQS listener sizing, meaning the concurrency ceiling and the
 #   poll batch width; and log retention. Nothing else may differ between the two.
 #
-#   Refactoring Rationale: this list previously named the breadth of the actuator
-#   health detail and the statement echo flag spring.jpa.show-sql as the third and
-#   fourth axes, and named no messaging axis at all. Both are corrected here
-#   because both were actively harmful rather than merely inexact. Permitting the
-#   health detail to vary invited the dev profile to widen it, and it had -- which
-#   published a description of the data tier on the ONE route SecurityConfig
-#   leaves unauthenticated, since neither the load-balancer target group nor the
-#   container health check can present a token. Permitting spring.jpa.show-sql to
-#   vary pointed both profiles at a switch that writes to standard output OUTSIDE
-#   the logging subsystem, so no level below can narrow it and the shared console
-#   pattern never reaches it; org.hibernate.SQL below is the supported control and
-#   is the one the profiles now use. Neither key is restated by either profile any
-#   longer, so the actuator surface and the echo flag are now identical in both
-#   environments by construction rather than by two values that could drift.
+#   Alternatives Considered: two further axes that are deliberately NOT permitted
+#   -- the breadth of the actuator health detail, and the statement echo flag
+#   spring.jpa.show-sql. Both are excluded because permitting them is actively
+#   harmful rather than merely loose. A dev profile free to widen the health detail
+#   publishes a description of the data tier on the ONE route SecurityConfig leaves
+#   unauthenticated, since neither the load-balancer target group nor the container
+#   health check can present a token. A profile free to set spring.jpa.show-sql
+#   points at a switch that writes to standard output OUTSIDE the logging
+#   subsystem, so no level below can narrow it and the shared console pattern never
+#   reaches it; org.hibernate.SQL below is the supported control and is what both
+#   profiles use. Neither key is restated by either profile, so the actuator surface
+#   and the echo flag are identical in both environments by construction rather
+#   than by two values that could drift.
 #
 #   Assumptions: the listener axis is named because the concurrency ceiling and
 #   the pool ceiling are one decision, not two. Each in-flight inquiry holds a

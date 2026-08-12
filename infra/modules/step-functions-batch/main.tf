@@ -2,12 +2,23 @@
 # infra/modules/step-functions-batch/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions two STANDARD Step Functions workflows: the eleven-work-state
-#   nightly CardDemo batch chain and the ad-hoc report workflow started by
-#   reporting-service. Both use one least-privilege execution role, encrypted
-#   CloudWatch execution logs and optional X-Ray tracing. It also provisions the
-#   out-of-graph finalizer that releases the online-write quiesce bracket for a
-#   daily execution that was terminated rather than failed.
+#   Provisions three STANDARD Step Functions workflows: the eleven-work-state
+#   nightly CardDemo batch chain, the ad-hoc report workflow started by
+#   reporting-service, and the operator-invoked dataset export/import round trip.
+#   All three use one least-privilege execution role, encrypted CloudWatch
+#   execution logs and optional X-Ray tracing. It also provisions the out-of-graph
+#   finalizer that releases the online-write quiesce bracket for a daily execution
+#   that was terminated rather than failed.
+#
+#   Refactoring Rationale: the round-trip workflow is the third and newest, and it
+#   exists because two batch jobs were unreachable. BatchApplication accepts
+#   `--job=export` and `--job=import` and ExportJob and ImportJob register beans
+#   under exactly those tokens, yet neither token appeared in any state machine,
+#   schedule or API in this repository -- so both jobs could be built, tested and
+#   deployed while remaining impossible to run. The pair is operator-submitted in
+#   the baseline as well: app/jcl/CBEXPORT.jcl and app/jcl/CBIMPORT.jcl appear in
+#   neither app/scheduler/CardDemo.ca7 nor app/scheduler/CardDemo.controlm, so an
+#   on-demand machine is the faithful target rather than two more nightly states.
 #
 # Parameters:
 #   variables.tf declares the ECS cluster and three task definitions, private
@@ -17,8 +28,8 @@
 #   state.
 #
 # Return values:
-#   None here. outputs.tf publishes both state-machine ARNs/names, the execution
-#   role and both log-group identities.
+#   None here. outputs.tf publishes all three state-machine ARNs and names, the
+#   execution role and all three log-group identities.
 #
 # Exceptions or errors:
 #   Every work state has an explicit timeout, retry and catch, and NO execution
@@ -68,6 +79,8 @@ locals {
   name_stem                = "${var.name_prefix}-${var.environment}"
   daily_machine_name       = "${local.name_stem}-daily-batch"
   adhoc_machine_name       = "${local.name_stem}-adhoc-report"
+  dataset_machine_name     = "${local.name_stem}-dataset-roundtrip"
+  authz_machine_name       = "${local.name_stem}-authorization-extract"
   execution_role_name      = "${local.name_stem}-sfn-batch"
   ecs_events_rule_arn      = "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/StepFunctionsGetEventsForECSTaskRule"
   state_machine_arn_prefix = "arn:${data.aws_partition.current.partition}:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:stateMachine:${local.name_stem}-"
@@ -268,6 +281,49 @@ locals {
     }
   }
 
+  # WHY : Refactoring Rationale: reporting-service is the ONE workload whose task
+  #       definition is both a long-running ECS service and a task this machine
+  #       starts directly, and that duality costs it its metrics unless they are
+  #       pushed per run. ecs-service supplies Micrometer's OTLP registry settings
+  #       only to workloads it creates no service for -- batch and data-migration --
+  #       because a serving task publishes /actuator/prometheus and the collector
+  #       sidecar scrapes it, and enabling both paths on one task definition would
+  #       export every meter twice. A reporting run started here has no listener to
+  #       scrape: the command switches the container into a one-shot job, so the
+  #       scrape half of that arrangement is absent and, without these three
+  #       overrides, the statement and report steps would export spans and not one
+  #       counter or timer. Supplying them as a container override rather than in the
+  #       task definition keeps the double-export impossible, because they exist only
+  #       for the lifetime of a run this machine starts.
+  # WHY : Assumptions: the collector sidecar listens on loopback inside the task's
+  #       own network namespace, so 127.0.0.1:4318 needs no service discovery and
+  #       leaves the task on no port. ecs-service adds that sidecar to every
+  #       workload by default and neither environment root disables it; were a root
+  #       ever to disable it for reporting, these pushes would be refused on loopback
+  #       and logged by Micrometer, which is a bounded warning rather than a failed
+  #       step -- the alternative, gating the overrides on a new module input, would
+  #       add a second place for the two settings to disagree.
+  # WHY : Trade-offs: the fifteen-second step matches what ecs-service gives the
+  #       other task-mode workloads and for the same reason -- the registry's own
+  #       default publishes once a minute, and a report that finishes inside that
+  #       window would exit having exported nothing, because the shutdown flush is
+  #       best effort. Four times the export volume for a nightly job is negligible
+  #       against losing its metrics entirely.
+  reporting_metrics_push_environment = [
+    {
+      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED"
+      Value = "true"
+    },
+    {
+      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_STEP"
+      Value = "15s"
+    },
+    {
+      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_URL"
+      Value = "http://127.0.0.1:4318/v1/metrics"
+    },
+  ]
+
   reporting_task_states = {
     for state_name, job_config in local.reporting_jobs :
     state_name => {
@@ -283,7 +339,7 @@ locals {
           ContainerOverrides = [{
             Name        = var.reporting_container_name
             "Command.$" = "States.Array('--job=${job_config.job}', States.Format('--business-date={}', $.businessDate))"
-            Environment = [
+            Environment = concat([
               {
                 Name      = "CARDDEMO_BATCH_RUN_ID"
                 "Value.$" = "$$.Execution.Name"
@@ -292,7 +348,7 @@ locals {
                 Name  = "CARDDEMO_DATASET_BUCKET"
                 Value = var.dataset_bucket_name
               },
-            ]
+            ], local.reporting_metrics_push_environment)
           }]
         }
       }
@@ -1069,7 +1125,7 @@ locals {
             ContainerOverrides = [{
               Name        = var.reporting_container_name
               "Command.$" = "States.Array('--job=generate-report', States.Format('--start-date={}', $.startDate), States.Format('--end-date={}', $.endDate), States.Format('--report-type={}', $.reportType))"
-              Environment = [
+              Environment = concat([
                 {
                   Name      = "CARDDEMO_BATCH_RUN_ID"
                   "Value.$" = "$$.Execution.Name"
@@ -1078,7 +1134,7 @@ locals {
                   Name  = "CARDDEMO_DATASET_BUCKET"
                   Value = var.dataset_bucket_name
                 },
-              ]
+              ], local.reporting_metrics_push_environment)
             }]
           }
         }
@@ -1138,10 +1194,475 @@ locals {
     }
   }
 
+  # ---------------------------------------------------------------------------
+  # Operator-invoked dataset round trip: export then import
+  # ---------------------------------------------------------------------------
+  # WHY : Refactoring Rationale: this definition is NEW, and it closes a gap in
+  #       which two jobs existed with no way to run them. BatchApplication accepts
+  #       `--job=export` and `--job=import`, ExportJob and ImportJob register beans
+  #       under exactly those tokens, and yet neither token appeared in
+  #       local.batch_jobs, in local.reporting_jobs or in the ad-hoc definition --
+  #       so nothing in this repository could start either job in a provisioned
+  #       environment. That is not a scheduling decision: app/jcl/CBEXPORT.jcl and
+  #       app/jcl/CBIMPORT.jcl are both operator-submitted rather than driven by the
+  #       nightly scheduler definitions in app/scheduler, so the correct target is an
+  #       on-demand state machine, exactly as the ad-hoc report above is.
+  # WHY : Alternatives Considered: three other placements, all rejected.
+  #       (a) Two more states inside the daily chain. Rejected because it changes
+  #           WHEN the pair runs: the reference submits both by hand, neither appears
+  #           in app/scheduler/CardDemo.ca7 or app/scheduler/CardDemo.controlm, and
+  #           adding them to the nightly graph would export a full five-master
+  #           extract every night whether or not anyone asked for one.
+  #       (b) Two more states in the ad-hoc report machine. Rejected because that
+  #           machine's input contract is a report request -- startDate, endDate and
+  #           reportType -- and the round trip needs only a business date, so the two
+  #           would have to share a validator that accepted the union of both shapes
+  #           and therefore validated neither.
+  #       (c) A bare `runTask` from an operator's shell, with no state machine.
+  #           Rejected because the export must succeed before the import runs, and a
+  #           shell sequence has no retry, no per-step ceiling, no exit-code gate and
+  #           no execution history -- so an import over a half-written dataset would
+  #           be indistinguishable from a clean round trip.
+  # WHY : Assumptions: the two states run SEQUENTIALLY and the import is gated on the
+  #       export's exit code, because the import reads exactly the object the export
+  #       writes -- export/<yyyymmdd00>/export.dat, composed identically by
+  #       ExportJob and ImportJob from the same business date. Running them in
+  #       parallel, or letting the import follow a non-zero export, would read a
+  #       partial or absent dataset and report the six artefacts it produced as
+  #       complete.
+  dataset_roundtrip_definition = {
+    Comment = "CardDemo operator-invoked dataset export/import round trip"
+
+    # WHY : Assumptions: the machine-level ceiling is separate from the two state
+    #       ceilings for the reason the ad-hoc definition above records: a per-state
+    #       TimeoutSeconds does not bound an execution that stalls BETWEEN states or
+    #       inside the service's own bookkeeping. Its validation holds it at or above
+    #       the SUM of the two work-state ceilings, because the two run in sequence,
+    #       so the execution can never expire while either state is still inside its
+    #       own allowance.
+    TimeoutSeconds = var.dataset_roundtrip_timeout_seconds
+
+    StartAt = "ValidateDatasetRequest"
+    States = {
+      # WHY : Assumptions: the input is validated in the GRAPH rather than left to
+      #       the job, and the shape checked is the same one the daily chain's
+      #       entry receives -- a present businessDate matching ????-??-??. The job
+      #       does validate it again, through the shared job-parameter validator
+      #       and then through BusinessDate's own width check, and that second
+      #       check is not redundant: a graph check refuses a malformed request
+      #       WITHOUT starting a Fargate task, so the operator gets an immediate
+      #       InvalidDatasetRequest instead of paying a task start-up to be told
+      #       the same thing by a stack trace.
+      # WHY : Trade-offs: StringMatches checks the SHAPE and not the calendar, so
+      #       2022-13-45 passes here and is refused by BusinessDate. Expressing a
+      #       real date check in Amazon States Language would need either a
+      #       validating Lambda -- a function, a role and a log group for one
+      #       string test -- or a wall of Choice rules per field. The shape test
+      #       catches the mistakes an operator actually makes at the command line,
+      #       a transposed or truncated token, and the job catches the rest.
+      ValidateDatasetRequest = {
+        Type = "Choice"
+        Choices = [{
+          And = [
+            {
+              Variable  = "$.businessDate"
+              IsPresent = true
+            },
+            {
+              Variable      = "$.businessDate"
+              StringMatches = "????-??-??"
+            },
+          ]
+          Next = "ExportDataset"
+        }]
+        Default = "InvalidDatasetRequest"
+      }
+
+      InvalidDatasetRequest = {
+        Type = "Pass"
+        Result = {
+          error   = "InvalidDatasetRequest"
+          message = "Supply businessDate as YYYY-MM-DD"
+        }
+        ResultPath = "$.failure"
+        Next       = "NotifyDatasetFailure"
+      }
+
+      ExportDataset = {
+        Type           = "Task"
+        Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
+        TimeoutSeconds = var.dataset_state_timeout_seconds["ExportDataset"]
+        Parameters = {
+          Cluster              = var.ecs_cluster_arn
+          TaskDefinition       = var.batch_task_definition_arn
+          LaunchType           = "FARGATE"
+          NetworkConfiguration = local.network_configuration
+          Overrides = {
+            ContainerOverrides = [{
+              Name        = var.batch_container_name
+              "Command.$" = "States.Array('--job=export', States.Format('--business-date={}', $.businessDate))"
+              Environment = [
+                # WHY : Assumptions: the run identifier is the EXECUTION NAME, the
+                #       same binding every state of the daily chain uses, and here
+                #       it is the whole of the idempotency story. BatchStepLedger
+                #       keys on (runId, stepName) over batch.batch_run, so a
+                #       re-invocation carrying the same execution name finds the
+                #       step already recorded and replays its outcome instead of
+                #       exporting a second time -- and for the import that matters
+                #       more than for any other job in the module, because a second
+                #       body run would append a second copy of every record to all
+                #       six artefacts. The operator convention that makes the name
+                #       repeatable is documented in
+                #       docs/runbooks/batch-operations.md; Step Functions
+                #       independently refuses a duplicate execution name on a
+                #       STANDARD machine, so a repeat is refused before it starts
+                #       and recognised by the ledger if it ever does.
+                {
+                  Name      = "CARDDEMO_BATCH_RUN_ID"
+                  "Value.$" = "$$.Execution.Name"
+                },
+                {
+                  Name  = "CARDDEMO_DATASET_BUCKET"
+                  Value = var.dataset_bucket_name
+                },
+              ]
+            }]
+          }
+        }
+        ResultSelector = local.ecs_result_selector
+        ResultPath     = "$.export"
+        Retry          = local.ecs_retry
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.failure"
+          Next        = "NotifyDatasetFailure"
+        }]
+        Next = "CheckExportExitCode"
+      }
+
+      # WHY : Assumptions: the exit code is checked in a SEPARATE Choice state
+      #       rather than folded into the task's Catch, because a non-zero container
+      #       exit does not raise an ECS API error -- runTask.sync completes
+      #       successfully and reports the code in its result. This is the same
+      #       two-state shape every work state of the daily chain uses, and the
+      #       reason the result selector exists.
+      CheckExportExitCode = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.export.exitCode"
+          NumericEquals = 0
+          Next          = "ImportDataset"
+        }]
+        Default = "NotifyDatasetFailure"
+      }
+
+      ImportDataset = {
+        Type           = "Task"
+        Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
+        TimeoutSeconds = var.dataset_state_timeout_seconds["ImportDataset"]
+        Parameters = {
+          Cluster              = var.ecs_cluster_arn
+          TaskDefinition       = var.batch_task_definition_arn
+          LaunchType           = "FARGATE"
+          NetworkConfiguration = local.network_configuration
+          Overrides = {
+            ContainerOverrides = [{
+              Name        = var.batch_container_name
+              "Command.$" = "States.Array('--job=import', States.Format('--business-date={}', $.businessDate))"
+              Environment = [
+                {
+                  Name      = "CARDDEMO_BATCH_RUN_ID"
+                  "Value.$" = "$$.Execution.Name"
+                },
+                {
+                  Name  = "CARDDEMO_DATASET_BUCKET"
+                  Value = var.dataset_bucket_name
+                },
+              ]
+            }]
+          }
+        }
+        ResultSelector = local.ecs_result_selector
+        ResultPath     = "$.import"
+        Retry          = local.ecs_retry
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.failure"
+          Next        = "NotifyDatasetFailure"
+        }]
+        Next = "CheckImportExitCode"
+      }
+
+      CheckImportExitCode = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.import.exitCode"
+          NumericEquals = 0
+          Next          = "DatasetRoundTripSucceeded"
+        }]
+        Default = "NotifyDatasetFailure"
+      }
+
+      NotifyDatasetFailure = {
+        Type     = "Task"
+        Resource = "arn:${data.aws_partition.current.partition}:states:::sns:publish"
+        Parameters = {
+          TopicArn    = var.notification_topic_arn
+          Subject     = "CardDemo dataset round trip failed"
+          "Message.$" = "States.Format('CardDemo dataset round trip execution {} failed: {}', $$.Execution.Name, States.JsonToString($))"
+        }
+        ResultPath = "$.notification"
+        Retry = [{
+          ErrorEquals     = ["States.TaskFailed", "States.Timeout"]
+          IntervalSeconds = var.retry_interval_seconds
+          MaxAttempts     = var.retry_max_attempts
+          BackoffRate     = var.retry_backoff_rate
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.notificationFailure"
+          Next        = "DatasetRoundTripFailed"
+        }]
+        Next = "DatasetRoundTripFailed"
+      }
+
+      DatasetRoundTripSucceeded = {
+        Type = "Succeed"
+      }
+
+      DatasetRoundTripFailed = {
+        Type  = "Fail"
+        Error = "CardDemoDatasetRoundTripFailed"
+        Cause = "The dataset export or import task failed; inspect the execution history and notification"
+      }
+    }
+  }
+
+  # WHY : Refactoring Rationale: the authorization definition is the FOURTH entry and
+  #       was added with the authorization-extract machine below. Its absence was not a
+  #       narrowing -- it was the reason that machine could not exist: ecs:RunTask is
+  #       scoped to exactly this list, so a state naming a task definition outside it is
+  #       refused at run time with an access-denied error naming the definition rather
+  #       than this input.
+  # WHY : Refactoring Rationale: this machine exists because
+  #       com.carddemo.authorization.service.UnloadService -- the transcription of
+  #       cbl/PAUDBUNL.CBL and cbl/DBUNLDGS.CBL -- had no accepted invocation of any
+  #       kind. It had no task, no controller, no schedule and no state here, so the
+  #       segment export was reachable only from its own unit tests. The load and the
+  #       purge were in the same state and were given task entry points inside the
+  #       service; what neither of them gained, and what this machine supplies, is the
+  #       operator-facing half: an invocation that names destinations, bounds its own
+  #       duration, retries a launch fault, reports a non-zero exit and notifies.
+  # WHY : Assumptions: ONE machine with a mode rather than one machine per direction.
+  #       The two directions share their validation, their notification, their failure
+  #       state and their timeouts, and differ only in which job the container override
+  #       selects; a second machine would duplicate seven states to vary one string.
+  # WHY : Assumptions: the two directions are alternatives and are NEVER chained, which
+  #       is the one way this definition deliberately departs from the dataset round
+  #       trip above. That machine exports and then imports, and verifying an export by
+  #       importing it is safe there because the import writes to dataset artefacts. The
+  #       equivalent here would load an extract back into the live authorization schema,
+  #       and because the purge deletes expired rows a load run after one would
+  #       RESURRECT exactly the rows the purge had removed. A verification that can undo
+  #       a retention decision is worse than no verification, so the load is offered as
+  #       its own explicitly-requested mode against operator-named sources.
+  authorization_extract_definition = {
+    Comment = "CardDemo operator-invoked pending-authorization segment export and extract load"
+
+    TimeoutSeconds = var.authorization_extract_timeout_seconds
+
+    StartAt = "ValidateAuthorizationExtractRequest"
+    States = {
+      # WHY : Assumptions: the mode is checked in the GRAPH and each mode's own
+      #       arguments are checked with it, so a request naming no mode, or a mode
+      #       whose arguments are absent, is refused without starting a Fargate task.
+      #       The service validates every argument again before its context starts;
+      #       that second check is not redundant, it is the one that runs when an
+      #       operator invokes the image directly rather than through this machine.
+      ValidateAuthorizationExtractRequest = {
+        Type = "Choice"
+        Choices = [
+          {
+            And = [
+              {
+                Variable     = "$.mode"
+                StringEquals = "unload"
+              },
+              {
+                Variable  = "$.businessDate"
+                IsPresent = true
+              },
+              {
+                Variable      = "$.businessDate"
+                StringMatches = "????-??-??"
+              },
+            ]
+            Next = "UnloadAuthorizations"
+          },
+          {
+            # WHY : Assumptions: the load takes its two sources from the REQUEST
+            #       rather than deriving them from a business date, because the
+            #       extract being loaded was not necessarily produced by this
+            #       machine -- the reference programs' own output is a legitimate
+            #       input, and it carries no run identifier this graph could
+            #       reconstruct a key from.
+            And = [
+              {
+                Variable     = "$.mode"
+                StringEquals = "load"
+              },
+              {
+                Variable  = "$.rootExtract"
+                IsPresent = true
+              },
+              {
+                Variable  = "$.childExtract"
+                IsPresent = true
+              },
+            ]
+            Next = "LoadAuthorizations"
+          },
+        ]
+        Default = "InvalidAuthorizationExtractRequest"
+      }
+
+      InvalidAuthorizationExtractRequest = {
+        Type = "Pass"
+        Result = {
+          error   = "InvalidAuthorizationExtractRequest"
+          message = "Supply mode=unload with businessDate as YYYY-MM-DD, or mode=load with rootExtract and childExtract locations"
+        }
+        ResultPath = "$.failure"
+        Next       = "NotifyAuthorizationExtractFailure"
+      }
+
+      # WHY : Assumptions: the two destinations are COMPUTED here rather than accepted
+      #       from the request, so an export cannot be told to overwrite an unrelated
+      #       key and two exports of the same business date on different executions
+      #       cannot collide. The execution name is in the prefix for the second
+      #       reason and the business date for the first, which is why both appear.
+      # WHY : Trade-offs: the operator therefore cannot choose where an export lands.
+      #       That is accepted because the runbook reads the destinations back out of
+      #       the execution's own input, so the location is discoverable after the
+      #       fact without being specifiable before it.
+      UnloadAuthorizations = {
+        Type           = "Task"
+        Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
+        TimeoutSeconds = var.authorization_state_timeout_seconds["UnloadAuthorizations"]
+        Parameters = {
+          Cluster              = var.ecs_cluster_arn
+          TaskDefinition       = var.authorization_task_definition_arn
+          LaunchType           = "FARGATE"
+          NetworkConfiguration = local.network_configuration
+          Overrides = {
+            ContainerOverrides = [{
+              Name        = var.authorization_container_name
+              "Command.$" = "States.Array('--job=unload-authorizations', States.Format('--root-extract=s3://{}/authorization/extract/dt={}/run={}/roots.dat', '${var.dataset_bucket_name}', $.businessDate, $$.Execution.Name), States.Format('--child-extract=s3://{}/authorization/extract/dt={}/run={}/children.dat', '${var.dataset_bucket_name}', $.businessDate, $$.Execution.Name))"
+            }]
+          }
+        }
+        ResultSelector = local.ecs_result_selector
+        ResultPath     = "$.unload"
+        Retry          = local.ecs_retry
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.failure"
+          Next        = "NotifyAuthorizationExtractFailure"
+        }]
+        Next = "CheckUnloadExitCode"
+      }
+
+      # WHY : Assumptions: a separate Choice, for the reason the dataset machine
+      #       records against its own pair -- a non-zero container exit completes the
+      #       synchronous integration successfully and reports the code in its result,
+      #       so the task's Catch never sees it.
+      CheckUnloadExitCode = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.unload.exitCode"
+          NumericEquals = 0
+          Next          = "AuthorizationExtractSucceeded"
+        }]
+        Default = "NotifyAuthorizationExtractFailure"
+      }
+
+      LoadAuthorizations = {
+        Type           = "Task"
+        Resource       = "arn:${data.aws_partition.current.partition}:states:::ecs:runTask.sync"
+        TimeoutSeconds = var.authorization_state_timeout_seconds["LoadAuthorizations"]
+        Parameters = {
+          Cluster              = var.ecs_cluster_arn
+          TaskDefinition       = var.authorization_task_definition_arn
+          LaunchType           = "FARGATE"
+          NetworkConfiguration = local.network_configuration
+          Overrides = {
+            ContainerOverrides = [{
+              Name        = var.authorization_container_name
+              "Command.$" = "States.Array('--job=load-authorizations', States.Format('--root-extract={}', $.rootExtract), States.Format('--child-extract={}', $.childExtract))"
+            }]
+          }
+        }
+        ResultSelector = local.ecs_result_selector
+        ResultPath     = "$.load"
+        Retry          = local.ecs_retry
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.failure"
+          Next        = "NotifyAuthorizationExtractFailure"
+        }]
+        Next = "CheckLoadExitCode"
+      }
+
+      CheckLoadExitCode = {
+        Type = "Choice"
+        Choices = [{
+          Variable      = "$.load.exitCode"
+          NumericEquals = 0
+          Next          = "AuthorizationExtractSucceeded"
+        }]
+        Default = "NotifyAuthorizationExtractFailure"
+      }
+
+      NotifyAuthorizationExtractFailure = {
+        Type     = "Task"
+        Resource = "arn:${data.aws_partition.current.partition}:states:::sns:publish"
+        Parameters = {
+          TopicArn    = var.notification_topic_arn
+          Subject     = "CardDemo authorization extract failed"
+          "Message.$" = "States.Format('CardDemo authorization extract execution {} failed: {}', $$.Execution.Name, States.JsonToString($))"
+        }
+        ResultPath = "$.notification"
+        Retry = [{
+          ErrorEquals     = ["States.TaskFailed", "States.Timeout"]
+          IntervalSeconds = var.retry_interval_seconds
+          MaxAttempts     = var.retry_max_attempts
+          BackoffRate     = var.retry_backoff_rate
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          ResultPath  = "$.notificationFailure"
+          Next        = "AuthorizationExtractFailed"
+        }]
+        Next = "AuthorizationExtractFailed"
+      }
+
+      AuthorizationExtractSucceeded = {
+        Type = "Succeed"
+      }
+
+      AuthorizationExtractFailed = {
+        Type  = "Fail"
+        Error = "CardDemoAuthorizationExtractFailed"
+        Cause = "The authorization export or extract load task failed; inspect the execution history and notification"
+      }
+    }
+  }
+
   task_definition_arns = [
     var.batch_task_definition_arn,
     var.data_migration_task_definition_arn,
     var.reporting_task_definition_arn,
+    var.authorization_task_definition_arn,
   ]
 
   # WHY : Assumptions: iam:RunTask evaluates the revision-qualified task
@@ -1177,6 +1698,37 @@ resource "aws_cloudwatch_log_group" "adhoc" {
 
   tags = merge(var.tags, {
     Name = "${local.adhoc_machine_name}-logs"
+  })
+}
+
+# WHY : Assumptions: a THIRD log group rather than a shared one, matching the two
+#       above. Step Functions writes one log destination per state machine, so a
+#       shared group would interleave a nightly chain, an on-demand report and an
+#       operator round trip into one stream and make a per-workload retention or
+#       subscription impossible to express.
+resource "aws_cloudwatch_log_group" "dataset_roundtrip" {
+  name              = "/aws/vendedlogs/states/${local.dataset_machine_name}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.log_group_kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "${local.dataset_machine_name}-logs"
+  })
+}
+
+# WHY : Assumptions: a FOURTH log group, on the same reasoning as the third. Step
+#       Functions writes one destination per state machine, and the authorization
+#       extract's stream is the one an operator reads when an export produced nothing;
+#       interleaved with the nightly chain it would be unreadable, and it is also the
+#       only one of the four whose retention a data-handling review might want set
+#       differently from a batch job's.
+resource "aws_cloudwatch_log_group" "authorization_extract" {
+  name              = "/aws/vendedlogs/states/${local.authz_machine_name}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.log_group_kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "${local.authz_machine_name}-logs"
   })
 }
 
@@ -1555,6 +2107,93 @@ resource "aws_sfn_state_machine" "adhoc" {
 
   tags = merge(var.tags, {
     Name = local.adhoc_machine_name
+  })
+
+  depends_on = [aws_iam_role_policy.this]
+}
+
+# WHY : Assumptions: STANDARD rather than EXPRESS, for two reasons that both
+#       matter here. The round trip runs two Fargate tasks in sequence, so its
+#       duration is minutes and can exceed the five-minute ceiling an EXPRESS
+#       execution has; and only a STANDARD execution refuses a duplicate execution
+#       NAME, which is the outer half of the idempotency the definition's run-id
+#       binding describes -- an EXPRESS machine would accept a repeated name and
+#       leave the batch step ledger as the only defence.
+# WHY : Assumptions: the SHARED execution role is reused rather than a third one
+#       created. Its privileges are already exactly what this machine needs and
+#       nothing more: ecs:RunTask is scoped to the three task definitions this
+#       module was given -- of which this machine uses only the batch one --
+#       alongside ecs:StopTask, ecs:DescribeTasks, the managed-rule permissions
+#       Step Functions needs to observe task completion, iam:PassRole over the
+#       enumerated task roles, and sns:Publish on the one notification topic. A
+#       third role would duplicate all of that with no narrowing, because the batch
+#       task definition is already in the set the daily chain runs.
+resource "aws_sfn_state_machine" "dataset_roundtrip" {
+  name     = local.dataset_machine_name
+  role_arn = aws_iam_role.this.arn
+  type     = "STANDARD"
+
+  definition = jsonencode(local.dataset_roundtrip_definition)
+
+  logging_configuration {
+    include_execution_data = var.log_include_execution_data
+    level                  = var.log_level
+    log_destination        = "${aws_cloudwatch_log_group.dataset_roundtrip.arn}:*"
+  }
+
+  tracing_configuration {
+    # WHY : Assumptions: asserted rather than parameterised, for the reason
+    #       recorded on the X-Ray statement of the execution-role policy above.
+    enabled = true
+  }
+
+  tags = merge(var.tags, {
+    Name = local.dataset_machine_name
+  })
+
+  depends_on = [aws_iam_role_policy.this]
+}
+
+
+# WHY : Assumptions: STANDARD rather than EXPRESS, on the same two grounds the dataset
+#       round trip records. An export walks every pending authorization in the schema, so
+#       its duration is minutes and can exceed an EXPRESS execution's five-minute
+#       ceiling; and only a STANDARD execution refuses a duplicate execution NAME, which
+#       matters more here than anywhere else in this module because the export's
+#       destination keys are DERIVED from that name -- two executions sharing a name
+#       would write the same two objects.
+# WHY : Assumptions: the SHARED execution role is reused rather than a fourth created.
+#       Its privileges are already exactly what this machine needs: ecs:RunTask over the
+#       four task definitions this module was given, of which this machine uses only the
+#       authorization one, alongside ecs:StopTask, ecs:DescribeTasks, the managed-rule
+#       permissions Step Functions needs to observe task completion, iam:PassRole over the
+#       enumerated task roles, and sns:Publish on the one notification topic.
+# WHY : Assumptions: nothing here grants the object-store access the export needs. That
+#       privilege belongs to the authorization TASK role, which is what the container
+#       authenticates as, and it is granted in the environment root beside the rest of
+#       that role's policy. Granting it to the execution role instead would be granting
+#       it to the wrong identity and would not work.
+resource "aws_sfn_state_machine" "authorization_extract" {
+  name     = local.authz_machine_name
+  role_arn = aws_iam_role.this.arn
+  type     = "STANDARD"
+
+  definition = jsonencode(local.authorization_extract_definition)
+
+  logging_configuration {
+    include_execution_data = var.log_include_execution_data
+    level                  = var.log_level
+    log_destination        = "${aws_cloudwatch_log_group.authorization_extract.arn}:*"
+  }
+
+  tracing_configuration {
+    # WHY : Assumptions: asserted rather than parameterised, for the reason
+    #       recorded on the X-Ray statement of the execution-role policy above.
+    enabled = true
+  }
+
+  tags = merge(var.tags, {
+    Name = local.authz_machine_name
   })
 
   depends_on = [aws_iam_role_policy.this]

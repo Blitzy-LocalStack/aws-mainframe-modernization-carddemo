@@ -357,6 +357,15 @@ class InternalApiSecurityConfigTest {
      * <p>Assumptions: asserted as a positive case beside the refusal above, because a subject check that
      * refused everything would satisfy the refusal case alone while taking both production callers offline
      * -- the same class of defect as the one this whole phase remediates.</p>
+     *
+     * <p>Refactoring Rationale: each subject mints with a scope IT is permitted to carry, drawn from the
+     * shared token type's own permission table rather than from one scope named here for both. An earlier
+     * revision minted the account read for both, which stopped being mintable when transaction-service's
+     * permitted set was narrowed to the cross-reference read alone -- bill payment no longer reads an
+     * account over HTTP, because it settles the balance on its own connection. The narrowing is the
+     * correct state and this fixture was asserting the old one; deriving the scope per subject is what
+     * keeps the case about the SUBJECT check, which is what it exists to assert, rather than about which
+     * scope a caller happens to hold today.</p>
      */
     @Test
     @DisplayName("both production minting subjects are admitted")
@@ -367,10 +376,17 @@ class InternalApiSecurityConfigTest {
             //   one key would fail the signature check for whichever caller that key does not belong to,
             //   which is a property of the fixture rather than of the subject check under test.
             String signingKey = subject.equals(SUBJECT) ? KEY : OTHER_KEY;
+            // Assumptions: the scope is READ OFF the permission table rather than named here, so this
+            //   case cannot be broken again by a legitimate narrowing of what a caller may carry. The
+            //   cross-reference read is the one scope both admitted subjects hold, and taking the first
+            //   permitted scope would work today and stop being deterministic the moment a set grows.
             String token = minter(signingKey, Duration.ofMinutes(1), Instant.now(), subject).mint(
                     InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
-                    InternalServiceToken.SCOPE_ACCOUNT_READ);
+                    InternalServiceToken.SCOPE_CARD_XREF_READ);
 
+            assertThat(InternalServiceToken.permittedScopes(subject))
+                    .as("the cross-reference read is the scope both admitted subjects carry")
+                    .contains(InternalServiceToken.SCOPE_CARD_XREF_READ);
             assertThat(decoder().decode(token).getSubject())
                     .as("subject %s is minted in production and must decode", subject)
                     .isEqualTo(subject);
@@ -589,6 +605,16 @@ class InternalApiSecurityConfigTest {
                 CustomerController.BASE_PATH + CustomerController.RECORD_PATH)))
                 .as("the keyed customer read is an internal address")
                 .isTrue();
+
+        // WHY : Refactoring Rationale: the six-field display read is probed because it is a NEW internal
+        //   address, and an address this chain fails to claim reaches the application chain -- which denies
+        //   the whole customer subtree outright. An omission here would therefore present as a 403 on a
+        //   correctly mounted route serving a screen that renders six fields, which is the shape of failure
+        //   this whole operation was authored to remove.
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH)))
+                .as("the six-field customer display read is an internal address")
+                .isTrue();
         assertThat(matcher.matches(request(HttpMethod.GET,
                 AccountController.BASE_PATH + "/12345678901")))
                 .as("the retired keyed account read must NOT be claimed: claiming it would authorise the"
@@ -739,7 +765,15 @@ class InternalApiSecurityConfigTest {
                         CardXrefController.BASE_PATH + CardXrefController.SEARCH_BY_ACCOUNT_PATH),
                 request(HttpMethod.POST, AccountController.BASE_PATH + AccountController.LOOKUP_PATH),
                 request(HttpMethod.POST,
-                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH));
+                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH),
+                // WHY : Assumptions: the display read belongs in the DECISION group and its absence from
+                //   the record group below is the assertion that matters. It carries no encrypted
+                //   identifier and no credit score, so gating it on the customer-master authority -- which
+                //   this system mints for no context -- would make it unreachable; gating the WHOLE record
+                //   on the decision authority instead would hand every caller that resolves a card number
+                //   a national identifier. The loop asserts both directions for every entry.
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH));
         List<MockHttpServletRequest> recordRequests = List.of(
                 request(HttpMethod.GET, CustomerController.BASE_PATH),
                 request(HttpMethod.POST,
@@ -771,26 +805,35 @@ class InternalApiSecurityConfigTest {
     }
 
     /**
-     * Verifies the two end-user operations that hang below the account address are not claimed by this
-     * chain.
+     * Verifies the three end-user operations that share the account prefix are not claimed by this chain.
      *
      * <p>Assumptions: they are asserted explicitly rather than left to the deeper-path case above, because
-     * these two are REAL mounted routes rather than hypothetical ones. A matcher widened to a subtree
-     * pattern would claim both, and the symptom -- an account view that answers 403 to the very user whose
-     * screen it is -- would be attributed to the token or the group long before the chain.</p>
+     * these three are REAL mounted routes rather than hypothetical ones. A matcher widened to a subtree
+     * pattern would claim all three, and the symptom -- an account view that answers 403 to the very user
+     * whose screen it is -- would be attributed to the token or the group long before the chain.</p>
+     *
+     * <p>Refactoring Rationale: all three are now POSTs on fixed sub-paths of the account prefix, where two
+     * were keyed GETs and the third a keyed PUT. They moved because a path segment is written verbatim into
+     * the load balancer's access record, and this chain's own address is a POST too -- so the separation
+     * that used to fall out of the METHOD differing now rests entirely on the SUB-PATH differing, which is
+     * exactly why each of the three is named here rather than one standing for the family.</p>
      */
     @Test
-    @DisplayName("the end-user routes below the account address stay on the application chain")
+    @DisplayName("the end-user routes on the account prefix stay on the application chain")
     void theEndUserRoutesBelowTheAccountAddressAreNotClaimed() {
         var matcher = InternalApiSecurityConfig.internalPaths();
 
-        assertThat(matcher.matches(request(HttpMethod.GET,
-                AccountController.BASE_PATH + "/12345678901/view")))
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                AccountController.BASE_PATH + AccountController.VIEW_PATH)))
                 .as("the human account view is an end-user route")
                 .isFalse();
-        assertThat(matcher.matches(request(HttpMethod.GET,
-                AccountController.BASE_PATH + "/12345678901/card-cross-references")))
-                .as("the by-account cross-reference listing is an end-user route")
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                AccountController.BASE_PATH + AccountController.UPDATE_PATH)))
+                .as("the account edit is an end-user route")
+                .isFalse();
+        assertThat(matcher.matches(request(HttpMethod.POST,
+                AccountController.BASE_PATH + AccountController.CARD_XREF_SEARCH_PATH)))
+                .as("the by-account cross-reference walk is an end-user route")
                 .isFalse();
     }
 
@@ -889,7 +932,9 @@ class InternalApiSecurityConfigTest {
                 request(HttpMethod.POST,
                         AccountController.BASE_PATH + AccountController.LOOKUP_PATH),
                 request(HttpMethod.POST,
-                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH));
+                        CustomerController.BASE_PATH + CustomerController.LOOKUP_PATH),
+                request(HttpMethod.POST,
+                        CustomerController.BASE_PATH + CustomerController.DISPLAY_PATH));
         List<MockHttpServletRequest> customerMasterAddresses = List.of(
                 request(HttpMethod.POST,
                         CustomerController.BASE_PATH + CustomerController.RECORD_PATH),

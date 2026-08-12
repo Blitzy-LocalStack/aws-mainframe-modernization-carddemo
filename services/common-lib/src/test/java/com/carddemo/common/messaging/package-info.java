@@ -4,12 +4,28 @@
  *
  * <h2>What is exercised here</h2>
  *
- * <p>Three production types live in the package under test and each has a test class here:
+ * <p>Four production types live in the package under test and each has a test class here:
  * {@code MessagingCorrelationIdTest} and {@code MessageExpiryTest} cover the two value rules described
- * below, and {@code QueueClientBudgetTest} covers the arithmetic relating a queue client's time bounds to
- * the visibility period of the message its handler holds. The first two are about what a single value may
- * contain; the third is about how three values must be ordered against one another, which is why it is
+ * below, {@code QueueClientBudgetTest} covers the arithmetic relating a queue client's time bounds to
+ * the visibility period of the message its handler holds, and {@code RethrowingDigestErrorHandlerTest}
+ * covers what a FAILED delivery records and what it rethrows. The first two are about what a single value
+ * may contain; the third is about how three values must be ordered against one another, which is why it is
  * stated as its own class rather than as further cases on either of the others.</p>
+ *
+ * <p>A fifth class here, {@code MessageSinkSuppressionTest}, has no production type of its own in this
+ * package because its subject is a CONFIGURATION line: the shared defaults switch off one framework logger
+ * by its fully qualified name, and the handler above is the replacement record that line assumes exists.
+ * The two are asserted together in this directory because neither is sufficient alone -- suppressing the
+ * framework record with no replacement makes failures invisible, and adding a replacement without the
+ * suppression leaves the original exposure in place beside it.</p>
+ *
+ * <p>Refactoring Rationale: the handler's rethrow is asserted at least as heavily as its log rendering, and
+ * that balance is deliberate. The pinned starter installs its error-handler stage as a RECOVERY step, so a
+ * handler that returned normally would leave the pipeline result successful and the acknowledgement stage
+ * that runs after it would DELETE the message. A handler edited into swallowing would therefore not lose a
+ * log line, it would lose the message -- no visibility-timeout redelivery, no dead-letter at the fifth
+ * receive -- and no assertion about logging would catch it, which is why the swallow case has cases of its
+ * own.</p>
  *
  * <p>Refactoring Rationale for the third: the budget rule was originally going to be written once per
  * service, inside each queue client's configuration class. Stating it here instead means the comparison

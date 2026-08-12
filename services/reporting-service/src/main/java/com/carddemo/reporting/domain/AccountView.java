@@ -161,13 +161,6 @@ import org.hibernate.annotations.Immutable;
  * two moves with {@code OF TRAN-RECORD} at L365 and L367 of {@code app/cbl/CBTRN03C.cbl}. Every
  * citation in this file therefore names the copybook or the file description that declares the field,
  * and the layout mapped here is scoped to {@code app/cpy/CVACT01Y.cpy} alone.
- *
- * <h2>Documentation contract</h2>
- *
- * <p>Every member below carries a docstring whatever its visibility, because the project's
- * Explainability rule attaches its presence clause to every class and function and names no
- * visibility to exempt. The four rationale labels are used in the plural, unparenthesised, colon-
- * terminated forms that rule declares.
  */
 @Entity
 @Immutable
@@ -483,15 +476,15 @@ public class AccountView {
      * declared at {@code app/cpy/CVACT01Y.cpy} L6; the account identifier and both projected money
      * columns are withheld.</p>
      *
-     * <p>Refactoring Rationale: this rendering carried the account identifier, and its documentation
-     * argued for it on the ground that "the baseline prints it in full on every statement it
-     * produces, at L483 of {@code app/cbl/CBSTM03A.CBL}, so it is not a value this system conceals".
-     * That argument is refuted by the authority it was written against, twice over. A statement is a
-     * document delivered to the account holder, whereas a {@code toString()} is reached from a log
-     * statement, an assertion message and a debugger alike, so what one may print says nothing about
-     * the other; and the omission rule covers account identifiers by name, which leaves no room for a
-     * per-type judgement. The argument is recorded rather than deleted because it is a plausible one
-     * that a future reader could reach again from the same baseline line.</p>
+     * <p>Alternatives Considered: carrying the account identifier here, on the ground that the
+     * baseline prints it in full on every statement it produces, at L483 of
+     * {@code app/cbl/CBSTM03A.CBL}, so it is not a value this system conceals. Rejected twice over by
+     * the authority that argument is read against: a statement is a document delivered to the account
+     * holder, whereas a {@code toString()} is reached from a log statement, an assertion message and a
+     * debugger alike, so what one may print says nothing about the other; and the omission rule covers
+     * account identifiers by name, which leaves no room for a per-type judgement. The alternative is
+     * recorded because it is a plausible one a reader could reach again from the same baseline
+     * line.</p>
      *
      * <p>Trade-offs: the cost is that a log line written from this type cannot be joined to a
      * specific account at all, and it is a real cost. The observability authority names what pays it

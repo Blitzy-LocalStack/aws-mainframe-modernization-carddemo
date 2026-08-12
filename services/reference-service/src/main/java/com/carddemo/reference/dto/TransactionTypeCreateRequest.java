@@ -55,35 +55,29 @@ import jakarta.validation.constraints.Size;
  * {@code app/data/ASCII/trancatg.txt} is the type {@code 01} followed by the category {@code 0001},
  * and a code arriving as {@code 1} rather than {@code 01} would not locate its own categories. The
  * description's trailing blanks are padding to the record length rather than data, which is why the
- * same migration stores it as {@code description VARCHAR(50)}, why
+ * same migration stores it as {@code description VARCHAR(50)} and why
  * {@code app/app-transaction-type-db2/ddl/TRNTYPE.ddl} declares
- * {@code TR_DESCRIPTION VARCHAR(50) NOT NULL} against {@code TR_TYPE CHAR(2) NOT NULL}, and why the
- * DCLGEN host structure {@code dcl/DCLTRTYP.dcl} carries the code as {@code DCL-TR-TYPE PIC X(2)} at
- * its line 38 but generates the description as a length halfword paired with its text. Both members
+ * {@code TR_DESCRIPTION VARCHAR(50) NOT NULL} against {@code TR_TYPE CHAR(2) NOT NULL}. Both members
  * are {@code String} and neither is a numeric type, so a leading zero survives the round trip; a
  * numeric member would admit a sign and an exponent the contract does not, and would discard the
  * leading zero the key depends on.</p>
  *
- * <p>Refactoring Rationale: the {@code FILLER PIC X(08)} the layout carries is not a member of this
- * shape, and the drop is recorded here rather than left to be noticed. {@code app/cpy/CVTRA03Y.cpy}
- * declares it at its line 7 and {@code COTRTUPC.cbl} declares it again at its line 136 inside
- * {@code TTYP-UPDATE-RECORD}; it is the one filler of that record, and {@code X(02)} plus
- * {@code X(50)} plus {@code X(08)} accounts for every one of the sixty bytes both headers declare.
- * Those eight bytes are padding to a positional record length, a need a JSON object does not have: a
- * reader walking a flat record has to know where the next record begins, whereas a member of an
- * object is delimited by the encoding itself. Migration rule T1 makes the drop the rule for every
- * record rather than a choice taken at this one, and requires that it be recorded, which is what this
- * paragraph is for. The seed rows carry zeros in those bytes, so the omission discards no value a
- * caller could have supplied.</p>
+ * <p>Assumptions: the {@code FILLER PIC X(08)} the layout carries is not a member of this shape, and
+ * migration rule T1 requires the drop be recorded rather than left to be noticed.
+ * {@code app/cpy/CVTRA03Y.cpy} declares it at its line 7, and {@code X(02)} plus {@code X(50)} plus
+ * {@code X(08)} accounts for every one of the sixty bytes the record header declares, so nothing is
+ * overlooked by omitting it. Those eight bytes pad a positional record length, which a JSON object has
+ * no need of, and the seed rows carry zeros in them, so the omission discards no value a caller could
+ * have supplied.</p>
  *
  * <p>Assumptions: no action-code member exists here and none belongs here, because the two action
  * domains the baseline maintains are not one domain and merging them is the likely way such a member
  * would arrive. The online row-selection domain admits exactly {@code 'D'} and {@code 'U'}, declared
  * as {@code 88 SELECT-OK VALUES 'D', 'U'} at line 183 of
- * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}. The batch dispatch domain admits
- * {@code 'A'} at line 111 of {@code COBTUPDT.cbl}, {@code 'U'} at line 114, {@code 'D'} at line 117
- * and {@code '*'} at line 120, the last standing for an input line to ignore rather than for an
- * action at all. One enumeration covering both would admit an add on a screen that offers no add,
+ * {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl}. The batch dispatch domain admits {@code 'A'},
+ * {@code 'U'}, {@code 'D'} and {@code '*'} from line 111 of {@code COBTUPDT.cbl} onward, the last
+ * standing for an input line to ignore rather than for an action at all. One enumeration covering both
+ * would admit an add on a screen that offers no add,
  * and a selection character in a file that has no screen. Here the action is neither character: it is
  * the POST method on the collection route, so no discriminator is carried and none is to be added.</p>
  *
@@ -92,17 +86,15 @@ import jakarta.validation.constraints.Size;
  * {@code com.carddemo.common.validation.FieldValidationFlag} state, and that mapping is owned by
  * {@code com.carddemo.common.error.GlobalExceptionHandler}, which {@code ReferenceApplication}
  * imports -- this module declares no second advice, because two advices competing for one exception
- * resolve by a precedence a reader cannot see. Two properties of that flag are counter-intuitive
- * enough to invert by accident. The valid state is the low-value character and not the digit zero:
- * {@code COTRTUPC.cbl} declares {@code 88 FLG-TRANFILTER-ISVALID VALUE LOW-VALUES} at its line 95,
- * beside {@code 88 FLG-TRANFILTER-NOT-OK VALUE '0'} at line 96 and
- * {@code 88 FLG-TRANFILTER-BLANK VALUE 'B'} at line 97. And the digit zero carries the opposite
- * polarity one copybook away, where {@code app/app-transaction-type-db2/cpy/CSDB2RWY.cpy} declares
- * {@code 88 WS-DB2-OK VALUE '0'} against {@code 88 WS-DB2-ERROR VALUE '1'} -- zero means OK in that
- * family and not-OK in this one, so no assumption about what zero means may travel between them.
- * Blank is a subset of error rather than a third peer state, because {@code app/cpy/CSSETATY.cpy}
- * tests the two together in one disjunction at its lines 18 and 19, which is why a consumer asks
- * {@code FieldValidationFlag.isError()} and never compares against a constant.</p>
+ * resolve by a precedence a reader cannot see. Two properties of that flag invert by accident. The
+ * valid state is the LOW-VALUE character and not the digit zero -- {@code COTRTUPC.cbl} line 95
+ * declares {@code 88 FLG-TRANFILTER-ISVALID VALUE LOW-VALUES} beside
+ * {@code 88 FLG-TRANFILTER-NOT-OK VALUE '0'} -- while one copybook away
+ * {@code app/app-transaction-type-db2/cpy/CSDB2RWY.cpy} declares {@code 88 WS-DB2-OK VALUE '0'}, so no
+ * assumption about what zero means may travel between the two families. And blank is a subset of error
+ * rather than a third peer state, because {@code app/cpy/CSSETATY.cpy} tests the two together in one
+ * disjunction, which is why a consumer asks {@code FieldValidationFlag.isError()} and never compares
+ * against a constant.</p>
  *
  * <p>Assumptions: the baseline separates a key failure from a value failure structurally, and the two
  * are reported as different kinds of thing for that reason. {@code COTRTUPC.cbl} declares the code's
@@ -114,30 +106,16 @@ import jakarta.validation.constraints.Size;
  * two into one undifferentiated list would invite a caller to resubmit a reworded description while
  * the code that made the request unanswerable is still wrong.</p>
  *
- * <p>Assumptions: the presentation the baseline drives from those flags does not travel, and two of
- * its parts are named so that neither is looked for in this shape. {@code CSSETATY.cpy} gates its
- * highlight on {@code CDEMO-PGM-REENTER} at its line 20, a re-entry discriminator held in the
- * session structure that a stateless handler has no equivalent of and no use for, so error
- * presentation is driven by the response body alone. And the asterisk it moves for a blank field at
- * its lines 24 and 25 goes to the map's output subfield while the colour at lines 21 and 22 goes to
- * the attribute subfield: those are two different targets, and the asterisk is a rendering constant
- * rather than a flag value, so it is published on {@code FieldValidationFlag} and appears in no
- * member here. The aggregate sentence accompanying the array is held to seventy-five characters,
- * {@code ApiError.MESSAGE_RENDERING_WIDTH}, read from {@code CCARD-ERROR-MSG PIC X(75)} at line 28 of
- * {@code app/cpy/CVCRD01Y.cpy} and {@code CCARD-RETURN-MSG PIC X(75)} at line 29 beside it -- not the
- * {@code ERRMSGI PIC X(78)} the screen map declares at line 78 of {@code cpy-bms/COTRTUP.cpy}, which
- * is the field a terminal pads a message into, and not the {@code WS-RETURN-MSG PIC X(80)} that
- * {@code COBTUPDT.cbl} declares at its line 61, which is a batch console width from a separate
- * regime.</p>
- *
- * <p>Parameters, return values and exceptions at the type level: the two record components are this
- * type's parameters and each carries its own at-clause below. A type declaration returns nothing and
- * raises nothing, so no return or exception at-clause belongs here, and the canonical accessors the
- * record form supplies return their component unchanged, which is the trivial case the
- * Explainability rule admits a single line for. Stating that inapplicability rather than passing over
- * it in silence is deliberate: the same rule counts a docstring omitting parameters or return values
- * among its forbidden patterns, so a reader has to be able to tell a declared inapplicability from an
- * oversight.</p>
+ * <p>Assumptions: the presentation the baseline drives from those flags does not travel.
+ * {@code CSSETATY.cpy} gates its highlight on the session structure's re-entry discriminator, which a
+ * stateless handler has no equivalent of, so error presentation is driven by the response body alone;
+ * and the asterisk it moves for a blank field targets the map's output subfield rather than the
+ * attribute subfield, making it a rendering constant rather than a flag value, so it is published on
+ * {@code FieldValidationFlag} and appears in no member here. The aggregate sentence accompanying the
+ * array is held to seventy-five characters, {@code ApiError.MESSAGE_RENDERING_WIDTH}, read from
+ * {@code CCARD-ERROR-MSG PIC X(75)} at line 28 of {@code app/cpy/CVCRD01Y.cpy} -- not the
+ * {@code ERRMSGI PIC X(78)} a screen map declares, which is the field a terminal pads a message into,
+ * and not the {@code WS-RETURN-MSG PIC X(80)} of the batch console, which is a separate regime.</p>
  *
  * <p>Every baseline artifact cited above is read as the specification for this migration and is never
  * modified. Where this context's behaviour departs from the baseline's, the departure is recorded in

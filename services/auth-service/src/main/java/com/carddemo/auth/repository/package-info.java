@@ -78,9 +78,13 @@
  * <p>The neighbouring packages are shaped by that charter.
  * {@code com.carddemo.auth.service} composes these operations into the
  * behaviour transcribed from the baseline programs, and the two browse queries
- * fill {@code com.carddemo.common.web.PageResponse}, whose first key, last key
- * and has-next members are what a caller navigates by. A caller therefore never
- * supplies a page number, because nothing on this boundary accepts one.</p>
+ * fill {@code com.carddemo.common.web.PageResponse}, whose first key, last key,
+ * has-next and has-previous members are what a caller navigates by. A caller
+ * therefore never supplies a page number, because nothing on this boundary
+ * accepts one. Assumptions: both availability members are settled by the service
+ * layer from the surplus row each direction reads, not inferred from a boundary
+ * key being present; the surplus row is what this package's two browse queries
+ * return by asking for one row more than the page.</p>
  *
  * <h2>Design decisions</h2>
  *

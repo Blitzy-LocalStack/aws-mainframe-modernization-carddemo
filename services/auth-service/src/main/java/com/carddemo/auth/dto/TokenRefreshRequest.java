@@ -36,12 +36,33 @@ import jakarta.validation.constraints.Size;
  * deserialised from the contract's property by name and would still hold the characters while the
  * exchange ran.
  *
- * <p>Assumptions: no upper bound is declared on the token, matching the committed contract, which
- * declares {@code minLength: 1} on it and no maximum. The value is opaque and provider-sized, and a
- * bound guessed here would refuse a token the pool had legitimately issued -- which for this operation
- * means locking a caller out until it signs on again with a credential it may no longer be holding. The
- * cost is that an oversized body is refused by the transport's own request-size limit rather than by a
- * field constraint, which is one hop later than this record would refuse it.
+ * <h2>The two bounds on this body, and which one refuses first</h2>
+ *
+ * <p>Assumptions: the token carries a deliberately generous maximum rather than none, and the choice is
+ * asymmetric on purpose. The value is opaque and provider-sized, so a bound set near the largest token
+ * the pool has been observed to issue would eventually refuse one it had legitimately issued -- which on
+ * this operation means locking a caller out until it signs on again with a credential it may no longer
+ * be holding. Accepting an over-long value costs only the bytes, and those are already bounded by the
+ * control described next. {@link #REFRESH_TOKEN_MAX_LENGTH} is therefore several times the largest token
+ * observed and an eighth of the body bound, so the field bound refuses a value that is implausible while
+ * being unable to refuse one that is merely large.
+ *
+ * <p>Refactoring Rationale: this paragraph previously declared NO bound at all and justified the absence
+ * by saying an oversized body would be refused by the transport's own request-size limit, one hop later
+ * than a field constraint. That was false in both halves. No such limit existed: the servlet container's
+ * post-size setting bounds {@code application/x-www-form-urlencoded} data, which this operation does not
+ * accept, and neither the edge nor any service configuration named a body size -- so an unbounded JSON
+ * body reached the deserialiser on the one operation in this service that requires no credential to
+ * reach. And the throttling that did exist limits how OFTEN a caller may call, not how many bytes one
+ * call may carry, so it does not substitute for either bound.
+ *
+ * <p>Assumptions: the real controls are now two, and they are ordered. First
+ * {@code com.carddemo.common.web.RequestBodySizeFilter}, registered by the shared kernel for every path
+ * in every service, refuses a request whose whole body exceeds its configured ceiling -- before the body
+ * is parsed and before the security chain runs, so an unauthenticated caller cannot cause that work.
+ * Second, and only for a body that got past it, the field bound below refuses an implausible token and
+ * names the offending member the way every other field refusal does. The first control answers 413 and
+ * names the request; the second answers 400 and names the field.
  *
  * <h2>Component order</h2>
  *
@@ -62,8 +83,9 @@ import jakarta.validation.constraints.Size;
  *     {@code app/cpy/CSUSR01Y.cpy} line 18 and the maximum the committed schema declares. A token
  *     presented against a different identifier is refused by the pool, reported as 401
  * @param refreshToken the refresh token a previous sign-on returned, a {@code String} that must not be
- *     blank and is otherwise unbounded here for the reason recorded above, replayed unaltered. It
- *     travels in this request only, appears in no response, and is never persisted or logged
+ *     blank and is at most {@link #REFRESH_TOKEN_MAX_LENGTH} characters for the reason recorded above,
+ *     replayed unaltered. It travels in this request only, appears in no response, and is never
+ *     persisted or logged
  */
 // WHY : Assumptions: both components publish the package's non-whitespace pattern into the generated
 //       document beside their non-blank constraint, and the committed schema declares the same facet on
@@ -77,7 +99,9 @@ public record TokenRefreshRequest(
         @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG) String userId,
         @NotBlank(message = MESSAGE_REFRESH_TOKEN_REQUIRED)
-        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN) String refreshToken) {
+        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
+        @Size(max = REFRESH_TOKEN_MAX_LENGTH, message = MESSAGE_REFRESH_TOKEN_TOO_LONG)
+        String refreshToken) {
 
     /**
      * The sentence reported when the identifier is absent from the renewal.
@@ -110,6 +134,41 @@ public record TokenRefreshRequest(
      */
     private static final String MESSAGE_REFRESH_TOKEN_REQUIRED =
             "Please sign on again to renew your session ...";
+
+    /**
+     * The greatest number of characters a submitted refresh token may carry.
+     *
+     * <p>Assumptions: the figure is chosen for the asymmetry recorded in this record's type
+     * documentation rather than measured from a published maximum, because the provider publishes none.
+     * Tokens this pool issues are on the order of one to two thousand characters, so eight thousand one
+     * hundred and ninety-two is several times the largest observed and cannot refuse one the pool
+     * legitimately issued; it is also an eighth of the shared body ceiling, which keeps the two controls
+     * ordered rather than coincident.
+     *
+     * <p>Alternatives Considered: a bound near the observed length, on the reasoning that a tighter
+     * bound refuses more. Rejected because the two failures are not comparable: a bound that is too
+     * tight refuses a caller holding a valid token and cannot be worked around, whereas a bound that is
+     * too loose admits a longer invalid value whose only cost is the bytes -- and those are already
+     * refused above the body ceiling by a control that runs before this one.
+     */
+    private static final int REFRESH_TOKEN_MAX_LENGTH = 8192;
+
+    /**
+     * The sentence reported when the submitted token exceeds its declared maximum.
+     *
+     * <p>Assumptions: it names the number, in the same shape as the sibling sentence for the identifier,
+     * and the distinction from {@link #MESSAGE_REFRESH_TOKEN_REQUIRED} is deliberate. That sentence
+     * withholds the token's shape because describing the pool's mechanics to an unauthenticated caller
+     * buys nothing; a maximum is not the pool's mechanics but this API's own published facet, declared in
+     * the committed contract where any caller can already read it, so naming it here tells an integrator
+     * which of the two bounds refused the call.
+     *
+     * <p>Assumptions: authored for the target on the same footing as the identifier's overflow sentence
+     * -- a reference screen field cannot overflow its own declared width, so the condition has no
+     * reference branch to reproduce.
+     */
+    private static final String MESSAGE_REFRESH_TOKEN_TOO_LONG =
+            "Refresh token must be at most " + REFRESH_TOKEN_MAX_LENGTH + " characters ...";
 
     /**
      * The number of positions the reference declares for a user identifier.

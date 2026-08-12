@@ -12,27 +12,41 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Verifies that the value entering a generated transaction identifier is always numeric.
+ * Verifies that one business date resolves to exactly one ten-digit dataset-key prefix.
  *
- * <p>Refactoring Rationale: this class exists because of a specific defect with a delayed symptom, and
- * the assertions below are shaped by that timing rather than by the shape of the method under test.
- * Identifier construction used to read the business-date token verbatim, on the correct observation that
- * {@code app/cbl/CBACT04C.cbl} lines 476 to 480 concatenate the parameter as supplied. The baseline's own
- * parameter is compact and numeric -- {@code app/jcl/INTCALC.jcl} line 22 injects
- * {@code PARM='2022071800'} -- so its identifiers are sixteen digits. This module's entry point also
- * accepts a SEPARATED token of the same width, because {@code DatasetGeneration.partitionDate()} resolves
- * both layouts, and a separated token concatenated as supplied produces {@code 2024-01-15000001}: the
- * right length, and not a number.</p>
+ * <p>Purpose: the export and import jobs place this value in an object key so a staged generation is
+ * addressable by the day it was produced for. An object key is listed and compared as text, so two
+ * spellings of one day would be two prefixes and a run started as {@code 2024-01-15} would not find the
+ * generation a run started as {@code 2024011500} wrote. The module's entry point accepts both layouts,
+ * because {@code DatasetGeneration.partitionDate()} resolves both and documents both as supported, so
+ * the key has to be single-valued across them and this is the one place that is arranged.</p>
  *
- * <p>Assumptions: that identifier stores cleanly and is not detectably wrong until something reads it
- * back arithmetically. Because the column is {@code CHAR(16)} and orders lexicographically, a
- * date-prefixed identifier sorts above every sequence-format one, so after one night's interest run it
- * became the stored maximum -- and the interactive add and bill-payment paths, which derived their next
- * key from that maximum, then failed on a numeric parse. The failure therefore appeared a day after the
- * change that caused it, in a different service, on a path that had not been touched. That is why the
- * guarantee is asserted here at the point of composition rather than only at the point of consumption.</p>
+ * <p>Refactoring Rationale: this class was charted as verifying that "the value entering a generated
+ * TRANSACTION IDENTIFIER is always numeric", and that charter is withdrawn because the premise under it
+ * was false. It held that a separated token had no baseline counterpart, so normalising one could not
+ * diverge. The baseline has a counterpart: {@code app/cbl/CBACT04C.cbl} lines 476 to 480 string the
+ * parameter and the suffix {@code DELIMITED BY SIZE}, copying all ten characters of
+ * {@code PARM-DATE PIC X(10)} verbatim with no normalisation in the program, and the committed golden
+ * master for a separated parameter is that concatenation --
+ * {@code tests/golden/interest/happy_path/transact.expected} carries {@code 2024-01-15000001} at bytes 1
+ * to 16, which that scenario's README documents at line 161. Normalising the interest identifier would
+ * break golden-master parity on the one job the oracle pins byte for byte, so
+ * {@code InterestCalculationService} reads the raw token and this method has nothing to do with it.</p>
+ *
+ * <p>Assumptions: the assertions themselves are unchanged and are all about the METHOD -- a compact
+ * token returned byte for byte, a separated one normalised, ten digits always, and an unrecognised
+ * layout refused rather than passed through. Only the reason they matter changed, so they are re-based
+ * rather than rewritten; deleting a correct assertion because its stated motive was wrong would lose
+ * coverage to a documentation fix.</p>
+ *
+ * <p>Assumptions: the hazard the withdrawn charter described was real and is closed elsewhere. A
+ * date-prefixed identifier is not a number, the column is {@code CHAR(16)} and orders lexicographically,
+ * so such a value became the stored maximum after one night's interest run and the interactive add and
+ * bill-payment paths, which derived their next key from that maximum, failed on a numeric parse. Those
+ * paths now allocate from {@code ledger.transaction_id_seq} and parse no stored identifier at all, which
+ * is where the hazard is closed -- not here.</p>
  */
-@DisplayName("the business-date identifier prefix")
+@DisplayName("the business-date dataset-key prefix")
 class BusinessDateIdentifierPrefixTest {
 
     /**
@@ -105,26 +119,30 @@ class BusinessDateIdentifierPrefixTest {
     }
 
     /**
-     * A composed identifier is sixteen digits and parses as a number.
+     * Two spellings of one day resolve to one prefix, so one day addresses one generation.
      *
-     * <p>Refactoring Rationale: this asserts the exact condition that used to fail, and it asserts it
-     * against the SEPARATED layout specifically, because the compact layout never failed. The parse is
-     * performed here even though production no longer parses a stored identifier on the add path, and the
-     * redundancy is deliberate: the property being protected is that a stored identifier remains numeric,
-     * and some future consumer may reasonably rely on it again.</p>
+     * <p>Refactoring Rationale: this case asserted that a separated token composes a sixteen-digit
+     * TRANSACTION IDENTIFIER, which production does not compose and must not -- the interest identifier
+     * is the verbatim concatenation the golden master pins. What survives from it is the property that
+     * actually matters for the method's real consumer, and it is now asserted directly: the two accepted
+     * layouts of one day agree on the prefix. The previous formulation asserted that agreement only
+     * implicitly, by naming one expected string, so a normalisation that mapped BOTH layouts to some
+     * third value would have failed it for the right reason by accident rather than by design.</p>
+     *
+     * <p>Assumptions: the compact side of the comparison is the token the baseline's own driver injects,
+     * so the agreement is with the reference's spelling of the day and not merely internal.</p>
      */
     @Test
-    @DisplayName("composes a sixteen-digit identifier from a separated token")
-    void composedIdentifierFromSeparatedTokenIsNumeric() {
-        // WHY : Assumptions: the suffix is rendered to six digits the way the reference renders it --
-        //       WS-TRANID-SUFFIX PIC 9(06) at app/cbl/CBACT04C.cbl:173 is a zero-suppressed-free numeric
-        //       display field, so 1 occupies all six positions as 000001.
-        String identifier = new BusinessDate("2024-01-15").identifierPrefix()
-                + String.format("%06d", 1);
+    @DisplayName("resolves both accepted spellings of one day to the same prefix")
+    void bothSpellingsOfOneDayResolveToOnePrefix() {
+        String fromSeparated = new BusinessDate("2022-07-18").identifierPrefix();
+        String fromCompact = new BusinessDate("2022071800").identifierPrefix();
 
-        assertThat(identifier).isEqualTo("2024011500000001");
-        assertThat(identifier).hasSize(16).containsOnlyDigits();
-        assertThat(Long.parseLong(identifier)).isPositive();
+        assertThat(fromSeparated)
+                .as("one day, one dataset-key prefix, whichever layout the operator supplied")
+                .isEqualTo(fromCompact)
+                .isEqualTo("2022071800");
+        assertThat(fromSeparated).hasSize(PREFIX_WIDTH).containsOnlyDigits();
     }
 
     /**

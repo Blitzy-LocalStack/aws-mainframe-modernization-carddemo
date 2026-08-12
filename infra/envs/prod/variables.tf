@@ -27,13 +27,11 @@
 #   `cloudfront_api_connect_src_origins`, `image_tag`, `github_repository`,
 #   `github_oidc_provider_arn`, `mask_hmac_secret_arn`,
 #   `permissions_boundary_arn` and `alarm_email_endpoints`.
-#   WHY (Refactoring Rationale): this line said "twenty-nine, five required".
-#   Both figures were stale, and the required count moved again when
-#   `alarm_email_endpoints` stopped defaulting to a value held in this
-#   repository -- an alarm destination is operator-supplied, so it has no
-#   defensible default. The count is stated here rather than left to be counted
-#   from the table below, because the table is what a reader consults for one
-#   input and this line is what they consult before a first apply.
+#   Assumptions: `alarm_email_endpoints` is required rather than defaulted
+#   because an alarm destination is operator-supplied and no value held in this
+#   repository is a defensible one. The count is stated here rather than left to
+#   be counted from the table below, because the table is what a reader consults
+#   for one input and this line is what they consult before a first apply.
 #   The table that follows is a reading aid for the same declarations and is not
 #   exhaustive; each `variable` block below carries the authoritative type,
 #   description and validation for its own input.
@@ -841,10 +839,20 @@ variable "image_digests" {
         "authorization-service",
         "reporting-service",
         "data-migration",
+        "aws-otel-collector",
       ], artifact)
     ])
-    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment builds: the eight services plus data-migration. A key that names no repository would be silently ignored."
+    error_message = "Every image_digests key must name one of the ten ECR artifacts this deployment publishes: the eight services and data-migration, which it builds, plus aws-otel-collector, which it mirrors. A key that names no repository would be silently ignored."
   }
+
+  # WHY : Refactoring Rationale: `aws-otel-collector` was added to the admissible
+  #       keys, and it is the one entry this deployment does not BUILD. The mirror
+  #       step in .github/workflows/deploy.yml records the digest it pushed, and
+  #       main.tf prefers that digest for the telemetry sidecar exactly as it does
+  #       for the eight services -- so without this key the value would be rejected
+  #       by the check above and the sidecar would stay on its tag alone. `ui` is
+  #       still absent on purpose: the browser bundle is published to S3 and its
+  #       image runs no ECS task, so a digest for it would configure nothing.
 }
 
 # WHY : Assumptions: an ACM certificate ARN identifies the listener credential

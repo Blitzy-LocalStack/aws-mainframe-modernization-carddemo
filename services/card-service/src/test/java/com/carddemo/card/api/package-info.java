@@ -65,14 +65,13 @@
  *       another and the blank field state kept distinguishable from the unacceptable one.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: this charter stated that "two test classes execute here" and named two
- * of them, while {@code CardUpdateHttpValidationTest}, 445 lines declaring 8 cases, stood beside it
- * as a third that no sentence here accounted for. The claim was
- * replaced with the marker line above rather than merely incremented, because a count written in
- * prose alone is invisible to everything except a reader comparing the paragraph against a directory
- * listing, and this package is not the first place in the tree where such a count drifted. A further
- * class arriving here without an entry now fails the build rather than quietly making this section
- * wrong, which is what the fourth entry above was added under rather than beside.</p>
+ * <p>Assumptions: the roster is stated as the MARKER LINE above rather than as a count in prose,
+ * because a prose count is invisible to everything except a reader comparing the paragraph against a
+ * directory listing. The marker and the entries under it are measured against this directory on every
+ * build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a further class arriving here without an entry fails the build rather than quietly making this
+ * section wrong.</p>
  *
  * <h2>The boundary this package holds, and the four it does not</h2>
  *
@@ -201,8 +200,7 @@
  * dispatchers are assembled from constructors, and {@code CardControllerTest} registers its own
  * configuration class into a context it refreshes itself, supplying the two group names as the shared
  * converter's compiled constants rather than as properties. This is recorded because that overlay
- * names a reader in this package at its lines 28, 479 and 491 -- the name is
- * {@code CardControllerTest} and the file now exists -- so a maintainer could reasonably expect a
+ * names {@code CardControllerTest} among its readers, so a maintainer could reasonably expect a
  * property set there, an issuer location or a transport setting, to influence what that class does. It
  * does not, and a value changed there to steer a result here would have no effect at all. What the
  * overlay's own notes describe is nevertheless honoured: the substituted decoder is present for exactly

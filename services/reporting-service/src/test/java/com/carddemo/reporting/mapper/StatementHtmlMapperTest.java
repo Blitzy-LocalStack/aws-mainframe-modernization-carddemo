@@ -294,14 +294,12 @@ class StatementHtmlMapperTest {
      * at line 560 of {@code app/cbl/CBSTM03A.CBL} provably drops content rather than happening to fit;
      * and the 51st character onward is what a re-derivation from the wrong source would keep.</p>
      *
-     * <p>Refactoring Rationale: this paragraph said 60 and the literal below measures 59. The figure is
-     * load-bearing rather than decorative, because the whole point of the constant is that it EXCEEDS
-     * the fifty the markup cell keeps, and the nine dropped characters are named elsewhere in this class
-     * as the 51st through 59th. Five other sites already stated 59 correctly, so this one paragraph
-     * disagreed with the rest of the file and with the literal it introduces; a reader reconciling them
-     * would have had to count the string by hand to learn which was right. The narrowing claim itself is
-     * unaffected -- 59 is greater than 50 exactly as 60 would have been -- which is precisely why no
-     * assertion failed and why the figure had to be measured rather than trusted.</p>
+     * <p>Assumptions: the figure 59 is measured from the literal below rather than restated, and it is
+     * load-bearing rather than decorative: the constant exists precisely because it EXCEEDS the fifty
+     * the markup cell keeps, and the nine dropped characters are named elsewhere in this class as the
+     * 51st through 59th. A figure carried in prose beside the string it describes is the kind of claim
+     * no assertion can fail on -- any value above fifty satisfies the narrowing -- so it is stated here
+     * only where a reader can count it against the literal.</p>
      */
     private static final String OVER_WIDE_NAME_TEXT =
             "ANNA-MARIE ELISABETH VON HOHENBERG-SCHWARZENSTEIN THE THIRD";
@@ -1428,8 +1426,8 @@ class StatementHtmlMapperTest {
         //       ASTERISK, and no asterisk occurs in the data these items carry, so the delimiter is
         //       never found and the concatenation consumes the whole item. This is an idiomatic COBOL
         //       whole-field copy and not a trim; reading it as a trim would strip the declared padding
-        //       out of three columns and pull the closing tag of every transaction row left, so the
-        //       three columns of the table would no longer line up down the document.
+        //       out of three columns and pull the closing tag of every transaction row left, leaving the
+        //       three columns of the table misaligned down the document.
         assertThat(rendered)
                 .as("%s is transferred whole", site.label())
                 .isEqualTo(padded)
@@ -2559,11 +2557,11 @@ class StatementHtmlMapperTest {
      * second statement of the same fact -- correct today and free to drift the moment the shared
      * encoder changed a spelling. This case makes them a MIRROR that fails loudly instead.</p>
      *
-     * <p>Refactoring Rationale: the mapper used to hold its own five-character replacement table, and
-     * the two tables were byte-identical by coincidence rather than by construction: nothing compared
-     * them, so a correction applied to the shared encoder would have left this artifact emitting the
-     * old spelling. The table here has been removed and the encoding delegated; what remains is the
-     * published vocabulary, and this case is what binds it to the implementation.</p>
+     * <p>Alternatives Considered: the mapper holding its own five-character replacement table beside the
+     * shared encoder's. Rejected because two tables are byte-identical only by coincidence, not by
+     * construction: nothing compares them, so a correction applied to the shared encoder would leave this
+     * artifact emitting the old spelling. The encoding is delegated and only the published vocabulary
+     * remains here, which this case binds to the implementation.</p>
      *
      * <p>Assumptions: the encoder is called on the bare character rather than through a cell, because
      * the point of comparison is the SPELLING and a cell would add prefix, padding and record framing

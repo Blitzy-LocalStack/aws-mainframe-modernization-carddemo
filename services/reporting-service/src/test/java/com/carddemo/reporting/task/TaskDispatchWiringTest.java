@@ -29,6 +29,7 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 /**
  * Pins that every task name the orchestrator dispatches resolves to a bean that can actually run, and
@@ -135,13 +136,18 @@ class TaskDispatchWiringTest {
     @DisplayName("the nightly report task covers its business date as a one-day range")
     void theNightlyReportTaskCoversOneDay() throws Exception {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
-        when(publisher.publish(any(), any(), any())).thenReturn(summary());
+        when(publisher.publishDaily(any())).thenReturn(published());
 
         new GenerateReportsTask(publisher).run(Map.of(
                 ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
 
+        // WHY : Refactoring Rationale: the nightly task is verified against publishDaily rather than
+        //       against the four-argument publication, because the one-day range and the daily type
+        //       token belong together and the publisher now states that pairing once. Verifying the
+        //       general form here would let a future caller pair the daily token with a period and still
+        //       satisfy this case.
         LocalDate businessDate = LocalDate.parse(DATE_TOKEN);
-        verify(publisher).publish(businessDate, businessDate, businessDate);
+        verify(publisher).publishDaily(businessDate);
     }
 
     /**
@@ -153,14 +159,17 @@ class TaskDispatchWiringTest {
     @DisplayName("the on-demand task covers the requested range and keys under its end")
     void theOnDemandTaskCoversTheRequestedRange() throws Exception {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
-        when(publisher.publish(any(), any(), any())).thenReturn(summary());
+        when(publisher.publish(any(), any(), any(), any())).thenReturn(published());
 
         new GenerateAdHocReportTask(publisher).run(Map.of(
                 ReportingTaskRunner.START_DATE_PARAMETER, "2022-07-01",
                 ReportingTaskRunner.END_DATE_PARAMETER, DATE_TOKEN,
                 ReportingTaskRunner.REPORT_TYPE_PARAMETER, "Custom"));
 
-        verify(publisher).publish(
+        // WHY : Assumptions: the requested TYPE is verified alongside the range, because the type is now
+        //       part of the artifact key and a task that dropped it would publish an on-demand report
+        //       over the key some other type owns.
+        verify(publisher).publish("Custom",
                 LocalDate.of(2022, 7, 1), LocalDate.parse(DATE_TOKEN), LocalDate.parse(DATE_TOKEN));
     }
 
@@ -201,29 +210,152 @@ class TaskDispatchWiringTest {
     //       put -- which is why this case can read the key from a put request rather than having to
     //       drive a five-mebibyte artifact to reach a completion call.
     /**
-     * Asserts that a report artifact is keyed under the run date's partition and the fixed object name.
+     * Asserts that a report artifact key names the run date, the type and both range bounds.
      *
      * @throws Exception if the publication raises, which the assertion below would not reach
      */
     @Test
-    @DisplayName("a report artifact is keyed under the run date's date partition")
-    void aReportArtifactIsKeyedUnderTheRunDate() throws Exception {
+    @DisplayName("a report artifact key names the run date, the report type and both bounds")
+    void aReportArtifactIsKeyedUnderItsFullInputSet() throws Exception {
         TransactionReportService reports = mock(TransactionReportService.class);
         when(reports.generateReport(any(), any(), any())).thenReturn(summary());
-        S3Client s3 = mock(S3Client.class);
+        S3Client s3 = storageAnsweringVersion("v-42");
 
         LocalDate runDate = LocalDate.parse(DATE_TOKEN);
-        new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX)
-                .publish(runDate, runDate, runDate);
+        ReportArtifactPublisher.PublishedArtifact result =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX)
+                        .publish("Custom", LocalDate.of(2022, 7, 1), runDate, runDate);
 
         ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
         verify(s3).putObject(put.capture(), any(RequestBody.class));
+        String expectedKey = REPORT_PREFIX + "dt=" + DATE_TOKEN + "/type=custom/from=2022-07-01/to="
+                + DATE_TOKEN + "/" + ReportArtifactPublisher.REPORT_OBJECT;
         assertThat(put.getValue().bucket()).isEqualTo(BUCKET);
         assertThat(put.getValue().key())
-                .as("the dataset convention keys an artifact under <prefix>dt=<date>/<object>")
-                .isEqualTo(REPORT_PREFIX + "dt=" + DATE_TOKEN + "/"
-                        + ReportArtifactPublisher.REPORT_OBJECT);
+                .as("the key names every input that decides the artifact's content")
+                .isEqualTo(expectedKey);
         verify(s3, never()).createMultipartUpload(any(CreateMultipartUploadRequest.class));
+
+        // WHY : Assumptions: the returned locator is asserted to agree with the key the client was
+        //       handed, rather than merely being non-empty. A locator assembled from a different rule
+        //       than the one the write used would name an object that does not exist, and only holding
+        //       the two to each other detects that.
+        assertThat(result.bucket()).isEqualTo(BUCKET);
+        assertThat(result.key()).isEqualTo(expectedKey);
+        assertThat(result.versionId()).isEqualTo("v-42");
+        assertThat(result.locator()).isEqualTo("s3://" + BUCKET + "/" + expectedKey + "?versionId=v-42");
+        assertThat(result.summary()).isEqualTo(summary());
+    }
+
+    // WHY : Assumptions: the two keys are compared for INEQUALITY, which is the whole content of the
+    //       defect this case exists for. The nightly task keyed on its business date and the on-demand
+    //       task keyed on its range's END date, so an on-demand report over any period ending on a
+    //       nightly date wrote to the nightly artifact's exact key and replaced it silently. Asserting
+    //       each key's shape separately would not have caught that -- both shapes were correct; it was
+    //       their collision that was wrong.
+    /**
+     * Asserts that a period report ending on a nightly date does not overwrite the nightly artifact.
+     *
+     * @throws Exception if either publication raises, which the assertion below would not reach
+     */
+    @Test
+    @DisplayName("a period report ending on a nightly date keys apart from the nightly artifact")
+    void aPeriodReportDoesNotCollideWithTheNightlyArtifact() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        when(reports.generateReport(any(), any(), any())).thenReturn(summary());
+        S3Client s3 = storageAnsweringVersion(null);
+        ReportArtifactPublisher publisher =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+
+        LocalDate runDate = LocalDate.parse(DATE_TOKEN);
+        String nightly = publisher.publishDaily(runDate).key();
+        String period = publisher.publish("monthly", LocalDate.of(2022, 7, 1), runDate, runDate).key();
+
+        assertThat(nightly).isNotEqualTo(period);
+        assertThat(nightly)
+                .as("the scheduled run publishes under its own type token")
+                .contains("type=" + ReportArtifactPublisher.DAILY_REPORT_TYPE);
+        assertThat(period).contains("type=monthly");
+    }
+
+    // WHY : Assumptions: the refusal is asserted to happen BEFORE any generation or storage call, not
+    //       merely to happen. The type reaches an object key, so a value admitted and then rejected
+    //       after the generator had streamed an artifact would already have written it somewhere.
+    /**
+     * Asserts that a report type outside the closed domain is refused before any work starts.
+     *
+     * @throws Exception if the mock setup raises, which the assertion below would not reach
+     */
+    @Test
+    @DisplayName("a report type outside the closed domain is refused before any write")
+    void anUnknownReportTypeIsRefusedBeforeAnyWrite() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        S3Client s3 = mock(S3Client.class);
+        ReportArtifactPublisher publisher =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+        LocalDate runDate = LocalDate.parse(DATE_TOKEN);
+
+        for (String rejected : List.of("", "   ", "quarterly",
+                "Custom\nevent=reporting.report.produced records=0", "../../etc")) {
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .as("the type is part of the object key, so an unknown one is not publishable")
+                    .isThrownBy(() -> publisher.publish(rejected, runDate, runDate, runDate));
+        }
+
+        verify(reports, never()).generateReport(any(), any(), any());
+        verify(s3, never()).putObject(any(PutObjectRequest.class), any(RequestBody.class));
+    }
+
+    // WHY : Assumptions: the four accepted tokens are exercised in a capitalisation an operator might
+    //       type, because the argument travels through a command line and the state machine forwards a
+    //       lower-cased form. One key per report is only true if the canonicalisation holds.
+    /**
+     * Asserts that the accepted types canonicalise to one lower-case token each.
+     *
+     * @throws Exception if a publication raises, which the assertion below would not reach
+     */
+    @Test
+    @DisplayName("an accepted report type canonicalises to one lower-case key token")
+    void anAcceptedReportTypeCanonicalises() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        when(reports.generateReport(any(), any(), any())).thenReturn(summary());
+        S3Client s3 = storageAnsweringVersion(null);
+        ReportArtifactPublisher publisher =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
+        LocalDate runDate = LocalDate.parse(DATE_TOKEN);
+
+        for (String accepted : List.of("MONTHLY", "Yearly", " custom ",
+                ReportArtifactPublisher.DAILY_REPORT_TYPE)) {
+            assertThat(publisher.publish(accepted, runDate, runDate, runDate).key())
+                    .contains("type=" + accepted.trim().toLowerCase(java.util.Locale.ROOT));
+        }
+    }
+
+    // WHY : Assumptions: the absence of a version is asserted as its own case, because the production
+    //       bucket is versioned and every local and test bucket is not -- so the unversioned answer is
+    //       the one a developer meets first, and a locator that appended a null there would name an
+    //       object nothing can fetch.
+    /**
+     * Asserts that an unversioned bucket yields a locator without a version fragment.
+     *
+     * @throws Exception if the publication raises, which the assertion below would not reach
+     */
+    @Test
+    @DisplayName("an unversioned bucket yields a locator carrying no version fragment")
+    void anUnversionedBucketYieldsAPlainLocator() throws Exception {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        when(reports.generateReport(any(), any(), any())).thenReturn(summary());
+        S3Client s3 = storageAnsweringVersion(null);
+
+        LocalDate runDate = LocalDate.parse(DATE_TOKEN);
+        ReportArtifactPublisher.PublishedArtifact result =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX)
+                        .publishDaily(runDate);
+
+        assertThat(result.versionId()).isNull();
+        assertThat(result.locator())
+                .isEqualTo("s3://" + BUCKET + "/" + result.key())
+                .doesNotContain("versionId");
     }
 
     // WHY : Assumptions: the statement task's two artifacts are asserted by KEY and by COUNT, because
@@ -244,7 +376,7 @@ class TaskDispatchWiringTest {
             sink.replaceArtifacts();
             return 0;
         });
-        S3Client s3 = mock(S3Client.class);
+        S3Client s3 = storageAnsweringVersion(null);
 
         new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX)
                 .run(Map.of(ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
@@ -271,7 +403,7 @@ class TaskDispatchWiringTest {
     void theStatementTaskRunsWithoutABusinessDate() throws Exception {
         StatementService statements = mock(StatementService.class);
         when(statements.generateStatements(any())).thenReturn(0);
-        S3Client s3 = mock(S3Client.class);
+        S3Client s3 = storageAnsweringVersion(null);
 
         new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX).run(Map.of());
 
@@ -289,7 +421,7 @@ class TaskDispatchWiringTest {
     @DisplayName("a publication failure propagates out of the task")
     void aPublicationFailurePropagates() throws Exception {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
-        when(publisher.publish(any(), any(), any()))
+        when(publisher.publishDaily(any()))
                 .thenThrow(new IOException("the artifact could not be published"));
 
         assertThatExceptionOfType(IOException.class)
@@ -301,16 +433,22 @@ class TaskDispatchWiringTest {
     //       directly. The sanitiser has its own tests in the shared kernel; what is unproven here is
     //       that this task ROUTES the one caller-supplied string it journals through it, and only a call
     //       carrying a terminator all the way to the log statement can establish that.
+    // WHY : Refactoring Rationale: the publisher is a MOCK here on purpose, and the case is deliberately
+    //       kept even though a real publisher now refuses this value against its closed domain. The two
+    //       controls answer different questions: the domain proves such a value cannot reach an object
+    //       key, and this case proves that the journal line does not carry a caller's raw string even so.
+    //       Deleting it would leave the sanitiser call with no test at all, and a later change that
+    //       widened the domain would remove the remaining protection unnoticed.
     /**
-     * Asserts that a report type carrying a line terminator does not stop the run it names.
+     * Asserts that the on-demand task journals its report type through the sanitiser.
      *
      * @throws Exception if the task raises, which the assertion below would not reach
      */
     @Test
-    @DisplayName("a report type carrying a line terminator is journalled without stopping the run")
+    @DisplayName("a report type carrying a line terminator is journalled through the sanitiser")
     void aReportTypeCarryingATerminatorIsSanitised() throws Exception {
         ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
-        when(publisher.publish(any(), any(), any())).thenReturn(summary());
+        when(publisher.publish(any(), any(), any(), any())).thenReturn(published());
 
         Map<String, String> parameters = new HashMap<>();
         parameters.put(ReportingTaskRunner.START_DATE_PARAMETER, "2022-07-01");
@@ -320,25 +458,30 @@ class TaskDispatchWiringTest {
 
         new GenerateAdHocReportTask(publisher).run(parameters);
 
-        verify(publisher).publish(any(), any(), any());
+        verify(publisher).publish(any(), any(), any(), any());
     }
 
+    // WHY : Refactoring Rationale: this case asserted that an absent report type "does not stop an
+    //       on-demand run", which was true while the type was only journalled. It is now part of the
+    //       artifact key, so a run with no type has nowhere defensible to publish and is refused -- the
+    //       runner already requires the option in any case, so the refusal is reachable only by a caller
+    //       driving the task directly. Asserting the old tolerance would assert that an on-demand report
+    //       can be published under a key that does not say what it is.
     /**
-     * Asserts that an absent report type does not stop an otherwise complete on-demand request.
-     *
-     * @throws Exception if the task raises, which the assertion below would not reach
+     * Asserts that an absent report type is refused, because the artifact key names the type.
      */
     @Test
-    @DisplayName("an absent report type does not stop an on-demand run")
-    void anAbsentReportTypeDoesNotStopTheRun() throws Exception {
-        ReportArtifactPublisher publisher = mock(ReportArtifactPublisher.class);
-        when(publisher.publish(any(), any(), any())).thenReturn(summary());
+    @DisplayName("an absent report type is refused because the artifact key names the type")
+    void anAbsentReportTypeIsRefused() {
+        TransactionReportService reports = mock(TransactionReportService.class);
+        S3Client s3 = mock(S3Client.class);
+        ReportArtifactPublisher publisher =
+                new ReportArtifactPublisher(reports, s3, BUCKET, REPORT_PREFIX);
 
-        new GenerateAdHocReportTask(publisher).run(Map.of(
-                ReportingTaskRunner.START_DATE_PARAMETER, "2022-07-01",
-                ReportingTaskRunner.END_DATE_PARAMETER, DATE_TOKEN));
-
-        verify(publisher).publish(any(), any(), any());
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> new GenerateAdHocReportTask(publisher).run(Map.of(
+                        ReportingTaskRunner.START_DATE_PARAMETER, "2022-07-01",
+                        ReportingTaskRunner.END_DATE_PARAMETER, DATE_TOKEN)));
     }
 
     /**
@@ -349,6 +492,37 @@ class TaskDispatchWiringTest {
     private static TransactionReportService.ReportGenerationSummary summary() {
         return new TransactionReportService.ReportGenerationSummary(
                 12L, 7L, 1L, 2L, Money.of("-1234.56"));
+    }
+
+    /**
+     * Builds one published-artifact locator standing for a completed publication.
+     *
+     * <p>Assumptions: the key here is a stand-in and is deliberately NOT assembled by the rule under
+     * test. A helper that rebuilt the real key would agree with whatever it was copied from, which is the
+     * failure mode the key cases above exist to detect.</p>
+     *
+     * @return the locator
+     */
+    private static ReportArtifactPublisher.PublishedArtifact published() {
+        return new ReportArtifactPublisher.PublishedArtifact(
+                summary(), BUCKET, REPORT_PREFIX + "stand-in/artifact.txt", null);
+    }
+
+    /**
+     * Builds a storage client whose whole-object put answers a given version.
+     *
+     * <p>Assumptions: the put is stubbed rather than left at its default, because a Mockito default
+     * answers {@code null} for the response object and the writer reads a member off it -- so a default
+     * would fail with a null dereference rather than exercising the version capture.</p>
+     *
+     * @param versionId the version to answer, or {@code null} to stand for an unversioned bucket
+     * @return the client
+     */
+    private static S3Client storageAnsweringVersion(String versionId) {
+        S3Client s3 = mock(S3Client.class);
+        when(s3.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+                .thenReturn(PutObjectResponse.builder().versionId(versionId).build());
+        return s3;
     }
 
     /**

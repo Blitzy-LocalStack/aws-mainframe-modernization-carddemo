@@ -11,47 +11,64 @@
  * about what belongs there, and that second half is the half a reader cannot
  * reconstruct from the files.</p>
  *
- * <p>What is present in the tree as this charter is written, enumerated so the
+ * <p>What is present in the tree, enumerated so the
  * distinction above is checkable rather than merely declared: EIGHT
  * subpackages exist, each carrying its own charter, and ALL EIGHT
- * carry at least one test class. {@code api} holds
+ * carry at least one test class. {@code api} holds FOUR --
  * {@code ReferenceApiRoutingContractTest},
- * {@code DateEvaluationDispatcherTest} and
- * {@code ReferenceParameterConstraintTest}. {@code config} holds
- * {@code ReferenceApiContractTest} and
- * {@code SecurityConfigTest}. {@code domain} holds
- * {@code ReferenceKeyCanonicalityTest}. {@code dto} holds
+ * {@code DateEvaluationDispatcherTest},
+ * {@code ReferenceParameterConstraintTest} and
+ * {@code DateConversionRefusalTest}. {@code config} holds THREE --
+ * {@code ReferenceApiContractTest},
+ * {@code SecurityConfigTest} and {@code SqsConfigTest}. {@code domain} holds ONE,
+ * {@code ReferenceKeyCanonicalityTest}. {@code dto} holds TWO --
  * {@code ReferenceWireContractTest} and
- * {@code DomainRefusalDisclosureTest}. {@code fixtures} holds
+ * {@code DomainRefusalDisclosureTest}. {@code fixtures} holds TWO --
  * {@code ReferenceFixtureContractTest} and {@code ReferenceFixtureTest}.
- * {@code mapper} holds {@code DateInquiryReplyMapperTest}. {@code service}
- * holds {@code DateInquiryMessageListenerTest},
- * {@code ReferenceWriteBehaviourTest}, {@code TransactionTypeBrowseTest} and
- * {@code DateConversionServiceTest}. The eighth, {@code repository}, holds
+ * {@code mapper} holds THREE -- {@code DateInquiryReplyMapperTest},
+ * {@code ReferenceDescriptionTrimTest} and {@code TransactionCategoryMapperTest}.
+ * {@code service} holds TEN --
+ * {@code DateInquiryMessageListenerTest},
+ * {@code ReferenceWriteBehaviourTest}, {@code TransactionTypeBrowseTest},
+ * {@code DateConversionServiceTest}, {@code DisclosureGroupServiceTest},
+ * {@code ReferenceBatchUpdateServiceTest},
+ * {@code ReferenceQueueConsumerContractTest},
+ * {@code ReferenceServiceStructureTest}, {@code TransactionCategoryServiceTest} and
+ * {@code TransactionTypeServiceTest}. The eighth, {@code repository}, holds NINE --
  * {@code TransactionTypeRepositoryIT},
  * {@code TransactionCategoryRepositoryIT},
  * {@code DisclosureGroupRepositoryIT},
- * {@code UsPhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT} and
- * {@code UsStateZipPrefixRepositoryIT}, together with the container base type
- * the first of those hosts. That is FIFTEEN classes named {@code Test},
- * collected by Surefire, and SIX named {@code IT}, collected by Failsafe --
- * twenty-one in total. This package root holds this charter and no test class,
- * which makes {@code ReferenceMoneyPathRulesTest}, reserved for it below, a
- * name this charter reserves rather than a file it describes.</p>
+ * {@code UsPhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT},
+ * {@code UsStateZipPrefixRepositoryIT}, {@code PhoneAreaCodeRepositoryIT},
+ * {@code StateRepositoryIT} and {@code StateZipPrefixRepositoryIT}, together with
+ * the container base type the first of those hosts. This package root holds this
+ * charter and {@code ReferenceMoneyPathRulesTest}. That is TWENTY-SIX classes named
+ * {@code Test}, collected by Surefire, and NINE named {@code IT}, collected by
+ * Failsafe -- thirty-five in total.</p>
  *
- * <p>Refactoring Rationale: the enumeration above previously read "SEVEN of the
+ * <p>Refactoring Rationale: the totals above are re-measured, and the two figures they
+ * replaced -- fifteen and six, twenty-one in total -- had gone stale by fourteen classes.
+ * Two further claims of that paragraph had also been overtaken: it described
+ * {@code ReferenceMoneyPathRulesTest} as a name reserved rather than a file, and that file
+ * now sits in this directory, and it credited {@code api}, {@code config},
+ * {@code mapper} and {@code service} with fewer classes than each holds. The per-subpackage
+ * figures are given so a reader re-measuring finds one stale entry rather than one stale
+ * total, and each subpackage charter carries the directory marker line that
+ * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures on every build, which
+ * is where the counting now happens.</p>
+ *
+ * <p>Refactoring Rationale: an earlier revision of the enumeration read "SEVEN of the
  * eight carry at least one test class", listed ten classes, and stated that
  * "this module contributes no class named {@code IT}". Every one of those three
  * claims was false against the tree, and the third was the one that could
  * mislead a reader into a wrong conclusion rather than merely an incomplete
- * one: {@code repository} holds six classes named {@code IT}, so a reader
+ * one: {@code repository} holds nine classes named {@code IT}, so a reader
  * taking this charter at its word would have concluded that this module's
  * Failsafe run collects nothing and that a green {@code mvn test} was therefore
- * the whole of its verification. The recount is stated as two totals rather
+ * the whole of its verification. The totals are stated as two rather
  * than one because the two suffixes are collected by DIFFERENT plugins in
  * different lifecycle phases, and a single total conceals which command runs
- * which half. This paragraph is the one to re-measure when a class is added to
- * any subpackage.</p>
+ * which half.</p>
  *
  * <p>Refactoring Rationale: this enumeration read "seven subpackages exist,
  * each carrying its own charter, and each carries at least one test class",

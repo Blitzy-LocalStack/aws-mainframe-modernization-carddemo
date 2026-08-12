@@ -15,7 +15,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * Asserts that the extract-load and purge diagnostics name no account or customer identifier.
+ * Asserts that the extract-load, unload and purge diagnostics name no account or customer identifier.
  *
  * <h2>Purpose</h2>
  * <p>Refactoring Rationale: seven log templates and one throwable message in {@code LoadService} and
@@ -42,6 +42,18 @@ import org.junit.jupiter.api.Test;
  * path here needs a detail extract with an unresolvable parent, the progress path needs enough windows to
  * cross the log frequency -- so a template on an undriven path would stay unasserted, which is exactly the
  * state that let the identifiers stand. Reading the source asserts every template unconditionally.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: {@code UnloadService} is the THIRD class this asserts over, and its
+ * absence from the first two is why review found two disclosing templates in it after the same finding had
+ * been closed for its two siblings. One template reported the walk's resume key, which is an account
+ * identifier, and the other reported the customer identifier of a row it had passed over -- and carried a
+ * paragraph ARGUING for it, on the ground that the account identifier was the value that was absent so the
+ * customer identifier was the only handle left. A test naming its subjects one at a time is a test that
+ * cannot see the class nobody added, so this covers the whole set of sources that walk the two tables and
+ * report on rows: the loader, the unloader and the purge. Assumptions: the set is enumerated rather than
+ * globbed because a glob over the service package would also reach the request listener and the outbox,
+ * whose admissible complements are a card number's masked form and a message identity rather than a record
+ * ordinal, and a single rule over both groups could only hold by admitting what this one forbids.</p>
  *
  * <p>Alternatives Considered: an ArchUnit rule in {@code common-lib} applied to every service. Rejected
  * for now because the admissible complements differ by context -- an authorization is keyed by date and
@@ -80,15 +92,29 @@ class AuthorizationDiagnosticDisclosureTest {
     /** The main source that purges expired pending authorizations. */
     private static final String PURGE_JOB = "PurgeJob.java";
 
+    /** The main source that writes both pending-authorization extracts back out. */
+    private static final String UNLOAD_SERVICE = "UnloadService.java";
+
+    /**
+     * Every main source whose diagnostics this class governs.
+     *
+     * <p>Assumptions: declared once and read by both of the two set-wide cases below, so a fourth source
+     * added here is covered by both rather than by whichever case its author remembered. That is the
+     * failure this constant exists to prevent: the omission assertion and the still-logs assertion were
+     * two independently written literals, and the class that went uncovered went uncovered in both.</p>
+     */
+    private static final List<String> GOVERNED_SOURCES =
+            List.of(LOAD_SERVICE, PURGE_JOB, UNLOAD_SERVICE);
+
     /**
      * No log template in either class renders an account or customer identifier.
      *
      * @throws AssertionError if any logger invocation names one of the two identifiers
      */
     @Test
-    @DisplayName("no extract-load or purge log template names an account or customer identifier")
+    @DisplayName("no load, unload or purge log template names an account or customer identifier")
     void noLogTemplateNamesAnAccountOrCustomer() {
-        for (String source : List.of(LOAD_SERVICE, PURGE_JOB)) {
+        for (String source : GOVERNED_SOURCES) {
             List<String> disclosing = new ArrayList<>();
             for (String call : loggerInvocations(source)) {
                 if (DISCLOSING_MEMBER.matcher(call).find()) {
@@ -119,6 +145,64 @@ class AuthorizationDiagnosticDisclosureTest {
         assertThat(loggerInvocations(PURGE_JOB))
                 .as("logger invocations in %s", PURGE_JOB)
                 .hasSizeGreaterThanOrEqualTo(6);
+        assertThat(loggerInvocations(UNLOAD_SERVICE))
+                .as("logger invocations in %s", UNLOAD_SERVICE)
+                .hasSizeGreaterThanOrEqualTo(2);
+    }
+
+    /**
+     * Every governed source is a file, so a renamed subject cannot make the set-wide cases vacuous.
+     *
+     * <p>Assumptions: {@link #loggerInvocations(String)} raises on an unreadable path, so a renamed source
+     * already fails the two cases above rather than passing them empty. This case is the direct statement
+     * of the same property, because the failure it produces names the missing file instead of naming an
+     * empty collection of logger invocations -- and the diagnosis of the two is a minute apart.</p>
+     *
+     * @throws AssertionError if any governed source is absent
+     */
+    @Test
+    @DisplayName("every source this class governs is present")
+    void everyGovernedSourceIsPresent() {
+        for (String source : GOVERNED_SOURCES) {
+            assertThat(strippedSource(source))
+                    .as("the source text of %s", source)
+                    .isNotBlank();
+        }
+        assertThat(GOVERNED_SOURCES)
+                .as("the sources whose diagnostics this class governs")
+                .containsExactly(LOAD_SERVICE, PURGE_JOB, UNLOAD_SERVICE);
+    }
+
+    /**
+     * The unload diagnostics report run-local counts where they once reported two identifiers.
+     *
+     * <p>Assumptions: this is asserted as a positive requirement and not only as the absence above,
+     * because withdrawing an identifier from a diagnostic that then says nothing useful trades one defect
+     * for another. The skip line has to locate the occurrence WITHIN the run, which its ordinal does, and
+     * the terminating line has to say how far the run had got, which its three counts do.</p>
+     *
+     * @throws AssertionError if either unload diagnostic loses its run-local replacement
+     */
+    @Test
+    @DisplayName("the unload diagnostics report a run-local ordinal and run-local counts")
+    void theUnloadDiagnosticsReportRunLocalValues() {
+        List<String> skips = new ArrayList<>();
+        List<String> endings = new ArrayList<>();
+        for (String call : loggerInvocations(UNLOAD_SERVICE)) {
+            if (call.contains("root-skipped-unexportable")) {
+                skips.add(call);
+            }
+            if (call.contains("walk-ended-without-resume-key")) {
+                endings.add(call);
+            }
+        }
+        assertThat(skips).as("unload skip diagnostics").hasSize(1);
+        assertThat(skips.get(0)).contains("skippedOrdinal={}");
+        assertThat(endings).as("unload walk-termination diagnostics").hasSize(1);
+        assertThat(endings.get(0))
+                .contains("rootsWritten={}")
+                .contains("childrenWritten={}")
+                .contains("rootsSkipped={}");
     }
 
     /**

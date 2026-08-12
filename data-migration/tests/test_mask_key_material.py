@@ -129,7 +129,7 @@ def test_an_unset_key_falls_back_to_strong_process_material(
             layouts._mask_hmac_key()
         message = str(refused.value)
         assert layouts.ENV_MASK_HMAC_KEY in message
-        # WHY (Assumptions): the refusal must tell an operator how to reach BOTH supported
+        # Assumptions: the refusal must tell an operator how to reach BOTH supported
         #   outcomes, because a message that only demands a key would push someone who wanted
         #   the fallback into inventing one, which is how weak keys get chosen.
         assert "UNSET" in message

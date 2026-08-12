@@ -25,13 +25,10 @@ import org.hibernate.annotations.JdbcTypeCode;
  *
  * <p>Assumptions: {@code CVCUS01Y} is the contract for this context and {@code app/cpy/CUSTREC.cpy} is
  * not, even though the two declare a near-identical 500-byte {@code CUSTOMER-RECORD}. The customer master
- * reader settles it first-hand: {@code app/cbl/CBCUS01C.cbl} line 45 is {@code COPY CVCUS01Y.}, its file
- * record at lines 38 through 40 sums to 500 over a nine-digit key plus 491 bytes of data, and line 32
- * keys the cluster on that identifier. The other copybook names its date field
- * {@code CUST-DOB-YYYYMMDD} at its own line 19, without the two hyphens the extract actually carries, and
- * it is copied by {@code app/cbl/CBSTM03A.CBL} line 55 -- the statement generator, which belongs to the
- * reporting context rather than to this one. Taking offsets from it here would place the date and every
- * field after it at the wrong position while still compiling.</p>
+ * reader settles it: {@code app/cbl/CBCUS01C.cbl} line 45 is {@code COPY CVCUS01Y.}. The other copybook
+ * names its date field without the two hyphens the extract actually carries, and it is copied by the
+ * statement generator, which belongs to the reporting context. Taking offsets from it here would place the
+ * date and every field after it at the wrong position while still compiling.</p>
  *
  * <h2>Target schema</h2>
  * <p>Assumptions: the shape below is the other half of a two-sided contract with
@@ -119,45 +116,39 @@ import org.hibernate.annotations.JdbcTypeCode;
  * <p>Refactoring Rationale: the {@code @Version} column replaces a manual before-image comparison the
  * reference already performs, so this expresses an existing check natively rather than adding a new one.
  * {@code app/cbl/COACTUPC.cbl} snapshots the whole pre-edit customer row into
- * {@code 10 ACUP-OLD-CUST-DATA.} at line 709, inside {@code 05 ACUP-OLD-DETAILS.} which opens at line 669
- * and ends where {@code 05 ACUP-NEW-DETAILS.} begins at line 757; the snapshot's last member is the
- * three-character credit score at lines 754 through 756. Paragraph
- * {@code 9700-CHECK-CHANGE-IN-REC.} at line 4109 then compares the re-read row against that snapshot at
- * lines 4152 through 4191, exiting at line 4193, and is driven from lines 3947 and 3948. On a mismatch it
- * sets the flag declared as {@code 05 WS-DATACHANGED-FLAG PIC X(1).} at line 168, whose two conditions sit
- * at lines 169 and 170. The comparison exists precisely because the read-for-update lock was never held
+ * {@code 10 ACUP-OLD-CUST-DATA.} at line 709, inside the before-image block that opens at line 669.
+ * Paragraph {@code 9700-CHECK-CHANGE-IN-REC.} at line 4109 then compares the re-read row against that
+ * snapshot and, on a mismatch, sets {@code WS-DATACHANGED-FLAG} at line 168 so the write is abandoned. The
+ * comparison exists precisely because the read-for-update lock was never held
  * across client think-time in a pseudo-conversational transaction, which is the same reason a version
  * column is the right native form: both detect a concurrent write after the fact rather than preventing
  * one.</p>
  *
- * <p>Assumptions: the reference's customer snapshot is COMPLETE where its account snapshot is not. All
- * eighteen non-filler fields of this record appear in the block at lines 709 through 756 and all seventeen
- * non-key fields are compared, whereas the account block at lines 670 through 708 carries no postal-code
- * member at all even though {@code ACCT-ADDR-ZIP PIC X(10)} exists at {@code app/cpy/CVACT01Y.cpy} line
- * 15. The asymmetry is worth recording because it says the account update screen never edited an account
- * postal code, so a reader comparing the two entities does not mistake the difference for an omission
- * here.</p>
+ * <p>Assumptions: the reference's customer snapshot is COMPLETE where its account snapshot is not -- all
+ * eighteen non-filler fields of this record are snapshotted and all seventeen non-key fields compared,
+ * whereas the account block carries no postal-code member even though {@code ACCT-ADDR-ZIP PIC X(10)}
+ * exists at {@code app/cpy/CVACT01Y.cpy} line 15. The asymmetry says the account update screen never
+ * edited an account postal code, so a reader comparing the two entities does not mistake the difference
+ * for an omission here.</p>
  *
  * <p>Trade-offs: a version column is strictly MORE conservative than the comparison it replaces, and the
  * difference is observable. The reference compares the three name parts, the three address lines, the
- * state, the country and the government-issued identifier through {@code FUNCTION UPPER-CASE} at lines
- * 4152 through 4173, so a concurrent edit that only changed a letter's case counted as no change at all;
- * the postal code, both phone numbers, the national identifier, the date of birth, the transfer account,
- * the primary-holder indicator and the credit score are compared raw at lines 4168 through 4186. A version
- * counter increments on ANY committed update, case-only edits included, so it will report a conflict in a
- * narrow case where the reference reported none. Refusing a write that a concurrent case-only edit
- * overlapped is accepted as the safer direction to err, and the alternative -- reproducing the case-folded
- * field-by-field comparison in Java to preserve the blind spot exactly -- was rejected because it would
- * carry a silent lost-update window forward for the sake of matching it.</p>
+ * state, the country and the government-issued identifier through {@code FUNCTION UPPER-CASE}, so a
+ * concurrent edit that changed only a letter's case counted as no change at all, while a version counter
+ * increments on ANY committed update. Refusing a write that a concurrent case-only edit overlapped is the
+ * safer direction to err; reproducing the case-folded comparison in Java to preserve the blind spot
+ * exactly was rejected because it would carry a silent lost-update window forward for the sake of matching
+ * it. The divergence is registered as {@code D-UPDATE-CASE-SENSITIVE-COMPARE} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <p>Assumptions: the conflict this column raises is translated to a response elsewhere and must not be
  * translated here. The shared kernel's exception advice already answers an optimistic-lock failure with
  * HTTP 409 carrying the reference's own verbatim message, the one declared at
  * {@code app/cbl/COACTUPC.cbl} lines 521 and 522 on the {@code PIC X(75)} field at line 479. This class
  * only causes the exception at flush; it defines, catches, wraps and re-maps nothing, which is why no
- * exception type is declared or imported below. The reference's own failure path is the same shape: line
- * 4098 sets its locked-but-failed state and line 4100 issues {@code SYNCPOINT ROLLBACK}, which
- * transformation rule T5 carries over as ordinary exception propagation.</p>
+ * exception type is declared or imported below. The reference's own failure path is the same shape -- it
+ * sets a locked-but-failed state and issues {@code SYNCPOINT ROLLBACK} -- which transformation rule T5
+ * carries over as ordinary exception propagation.</p>
  *
  * <h2>Shape decisions</h2>
  * <p>Alternatives Considered: mapping only an existence probe, since the account-context contract asks
@@ -172,12 +163,10 @@ import org.hibernate.annotations.JdbcTypeCode;
  * {@code CVCUS01Y.cpy} line 20, and that is an EXTERNAL transfer account at another institution rather
  * than a reference into {@code account.accounts}. The join path is {@code CARD-XREF-RECORD} of
  * {@code app/cpy/CVACT03Y.cpy}, whose lines 6 and 7 carry the customer and account identifiers together,
- * and the view program reaches its three rows as three separate keyed reads --
- * {@code app/cbl/COACTVWC.cbl} lines 727 and 728, 776 and 777, and 826 and 827 -- never as a navigation.
- * A foreign key would additionally reject rows the baseline accepts: the only one declared anywhere in the
- * reference is in the transaction-type extension, at
- * {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl} lines 6 and 7, which belongs to another context
- * entirely, and every file stanza in this one is defined {@code RECOVERY(NONE) JOURNAL(NO)}.</p>
+ * and the view program reaches its three rows as three separate keyed reads rather than as a navigation. A
+ * foreign key would additionally reject rows the baseline accepts: the only one declared anywhere in the
+ * reference belongs to the transaction-type extension in another context, and every file stanza in this
+ * one is defined {@code RECOVERY(NONE) JOURNAL(NO)}.</p>
  *
  * <p>Alternatives Considered: generating the accessors with an annotation processor, or declaring this
  * type as a {@code record}. Both were rejected on the same ground and the ground is mechanical rather than
@@ -533,12 +522,6 @@ public class Customer {
     }
 
     /**
-     * Copies an array so a caller's reference cannot reach the stored value.
-     *
-     * @param value the array to copy, which may be {@code null}
-     * @return an independent copy, or {@code null} when the input was {@code null}
-     */
-    /**
      * Applies an edited customer state onto this MANAGED row, leaving the provider to own the version.
      *
      * <p>Purpose: this is the migrated form of the write-back at {@code app/cbl/COACTUPC.cbl} L4009
@@ -548,20 +531,20 @@ public class Customer {
      * fresh one: the row's identity and its concurrency state belong to the row, not to the submission.
      * </p>
      *
-     * <p>Refactoring Rationale: the update path previously CONSTRUCTED a new {@code Customer} from the
-     * request. That reset {@code version} to zero, which defeats the optimistic check entirely -- the
-     * provider would either insert a duplicate or overwrite whatever version it found, so the
-     * concurrent-change detection the reference performs with its before-image had no target form at
-     * all. Mutating the managed row is what makes {@code @Version} do the work, because the version the
+     * <p>Alternatives Considered: constructing a new {@code Customer} from the request and saving that.
+     * Rejected because it resets {@code version} to zero, which defeats the optimistic check entirely --
+     * the provider would either insert a duplicate or overwrite whatever version it found, leaving the
+     * concurrent-change detection the reference performs with its before-image no target form at all.
+     * Mutating the managed row is what makes {@code @Version} do the work, because the version the
      * provider compares is then the one it loaded.</p>
      *
      * <p>Assumptions: the two PROTECTED identifiers are supplied as explicit intents rather than as
      * values, which is why they are the only two parameters that are not plain fields. A blank or
      * omitted protected value cannot be distinguished from "leave it alone" by looking at the value,
-     * because the submitter is shown a mask and never the ciphertext -- so a value-shaped parameter has
-     * no representation for the difference and the previous code resolved it the destructive way: an
-     * omitted government-issued identifier became {@code null} and DELETED the stored ciphertext, and
-     * the national identifier was re-enciphered on every update whether or not it had been edited. The
+     * because the submitter is shown a mask and never the ciphertext. A value-shaped parameter has no
+     * representation for that difference, and the only readings left to it are destructive ones: an
+     * omitted government-issued identifier resolves to {@code null} and DELETES the stored ciphertext,
+     * and the national identifier is re-enciphered on every update whether or not it was edited. The
      * intent types make preserve, replace and clear three separate things a caller must choose
      * between.</p>
      *

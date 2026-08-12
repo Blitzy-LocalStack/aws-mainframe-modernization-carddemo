@@ -22,6 +22,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.carddemo.auth.config.SecurityConfig;
 import com.carddemo.auth.dto.CreateUserRequest;
+import com.carddemo.auth.dto.CreatedUserResponse;
 import com.carddemo.auth.dto.UpdateUserRequest;
 import com.carddemo.auth.dto.UserResponse;
 import com.carddemo.auth.dto.UserSummary;
@@ -468,6 +469,24 @@ class UserControllerTest {
      * pass while asserting the wrong thing.</p>
      */
     private static final UUID ROW_SUBJECT = UUID.fromString("99999999-8888-7777-6666-555555555555");
+
+    /**
+     * The managed-secret entry name the substituted service reports on a created row.
+     *
+     * <p>Assumptions: a distinctive value, unlike any other literal this class declares, so the two
+     * assertions it carries can both be exact: that the created body publishes it, and that no OTHER
+     * rendered body or refusal echoes it. A value that resembled an identifier could satisfy the first
+     * while making the second unable to distinguish a leak from a coincidence.</p>
+     *
+     * <p>Refactoring Rationale: this literal was a credential and is now a LOCATOR. The created body
+     * carries the name of the entry holding the account's first credential rather than the credential
+     * itself, because a credential in a response body is retained by every proxy log on the path; the
+     * shape here mirrors the real derivation -- a configured prefix, the fixed infix and a truncated
+     * digest of the identifier -- so a case asserting the published shape is not passing on a value the
+     * service could never produce.</p>
+     */
+    private static final String CREATED_CREDENTIAL_SECRET_NAME =
+            "carddemo/dev/auth/runtime-user/9f2c4a7b1e6d05384c9a1b2d3e4f5061";
 
     /**
      * The opaque value a request presents in its authorization header.
@@ -1666,14 +1685,23 @@ class UserControllerTest {
     }
 
     /**
-     * Builds the row the substituted service reports for a newly created identifier.
+     * Builds the created body the substituted service reports for a newly created identifier.
      *
-     * @return a transfer record standing for a created row of the administrator type; never
-     *     {@code null}
+     * <p>⚠️ Refactoring Rationale: this fixture answers with the create body rather than the read row,
+     * because the create operation's own answer changed shape. It previously returned the read
+     * projection, which meant the one-time credential the pool account was created with existed
+     * nowhere: not in the response, not in a column and not in any later operation. The row half is
+     * still built through the read projection and composed by {@code CreatedUserResponse.of}, so the
+     * five row values here cannot drift from the ones every other case asserts.</p>
+     *
+     * @return a transfer record standing for a created row of the administrator type, carrying the
+     *     credential its account was created with; never {@code null}
      */
-    private static UserResponse createdRow() {
-        return new UserResponse(CREATED_IDENTIFIER, SUBMITTED_FIRST_NAME, SUBMITTED_LAST_NAME,
-                ADMIN_TYPE_CODE, ROW_SUBJECT);
+    private static CreatedUserResponse createdRow() {
+        return CreatedUserResponse.of(
+                new UserResponse(CREATED_IDENTIFIER, SUBMITTED_FIRST_NAME, SUBMITTED_LAST_NAME,
+                        ADMIN_TYPE_CODE, ROW_SUBJECT),
+                CREATED_CREDENTIAL_SECRET_NAME);
     }
 
     /**
@@ -1702,7 +1730,7 @@ class UserControllerTest {
         return PageResponse.ofRows(
                 List.of(new UserSummary(STORED_IDENTIFIER, SUBMITTED_FIRST_NAME,
                         SUBMITTED_LAST_NAME, ORDINARY_TYPE_CODE)),
-                SEALED_FIRST_KEY, SEALED_LAST_KEY, true, false);
+                SEALED_FIRST_KEY, SEALED_LAST_KEY, true);
     }
 
     /**

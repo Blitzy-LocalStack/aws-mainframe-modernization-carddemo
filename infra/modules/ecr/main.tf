@@ -2,10 +2,18 @@
 # infra/modules/ecr/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions the ten Amazon ECR container repositories that hold every
-#   deployable artifact of the migrated CardDemo application -- the eight
-#   Spring Boot services, the browser SPA and the ETL image -- one repository
-#   per artifact, each independently versioned, scanned and retained.
+#   Provisions the ELEVEN Amazon ECR container repositories that hold every
+#   image a CardDemo task pulls -- the ten this repository builds, being the
+#   eight Spring Boot services, the browser SPA and the ETL image, plus one
+#   mirror of the pinned third-party telemetry collector that the deployment
+#   pushes but does not build -- one repository per artifact, each independently
+#   versioned, scanned and retained.
+#
+#   Refactoring Rationale: this paragraph and the one below said TEN while
+#   variables.tf has defaulted and asserted eleven since the collector mirror was
+#   added. Both counts are now stated with the distinction that separates them,
+#   because "ten" and "eleven" both appear in this module for good reasons and a
+#   reader cannot otherwise tell a stale number from a deliberate one.
 #
 #   What those ten replace is ONE shared z/OS load library. The online CICS
 #   region reached `DSNAME01(AWS.M2.CARDDEMO.LOADLIB)` through two library
@@ -15,7 +23,7 @@
 #   STEPLIB. A single library therefore held every executable module the
 #   online region and the batch tier could run, with no per-artifact
 #   isolation, retention or scanning available to any of them. This file is
-#   where that one store becomes ten separable ones.
+#   where that one store becomes eleven separable ones.
 #
 # Parameters:
 #   None declared here. This file CONSUMES inputs and declares none; all ten
@@ -250,16 +258,23 @@ resource "aws_ecr_repository" "this" {
   tags = var.tags
 
   # WHY : Assumptions: the registry performs the vulnerability scan itself,
-  #       SERVER-SIDE, at the moment an image is pushed, and its findings are
-  #       then read from the registry rather than gated in the pipeline that
-  #       pushed. That is recorded here because it is the reason no separate
-  #       container-image-scanning step appears in the service build workflow
-  #       or in the deployment workflow: their absence is a consequence of
-  #       this setting, and a reader who does not know that will add a
-  #       redundant scanning step to continuous integration. The same
-  #       mechanism bounds what this setting can promise -- a finding surfaces
-  #       after the push has already succeeded, so it is not a push-blocking
-  #       control and must not be relied on as one.
+  #       SERVER-SIDE, at the moment an image is pushed, so no separate
+  #       container-image-scanning TOOL appears in either workflow and a reader
+  #       who does not know that will add a redundant one. What this setting
+  #       cannot do is block anything: the scan runs after the push has already
+  #       succeeded, so it produces a finding and nothing else.
+  # WHY : Refactoring Rationale: this note used to conclude from that limit that
+  #       no scanning step belonged in the deployment workflow at all, and the
+  #       conclusion was wrong in a way that mattered -- it left the registry
+  #       generating a vulnerability report per image with NO consumer, so a
+  #       critical finding was recorded and deployed over. Scanning here and
+  #       gating there are two halves of one control: this argument produces the
+  #       findings, and the "Gate the deployment on image vulnerability findings"
+  #       step in .github/workflows/deploy.yml reads them after every push and
+  #       before the apply, refusing the deployment on a CRITICAL or HIGH
+  #       finding. Setting scan_on_push false therefore does more than skip a
+  #       scan: it removes that gate's input, which is why the input defaults
+  #       true and says so.
   image_scanning_configuration {
     scan_on_push = var.scan_on_push
   }

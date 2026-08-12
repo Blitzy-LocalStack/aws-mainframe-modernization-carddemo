@@ -12,14 +12,16 @@ import com.carddemo.batch.domain.BatchRun;
 import com.carddemo.batch.domain.DisclosureGroup;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
+import com.carddemo.batch.dto.BatchErrorEvent;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DisclosureGroupKey;
 import com.carddemo.batch.dto.InterestRateLookup;
+import com.carddemo.batch.job.PostTransactionsJob;
 import com.carddemo.batch.repository.AccountRepository;
-import com.carddemo.batch.repository.BatchRunRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.DisclosureGroupRepository;
 import com.carddemo.batch.repository.TransactionRepository;
@@ -35,6 +37,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
@@ -377,20 +380,43 @@ class BatchServicesTest {
         /** The step name the cases use. */
         private static final String STEP = "PostTransactions";
 
+        /** The surrogate identity the writer reports for the row it opened. */
+        private static final Long ROW_ID = 42L;
+
+        /** The job the cases attribute their step to, carried so a published failure names it. */
+        private static final BatchJobName JOB = BatchJobName.POST_TRANSACTIONS;
+
+        /**
+         * Builds a ledger over a writer and no failure reporter.
+         *
+         * <p>Assumptions: the reporter is absent in these cases because the behaviour under test is the
+         * ledger's transition record, and an absent reporter is a supported deployment state rather than
+         * a stub: the queue configuration is gated on a sink address, so an environment that publishes
+         * none registers no implementation. The cases that DO exercise reporting supply a mock
+         * explicitly, which keeps each case's collaborator set the smallest one that can observe it.</p>
+         *
+         * @param writer the ledger writer to build over; must not be {@code null}
+         * @return a ledger holding no failure reporter, never {@code null}
+         */
+        private static BatchStepLedger ledgerOver(BatchStepLedgerWriter writer) {
+            return new BatchStepLedger(writer, Optional.empty());
+        }
+
         /** An unrecorded step runs its body and records the completion. */
         @Test
         @DisplayName("run an unrecorded step and record its completion")
         void unrecordedStepRunsAndRecords() {
-            BatchRunRepository runs = mock(BatchRunRepository.class);
-            when(runs.findByRunIdAndStepName(RUN_ID, STEP)).thenReturn(Optional.empty());
-            when(runs.save(any())).thenAnswer(call -> call.getArgument(0));
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
 
-            BatchStepLedger.StepOutcome outcome = new BatchStepLedger(runs, FIXED)
-                    .runStep(RUN_ID, STEP, () -> BatchReturnCode.CLEAN);
+            BatchStepLedger.StepOutcome outcome = ledgerOver(writer)
+                    .runStep(RUN_ID, STEP, JOB, () -> BatchReturnCode.CLEAN);
 
             assertThat(outcome.skipped()).isFalse();
             assertThat(outcome.returnCode()).isEqualTo(BatchReturnCode.CLEAN);
-            verify(runs, org.mockito.Mockito.times(2)).save(any());
+            verify(writer).openAttempt(RUN_ID, STEP);
+            verify(writer).closeAttempt(ROW_ID, BatchReturnCode.CLEAN, false);
         }
 
         /** An already-completed step is a no-op that reports its recorded code. */
@@ -402,12 +428,12 @@ class BatchServicesTest {
             completed.markCompleted(LocalDateTime.now(FIXED),
                     (short) BatchReturnCode.SOFT_WARN.numericValue());
 
-            BatchRunRepository runs = mock(BatchRunRepository.class);
-            when(runs.findByRunIdAndStepName(RUN_ID, STEP)).thenReturn(Optional.of(completed));
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.of(completed));
 
             boolean[] ran = {false};
-            BatchStepLedger.StepOutcome outcome = new BatchStepLedger(runs, FIXED)
-                    .runStep(RUN_ID, STEP, () -> {
+            BatchStepLedger.StepOutcome outcome = ledgerOver(writer)
+                    .runStep(RUN_ID, STEP, JOB, () -> {
                         ran[0] = true;
                         return BatchReturnCode.CLEAN;
                     });
@@ -415,24 +441,84 @@ class BatchServicesTest {
             assertThat(ran[0]).as("the body of a completed step must not run").isFalse();
             assertThat(outcome.skipped()).isTrue();
             assertThat(outcome.returnCode()).isEqualTo(BatchReturnCode.SOFT_WARN);
-            verify(runs, never()).save(any());
+            verify(writer, never()).openAttempt(any(), any());
+            verify(writer, never()).closeAttempt(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
         }
 
-        /** A failing body marks the row failed and rethrows, so the orchestrator can catch it. */
+        /**
+         * A failing body records the failure through the writer and rethrows.
+         *
+         * <p>Assumptions: the assertion is that the failure is recorded through the WRITER rather than
+         * through a repository this class holds, because that is what makes the record survive the
+         * caller's rollback. Recording it on a collaborator whose methods run in their own transactions
+         * is the whole correction; a test that only asserted "two saves happened" passed equally well
+         * before and after it.</p>
+         */
         @Test
-        @DisplayName("mark a failing step failed and rethrow")
+        @DisplayName("mark a failing step failed through the independent writer and rethrow")
         void failingStepIsRecordedAndRethrown() {
-            BatchRunRepository runs = mock(BatchRunRepository.class);
-            when(runs.findByRunIdAndStepName(RUN_ID, STEP)).thenReturn(Optional.empty());
-            when(runs.save(any())).thenAnswer(call -> call.getArgument(0));
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
 
-            BatchStepLedger ledger = new BatchStepLedger(runs, FIXED);
+            BatchStepLedger ledger = ledgerOver(writer);
 
-            assertThatThrownBy(() -> ledger.runStep(RUN_ID, STEP, () -> {
+            assertThatThrownBy(() -> ledger.runStep(RUN_ID, STEP, JOB, () -> {
                 throw new IllegalStateException("step failed");
             })).isInstanceOf(IllegalStateException.class).hasMessage("step failed");
 
-            verify(runs, org.mockito.Mockito.times(2)).save(any());
+            verify(writer).closeAttempt(ROW_ID, BatchReturnCode.HARD_FAILURE, true);
+        }
+
+        /**
+         * The failure record carries the fault's type chain and neither its text nor the throwable.
+         *
+         * <p>Assumptions: the fault's message is fabricated to look like a driver message quoting a
+         * bound parameter, because that is the shape this record actually has to withhold -- a posting
+         * step's parameters are transaction records, so a driver fault quoting them puts a primary
+         * account number in the log stream. The assertion is on ABSENCE of that text and absence of an
+         * attached throwable, because attaching one renders every message in the cause chain and would
+         * disclose exactly what suppressing the text refuses.</p>
+         */
+        @Test
+        @DisplayName("the failure record carries the type chain, not the fault's text")
+        void failureRecordCarriesNoFaultText() {
+            // WHY : Refactoring Rationale: the ledger is built over the WRITER seam rather than over a
+            //       repository and a clock. The durable attempt model owns the row transitions, so a
+            //       repository double here would leave the attempt unopened and the case would assert a
+            //       log line produced on a path the service no longer takes.
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(1L);
+            BatchStepLedger ledger = new BatchStepLedger(writer, Optional.empty());
+
+            ch.qos.logback.classic.Logger ledgerLogger = (ch.qos.logback.classic.Logger)
+                    org.slf4j.LoggerFactory.getLogger(BatchStepLedger.class);
+            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> captured =
+                    new ch.qos.logback.core.read.ListAppender<>();
+            ch.qos.logback.classic.Level restore = ledgerLogger.getLevel();
+            captured.start();
+            ledgerLogger.addAppender(captured);
+            ledgerLogger.setLevel(ch.qos.logback.classic.Level.ERROR);
+            try {
+                assertThatThrownBy(() -> ledger.runStep(RUN_ID, STEP, JOB, () -> {
+                    throw new IllegalStateException(
+                            "ERROR: value too long for column at INSERT INTO ledger.transactions"
+                                    + " (card_num) VALUES ('4111111111111111')");
+                })).isInstanceOf(IllegalStateException.class);
+
+                assertThat(captured.list).hasSize(1);
+                String rendered = captured.list.getFirst().getFormattedMessage();
+                assertThat(rendered).contains("event=batch.step.failed")
+                        .contains(IllegalStateException.class.getName());
+                assertThat(rendered).doesNotContain("4111111111111111")
+                        .doesNotContain("value too long");
+                assertThat(captured.list.getFirst().getThrowableProxy()).isNull();
+            } finally {
+                ledgerLogger.detachAppender(captured);
+                captured.stop();
+                ledgerLogger.setLevel(restore);
+            }
         }
 
         /** A previously failed step is re-run rather than skipped. */
@@ -444,19 +530,168 @@ class BatchServicesTest {
             failed.markFailed(LocalDateTime.now(FIXED),
                     (short) BatchReturnCode.HARD_FAILURE.numericValue());
 
-            BatchRunRepository runs = mock(BatchRunRepository.class);
-            when(runs.findByRunIdAndStepName(RUN_ID, STEP)).thenReturn(Optional.of(failed));
-            when(runs.save(any())).thenAnswer(call -> call.getArgument(0));
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.of(failed));
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
 
             boolean[] ran = {false};
-            BatchStepLedger.StepOutcome outcome = new BatchStepLedger(runs, FIXED)
-                    .runStep(RUN_ID, STEP, () -> {
+            BatchStepLedger.StepOutcome outcome = ledgerOver(writer)
+                    .runStep(RUN_ID, STEP, JOB, () -> {
                         ran[0] = true;
                         return BatchReturnCode.CLEAN;
                     });
 
             assertThat(ran[0]).as("the body of a failed step must run again").isTrue();
             assertThat(outcome.skipped()).isFalse();
+            verify(writer).openAttempt(RUN_ID, STEP);
+        }
+
+        /**
+         * A row re-opened for another attempt counts the attempt and clears the previous outcome.
+         *
+         * <p>Assumptions: this asserts the ROW transition rather than the ledger, because the transition
+         * is what the uniqueness constraint forces. A redrive cannot insert a second row for the same run
+         * and step, so re-opening the recorded one is the only available shape and the attempt counter is
+         * the only record that the step was tried more than once.</p>
+         */
+        @Test
+        @DisplayName("count the attempt and clear the previous outcome when a failed row is re-opened")
+        void reopeningAFailedRowCountsTheAttempt() {
+            BatchRun row = new BatchRun(RUN_ID, STEP, LocalDateTime.now(FIXED).minusMinutes(5));
+            row.markFailed(LocalDateTime.now(FIXED),
+                    (short) BatchReturnCode.HARD_FAILURE.numericValue());
+            assertThat(row.getAttempt()).isEqualTo(1);
+
+            row.reopen(LocalDateTime.now(FIXED));
+
+            assertThat(row.getAttempt()).isEqualTo(2);
+            assertThat(row.getStatus()).isEqualTo(BatchRun.BatchRunStatus.STARTED);
+            assertThat(row.getFinishedAt()).isNull();
+            assertThat(row.getReturnCode()).isNull();
+        }
+
+        /**
+         * A completed row refuses re-opening, so committed work is never applied twice.
+         *
+         * <p>Assumptions: the refusal lives on the row and not only on the ledger's skip decision, so a
+         * future caller that forgot the skip cannot double-apply a completed step's writes.</p>
+         */
+        @Test
+        @DisplayName("refuse to re-open a completed row")
+        void reopeningACompletedRowIsRefused() {
+            BatchRun row = new BatchRun(RUN_ID, STEP, LocalDateTime.now(FIXED).minusMinutes(5));
+            row.markCompleted(LocalDateTime.now(FIXED),
+                    (short) BatchReturnCode.CLEAN.numericValue());
+
+            assertThatThrownBy(() -> row.reopen(LocalDateTime.now(FIXED)))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("completed row");
+        }
+
+        /**
+         * A raised failure is reported to the terminal sink, naming its run, step, job and tier.
+         *
+         * <p>Assumptions: this asserts the report is issued at all, which is the whole of what was
+         * missing. The module shipped a validated sink binding that nothing ever called, so the sink
+         * stayed empty however a night ended -- a case asserting only that the ledger row was written
+         * passed identically before and after the publisher existed.</p>
+         */
+        @Test
+        @DisplayName("report a raised step failure to the terminal sink")
+        void raisedFailureIsReported() {
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
+            BatchFailureReporter reporter = mock(BatchFailureReporter.class);
+
+            BatchStepLedger ledger = new BatchStepLedger(writer, Optional.of(reporter));
+
+            assertThatThrownBy(() -> ledger.runStep(RUN_ID, STEP, JOB, () -> {
+                throw new IllegalStateException("step failed");
+            })).isInstanceOf(IllegalStateException.class);
+
+            ArgumentCaptor<BatchErrorEvent> published =
+                    ArgumentCaptor.forClass(BatchErrorEvent.class);
+            verify(reporter).report(published.capture());
+            BatchErrorEvent event = published.getValue();
+            assertThat(event.runId()).isEqualTo(RUN_ID);
+            assertThat(event.stepName()).isEqualTo(STEP);
+            assertThat(event.jobName()).isEqualTo(JOB);
+            assertThat(event.returnCode()).isEqualTo(BatchReturnCode.HARD_FAILURE);
+            assertThat(event.abendDetail().abendCode())
+                    .isEqualTo(BatchStepLedger.BATCH_ABEND_CODE);
+            assertThat(event.abendDetail().abendReason())
+                    .as("the reason carries the failure's TYPE and never its message, because a"
+                            + " library-composed message is an unbounded disclosure channel")
+                    .isEqualTo("IllegalStateException")
+                    .doesNotContain("step failed");
+        }
+
+        /** A body that grades its own outcome as the failure tier is reported too. */
+        @Test
+        @DisplayName("report a step that graded its own outcome as the failure tier")
+        void gradedFailureIsReported() {
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
+            BatchFailureReporter reporter = mock(BatchFailureReporter.class);
+
+            BatchStepLedger.StepOutcome outcome =
+                    new BatchStepLedger(writer, Optional.of(reporter))
+                            .runStep(RUN_ID, STEP, JOB, () -> BatchReturnCode.HARD_FAILURE);
+
+            assertThat(outcome.returnCode()).isEqualTo(BatchReturnCode.HARD_FAILURE);
+            verify(reporter).report(any(BatchErrorEvent.class));
+        }
+
+        /**
+         * The warn tier is never reported, so a correct night that rejected rows raises nobody.
+         *
+         * <p>Assumptions: the reference reaches the warn tier BY DESIGN at
+         * {@code app/cbl/CBTRN02C.cbl:229-230}, where a non-zero reject count moves 4 into
+         * {@code RETURN-CODE} on a run that did its job correctly. Publishing that to a terminal sink
+         * would raise an operator for a successful night, and the credibility of a sink is spent the
+         * first time it does.</p>
+         */
+        @Test
+        @DisplayName("never report the warn tier")
+        void warnTierIsNotReported() {
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
+            BatchFailureReporter reporter = mock(BatchFailureReporter.class);
+
+            new BatchStepLedger(writer, Optional.of(reporter))
+                    .runStep(RUN_ID, STEP, JOB, () -> BatchReturnCode.SOFT_WARN);
+
+            verify(reporter, never()).report(any(BatchErrorEvent.class));
+        }
+
+        /**
+         * A reporter that raises does not replace the step failure it was reporting.
+         *
+         * <p>Assumptions: the port's contract obliges an implementation not to throw, and this case
+         * asserts the ledger survives one that breaks the contract anyway. Without the guard, a queue
+         * permission the task role was never granted would surface as a messaging-library stack trace
+         * and the real cause -- the step that actually failed -- would be lost.</p>
+         */
+        @Test
+        @DisplayName("keep the step's own failure when the reporter itself raises")
+        void reporterFailureDoesNotReplaceTheStepFailure() {
+            BatchStepLedgerWriter writer = mock(BatchStepLedgerWriter.class);
+            when(writer.read(RUN_ID, STEP)).thenReturn(Optional.empty());
+            when(writer.openAttempt(RUN_ID, STEP)).thenReturn(ROW_ID);
+            BatchFailureReporter reporter = mock(BatchFailureReporter.class);
+            when(reporter.report(any(BatchErrorEvent.class)))
+                    .thenThrow(new IllegalStateException("sink unreachable"));
+
+            BatchStepLedger ledger = new BatchStepLedger(writer, Optional.of(reporter));
+
+            assertThatThrownBy(() -> ledger.runStep(RUN_ID, STEP, JOB, () -> {
+                throw new IllegalArgumentException("step failed");
+            })).isInstanceOf(IllegalArgumentException.class).hasMessage("step failed");
+
+            verify(writer).closeAttempt(ROW_ID, BatchReturnCode.HARD_FAILURE, true);
         }
     }
 }

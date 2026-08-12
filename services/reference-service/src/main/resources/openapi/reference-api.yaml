@@ -2999,16 +2999,16 @@ components:
 
 
     # WHY : Assumptions: every page envelope in this document carries exactly the
-    #       FIVE members the shared response type declares -- items, firstKey,
-    #       lastKey, hasNext and hasPrevious, at
+    #       FOUR members the shared response type declares -- items, firstKey,
+    #       lastKey and hasNext, at
     #       services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java
-    #       -- in that order, and every one of them is required. Publishing a sixth
+    #       -- in that order, and every one of them is required. Publishing a fifth
     #       would describe a body this service cannot send: the shared type has no
     #       such component, so a serialisation of it omits the member, a generated
     #       client would receive an accessor that is always absent, and a strict
     #       client would reject every valid response for missing a member the
     #       contract declared. Absence of a boundary is spelled as a null value on
-    #       a present member, never as a missing member, which is why all five are
+    #       a present member, never as a missing member, which is why all four are
     #       required and not only items.
     # WHY : Refactoring Rationale: this note said FOUR members and rejected adding a
     #       backward-availability member for symmetry, on the ground that it would be
@@ -3039,7 +3039,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3082,18 +3081,6 @@ components:
             backward reader. When it is true, lastKey is present. When it is false, a
             caller that presses forward anyway receives the baseline's own end-of-set
             wording, published on the ReferenceMessageCatalogue schema.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
       examples:
         - items:
@@ -3119,7 +3106,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3150,18 +3136,6 @@ components:
             Whether a further page follows. Settled on a forward walk by reading one
             row beyond the page; always true on a page reached by paging backward, as
             recorded in full on the transaction-type page.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
       examples:
         - items:
@@ -3184,7 +3158,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3212,18 +3185,6 @@ components:
             Whether a further page of area codes follows. Settled on a forward walk by
             reading one row beyond the page; always true on a page reached by paging
             backward, as recorded in full on the transaction-type page.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
       examples:
         - items:
@@ -3243,7 +3204,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3271,18 +3231,6 @@ components:
             Whether a further page of state codes follows. Settled on a forward walk by
             reading one row beyond the page; always true on a page reached by paging
             backward, as recorded in full on the transaction-type page.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
       examples:
         - items:
@@ -3302,7 +3250,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         items:
@@ -3330,18 +3277,6 @@ components:
             Whether a further page of combinations follows. Settled on a forward walk by
             reading one row beyond the page; always true on a page reached by paging
             backward, as recorded in full on the transaction-type page.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
       examples:
         - items:
@@ -4065,9 +4000,25 @@ components:
         status. It carries a machine-readable identifier, an aggregate sentence for
         a person to read, the per-field detail described on the FieldError schema,
         and the correlation identifier that leads to the operational record.
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
       required:
         - code
         - secondaryCode
+        - message
         - severity
         - subsystem
         - status
@@ -4075,6 +4026,7 @@ components:
         - path
         - timestamp
         - fieldErrors
+        - abend
       additionalProperties: false
       properties:
         code:

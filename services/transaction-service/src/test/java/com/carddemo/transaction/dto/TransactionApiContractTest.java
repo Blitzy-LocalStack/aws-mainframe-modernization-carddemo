@@ -4,11 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.common.money.Money;
+import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.transaction.service.TransactionAddService;
 import jakarta.validation.constraints.Pattern;
 import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.RecordComponent;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,6 +19,8 @@ import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Holds the published transaction contract and this module's request and response types to each other.
@@ -40,20 +45,37 @@ import org.yaml.snakeyaml.Yaml;
  *
  * <p>Alternatives Considered: generating the request and response types from the contract, which would
  * make the disagreement impossible rather than merely detectable. Rejected for this module because the
- * mapping is not mechanical - it truncates padding, masks the primary account number, narrows an edit
- * mask and renames three misspelled baseline fields, each of which needs a justification at the point
- * of the decision that a generator cannot hold - and because the migration plan states the mapping
- * layer is hand-written for exactly that reason. Asserting the agreement keeps the annotated types and
- * their rationale while making drift fail a build.</p>
+ * mapping is not mechanical - it truncates padding, masks the primary account number, withholds a
+ * verification value and renames three misspelled baseline fields, each of which needs a justification
+ * at the point of the decision that a generator cannot hold - and because the migration plan states the
+ * mapping layer is hand-written for exactly that reason. Asserting the agreement keeps the annotated
+ * types and their rationale while making drift fail a build.</p>
+ *
+ * <p>Refactoring Rationale: a later review found a SEVENTH disagreement of the same kind, and it was one
+ * a two-sided comparison could not have found. The amount field has three authorities -- this contract,
+ * the request record and the service's own positional shape test -- and the first two agreed on the
+ * record's nine integer digits while the third measured the eight-digit screen picture, so a nine-digit
+ * amount cleared validation and was then refused after binding with a format sentence. Two cases were
+ * added below for it: one reads the service's constant against the published pattern, and one reads the
+ * key-selection rule against the baseline's own branch order rather than only against the other side.</p>
  */
 class TransactionApiContractTest {
 
     /** Classpath location of the contract this module publishes. */
     private static final String CONTRACT_RESOURCE = "/openapi/transaction-api.yaml";
 
-    /** The paths the edge and the load balancer route to this module, from the committed IaC. */
+    /**
+     * The paths the edge and the load balancer route to this module, from the committed IaC.
+     *
+     * <p>Refactoring Rationale: the copy-last path is included because the module now publishes it and
+     * the committed rule already forwards it: {@code infra/envs/dev/main.tf} and its production sibling
+     * both list {@code /api/v1/transactions/*} beside the collection, so a further segment under the
+     * collection needs no IaC change. It is listed here so that this assertion keeps comparing the
+     * contract with the deployed route table rather than with itself.</p>
+     */
     private static final List<String> DEPLOYED_PATHS = List.of(
-            "/api/v1/transactions", "/api/v1/transactions/{transactionId}", "/api/v1/billpay");
+            "/api/v1/transactions", "/api/v1/transactions/copy-last",
+            "/api/v1/transactions/{transactionId}", "/api/v1/billpay");
 
     /**
      * The keys of a path item that hold an operation, so its own non-operation keys are skipped.
@@ -428,6 +450,92 @@ class TransactionApiContractTest {
                 .isTrue();
     }
 
+    // WHY : Refactoring Rationale: the amount domain has THREE authorities and the case above compares
+    //       only two of them. The published schema and the record constraint agreed on nine integer
+    //       digits while TransactionAddService measured the eight-digit SCREEN picture at line 59 of
+    //       app/cbl/COTRN02C.cbl, so a nine-digit amount cleared the boundary this class guards and was
+    //       then refused by the service with a format sentence -- input the contract published as valid,
+    //       rejected after deserialization, and divergence D-AMOUNT-RECORD-WIDTH describing a width the
+    //       delivered code did not honour. Two agreeing authorities and one dissenting one is exactly
+    //       what a two-way comparison cannot see, which is why the third is read here.
+    /**
+     * Asserts that the width the service's positional shape test measures is the published domain's.
+     *
+     * <p>Assumptions: the service constant is read rather than the service being invoked, which is what
+     * this package's charter asks for -- the defect is in the DECLARATIONS, and a behavioural case
+     * would see only the values it happened to submit. The behaviour is covered separately by the
+     * capture screen's own suite, which asserts acceptance at nine digits and refusal at ten.</p>
+     */
+    @Test
+    @DisplayName("the width the service's shape test measures is the published amount domain's")
+    void theServiceShapeTestMeasuresThePublishedAmountDomain() {
+        java.util.regex.Pattern amount =
+                java.util.regex.Pattern.compile(String.valueOf(schema("TransactionAmount")
+                        .get("pattern")));
+        String atTheBound = "9".repeat(TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS) + ".99";
+        String oneDigitOver =
+                "1" + "0".repeat(TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS) + ".99";
+
+        assertThat(amount.matcher(atTheBound).matches())
+                .as("the service admits %s integer digits, so the contract must publish them",
+                        TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS)
+                .isTrue();
+        assertThat(amount.matcher(oneDigitOver).matches())
+                .as("and one digit more is outside both, so neither authority is the wider one")
+                .isFalse();
+        assertThat(String.valueOf(TransactionAddService.RECORD_AMOUNT_LENGTH))
+                .as("the rendering the shape test spans is the widest string the contract admits: a"
+                        + " sign, the integer digits, the point and two fractional digits")
+                .isEqualTo(String.valueOf(schema("TransactionAmount").get("maxLength")));
+    }
+
+    // WHY : Refactoring Rationale: the key rule was published as EXCLUSIVE disjunction on both sides,
+    //       and both sides were wrong together -- which is the one failure mode a two-sided agreement
+    //       test cannot catch, so this case reads the BASELINE's semantics into its assertions rather
+    //       than only comparing the two deliverables. Line 195 of app/cbl/COTRN02C.cbl opens an
+    //       EVALUATE TRUE whose account arm is first, so a both-keys submission resolves through the
+    //       account identifier and line 209 overwrites the submitted card number with no message. Only
+    //       lines 224 to 229, reached when NEITHER key arrived, report anything.
+    /**
+     * Asserts the key rule is published as at-least-one on both sides, with no mutual exclusion.
+     *
+     * <p>Assumptions: the absence of a {@code not} clause is asserted explicitly and not merely implied
+     * by the keyword being {@code anyOf}. A branch set written as {@code anyOf} in which each branch
+     * still forbids the other is the same contract as {@code oneOf} under a different name, so reading
+     * the keyword alone would pass on a document that had not changed meaning.</p>
+     *
+     * <p>Assumptions: the Java side is read as the presence of the class-level constraint rather than by
+     * running it, per this package's charter. Its behaviour -- both keys admitted, neither refused with
+     * both members named -- is asserted at the wire by the resource's own suite.</p>
+     */
+    @Test
+    @DisplayName("the key rule is at-least-one on both sides, and neither branch forbids the other")
+    void theKeyRuleIsAtLeastOneOnBothSides() {
+        Map<String, Object> request = schema("TransactionCreateRequest");
+
+        assertThat(request)
+                .as("mutual exclusion is not what the baseline's EVALUATE TRUE describes")
+                .doesNotContainKey("oneOf")
+                .containsKey("anyOf");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> branches = (List<Map<String, Object>>) request.get("anyOf");
+        assertThat(branches)
+                .as("one branch per key alternative, and nothing else")
+                .hasSize(2);
+        assertThat(branches).allSatisfy(branch -> assertThat(branch)
+                .as("a branch that forbids the other is oneOf under another name")
+                .doesNotContainKey("not"));
+        assertThat(branches.stream().map(branch -> strings(branch, "required")).toList())
+                .as("the two branches name the two key members")
+                .containsExactlyInAnyOrder(List.of("accountId"), List.of("cardNumber"));
+
+        assertThat(TransactionAddRequest.class
+                .isAnnotationPresent(TransactionAddRequest.AtLeastOneKey.class))
+                .as("the Java side carries the same rule, named for the same semantics")
+                .isTrue();
+    }
+
     // WHY : Assumptions: the enum's serialised form is asserted through fromWireValue rather than by
     //       name, because the defect was precisely that the names and the tokens differed. Comparing
     //       Direction.values() by name() would have reproduced the bug in the test.
@@ -464,16 +572,15 @@ class TransactionApiContractTest {
      * response type carries, so no generated client receives an accessor for a member no service
      * emits and no strict client rejects a valid response for a member no service sends.
      *
-     * <p>Assumptions: the five are read from the shared type rather than restated as a literal list
+     * <p>Assumptions: the four are read from the shared type rather than restated as a literal list
      * where the type can be reached, because the whole defect this asserts against was a contract that
      * named members the type does not declare.</p>
      */
     @Test
-    @DisplayName("the page envelope declares and requires exactly the shared envelope's five members")
+    @DisplayName("the page envelope declares and requires exactly the shared envelope's four members")
     void pageEnvelopeDeclaresExactlyTheSharedEnvelopeMembers() {
         assertThat(strings(schema("TransactionPage"), "required"))
-                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext",
-                        "hasPrevious");
+                .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
     }
 
     /**
@@ -554,6 +661,217 @@ class TransactionApiContractTest {
         assertThat(componentType(BillPaymentResponse.class, "paid"))
                 .as("a wrapper would admit a null the published constant refuses")
                 .isEqualTo(boolean.class);
+    }
+
+    /**
+     * Asserts that each preview body describes exactly the record the service emits on 200.
+     *
+     * <p>Purpose: both write operations of this contract answer two statuses with two bodies, and the
+     * review that prompted this test found both 200 bodies rejected by the schemas their own status
+     * publishes. Transaction add returned the created record, which declares no {@code written} member
+     * the preview schema requires and does declare an identifier the preview schema forbids; bill pay
+     * returned the posted record, whose money member is named {@code currentBalance} where the preview
+     * schema requires {@code payableBalance}, and which likewise carries a forbidden identifier. Neither
+     * failure was visible to a compiler, because one side is a document.</p>
+     *
+     * <p>Assumptions: the property sets are compared for EXACT equality rather than containment, because
+     * both directions of drift matter. A published member the record does not carry is a value a
+     * generated client waits for and never receives; a component the document does not publish, in an
+     * object closed with {@code additionalProperties: false}, is a body a strict client rejects
+     * outright.</p>
+     */
+    @Test
+    @DisplayName("each preview body publishes exactly the preview record's members")
+    void previewBodiesPublishExactlyThePreviewRecordMembers() {
+        assertPublishedShapeMatchesRecord("TransactionAddPreview",
+                TransactionAddPreview.class, "returnMessage");
+        // WHY : ⚠️ Assumptions: the payment preview has TWO optional members where the capture preview has
+        //       one, and the second is the money member. A declined confirmation reaches no account read
+        //       at all -- CLEAR-CURRENT-SCREEN at line 180 of app/cbl/COBIL00C.cbl blanks the display
+        //       fields -- so the withheld record carries no balance on that branch, and a contract that
+        //       required one would oblige this service to publish a figure it deliberately does not read.
+        assertPublishedShapeMatchesRecord("BillPaymentPreview",
+                BillPaymentPreview.class, "returnMessage", "payableBalance");
+
+        assertThat(mapping(mapping(schema("TransactionAddPreview"), "properties"), "written")
+                        .get("const"))
+                .as("the published constant must be the value the preview factory fixes")
+                .isEqualTo(TransactionAddPreview.CAPTURE_WITHHELD);
+        assertThat(mapping(mapping(schema("BillPaymentPreview"), "properties"), "paid").get("const"))
+                .as("the published constant must be the value the preview factory fixes")
+                .isEqualTo(BillPaymentPreview.PAYMENT_WITHHELD);
+
+        // WHY : Assumptions: the money member of the preview is asserted to be a DIFFERENT name from the
+        //       money member of the posted shape, because that difference is the whole reason the two
+        //       shapes exist separately. The posted figure is the balance before the payment and is
+        //       therefore also the amount paid; the preview figure is what a confirmed request would pay
+        //       and nothing has been paid. One name would make a client's reading of the number depend
+        //       on a status it may no longer hold.
+        assertThat(mapping(schema("BillPaymentPreview"), "properties"))
+                .containsKey("payableBalance")
+                .doesNotContainKey("currentBalance");
+        assertThat(mapping(schema("BillPaymentResponse"), "properties"))
+                .containsKey("currentBalance")
+                .doesNotContainKey("payableBalance");
+    }
+
+    // WHY : Refactoring Rationale: this asserts the SERIALISED body rather than the record's component
+    //       list, and the two are not the same statement. A record component is a Java name; a body is
+    //       what a client receives, and the failure being closed here was a body carrying a property
+    //       the schema forbids. Only serialising can catch a property added by an annotation, a getter
+    //       or a registered module, and only serialising can show that a nullable member is EMITTED as
+    //       null rather than omitted -- which matters because a null of a forbidden name fails a closed
+    //       schema just as a value would.
+    /**
+     * Asserts that a real serialisation of each of the four response bodies satisfies the schema its own
+     * status publishes: every emitted property is declared, every required property is emitted, and the
+     * object is closed.
+     */
+    @Test
+    @DisplayName("every serialised response body satisfies its own published schema")
+    void everySerialisedBodySatisfiesItsPublishedSchema() {
+        ObjectMapper writer = JsonMapper.builder().addModule(new MoneyModule()).build();
+
+        assertSerialisedBodySatisfiesSchema(writer, "TransactionAddPreview",
+                TransactionAddPreview.prompting(Money.of("125.50"),
+                        "Confirm to add this transaction..."));
+        assertSerialisedBodySatisfiesSchema(writer, "TransactionCreated",
+                new TransactionAddResponse("0000000000683580", Money.of("125.50"),
+                        "Transaction added successfully."));
+        assertSerialisedBodySatisfiesSchema(writer, "BillPaymentPreview",
+                BillPaymentPreview.reporting("00000000011", Money.of("123.45"),
+                        "Confirm to make a bill payment..."));
+        assertSerialisedBodySatisfiesSchema(writer, "BillPaymentResponse",
+                BillPaymentResponse.posted("00000000011", Money.of("123.45"), "0000000000683581",
+                        "Payment successful."));
+
+        // WHY : Assumptions: the declined-payment turn is serialised separately, because it is the one
+        //       body of the four whose message is legitimately null. The reference reaches it at lines
+        //       178 to 181 of app/cbl/COBIL00C.cbl without moving any message, and a null emitted under
+        //       a declared, nullable property is exactly what the published ReturnMessage union admits.
+        assertSerialisedBodySatisfiesSchema(writer, "BillPaymentPreview",
+                BillPaymentPreview.reporting("00000000011", Money.of("123.45"), null));
+    }
+
+    /**
+     * Asserts that a published schema declares exactly one record's components, requires all but the
+     * named optional ones, and is closed.
+     *
+     * @param schemaName the published schema to read
+     * @param record the record that implements it
+     * @param optional the component names the schema may leave out of its required list
+     */
+    private void assertPublishedShapeMatchesRecord(String schemaName, Class<?> record,
+            String... optional) {
+        Map<String, Object> published = schema(schemaName);
+        List<String> components = Arrays.stream(record.getRecordComponents())
+                .map(RecordComponent::getName)
+                .toList();
+        List<String> optionalNames = List.of(optional);
+
+        assertThat(mapping(published, "properties").keySet())
+                .as("%s must publish exactly the members %s carries", schemaName,
+                        record.getSimpleName())
+                .containsExactlyInAnyOrderElementsOf(components);
+        assertThat(strings(published, "required"))
+                .as("%s must require every member but %s", schemaName, optionalNames)
+                .containsExactlyInAnyOrderElementsOf(
+                        components.stream().filter(name -> !optionalNames.contains(name)).toList());
+        assertThat(published.get("additionalProperties"))
+                .as("%s must be closed, so a surplus property is a detectable failure", schemaName)
+                .isEqualTo(false);
+    }
+
+    /**
+     * Asserts that one serialised body satisfies one published schema.
+     *
+     * @param writer a mapper configured exactly as the application's own is for money
+     * @param schemaName the published schema the body is answered under
+     * @param body the response instance to serialise
+     */
+    private void assertSerialisedBodySatisfiesSchema(ObjectMapper writer, String schemaName,
+            Object body) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> emitted = writer.readValue(writer.writeValueAsString(body), Map.class);
+        Map<String, Object> published = schema(schemaName);
+        java.util.Set<String> declared = mapping(published, "properties").keySet();
+
+        List<String> undeclared = new ArrayList<>(emitted.keySet());
+        undeclared.removeAll(declared);
+        assertThat(undeclared)
+                .as("%s is closed with additionalProperties false, so %s may emit no other property",
+                        schemaName, body.getClass().getSimpleName())
+                .isEmpty();
+        assertThat(emitted.keySet())
+                .as("%s requires every one of %s", schemaName, strings(published, "required"))
+                .containsAll(strings(published, "required"));
+
+        // WHY : Assumptions: a money member is asserted to be a JSON STRING here, in the emitted body,
+        //       and not only to be declared as the exact-decimal type on the record. The declared type
+        //       is what selects the wire form, but only the emitted value proves the module that renders
+        //       it is registered -- and an unregistered module emits a JSON number, which most clients
+        //       parse into an IEEE-754 double and which no assertion on the Java type would notice.
+        for (RecordComponent component : body.getClass().getRecordComponents()) {
+            if (Money.class.equals(component.getType())) {
+                assertThat(emitted.get(component.getName()))
+                        .as("%s.%s must reach the wire as a quoted decimal", schemaName,
+                                component.getName())
+                        .isInstanceOf(String.class);
+            }
+        }
+    }
+
+    // WHY : Assumptions: this holds the two independently authored statements of ONE rule together --
+    //       the published schema and the Java constraint -- so neither can be changed alone. The rule
+    //       is PARITY and not a narrowing: app/cbl/COTRN02C.cbl L195 is EVALUATE TRUE, its first arm
+    //       at L196 fires whatever the card field holds, and L209 overwrites that field from the
+    //       cross-reference, so the reference is INCLUSIVE with account precedence. A
+    //       D-ADD-KEY-EXCLUSIVE entry in section 7.4 of
+    //       docs/architecture/cobol-to-service-traceability.md registered the exclusive form and is
+    //       withdrawn there, which is why no identifier is cited beside this case.
+    /**
+     * Asserts that the published key-selection rule and the Java constraint state one rule.
+     *
+     * <p>Assumptions: the document expresses the rule as a two-branch {@code anyOf} in which each
+     * branch requires one key and NEITHER forbids the other, and the absence of the {@code not: required}
+     * half is asserted as positively as the {@code required} half is. Without that assertion a reader
+     * could reintroduce {@code not} -- or switch the keyword back to {@code oneOf}, under which two
+     * satisfied branches fail rather than pass -- and the schema would refuse a body the reference
+     * accepts while every other assertion here still held.</p>
+     */
+    @Test
+    @DisplayName("the published key-selection rule is the constraint the request type applies")
+    void publishedKeySelectionRuleMatchesTheAppliedConstraint() {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> branches =
+                (List<Map<String, Object>>) schema("TransactionCreateRequest").get("anyOf");
+
+        assertThat(branches)
+                .as("the rule is published as exactly two alternatives, one per key, under anyOf")
+                .hasSize(2);
+        // WHY : Refactoring Rationale: the published rule is INCLUSIVE and this assertion states that.
+        //       It previously required each branch to forbid the other key, which refused a body
+        //       carrying both -- a body app/cbl/COTRN02C.cbl accepts and processes account-first at
+        //       line 226 onwards, selecting the account arm and never evaluating the card arm. An
+        //       exclusive rule therefore made the documented account-first precedence unreachable,
+        //       because validation rejected the request before the precedence could be applied, and no
+        //       reference message exists for a contradiction the reference never reports.
+        assertThat(branches.stream().map(branch -> strings(branch, "required")).toList())
+                .as("each alternative requires one key, and neither forbids the other")
+                .containsExactlyInAnyOrder(List.of("accountId"), List.of("cardNumber"));
+        assertThat(branches.stream().map(branch -> branch.containsKey("not")).toList())
+                .as("no branch may carry a negation, or a both-keys body matches neither")
+                .containsExactly(false, false);
+
+        assertThat(TransactionAddRequest.class
+                        .isAnnotationPresent(TransactionAddRequest.AtLeastOneKey.class))
+                .as("the Java side states the same rule as a class-level constraint, so a body the"
+                        + " document refuses is refused before a handler is entered")
+                .isTrue();
+        assertThat(TransactionAddRequest.class
+                        .getAnnotation(TransactionAddRequest.AtLeastOneKey.class).message())
+                .as("and carries app/cbl/COTRN02C.cbl line 226's sentence verbatim")
+                .isEqualTo(TransactionAddRequest.KEY_FIELD_REQUIRED);
     }
 
     /**

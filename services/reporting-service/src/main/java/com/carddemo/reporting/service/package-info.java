@@ -2,26 +2,44 @@
  * Business behaviour of the Reporting and Statement bounded context, expressed
  * as ordinary Java services rather than as CICS transactions or JCL job steps.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, and all three named services
- * have now landed beside it, so the contract and the directory agree and no entry has to be read as
- * an assignment rather than as a description.</p>
+ * <p>Four compilation units sit in this directory: this charter and the three services
+ * {@code ReportExecutionService}, {@code StatementService} and {@code TransactionReportService}. Every
+ * inventory, file name, class name and count here is a measurement of that directory, and the marker
+ * line is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a fourth service arriving without an entry here fails the build:</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this paragraph recorded that the directory held
- * this charter and nothing else, and that a type named below with no file was planned rather than
- * missing. That was accurate while it stood; it is replaced rather than softened now that all three
- * exist, because a planned marker outliving the files it describes reads as measured and would tell
- * a reader auditing this package that a landed service was still absent.</p>
+ * <pre>
+ * this directory: 4 java files = 3 classes + 1 charter
+ * </pre>
  *
  * <p>Assumptions: the two controllers in {@code com.carddemo.reporting.api} are the only callers of
  * these three services over HTTP, and the published contract at
  * {@code src/main/resources/openapi/reporting-api.yaml} settles the four operations they expose. The
- * business rules stay here and none of them moves into a controller: the report-type exclusivity, the
+ * business rules stay here and none of them moves into a controller: the report-type PRECEDENCE, the
  * per-type date-range derivation, the confirmation vocabulary, the integrity reconciliation, the
  * subtotal accumulation and the statement selector rules are all owned by these classes, and a
- * controller only maps their outcomes onto statuses.</p>
+ * controller maps their outcomes onto statuses and assembles the two sentences that interpolate a
+ * resolved report name.</p>
+ *
+ * <p>Refactoring Rationale: that list read "report-type exclusivity" and now reads precedence, because
+ * exclusivity is not what the baseline enforces. {@code app/cbl/CORPT00C.cbl} L212 is an
+ * {@code EVALUATE TRUE} whose first matching arm wins, so a request marking two types runs the first of
+ * them; an earlier revision of the owning service read the screen's exclusivity as a RULE and refused
+ * such a request, which is a refusal the reference does not have. The word is corrected here because a
+ * charter naming the wrong rule is how the wrong rule gets re-implemented after it has been fixed
+ * once.</p>
+ *
+ * <p>Assumptions: the two composed sentences -- the submission acknowledgement and the confirmation
+ * prompt -- are assembled by the controller and not here, and the split is deliberate rather than
+ * incidental. Both interpolate a resolved report name into two verbatim fragments, and the controller
+ * already holds that name because it resolved it before it chose a status; assembling them here would
+ * mean handing the name back to a service that had just returned it. The fragments themselves are
+ * verbatim reference strings either way, so transformation rule T8 is satisfied wherever they live --
+ * what it forbids is a sentence the baseline does not carry, not a particular home for one it
+ * does.</p>
  *
  * <p>Refactoring Rationale: that list named a "masked-collision refusal" and no longer does, because the
  * refusal it named cannot occur. Statement selection was a lookup by the card's masked rendering, which
@@ -179,8 +197,11 @@
  * defect, which is why Flyway is absent from its dependency set -- so the views
  * cannot come from a service migration either. They belong to a data-migration
  * step ordered AFTER the per-service migrations have created the tables they
- * read. Neither those views nor most of the migrations they read exist at this
- * checkpoint; each is authored at a later index of the same plan.
+ * read. Assumptions: that ordering is REALISED, not merely intended --
+ * {@code data-migration/sql/V1__reporting_views.sql} creates all seven views this
+ * package reads, and each per-service migration it depends on exists in the module
+ * that owns it. The sequencing constraint above is therefore a rule about where a
+ * view may be created, not a note about something absent.
  *
  * <p>Two consequences follow, and both are to be acted on rather than worked
  * around. Nothing in this package emits a data-definition statement of any kind:

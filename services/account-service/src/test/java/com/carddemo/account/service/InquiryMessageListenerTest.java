@@ -4,28 +4,40 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.account.domain.Account;
 import com.carddemo.account.mapper.AccountInquiryReplyMapper;
 import com.carddemo.account.repository.AccountRepository;
+import com.carddemo.account.repository.InquiryReplyLedger;
 import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.messaging.MessageExpiry;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.support.MessageBuilder;
@@ -103,6 +115,20 @@ class InquiryMessageListenerTest {
     private InquiryMessageListener listener;
 
     /**
+     * The substituted claim ledger, which decides whether a delivery is the first for its request.
+     */
+    private InquiryReplyLedger ledger;
+
+    /** The consumer's own log events, captured so a removed identifier can be asserted absent. */
+    private ListAppender<ILoggingEvent> captured;
+
+    /** The consumer's logger, held so the appender attached in setup can be detached again. */
+    private ch.qos.logback.classic.Logger serviceLogger;
+
+    /** The level the consumer's logger carried before setup lowered it. */
+    private Level previousLevel;
+
+    /**
      * Builds the consumer over substituted collaborators.
      */
     @BeforeEach
@@ -122,9 +148,42 @@ class InquiryMessageListenerTest {
         // Assumptions: the transaction manager is substituted, so the read template runs its callback and
         //   commits nothing. What the cases below assert is which store is touched and in what order, not
         //   that a database committed, and a read-only lookup has nothing to commit in any case.
+        // WHY : Assumptions: the ledger's claim answers TRUE by default, which is the first-delivery
+        //   outcome every pre-existing case here is about. A mock answers false unstubbed, and false is
+        //   the redelivery outcome -- so leaving it unstubbed would silently route every one of those
+        //   cases down the duplicate-suppression path and assert nothing they were written for.
+        this.ledger = mock(InquiryReplyLedger.class);
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(true);
+        when(this.ledger.markSent(anyString(), any(LocalDateTime.class))).thenReturn(true);
+
+        // Assumptions: the transaction manager is substituted, so the read template runs its callback and
+        //   commits nothing. What the cases below assert is which store is touched and in what order, not
+        //   that a database committed, and a read-only lookup has nothing to commit in any case.
         this.listener = new InquiryMessageListener(this.accounts, new AccountInquiryReplyMapper(),
-                this.sqs, REPLY_QUEUE, ERROR_QUEUE, Clock.fixed(NOW, ZoneOffset.UTC),
+                this.sqs, REPLY_QUEUE, ERROR_QUEUE, this.ledger, Clock.fixed(NOW, ZoneOffset.UTC),
                 mock(PlatformTransactionManager.class));
+
+        this.serviceLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(InquiryMessageListener.class);
+        this.previousLevel = this.serviceLogger.getLevel();
+        this.serviceLogger.setLevel(Level.INFO);
+        this.captured = new ListAppender<>();
+        this.captured.start();
+        this.serviceLogger.addAppender(this.captured);
+    }
+
+    /**
+     * Detaches the captured appender and restores the logger's level.
+     *
+     * <p>Assumptions: the level is restored rather than left lowered, because the logger is a process-wide
+     * singleton and a case that lowered it would change what every later class in the same fork emits.</p>
+     */
+    @AfterEach
+    void restoreLogger() {
+        this.serviceLogger.detachAppender(this.captured);
+        this.captured.stop();
+        this.serviceLogger.setLevel(this.previousLevel);
     }
 
     /**
@@ -224,6 +283,68 @@ class InquiryMessageListenerTest {
         assertThat(captureSend().messageBody())
                 .startsWith("INVALID REQUEST PARAMETERS ACCT ID : 12345678901FUNCTION : BADF");
         verify(this.accounts, never()).findById(anyLong());
+    }
+
+    // WHY : Assumptions: the function code is driven with a value carrying a line terminator and a complete
+    //       forged event prefix, because that is the attack rather than a stand-in for it. The REPLY must
+    //       still carry the requester's own bytes -- the reference's invalid-parameters sentence names the
+    //       function it refused -- while the journal must not, and only a case that asserts both halves
+    //       establishes that the two destinations were separated rather than both sanitised or both raw.
+    /**
+     * Verifies a forged function code reaches the reply verbatim and the journal only as a classification.
+     */
+    @Test
+    @DisplayName("a forged function code is echoed to the reply but classified for the journal")
+    void aForgedFunctionCodeIsClassifiedForTheJournal() {
+        String forged = "\nev";
+
+        this.listener.onRequest(message(request(forged, "12345678901"), Map.of()));
+
+        assertThat(captureSend().messageBody())
+                .as("the reference sentence names the function it refused, so the reply carries the bytes")
+                .contains("FUNCTION : " + forged);
+        assertThat(InquiryRequestCodec.decode(request(forged, "12345678901")).functionLabel())
+                .as("what a journal line receives is a closed token, never the field")
+                .isEqualTo(InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED);
+        verify(this.accounts, never()).findById(anyLong());
+    }
+
+    // WHY : Assumptions: the CLASSIFICATION is asserted to be closed over every shape the field can take,
+    //       including the two the guard treats alike -- a blank field and an unrecognised one. Only the
+    //       membership assertion establishes that a caller always has something safe to journal; asserting
+    //       the absence of forged text alone would pass for a method returning nothing at all.
+    /**
+     * Verifies the journalled classification is closed over every function the wire can carry.
+     */
+    @Test
+    @DisplayName("the journalled function classification is closed")
+    void theJournalledClassificationIsClosed() {
+        for (String function : java.util.List.of("INQA", "inqa", "    ", "BADF", "\nev", "\u0000A\u0000")) {
+            assertThat(InquiryRequestCodec.decode(request(function, "12345678901")).functionLabel())
+                    .isIn(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY,
+                            InquiryRequestCodec.FUNCTION_LABEL_BLANK,
+                            InquiryRequestCodec.FUNCTION_LABEL_UNRECOGNISED);
+        }
+    }
+
+    // WHY : Assumptions: the ABSENCE of the account identifier is asserted on the record's own rendering,
+    //       which is the value a journal line would carry if one interpolated the request. Asserting the two
+    //       log statements directly would need a log appender; asserting the rendering they would have used
+    //       establishes the same property at the source, and it is the property the observability contract
+    //       states -- omitted, not abbreviated.
+    /**
+     * Verifies a decoded request's own rendering discloses neither the account identifier nor the function.
+     */
+    @Test
+    @DisplayName("a decoded request discloses neither the account identifier nor the raw function")
+    void aDecodedRequestDisclosesNoIdentifier() {
+        String rendered = InquiryRequestCodec.decode(request("INQA", "12345678901")).toString();
+
+        assertThat(rendered)
+                .doesNotContain("12345678901")
+                .doesNotContain("2345")
+                .contains(InquiryRequestCodec.FUNCTION_ACCOUNT_INQUIRY)
+                .contains("keyUsable=true");
     }
 
     /**
@@ -510,12 +631,74 @@ class InquiryMessageListenerTest {
         PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
 
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                " ", ERROR_QUEUE, clock, transactions))
+                " ", ERROR_QUEUE, this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.reply-queue");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                REPLY_QUEUE, "", clock, transactions))
+                REPLY_QUEUE, "", this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.error-queue");
+    }
+
+    /**
+     * No log line this consumer writes names the account the inquiry is about.
+     *
+     * <p>Purpose: this consumer's two outcome lines carried {@code accountId=} and the value behind it,
+     * so ORDINARY successful traffic wrote an eleven-digit account identifier into log storage once per
+     * message -- {@code ACCT-ID PIC 9(11)} at line 5 of {@code app/cpy/CVACT01Y.cpy}. That exposure
+     * arrived through a hand-written format argument rather than through a metadata field, so no character
+     * rule and no shape rule anywhere in the kernel could see it; only an assertion over what was actually
+     * emitted can.</p>
+     *
+     * <p>Assumptions: BOTH outcomes are exercised in one case, because they were one defect and a fix
+     * applied to one of them would leave the other. The answered path and the not-found path are the two
+     * the reference program reaches with a usable key, so between them they cover every line that had the
+     * subject available to log.</p>
+     *
+     * <p>Assumptions: the assertion is that the DIGITS do not appear, rather than that the token
+     * {@code accountId=} does not. A rename to {@code account=} or {@code key=} would satisfy a
+     * token-based assertion while disclosing exactly the same value, so the check is on the value.</p>
+     *
+     * <p>Assumptions: the events are still asserted PRESENT. Removing the identifier must not turn into
+     * removing the record -- an operator needs to know an inquiry was answered and which of the two ways
+     * it went, and the correlation identity already in the diagnostic context is what attributes the line
+     * to one request.</p>
+     */
+    @Test
+    @DisplayName("no log line names the account, and both outcome events are still recorded")
+    void noLogLineNamesTheAccount() {
+        Logger listenerLogger = (Logger) LoggerFactory.getLogger(InquiryMessageListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        // WHY : Assumptions: the previous level may legitimately be null, which means "inherit" rather
+        //       than "unset", so null is what is restored. Substituting a concrete default would pin a
+        //       logger that had been inheriting.
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.INFO);
+        try {
+            when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+            this.listener.onRequest(message(request("INQA", "12345678901"), Map.of()));
+
+            when(this.accounts.findById(999L)).thenReturn(Optional.empty());
+            this.listener.onRequest(message(request("INQA", "00000000999"), Map.of()));
+
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .as("the subject of the inquiry must not reach a log line")
+                    .noneMatch(recorded -> recorded.contains("12345678901"))
+                    .noneMatch(recorded -> recorded.contains(String.valueOf(ACCOUNT_ID)))
+                    .noneMatch(recorded -> recorded.contains("00000000999"))
+                    .noneMatch(recorded -> recorded.contains("999"));
+
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .as("and both outcomes are still recorded, so the record is not simply gone")
+                    .contains("event=account.inquiry.answered", "event=account.inquiry.not-found");
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+            listenerLogger.setLevel(previousLevel);
+        }
     }
 }

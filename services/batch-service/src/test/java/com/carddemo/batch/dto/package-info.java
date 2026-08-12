@@ -32,11 +32,13 @@
  * collapsed into one package.</p>
  *
  * <p>Alternatives Considered: asserting the argument contract from the job tests instead, on the
- * ground that the jobs are what register under those tokens. Rejected, because a job test needs the
- * job beans to exist and a contract test does not: the token spelling is assertable the moment the
- * enumeration exists, which is earlier than the beans land, and it is exactly the interval in which
- * a misspelling is cheapest to catch. Folding the assertions into the job tests would also make a
- * token failure and a step-wiring failure indistinguishable in a build log.</p>
+ * ground that the jobs are what register under those tokens. Rejected, because a job test needs a
+ * built context and satisfied step wiring and a contract test needs neither: the token spelling is
+ * assertable from the enumeration alone, so a misspelling fails in the cheapest test in the module
+ * rather than inside a context-loading one. Folding the assertions into the job tests would also
+ * make a token failure and a step-wiring failure indistinguishable in a build log. The pairing of a
+ * token to a registered bean is a separate obligation and is asserted separately, by the job
+ * package's registration census.</p>
  *
  * <h2>The one obligation every test in this package carries</h2>
  *

@@ -1,7 +1,5 @@
 package com.carddemo.batch.job;
 
-import static org.assertj.core.api.Assertions.assertThat;
-
 import com.carddemo.batch.BatchApplication;
 import com.carddemo.batch.dto.BatchJobName;
 import java.lang.reflect.Method;
@@ -14,6 +12,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.batch.core.job.Job;
 import org.springframework.context.annotation.Bean;
+import static org.assertj.core.api.Assertions.assertThat;
+
 
 /**
  * Pins that the set of job names this module ADVERTISES equals the set it can actually RUN.
@@ -32,10 +32,13 @@ import org.springframework.context.annotation.Bean;
  * token, and a bean method is visible without instantiating it. The tier that proves the beans actually
  * wire is the module's integration tier, which runs against a database.</p>
  *
- * <p>Assumptions: the two tokens with no landed job are declared here as an explicit, enumerated set
- * rather than left to be inferred from a failure. That is the whole point of the arrangement: the gap is
- * stated, it is small, and it cannot widen without this file changing -- so a later reader finds a
- * measured statement of what is missing instead of discovering it from a production incident.</p>
+ * <p>Refactoring Rationale: <b>there is no longer a set of unlanded tokens, and there used to be one.</b>
+ * This file declared export and import as not-yet-landed and its list of configuration classes named only
+ * the other five -- so when both classes landed, the assertion never inspected either file and the stale
+ * declaration kept passing. The gap the arrangement was meant to make un-widenable was therefore also
+ * un-closable without editing this file. Both are now in the configuration list, the declared-missing set
+ * is empty, and the both-directions assertion below is what keeps the two statements honest: a token with
+ * nothing behind it fails, and a job that lands while still being declared missing fails too.</p>
  */
 @DisplayName("the batch job roster")
 class BatchJobRosterTest {
@@ -52,54 +55,49 @@ class BatchJobRosterTest {
             PostTransactionsJob.class,
             CalculateInterestJob.class,
             BackupTransactionsJob.class,
-            CombineTransactionsJob.class);
+            CombineTransactionsJob.class,
+            ExportJob.class,
+            ImportJob.class);
 
     /**
-     * The tokens the orchestration vocabulary declares for which no job has landed in this module.
+     * The tokens the landed jobs register under are exactly the tokens the vocabulary advertises.
      *
-     * <p>Assumptions: export and import are the two, and the reason is concrete rather than a matter of
-     * sequencing. Both re-express programs that read the customer and card masters --
-     * {@code app/jcl/CBEXPORT.jcl:49-57} names five input data definitions, two of which are those
-     * masters -- and this module holds no customer entity and no card entity, because the account and card
-     * contexts own them. Landing the pair would mean adding two entities and two repositories to this
-     * module's closed sets for a job that stands outside the nightly chain. There is also no oracle to
-     * verify a migration of them against: the existing suite records at {@code tests/README.md:53-69} that
-     * {@code CBEXPORT} and {@code CBIMPORT} do not compile under the open-source compiler at all, so no
-     * golden master exists for either.</p>
+     * <p>Refactoring Rationale: this set is now EMPTY and it used to hold export and import. Both have
+     * landed -- each has a file in the job package, each registers exactly one job bean under its own
+     * token, and both are named in {@link #JOB_CONFIGURATIONS} above -- so declaring them missing would be
+     * this file telling a reader that a capability is absent while it is present. The set is kept rather
+     * than deleted so that the next genuine gap is stated in one place and asserted in both directions,
+     * which is the arrangement that failed silently while it was populated and the list below was not.</p>
      *
-     * <p>Assumptions: the tokens are NOT removed from the orchestration vocabulary to close the gap. The
-     * vocabulary is an external contract -- the state machine names states by these tokens -- so removing
-     * one would change a contract outside this repository's Java sources in order to make a test pass.</p>
+     * <p>Assumptions: an empty set makes the both-directions assertion strictly stronger, not weaker.
+     * Every advertised token must now have a landed job, with nothing exempt.</p>
      */
-    private static final Set<BatchJobName> NOT_YET_LANDED =
-            EnumSet.of(BatchJobName.EXPORT, BatchJobName.IMPORT);
+    private static final Set<BatchJobName> NOT_YET_LANDED = EnumSet.noneOf(BatchJobName.class);
 
     /**
-     * Every advertised token either has a landed job or is one of the two declared as not yet landed.
+     * Every advertised token has a landed job, with nothing declared as not yet landed.
      *
-     * <p>Assumptions: the assertion is made in BOTH directions. One direction catches a token advertised
-     * with nothing behind it; the other catches a job that has landed while still being declared missing,
-     * which would leave this file telling a reader that a capability is absent when it is present.</p>
+     * <p>Assumptions: the exemption set is asserted empty rather than subtracted. While it was populated
+     * this file could tell a reader that a capability was absent when it was present; with it empty the
+     * membership assertion above stands unqualified, which is the stronger of the two statements.</p>
      */
     @Test
     @DisplayName("account for every advertised job token exactly once")
     void everyAdvertisedTokenIsAccountedFor() {
-        Set<String> landed = landedJobNames();
-        Set<String> declaredMissing = new TreeSet<>();
-        NOT_YET_LANDED.forEach(token -> declaredMissing.add(token.token()));
-
         Set<String> advertised = new TreeSet<>();
         Arrays.stream(BatchJobName.values()).forEach(token -> advertised.add(token.token()));
 
-        Set<String> accountedFor = new TreeSet<>(landed);
-        accountedFor.addAll(declaredMissing);
-
-        assertThat(accountedFor)
-                .as("every advertised token must either have a landed job or be declared missing")
+        assertThat(landedJobNames())
+                .as("every advertised token must have a landed job, and no landed job may sit outside"
+                        + " the advertised vocabulary")
                 .containsExactlyInAnyOrderElementsOf(advertised);
-        assertThat(landed)
-                .as("a token declared missing must not also have a landed job")
-                .doesNotContainAnyElementsOf(declaredMissing);
+        // WHY : Assumptions: ONE direction is asserted and that is now the stronger statement. The
+        //       declared-missing set below is empty, so every advertised token must have a landed job
+        //       with nothing exempt; a second assertion excluding an empty set would assert nothing at
+        //       all, and AssertJ refuses an empty exclusion rather than passing vacuously.
+        assertThat(NOT_YET_LANDED)
+                .as("nothing is declared missing, so the assertion above admits no exemption")
+                .isEmpty();
     }
 
     /**
@@ -150,7 +148,9 @@ class BatchJobRosterTest {
                 PostTransactionsJob.STEP_NAME,
                 CalculateInterestJob.STEP_NAME,
                 BackupTransactionsJob.STEP_NAME,
-                CombineTransactionsJob.STEP_NAME));
+                CombineTransactionsJob.STEP_NAME,
+                ExportJob.STEP_NAME,
+                ImportJob.STEP_NAME));
 
         assertThat(stepNames).hasSize(JOB_CONFIGURATIONS.size());
     }
@@ -194,6 +194,12 @@ class BatchJobRosterTest {
     /**
      * Reads a configuration class's declared job-name constant.
      *
+     * <p>Assumptions: the field is read with {@code getDeclaredField} rather than {@code getField},
+     * because two of the seven job classes declare the constant package-private and {@code getField}
+     * sees public members only. This test sits in the same package as the classes it reads, so a
+     * package-private constant is legitimately accessible to it, and requiring the constant to be public
+     * purely so a sibling test could read it would widen a class's API for a test's convenience.</p>
+     *
      * @param configuration the class to read; must not be {@code null}
      * @return the value of its {@code JOB_NAME} constant, never {@code null}
      * @throws IllegalStateException if the class declares no readable {@code JOB_NAME} constant, which
@@ -201,11 +207,11 @@ class BatchJobRosterTest {
      */
     private static String jobNameConstantOf(Class<?> configuration) {
         try {
-            Object value = configuration.getField("JOB_NAME").get(null);
+            Object value = configuration.getDeclaredField("JOB_NAME").get(null);
             return String.valueOf(value);
         } catch (ReflectiveOperationException unreadable) {
             throw new IllegalStateException(configuration.getName()
-                    + " must declare a public static JOB_NAME constant, because that constant is what"
+                    + " must declare a static JOB_NAME constant, because that constant is what"
                     + " this roster compares against the orchestration vocabulary", unreadable);
         }
     }

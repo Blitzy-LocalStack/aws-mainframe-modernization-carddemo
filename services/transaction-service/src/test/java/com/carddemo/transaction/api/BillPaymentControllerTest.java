@@ -1,5 +1,6 @@
 package com.carddemo.transaction.api;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -14,6 +15,7 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.transaction.dto.BillPaymentPreview;
 import com.carddemo.transaction.dto.BillPaymentResponse;
 import com.carddemo.transaction.mapper.BillPaymentMapper;
 import com.carddemo.transaction.service.BillPaymentService;
@@ -24,6 +26,7 @@ import java.util.NoSuchElementException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
@@ -37,6 +40,20 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>Assumptions: the payment service is stubbed, so these tests are about the wire shape each outcome
  * produces and not about the order the service evaluates its branches in -- that order is asserted against
  * the service itself, where the reference's own line numbers can be cited beside each branch.</p>
+ *
+ * <p>Trade-offs: stubbing the service means NO effect of a payment is reached from here, and naming where
+ * those effects ARE reached is part of this class's contract rather than a courtesy to the reader. A
+ * review of an earlier revision recorded that the account boundary was mocked everywhere it appeared, so
+ * a suite of stubbed controller cases sitting above a stubbed service read as coverage of a path that
+ * nothing exercised. Two classes carry the rest:
+ * {@code com.carddemo.transaction.service.BillPaymentServiceTest} asserts the branch order and the
+ * sentence selected on each branch against the reference's line numbers, and
+ * {@code com.carddemo.transaction.repository.BillPaymentAtomicityIT} drives the real service against a
+ * real PostgreSQL engine and reads the ledger row and the account balance back to prove they commit
+ * together and roll back together. What remains here is the mapping from an outcome to a status, a
+ * header and a body -- which is exactly what a stubbed service is the right instrument for, because a
+ * status mapping asserted through a real database would fail for reasons that have nothing to do with
+ * the mapping.</p>
  */
 @DisplayName("the payment operation's published outcomes")
 class BillPaymentControllerTest {
@@ -59,6 +76,10 @@ class BillPaymentControllerTest {
      * the state the baseline reaches for spaces or low values.</p>
      */
     private static final String WITHHELD_BODY = "{\"accountId\":\"00000000011\"}";
+
+    /** A submission that refuses the payment outright, which is the reference's own line 178 branch. */
+    private static final String REFUSED_BODY =
+            "{\"accountId\":\"00000000011\",\"confirmation\":\"N\"}";
 
     /** The payment this controller delegates to, stubbed per test. */
     private BillPaymentService billPaymentService;
@@ -125,13 +146,20 @@ class BillPaymentControllerTest {
     /**
      * A failed account update is reported with the payment program's own failed-update sentence.
      *
+     * <p>Assumptions: the cause carried under the sentence is a data-access failure, which is what this
+     * condition now arises from. The service reaches the balance with a statement on its own transaction's
+     * connection, so the failure it wraps is the framework's translated data-access exception; an earlier
+     * revision named the cause after a remote seam, which was accurate while the change was an HTTP call
+     * and became a misdescription of the only failure this path can now report.</p>
+     *
      * @throws Exception if the request could not be performed
      */
     @Test
     @DisplayName("render the reference's failed-update sentence on a 500")
     void reportsFailedUpdateWithReferenceSentence() throws Exception {
         when(this.billPaymentService.payBalanceInFull(any())).thenThrow(new IllegalStateException(
-                BillPaymentMapper.MESSAGE_ACCOUNT_UPDATE_FAILED, new RuntimeException("seam")));
+                BillPaymentMapper.MESSAGE_ACCOUNT_UPDATE_FAILED,
+                new DataAccessResourceFailureException("the balance statement did not complete")));
 
         this.mockMvc.perform(post(BillPaymentController.BASE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -187,6 +215,20 @@ class BillPaymentControllerTest {
      * absence of the header is asserted for the same reason: it is declared required on the written
      * outcome alone, so sending one here would address a transaction that was never written.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the stubbed answer is now {@link BillPaymentPreview} rather than a
+     * {@link BillPaymentResponse} whose identifier was null and whose {@code paid} member was false, and
+     * the substitution is the point rather than a detail. The adapter chooses its status by matching the
+     * outcome's TYPE, because the previous form -- one record for both turns, discriminated by a nullable
+     * identifier -- meant the required {@code Location} header depended on a member that is absent on
+     * every non-paying turn, and the published acknowledgement schema declared that identifier required
+     * while the service was filling it with null. A stub carrying the old shape would now be arranging a
+     * state the service cannot produce.</p>
+     *
+     * <p>Assumptions: the balance is asserted on the preview body as a quoted string, because a reporting
+     * turn has to show the operator the figure a confirmation would pay -- the reference displays it at
+     * lines 193 and 194 before the prompt at line 237. The quoting is transformation rule T3: a JSON
+     * number would be parsed into a double by most clients.</p>
+     *
      * <p>Assumptions: the withheld state is an absent confirmation rather than a blank one, matching the
      * baseline's own branch at {@code app/cbl/COBIL00C.cbl} lines 182 to 184, which reads the account and
      * falls through to display the balance for a confirmation of spaces or low values. The prompt the
@@ -195,11 +237,10 @@ class BillPaymentControllerTest {
      * @throws Exception if the request could not be performed
      */
     @Test
-    @DisplayName("answer a withheld confirmation 200 with nothing paid and no location")
+    @DisplayName("answer a withheld confirmation 200 with the payable balance, nothing paid, no location")
     void answersWithheldConfirmationWithoutPaying() throws Exception {
-        when(this.billPaymentService.payBalanceInFull(any())).thenReturn(new BillPaymentResponse(
-                null, ACCOUNT_ID, Money.of("123.45"), false,
-                BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT));
+        when(this.billPaymentService.payBalanceInFull(any())).thenReturn(BillPaymentPreview.reporting(
+                ACCOUNT_ID, Money.of("123.45"), BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT));
 
         this.mockMvc.perform(post(BillPaymentController.BASE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -207,8 +248,46 @@ class BillPaymentControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(header().doesNotExist(HttpHeaders.LOCATION))
                 .andExpect(jsonPath("$.paid").value(false))
-                .andExpect(jsonPath("$.currentBalance").value("123.45"))
+                .andExpect(jsonPath("$.accountId").value(ACCOUNT_ID))
+                .andExpect(jsonPath("$.payableBalance").value("123.45"))
                 .andExpect(jsonPath("$.returnMessage")
-                        .value(BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT));
+                        .value(BillPaymentMapper.MESSAGE_CONFIRM_PAYMENT))
+                // WHY : Assumptions: the identifier property is asserted ABSENT rather than null, because
+                //       the preview schema closes its object and declares no such property. A body
+                //       carrying it as null would still satisfy a paid-is-false assertion while telling a
+                //       client that a transaction identifier was expected here and could not be produced.
+                .andExpect(jsonPath("$.transactionId").doesNotExist());
+    }
+
+    /**
+     * A refused confirmation is answered 200 carrying neither a balance nor a sentence.
+     *
+     * <p>Purpose: this holds the third of the four turns the operation can take, and it is the one whose
+     * body is emptiest -- the reference's refusal branch at lines 178 to 181 of
+     * {@code app/cbl/COBIL00C.cbl} performs {@code CLEAR-CURRENT-SCREEN} at line 180 and moves nothing
+     * into the message field, so the operator sees a blanked screen and no text.</p>
+     *
+     * <p>Assumptions: both absences are asserted, and asserting only one would miss the likelier defect.
+     * A sentence invented here -- "payment cancelled" being the obvious candidate -- would put text in
+     * front of an operator that no line of the reference emits, which transformation rule T8 forbids; and
+     * a balance reported here would show a figure line 180 has just removed from view.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("answer a refused confirmation 200 with no balance and no sentence")
+    void answersRefusedConfirmationWithACearedBody() throws Exception {
+        when(this.billPaymentService.payBalanceInFull(any()))
+                .thenReturn(BillPaymentPreview.cleared(ACCOUNT_ID));
+
+        this.mockMvc.perform(post(BillPaymentController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(REFUSED_BODY))
+                .andExpect(status().isOk())
+                .andExpect(header().doesNotExist(HttpHeaders.LOCATION))
+                .andExpect(jsonPath("$.paid").value(false))
+                .andExpect(jsonPath("$.accountId").value(ACCOUNT_ID))
+                .andExpect(jsonPath("$.payableBalance").doesNotExist())
+                .andExpect(jsonPath("$.returnMessage").doesNotExist());
     }
 }

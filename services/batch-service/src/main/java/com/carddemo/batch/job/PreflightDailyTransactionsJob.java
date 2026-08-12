@@ -167,7 +167,7 @@ public class PreflightDailyTransactionsJob {
     public static final String JOB_NAME = BatchJobName.PREFLIGHT_DAILY_TRANSACTIONS.token();
 
     /** The step name the durable ledger records this job's progress under. */
-    public static final String STEP_NAME = "preflight-daily-transactions-step";
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /**
      * The text the reference displays on entry, from {@code app/cbl/CBTRN01C.cbl:156}.
@@ -214,16 +214,34 @@ public class PreflightDailyTransactionsJob {
             " COULD NOT BE VERIFIED. SKIPPING TRANSACTION ID-";
 
     /**
-     * The format the account identifier is rendered through inside the account-missing diagnostic.
+     * The redaction written into the account-missing diagnostic in place of the identifier.
      *
-     * <p>Assumptions: {@code ACCT-ID} is declared {@code PIC 9(11)} at
+     * <p>⚠️ Refactoring Rationale: this replaces a {@code "%011d"} format that interpolated the
+     * account identifier itself, and the substitution is a security fix rather than a cosmetic one.
+     * The line is emitted at {@code WARN} and therefore reaches durable log storage, so every account
+     * whose master row was missing had its identifier published to every holder of log access -- and it
+     * was published TWICE, because the same value was also carried as a structured
+     * {@code accountId} field on the same statement. The identifier is now omitted from both, and what
+     * replaces it here is a fixed run of the redaction character at the field's own declared width, so
+     * the line keeps the shape a positional reader expects while carrying nothing that identifies an
+     * account.</p>
+     *
+     * <p>Assumptions: the width is eleven because {@code ACCT-ID} is declared {@code PIC 9(11)} at
      * {@code app/cpy/CVACT01Y.cpy:5}, and a COBOL {@code DISPLAY} of a numeric-display field emits
-     * every declared digit position, so the reference renders eleven zero-padded digits rather than
-     * the shortest form of the number. Rendering the Java {@code Long} without the padding would
-     * publish a visibly different line for every account whose identifier is shorter than its
-     * declared width, which is every account in the seed data.</p>
+     * every declared digit position -- so the reference's line is eleven characters wide at this
+     * position whatever the identifier's magnitude, and the redaction preserves that.</p>
+     *
+     * <p>Alternatives Considered: masking to the last four digits, as the sibling card diagnostic in
+     * this class does. Rejected because the card mask exists to keep a card RECOGNISABLE to an operator
+     * who is looking at a specific card, whereas nothing in this pass needs an account to be
+     * recognisable: the line already carries the transaction identifier and the run-local ingestion
+     * ordinal, and either locates the feed row from which the account can be resolved through the
+     * cross-reference. A partial identifier would therefore be residual disclosure bought for no
+     * diagnostic gain. Trade-offs: an operator reading only this line cannot name the account, and must
+     * follow the transaction identifier into the feed to do so; that indirection is the price of the
+     * line carrying no identifier at all.</p>
      */
-    private static final String ACCOUNT_ID_FORMAT = "%011d";
+    private static final String ACCOUNT_ID_REDACTION = "***********";
 
     /**
      * The number of trailing digits of a card number that may appear in a log line.
@@ -353,7 +371,8 @@ public class PreflightDailyTransactionsJob {
      *     invocation rather than being re-entered per chunk
      */
     private RepeatStatus runStep(StepContribution contribution, ChunkContext context) {
-        this.ledgerOfSteps.runStep(BatchConfig.runIdOf(context), STEP_NAME, this::reportOnEveryRecord);
+        this.ledgerOfSteps.runStep(BatchConfig.runIdOf(context), STEP_NAME,
+                BatchJobName.PREFLIGHT_DAILY_TRANSACTIONS, this::reportOnEveryRecord);
         return RepeatStatus.FINISHED;
     }
 
@@ -520,9 +539,19 @@ public class PreflightDailyTransactionsJob {
 
         Long accountId = resolved.get().getAccountId();
         if (this.accounts.findByAccountId(accountId).isEmpty()) {
-            LOG.warn("event=batch.preflight.account-unresolved transactionId={} accountId={}"
-                    + " diagnostic=\"{}\"", feedRecord.getTransactionId(), accountId,
-                    accountMissingDiagnostic(accountId));
+            // WHY : ⚠️ Refactoring Rationale: the account identifier is gone from this statement. It
+            //       used to appear twice on one WARN line -- once as a structured accountId field and
+            //       again interpolated into the diagnostic -- so a durable log recorded, for every
+            //       account whose master row was missing, an identifier that any holder of log access
+            //       could read. What replaces it is identity that locates the record without naming the
+            //       account: the transaction identifier, which identifies nobody, and the run-local
+            //       ingestion ordinal, which is the feed table's own row position. Either is enough to
+            //       reach the row and resolve the account through the cross-reference, which is where
+            //       that lookup belongs. See ACCOUNT_ID_REDACTION for why a partial identifier was
+            //       rejected as well as a full one.
+            LOG.warn("event=batch.preflight.account-unresolved transactionId={} ingestSeq={}"
+                    + " diagnostic=\"{}\"", feedRecord.getTransactionId(),
+                    feedRecord.getIngestSeq(), accountMissingDiagnostic());
             return RecordOutcome.ACCOUNT_UNRESOLVED;
         }
         return RecordOutcome.RESOLVED;
@@ -550,16 +579,19 @@ public class PreflightDailyTransactionsJob {
     }
 
     /**
-     * Renders the reference's account-missing diagnostic for one account identifier.
+     * Renders the reference's account-missing diagnostic with the identifier redacted.
      *
-     * @param accountId the identifier the cross-reference supplied and the account master did not
-     *     hold; must not be {@code null}
-     * @return the diagnostic line, with the identifier zero-padded to its declared eleven digits,
-     *     never {@code null}
+     * <p>Refactoring Rationale: this method took the identifier as a parameter and interpolated it.
+     * It now takes nothing, which is deliberate: a renderer that cannot be handed the value cannot
+     * publish it, so the redaction is a property of the signature rather than a rule a future edit
+     * could relax. The full reasoning, including the rejected last-four masking, is on
+     * {@link #ACCOUNT_ID_REDACTION}.</p>
+     *
+     * @return the diagnostic line, with the identifier position occupied by the redaction at its
+     *     declared eleven-character width, never {@code null}
      */
-    private static String accountMissingDiagnostic(Long accountId) {
-        return ACCOUNT_MISSING_PREFIX + String.format(ACCOUNT_ID_FORMAT, accountId)
-                + ACCOUNT_MISSING_SUFFIX;
+    private static String accountMissingDiagnostic() {
+        return ACCOUNT_MISSING_PREFIX + ACCOUNT_ID_REDACTION + ACCOUNT_MISSING_SUFFIX;
     }
 
     /**

@@ -23,14 +23,15 @@ import org.springframework.data.repository.query.Param;
  *
  * <p>Assumptions: three movements are served by FOUR declarations, because two of them are declared
  * twice at different strengths and the walk is declared twice at different widths. The keyed read
- * appears once holding the row and once not; the walk appears once returning whole summaries and once
- * returning only the keys they are addressed by. Refactoring Rationale: the key-projected walk was
- * added for the purge, which must not mutate a summary it read before taking the lock -- a row already
- * loaded into the persistence context is returned from it again by a later locking read, so the state
- * the caller then adjusts is the state read BEFORE the lock, which is the read-modify-write the lock
- * exists to prevent. Projecting the walk to keys means the entity is loaded for the first time under
- * the lock, and the alternative of refreshing the loaded instance was rejected as a second statement
- * doing what one correctly-ordered statement already does.</p>
+ * appears once as a guarded modifying statement and once as a plain read; the walk appears once
+ * returning whole summaries and once returning only the keys they are addressed by. Refactoring
+ * Rationale: the key-projected walk was added for the purge, which DELETES from the very table it is
+ * stepping through -- so a page of whole summaries is a page of snapshots that a concurrent purge
+ * window or a live authorization may already have moved past, and a caller deciding a deletion from
+ * one of them would decide from state the row no longer holds. Projecting the walk to keys lets each
+ * summary be read individually once the window's position is fixed, and the alternative of refreshing
+ * a loaded instance was rejected as a second statement doing what one correctly-ordered statement
+ * already does.</p>
  *
  * <p>The rulings this interface inherits rather than restates -- where the transaction boundary lives,
  * why nothing on this boundary masks a value, why every monetary member is
@@ -140,6 +141,15 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
     //       each adds to the other's result -- which is the property the lock was reached for, obtained
     //       without holding anything across application logic. The decision that precedes them reads the
     //       summary through the non-locking findByAccountId below.
+    // WHY : Refactoring Rationale: making the accumulation safe was NOT sufficient, and the first of the
+    //       three statements carries a guard for what it left open. Two requests on two different cards of
+    //       one account are delivered concurrently by a queue grouped on card number, so both read the same
+    //       headroom, both approve, and both contributions then land -- which is the correct accumulation of
+    //       an incorrect pair of decisions, and the account's credit balance ends above its credit limit.
+    //       The approval statement is therefore QUALIFIED on the same credit check the decision made, so the
+    //       engine re-evaluates it against the row as it stands and the caller derives approval from whether
+    //       the row changed. Assumptions: only the APPROVAL needs the guard. A decline consumes no credit,
+    //       so its counters have nothing to exceed, and the purge reversal only ever reduces.
     // WHY : Alternatives Considered: (a) an optimistic @Version column, which the previous
     //       documentation also rejected. Still rejected, and for a stronger reason than it gave: the
     //       migration declares no version column on this table, and a version check detects a collision
@@ -156,37 +166,134 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
     //       exactly what these statements make safe.
 
     /**
-     * Adds one approved authorization's contribution to an account's summary, atomically.
+     * Copies an account master's two limits onto its stored summary, touching nothing else.
      *
-     * <p>Purpose: this is the write half of {@code cbl/COPAUA0C.cbl} L814 and L815, plus the credit
-     * balance the same paragraph moves at L817 and the cash balance it assigns at L818. All four members
-     * move in ONE statement so a concurrent contribution to the same row cannot displace this one.</p>
+     * <p>Purpose: this is {@code MOVE ACCT-CREDIT-LIMIT TO PA-CREDIT-LIMIT} and
+     * {@code MOVE ACCT-CASH-CREDIT-LIMIT TO PA-CASH-LIMIT} at {@code cbl/COPAUA0C.cbl} L810 and L811,
+     * expressed as a statement rather than as a field assignment on a loaded instance.</p>
+     *
+     * <p>Refactoring Rationale: the consumer used to perform this refresh by mutating the managed
+     * summary and calling the inherited {@code save}, and that combination LOST CONCURRENT
+     * CONTRIBUTIONS. The mapping declares neither a version member nor Hibernate's dynamic-update
+     * marker, so the pending change flushed as a WHOLE-ROW update carrying every column from the
+     * instance's load-time snapshot -- including the four accumulators. The flush is triggered by the
+     * very next statement, because the additive queries below are bulk operations and the provider
+     * flushes before running one. So a contribution another transaction had committed after this
+     * transaction's read was overwritten with the older counters, and only then was this decision's own
+     * contribution added on top of them: the other party's authorization vanished from the account's
+     * totals with nothing anywhere reporting it. Assumptions: the exposure is reachable rather than
+     * theoretical -- the request queue orders by MESSAGE GROUP and the group is the CARD NUMBER, so two
+     * cards belonging to one account are two groups and are delivered in parallel.
+     *
+     * <p>Assumptions: this statement is safe to interleave with the additive statements below BECAUSE
+     * THEIR COLUMN SETS ARE DISJOINT. The two limits are ASSIGNED from the account master -- the
+     * reference moves them, so a later write simply wins and there is nothing for an atomic statement
+     * to protect -- while the counters, the totals and the held balance are INCREMENTED and are the
+     * only members with a lost-update exposure. Two statements over disjoint columns cannot displace
+     * one another whichever order the engine serialises them in, which is what makes the pair correct
+     * where the entity write was not.
+     *
+     * <p>Alternatives Considered: (a) folding the limits into each additive statement, giving one
+     * statement per arm and four queries in place of three. Rejected because the assignment and the
+     * accumulation come from different paragraphs of the reference and are reached on different
+     * conditions -- the refresh happens whenever the account master was read, the accumulation on
+     * exactly one arm -- so combining them would make a caller that read no account master unable to
+     * contribute at all without a second pair of statements. (b) adding a version member to the
+     * mapping so the whole-row write could be retried on collision. Rejected for the reason the header
+     * above already gives for rejecting it as a lock substitute: the migration declares no version
+     * column on this table, and a version check discards decision work a retry then has to redo,
+     * whereas an atomic statement has no collision to detect.
+     *
+     * @param accountId the account whose summary receives the refreshed limits; must not be
+     *     {@code null}
+     * @param creditLimit the account master's credit limit, exact at scale two; must not be
+     *     {@code null}
+     * @param cashCreditLimit the account master's cash credit limit, exact at scale two; must not be
+     *     {@code null}
+     * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
+     */
+    @Modifying
+    @Query("""
+            update PendingAuthSummary s
+               set s.creditLimit = :creditLimit,
+                   s.cashLimit = :cashCreditLimit
+             where s.accountId = :accountId
+            """)
+    int refreshStoredLimits(@Param("accountId") Long accountId,
+            @Param("creditLimit") BigDecimal creditLimit,
+            @Param("cashCreditLimit") BigDecimal cashCreditLimit);
+
+    /**
+     * Reserves an approved authorization's amount only while the account's own limit still admits it.
+     *
+     * <p>Purpose: this is {@code cbl/COPAUA0C.cbl} L814 and L815 together with the credit balance the same
+     * paragraph moves at L817 and the cash balance it assigns at L818, qualified additionally on the credit
+     * check the decision was made against. All four members move in ONE statement so a concurrent
+     * contribution to the same row cannot displace this one, and the qualification is there because an
+     * atomic increment makes the ACCUMULATION safe and leaves the CREDIT DECISION unsafe -- two different
+     * properties of the same row.</p>
+     *
+     * <p>Refactoring Rationale: an UNGUARDED {@code addApprovedAuthorization} stood here and is withdrawn
+     * rather than kept beside this one. Keeping both would leave a statement that applies an approval
+     * without checking the limit available to any later caller, one method name away from the one that
+     * checks -- and the defect this method corrects was precisely an approval applied against headroom that
+     * had already been spent. There is one way to apply an approval and it is the checked way.</p>
      *
      * <p>Assumptions: the credit balance moves with the approved pair and not separately, because the
-     * entity's own {@code recordApproved} moves all three together and the three are meaningless apart
-     * -- an approved total that has advanced while the balance has not describes an account no
-     * reference program could produce.
+     * entity's own {@code recordApproved} moves all three together and the three are meaningless apart --
+     * an approved total that has advanced while the balance has not describes an account no reference
+     * program could produce. The cash balance is ASSIGNED zero, because {@code MOVE 0 TO PA-CASH-BALANCE}
+     * at L818 is an assignment rather than an accumulation; it is in this statement anyway so that an
+     * approval reaches the row exactly once, and its effect is not vacuous -- a summary the extract load
+     * rehydrated carries whatever cash balance the stored segment held, and the reference program zeroes it
+     * on the first approval thereafter.</p>
      *
-     * <p>Refactoring Rationale: the cash balance is ASSIGNED zero here and was previously left
-     * untouched, and the fourth member joins the statement for the same reason the other three are in
-     * it. {@code MOVE 0 TO PA-CASH-BALANCE} at L818 is an assignment rather than an accumulation, so it
-     * is the one member of the four for which a concurrent contribution cannot lose anything -- but
-     * splitting it out would mean an approval reached the row through two statements, and a reader
-     * comparing the reference branch's four statements with a three-member update would have to go
-     * looking for the fourth. Its effect is not vacuous: a summary the extract load rehydrated carries
-     * whatever cash balance the stored segment held, and the reference program zeroes it on the first
-     * approval thereafter, so omitting the assignment left a seeded value standing that the reference
-     * clears. It is expressed as a literal zero rather than as a parameter because the reference moves a
-     * literal.
+     * <p>Refactoring Rationale: the queue is a FIFO queue grouped by card number, so two requests on two
+     * DIFFERENT cards of one account are delivered concurrently and decided concurrently. Both read the
+     * summary through the non-locking {@link #findByAccountId(Long)}, both compute the same
+     * {@code creditLimit - creditBalance} headroom, both find their amount fits, and both then add
+     * atomically -- so both contributions land, exactly as intended, and the resulting credit balance
+     * exceeds the credit limit. The atomic increment is what makes that outcome reliable rather than
+     * intermittent. Nothing in the row afterwards records that a limit was breached, and the reference
+     * system cannot produce the state at all because it decides one message at a time.</p>
      *
-     * <p>Assumptions: the statement reports the number of rows it changed, and the caller is expected
-     * to treat zero as "no summary for this account" rather than ignoring it. That is the same
-     * condition the withdrawn read reported as an empty {@link Optional}, moved to the write.
+     * <p>Assumptions: the guarded predicate is {@code creditLimit - creditBalance >= :amount} and the
+     * INCLUSIVE operator is required rather than incidental. The reference declines only when the
+     * requested amount is STRICTLY GREATER than the available amount --
+     * {@code IF WS-TRANSACTION-AMT > WS-AVAILABLE-AMT} at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L668 and L676 -- so a request for exactly
+     * the available amount is approved. A strict predicate here would refuse the reservation the deciding
+     * service admitted, and the two would disagree at precisely the boundary value both are written
+     * around.</p>
      *
-     * @param accountId the account whose summary receives the contribution; must not be {@code null}
-     * @param amount the approved amount to add to both the approved total and the credit balance; must
-     *     not be {@code null}
-     * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
+     * <p>Assumptions: the predicate reads the row's OWN stored members rather than a value the caller
+     * carries, which is what makes the reservation atomic. The engine evaluates the condition and applies
+     * the four assignments in one statement against the row as it stands at that moment, so a
+     * contribution committed by a concurrent authorization between this transaction's read and this
+     * statement is already included in the {@code creditBalance} the predicate subtracts. Passing the
+     * headroom the caller computed would restore the very stale-read window this method closes.</p>
+     *
+     * <p>Alternatives Considered: (a) a pessimistic row lock taken before the decision, which is what
+     * previously stood on this boundary and was withdrawn for the reason recorded above -- the reference
+     * passes no get-hold function code anywhere, so a held row is concurrency machinery the reference
+     * system does not have, and it additionally holds the row across up to three outbound HTTP calls.
+     * (b) An optimistic version column, which detects the collision only at commit and then discards the
+     * decision work a retry must redo, on a table whose migration declares no version column. (c)
+     * Serialising the consumer to one task, which reproduces the reference's one-message-at-a-time model
+     * exactly and throws away the throughput the queue's per-card grouping exists to permit. A guarded
+     * update takes no lock, adds no column, needs no retry and leaves the concurrency the grouping
+     * allows.</p>
+     *
+     * <p>Trade-offs: the caller cannot tell a refused reservation from an absent row by the row count
+     * alone, because both answer zero. That is accepted rather than worked around with a second
+     * statement: the only caller reaches this method with a summary it has already read or re-read, so
+     * the row's existence is established before the statement runs and a zero can only mean the headroom
+     * went. A caller without that guarantee must establish it first.</p>
+     *
+     * @param accountId the account whose summary receives the reservation; must not be {@code null}
+     * @param amount the approved amount to reserve against the account's limit; must not be {@code null}
+     * @return {@code 1} when the limit still admitted the amount and the contribution was applied,
+     *     {@code 0} when it did not -- or when the account carries no summary at all
      */
     @Modifying
     @Query("""
@@ -196,8 +303,9 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
                    s.creditBalance = s.creditBalance + :amount,
                    s.cashBalance = 0
              where s.accountId = :accountId
+               and s.creditLimit - s.creditBalance >= :amount
             """)
-    int addApprovedAuthorization(@Param("accountId") Long accountId,
+    int reserveApprovedAuthorization(@Param("accountId") Long accountId,
             @Param("amount") BigDecimal amount);
 
     /**
@@ -370,21 +478,26 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * addressed by. It returns identifiers and not summaries, and that is the whole of its purpose.</p>
      *
      * <p>Purpose: a caller that INTENDS to modify each summary it walks cannot use the summary the walk
-     * returned. Every such caller must take the row lock first, and a locking read of a row that is
-     * already in the persistence context hands back the instance loaded by the earlier unlocked read
-     * rather than the state visible once the lock is held. The arithmetic that follows -- the four
-     * counter and total subtractions at {@code cbl/CBPAUP0C.cbl} L287 to L292 -- would then be applied
-     * to a snapshot a concurrent writer has already moved past, and the resulting row would be short by
-     * exactly that writer's contribution with nothing in it to show the loss. Walking keys makes the
-     * locking read the FIRST read of the row, so the state adjusted is the state the lock protects.</p>
+     * returned, and the reason is the DELETION this walk feeds rather than any lock. The purge removes
+     * rows from the very table it is stepping through, so a page of entities loaded before the window
+     * began is a page of snapshots that a concurrent writer -- another purge window, or a live
+     * authorization -- may already have moved past. A caller that decided from those snapshots would
+     * decide from state the row no longer holds. The arithmetic that follows -- the four counter and
+     * total subtractions at {@code cbl/CBPAUP0C.cbl} L287 to L292 -- is for that reason applied by a
+     * statement computed in the database and not by writing a loaded instance back, and the deletion
+     * decision is taken from a summary read individually, after the window's position was fixed by
+     * key. Walking keys is what makes that individual read possible at all.</p>
      *
-     * <p>Alternatives Considered: three. Refreshing each summary after locking it was rejected because
-     * it issues a second statement to undo the effect of the first and leaves the correct ordering as a
-     * convention a later reader can drop. Detaching the page before locking was rejected for the same
-     * reason and because it makes correctness depend on a call whose absence is invisible. Reading the
-     * page with the lock already applied -- one locking walk instead of a walk plus per-row locks --
-     * was rejected because it holds every row of a window for the whole window rather than one row at a
-     * time, so an online writer for any account in the window waits for all of it.</p>
+     * <p>Alternatives Considered: three, and all three were shapes of the pessimistic walk this
+     * boundary declines. Refreshing each summary after re-reading it was rejected because it issues a
+     * second statement to undo the effect of the first and leaves the correct ordering as a convention
+     * a later reader can drop. Detaching the page before re-reading was rejected for the same
+     * reason and because it makes correctness depend on a call whose absence is invisible. Walking
+     * the page under {@code PESSIMISTIC_WRITE} -- one locking walk instead of a walk plus per-row
+     * reads -- was rejected on two counts: it holds every row of a window for the whole window rather
+     * than one row at a time, so an online writer for any account in the window waits for all of it;
+     * and a lock on this path is concurrency machinery the reference system does not have, for the
+     * reason recorded on this interface's own withdrawal note above.</p>
      *
      * <p>Assumptions: the projection is stated as a query rather than derived from the method name.
      * Spring Data derives a projection to a single property only through a typed interface or class

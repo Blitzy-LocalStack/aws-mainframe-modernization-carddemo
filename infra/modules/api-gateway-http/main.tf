@@ -670,13 +670,15 @@ resource "aws_apigatewayv2_route" "service" {
   #       decision into a value an environment root supplies, where a typo silently
   #       publishes an open route. Here the only way to publish an unauthenticated
   #       route is to name it in `var.public_route_keys`, which is validated down to
-  #       one exact method and path and is served by the separate resource below.
+  #       a CLOSED SET OF THREE exact method-and-path pairs and is served by the
+  #       separate resource below.
   #       (2) Assumptions: the policy check on this directory requires that no route
   #       is unauthenticated WITHOUT a documented reason -- not that no such route
-  #       exists. Every route here is authenticated by construction; the one that is
-  #       not is the sign-on route, which is deliberately public because a caller has
-  #       no token before it succeeds, and its reason is recorded on the resource
-  #       that declares it rather than in a suppression comment.
+  #       exists. Every route here is authenticated by construction; the three that
+  #       are not are the pre-token operations of auth-service -- sign-on, challenge
+  #       and refresh -- each deliberately public because a caller cannot present the
+  #       token those operations exist to issue or renew, and their reason is recorded
+  #       on the resource that declares them rather than in a suppression comment.
   authorization_type = "JWT"
   authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 
@@ -708,13 +710,18 @@ resource "aws_apigatewayv2_route" "service" {
 
 resource "aws_apigatewayv2_route" "public" {
   #checkov:skip=CKV_AWS_309:Only the exact pre-token POST operations are public, because a caller cannot present the JWT these operations exist to issue or renew; var.public_route_keys is validated down to that closed set.
-  # WHY : (1) Assumptions: sign-on is the route that MINTS the token every other
-  #       route requires, so attaching the JWT authorizer to it would deadlock the
-  #       whole surface -- a caller could never obtain a credential, because
-  #       obtaining one would itself require presenting one. This matches the
-  #       sign-on program's position in the baseline: it is the entry transaction,
-  #       reached with no prior identity, and it is what establishes the identity
-  #       every later screen carries.
+  # WHY : (1) Assumptions: these three routes are the ones that MINT or RENEW the
+  #       token every other route requires, so attaching the JWT authorizer to them
+  #       would deadlock the whole surface -- a caller could never obtain a
+  #       credential, because obtaining one would itself require presenting one. The
+  #       set is three rather than one because token issuance is not a single
+  #       exchange: sign-on starts it, challenge completes the exchanges the pool
+  #       answers with a challenge instead of a token set, and refresh renews an
+  #       expired access token from a refresh token, which is by definition not a
+  #       bearer credential this authorizer accepts. This matches the sign-on
+  #       program's position in the baseline: it is the entry transaction, reached
+  #       with no prior identity, and it is what establishes the identity every
+  #       later screen carries.
   #       (2) Alternatives Considered: having the browser authenticate directly
   #       against the user pool so that no sign-on route exists at all. Rejected
   #       because the app client this edge's authorizer validates against is
@@ -726,18 +733,29 @@ resource "aws_apigatewayv2_route" "public" {
   #       authorizer turns "is this route open?" into a question about an
   #       expression rather than about which resource declares the route. Two
   #       resources make the answer readable at a glance: the set above is
-  #       authenticated, this one is not, and this one is held by validation to
-  #       exactly one method on exactly one path.
+  #       authenticated, this one is not, and this one is held by validation to a
+  #       closed list of three exact method-and-path pairs -- widening it requires
+  #       editing the condition in variables.tf, not a value in a tfvars file.
   #       (4) Trade-offs: an open route is an unauthenticated surface, so it is
   #       throttled independently on the stage below instead of sharing the
   #       account-level allowance the authenticated routes sit on. The cost
-  #       accepted is that a burst of sign-on attempts is rejected at the edge
+  #       accepted is that a burst of credential attempts is rejected at the edge
   #       before it reaches the service, which is the intended behaviour for the
-  #       one route an unauthenticated caller can reach.
+  #       three routes an unauthenticated caller can reach.
   #       (5) Assumptions: an empty `var.public_route_keys` produces no instance of
   #       this resource, so an environment fronting a pool whose app client is
   #       public -- where the browser can perform the exchange itself -- publishes
   #       no open route at all, with no edit to this module.
+  #       (6) Refactoring Rationale: this block described a SINGLE open route
+  #       throughout -- "exactly one method on exactly one path", "the one route an
+  #       unauthenticated caller can reach" -- while `var.public_route_keys` has
+  #       always defaulted to three keys and validates to exactly those three. The
+  #       count was the only thing wrong: the reasoning applies unchanged to all
+  #       three, because each is reached precisely when no usable access token is
+  #       available. It is corrected rather than resolved the other way, since
+  #       trimming the list would leave `challenge` and `refresh` unreachable, and
+  #       a caller forced to change a credential, or holding only a refresh token,
+  #       could then never obtain one.
   for_each = toset(var.public_route_keys)
 
   api_id    = aws_apigatewayv2_api.this.id
@@ -745,9 +763,9 @@ resource "aws_apigatewayv2_route" "public" {
   target    = "integrations/${aws_apigatewayv2_integration.alb.id}"
 
   # WHY : Trade-offs: `"NONE"` is written out even though it is the argument's own
-  #       default. Stating it makes the single deliberately open route greppable --
-  #       a reader scanning for `authorization_type` finds both the JWT set and
-  #       this exception -- where an omission would read as something forgotten.
+  #       default. Stating it makes the deliberately open routes greppable -- a
+  #       reader scanning for `authorization_type` finds both the JWT set and this
+  #       exception -- where an omission would read as something forgotten.
   #       The cost is one redundant line, which is the cheaper half of the trade
   #       against an open route that looks accidental.
   authorization_type = "NONE"
@@ -868,10 +886,11 @@ resource "aws_apigatewayv2_stage" "this" {
   #       enumerated per route, so they apply to every key in `var.route_keys`,
   #       including keys added later. Enumerating per route would let a newly
   #       published route arrive with no limit at all. The cost accepted is that
-  #       tightening one route takes an explicit override, and exactly one exists
-  #       -- the public sign-on route below, which is the only route an anonymous
-  #       caller can reach and therefore the only one whose budget cannot be
-  #       attributed to a credential. Both limits are inputs because they are
+  #       tightening one route takes an explicit override, and the overrides that
+  #       exist are exactly one per public route key below -- the three pre-token
+  #       operations, which are the only routes an anonymous caller can reach and
+  #       therefore the only ones whose budget cannot be attributed to a
+  #       credential. Both limits are inputs because they are
   #       dev/prod levers.
   #       (3) Trade-offs: `detailed_metrics_enabled` follows its input, which
   #       defaults on, because metrics are a stated cross-cutting requirement

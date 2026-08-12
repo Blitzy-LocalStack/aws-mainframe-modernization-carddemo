@@ -84,7 +84,7 @@
  *       intermediate one.</li>
  * </ul>
  *
- * <h2>The five contracts this package owns</h2>
+ * <h2>The six contracts this package owns</h2>
  *
  * <ul>
  *   <li><b>{@code CopybookLayout}</b> -- the layout descriptor. For one record
@@ -110,9 +110,29 @@
  *       and the six-field reply. Because both payloads are declared in string
  *       format, the field order and the delimiter <em>are</em> the interface,
  *       not a serialisation detail of it.</li>
+ *   <li><b>{@code InquiryRequestCodec}</b> -- the 1000-character inquiry wire, in
+ *       both directions and both outcomes: the four-character function and
+ *       eleven-digit key of the request, the space-padded framing every reply is
+ *       put with, the positional nine-member diagnostic the {@code 9000-ERROR}
+ *       paragraph reports a failure through, and the closed classification a
+ *       consumer journals the function field as instead of the field itself. Two
+ *       reference programs share this wire -- {@code COACCT01.cbl} and
+ *       {@code CODATE01.cbl} -- and their diagnostic groups are declared
+ *       identically, which is why the geometry is single-sourced here rather than
+ *       per consumer.</li>
  * </ul>
  *
- * <p>Trade-offs: five classes rather than two is a deliberate cost. A single
+ * <p>Refactoring Rationale: this list named FIVE contracts and omitted
+ * {@code InquiryRequestCodec} entirely, while the paragraph on the closed
+ * inventory below already recorded it as "a sixth codec". A roster that
+ * contradicts a count in the same file is worse than either alone, because a
+ * reader cannot tell which one the delivery matches. The diagnostic geometry and
+ * the function classification named in its entry were additionally held in one of
+ * the two consuming services rather than here, so the other consumer had neither
+ * -- which is how one consumer came to report a positional diagnostic on failure
+ * while the other reported nothing at all.
+ *
+ * <p>Trade-offs: five numeric-and-record classes rather than two is a deliberate cost. A single
  * general numeric codec branching internally on usage would be one file instead
  * of two, and the two numeric regimes described next are genuinely disjoint at
  * the byte level -- one is printable digits with a sign folded into the last
@@ -558,8 +578,8 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>40 production classes</b> and <b>11</b> package
- * charter files, for <b>51</b> compilation units in total:
+ * <p>The shared kernel holds <b>41 production classes</b> and <b>11</b> package
+ * charter files, for <b>52</b> compilation units in total:
  *
  * <pre>
  * package             production classes   charter   compilation units
@@ -568,7 +588,7 @@
  * common.codec                         6         1                   7
  * common.error                         7         1                   8
  * common.web                           3         1                   4
- * common.security                      8         1                   9
+ * common.security                      9         1                  10
  * common.observability                 3         1                   4
  * common.time                          1         1                   2
  * common.validation                    2         1                   3
@@ -579,21 +599,21 @@
  * <p>Read down the table. Cross-check by production class:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 3 + security 8 + observability 3 + time 1 + validation 2 + messaging 3 + control 4 = 40
+ * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 3 + time 1 + validation 2 + messaging 4 + control 4 = 43
  * </pre>
  *
  * <p>Cross-check by compilation unit:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 4 + security 9 + observability 4 + time 2 + validation 3 + messaging 4 + control 5 = 51
+ * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 4 + time 2 + validation 3 + messaging 5 + control 5 = 54
  * </pre>
  *
  * <p>Both sums agree, and this file is one of the eleven charters. Each sum is kept
  * whole on one line, and each addend is labelled with the package it counts, so
  * that a single wrong figure is locatable rather than merely detectable.
  *
- * <p>Assumptions: the authoritative figures are <strong>40 production classes
- * across 10 subpackages and the root, in 51 compilation units, of which 11 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>41 production classes
+ * across 10 subpackages and the root, in 52 compilation units, of which 11 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *
@@ -609,7 +629,8 @@
  *
  * <p>Refactoring Rationale: this section stated the migration plan's TARGET
  * inventory -- 21 production classes, 9 charters, 30 compilation units, and five
- * classes in this package -- and presented it as the canon. The delivered module had
+ * classes in this package -- and presented it as the canon. The roster above now
+ * names all six, so this paragraph and that list agree. The delivered module had
  * already exceeded every one of those figures, this package included:
  * {@code InquiryRequestCodec} is a sixth codec, and a tenth subpackage,
  * {@code messaging}, existed with no row at all. A target the delivery has overshot

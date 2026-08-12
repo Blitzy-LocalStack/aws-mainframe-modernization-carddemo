@@ -1404,7 +1404,7 @@ plan:
 | `disclosure_group` | `default_fallback` | `discgrp.txt` | 1734 | 34 x 50 |
 | `disclosure_group` | `empty_input` | `discgrp.txt` | 0 | zero-byte |
 | `batch_reference_update` | `add_record` | `trtype-update.txt` | 108 | 2 x 53 |
-| `batch_reference_update` | `invalid_type_soft_reject` | `trtype-update.txt` | 108 | 2 x 53 |
+| `batch_reference_update` | `invalid_type_abend` | `trtype-update.txt` | 108 | 2 x 53 |
 | `batch_reference_update` | `empty_input` | `trtype-update.txt` | 0 | zero-byte |
 | `date_conversion` | `happy_path` | `date-request.txt` | 1001 | 1 x 1000 |
 | `date_conversion` | `request_payload_ignored` | `date-request.txt` | 1001 | 1 x 1000 |
@@ -1473,15 +1473,20 @@ The count is stated here because a reader comparing this list against the direct
 would otherwise find one more scenario than the list admits and have no way to know
 which is right.
 
-Refactoring Rationale: the `batch_reference_update` scenario in the table above was
-named `invalid_type_abend` and is now `invalid_type_soft_reject`. The rename is not
-cosmetic: `9999-ABEND` in
+Assumptions: the `batch_reference_update` scenario in the table above is named
+`invalid_type_abend` for the PARAGRAPH it reaches, and the name is not a claim that the
+run halts. `9999-ABEND` in
 [`COBTUPDT.cbl`](../../../../../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl)
 displays a message, moves 4 to `RETURN-CODE` and EXITs -- it does not `STOP RUN` --
 so control returns to the read loop and the record after the invalid one IS
-processed. The old name described the paragraph's label rather than its body, and a
-fixture whose second row exists precisely to prove the loop advanced read as though
-it proved the run halted.
+processed, which the scenario's second row exists precisely to prove.
+Refactoring Rationale: this paragraph named the scenario `invalid_type_soft_reject`,
+which is the outcome rather than the directory. Nothing on disk carries that name: the
+directory is `invalid_type_abend`, and the table above, the two fixture test classes,
+`ReferenceBatchUpdateServiceTest` and three sibling scenario documents all resolve it
+under that name, so the sentence sent a reader to a path that does not exist. The
+outcome reasoning it carried is kept, because the paragraph's label genuinely does
+suggest a halt that does not happen; only the name is corrected.
 
 Assumptions: the file count, the scenario count and the byte counts are measurements
 taken from the directory, so they will drift as scenarios are added. Section 9's

@@ -574,11 +574,9 @@ public class TransactionMapper {
      * @param lastKeyToken the sealed cursor token identifying the last row of this page, required
      *     whenever rows are present and whenever a further page is reported
      * @param hasNext whether the caller's probe read found a row beyond this page
-     * @param hasPrevious whether a page precedes this one, as established by the caller that ran the
-     *     scan; it is not derived from {@code firstKeyToken}, which every page carrying rows supplies
-     * @return a page carrying one list row per supplied row together with both boundary tokens and
-     *     both availability indicators, or an exhausted page carrying no rows, no token and no further
-     *     page when nothing was returned
+     * @return a page carrying one list row per supplied row together with both boundary tokens and the
+     *     further-page indicator, or an exhausted page carrying no rows, no token and no further page
+     *     when nothing was returned
      * @throws NullPointerException if {@code displayOrderedRows} is {@code null}, if it contains a
      *     {@code null} element, or if a row carries no transaction identifier or no amount
      * @throws IllegalArgumentException if a further page is reported while no rows were returned, if
@@ -590,7 +588,7 @@ public class TransactionMapper {
      */
     public PageResponse<TransactionListItemResponse> toListPage(
             List<Transaction> displayOrderedRows, String firstKeyToken, String lastKeyToken,
-            boolean hasNext, boolean hasPrevious) {
+            boolean hasNext) {
         Objects.requireNonNull(displayOrderedRows, "displayOrderedRows must not be null");
         if (displayOrderedRows.isEmpty()) {
             if (hasNext) {
@@ -608,7 +606,7 @@ public class TransactionMapper {
         for (Transaction row : displayOrderedRows) {
             items.add(toListItem(row));
         }
-        return PageResponse.ofRows(items, firstKeyToken, lastKeyToken, hasNext, hasPrevious);
+        return PageResponse.ofRows(items, firstKeyToken, lastKeyToken, hasNext);
     }
 
     /**

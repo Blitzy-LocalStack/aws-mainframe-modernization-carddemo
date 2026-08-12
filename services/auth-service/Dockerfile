@@ -110,19 +110,44 @@ FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e
 #       aggregator and the two modules selected from it.
 WORKDIR /build/services
 
+# WHY : Refactoring Rationale: this image shipped no database trust anchor, and
+#       nothing about it looked broken. application.yml connects with
+#       sslmode=verify-full and resolves sslrootcert to
+#       /etc/ssl/certs/carddemo-rds-ca-bundle.pem, both environment roots pass that
+#       same literal as CARDDEMO_DB_SSL_ROOT_CERT, and infra/modules/ecs-service
+#       refuses to render a task definition that omits it -- so every layer of the
+#       configuration named a file that no layer of the image created. pgjdbc opens
+#       that path before it opens a socket, so the omission was not a silent
+#       downgrade to an unverified connection: it was eight services that cannot
+#       reach their database, reporting an unreadable-file error while reading as
+#       correctly configured everywhere a reviewer would look.
+# WHY : Assumptions: the fetch, the digest verification and the reasoning behind
+#       both live in config/docker/install-rds-trust-anchor.sh, and are stated once
+#       there rather than eight times here. The script pins the bundle by SHA-256,
+#       so this layer either installs the exact reviewed bytes or fails the build.
+# WHY : Trade-offs: this sits at the TOP of the build stage, above the POM copies,
+#       for the same layer-ordering reason they sit above the sources -- its only
+#       input is the script, so a Java edit does not re-fetch the bundle and a
+#       rebuild pays the network cost once. The cost is that a change to the script
+#       invalidates the dependency warm-up below it, which is the rarer edit of the
+#       two.
+# WHY : Alternatives Considered: fetching it in the runtime stage instead, which
+#       would need one fewer COPY. Rejected because it would put the script and a
+#       scratch download into the shipped image and add a network step to the layer
+#       that ships; fetching here and copying one verified file forward keeps the
+#       runtime stage to exactly the file the JVM reads.
+COPY config/docker/install-rds-trust-anchor.sh /tmp/install-rds-trust-anchor.sh
+RUN /bin/sh /tmp/install-rds-trust-anchor.sh /tmp/carddemo-rds-ca-bundle.pem
+
 # WHY : Trade-offs: the POMs and the documentation-gate configuration are copied
-#       before any source file, and the dependency resolution below sits in its
-#       own layer between the two groups. That split is the whole point of the
-#       ordering: a source-only change invalidates the layer that copies sources
-#       and everything after it, but not the resolved dependency layer above it,
-#       so a one-line Java edit does not re-resolve the dependency tree. The cost
-#       is four COPY instructions where one would do, and one more layer in the
-#       history than a single copy of the whole reactor would produce.
-# WHY : Trade-offs: the accepted residue is that dependency:go-offline is not a
-#       guarantee. In a multi-module reactor it can miss a plugin dependency that
-#       only a later lifecycle phase asks for, so the warm-up is a best effort
-#       rather than a proof of completeness. The split is still worth it because
-#       the dependency tree, not the residue, is what dominates a rebuild.
+#       before any source file so that the dependency resolution below sits in its
+#       own layer between the two groups: a source-only change invalidates the
+#       source copy and everything after it, but not the resolved dependency layer
+#       above it. The cost is four COPY instructions where one would do, plus the
+#       accepted residue that dependency:go-offline can miss a plugin dependency a
+#       later lifecycle phase asks for, so the warm-up is a best effort rather than
+#       a proof of completeness. The dependency tree, not the residue, dominates a
+#       rebuild, which is what makes the split worth its extra layer.
 COPY services/pom.xml ./pom.xml
 COPY services/common-lib/pom.xml ./common-lib/pom.xml
 COPY services/auth-service/pom.xml ./auth-service/pom.xml
@@ -139,13 +164,12 @@ COPY config/checkstyle /build/config/checkstyle
 
 # WHY : Assumptions: Maven validates every module directory an aggregator declares
 #       before -pl can select from it, so the copied parent must list only the two
-#       modules whose directories exist in this stage. The source parent POM is
-#       never modified; only the copy inside this layer is trimmed.
-# WHY : Assumptions: exactly two module entries must survive (common-lib and
-#       auth-service) and at least one must be dropped. The transformation ASSERTS
-#       both counts, so a renamed or already-trimmed module list fails here with
-#       the count that was wrong instead of emitting a plausible-looking POM whose
-#       breakage surfaces later as an obscure -pl resolution error.
+#       modules whose directories exist in this stage; the source parent POM is
+#       never modified, only this layer's copy. The transformation ASSERTS that
+#       exactly two entries survive and at least one is dropped, so a renamed or
+#       already-trimmed module list fails here with the count that was wrong rather
+#       than emitting a plausible POM whose breakage surfaces later as an obscure
+#       -pl resolution error.
 # WHY : Trade-offs: tracking XML comment state costs several lines over a
 #       single-line filter. It is paid because a comment mentioning a module - the
 #       very comment a maintainer would add to explain an absence - would
@@ -177,12 +201,11 @@ RUN awk ' \
     && mvn -B -ntp -f pom.xml -pl common-lib,auth-service -am \
        dependency:go-offline
 
-# WHY : Trade-offs: this is the second half of the split declared above the POM
-#       copies, and its position is the whole mechanism. Everything from here down
-#       is invalidated by any source edit, which is why the dependency warm-up sits
-#       ABOVE it and not below: measured on this reactor, appending one line to one
-#       Java file leaves the warm-up layer CACHED and re-runs only the packaging
-#       step. Both modules' sources are copied because the reactor compiles both.
+# WHY : Trade-offs: this is the second half of that split, and its position is the
+#       mechanism: everything from here down is invalidated by any source edit, so
+#       appending one line to one Java file leaves the warm-up layer cached and
+#       re-runs only the packaging step. Both modules' sources are copied because
+#       the reactor compiles both.
 COPY services/common-lib/src ./common-lib/src
 COPY services/auth-service/src ./auth-service/src
 
@@ -209,18 +232,14 @@ COPY services/auth-service/src ./auth-service/src
 #       sources being compiled here rather than a statement about behaviour, and
 #       no skip flag, severity downgrade or return-code tolerance may be added
 #       anywhere in this file to get past it.
-# WHY : Trade-offs: -B and -ntp are set so the log is a reviewable transcript
-#       rather than a redrawn progress display, at the cost of losing the
-#       interactive output a developer would see locally.
-# WHY : Trade-offs: --offline is what turns the warm-up above from a hopeful
-#       optimisation into a checked one. Without it, anything go-offline missed
-#       would be fetched here quietly, and the dependency layer would look
-#       effective while the build kept reaching the network on every rebuild;
-#       with it, a miss fails this step by name instead. Measured on this
-#       reactor: the packaging step resolves entirely from the local repository
-#       and downloads nothing. What is given up is tolerance - a dependency added
-#       to either module's POM must be reachable by the warm-up, which is the
-#       intended loss, because the alternative hides the very thing being cached.
+# WHY : Trade-offs: -B and -ntp make the log a reviewable transcript rather than a
+#       redrawn progress display, at the cost of the interactive output a developer
+#       sees locally. --offline turns the warm-up above from a hopeful optimisation
+#       into a checked one: without it anything go-offline missed would be fetched
+#       here quietly and the dependency layer would look effective while every
+#       rebuild reached the network, whereas a miss now fails this step by name.
+#       What is given up is tolerance - a dependency added to either module's POM
+#       must be reachable by the warm-up - which is the intended loss.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,auth-service -am \
     clean package -DskipTests
 
@@ -229,23 +248,21 @@ RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,auth-service -am \
 #       headful, headless, generic and jdk suffixes, and 21.0.12 is the highest
 #       published 21.x. So the reflex reach for a smaller base, `21-alpine`, is
 #       not a different or larger image - it is a tag that does not resolve, and
-#       substituting it fails this build outright at the pull. An earlier draft of
-#       the migration plan named exactly that tag, which is why the fact is
-#       recorded here beside the line it would be edited on.
+#       substituting it fails this build outright at the pull. The fact is
+#       recorded beside the line it would be edited on for that reason.
 # WHY : Trade-offs: headless is chosen over the other three suffixes. It omits the
 #       AWT and graphics stack that an HTTP service never loads; generic keeps it,
 #       and jdk would additionally ship javac and the whole compiler toolchain
 #       into a production runtime, which is the very thing the build stage exists
 #       to keep out. What is given up is the ability to render an image or open a
 #       font inside the container, neither of which this context does.
-# WHY : Refactoring Rationale: the reference is digest-pinned rather than left on
-#       the bare tag because this tag has already moved at least once - the
-#       registry index for `21.0.12-al2023-headless` and a copy cached earlier on
-#       a build host are two different manifest lists that both still resolve. A
-#       patch-level tag reading like an exact version is the easiest kind of
-#       mutable reference to mistake for an immutable one, so two builds of one
-#       commit could otherwise ship two different runtimes with nothing in the
-#       build log to say so.
+# WHY : Assumptions: the reference is digest-pinned rather than left on the bare
+#       tag because this tag is mutable - the registry index for
+#       `21.0.12-al2023-headless` and a copy cached earlier on a build host can be
+#       two different manifest lists that both still resolve. A patch-level tag
+#       reading like an exact version is the easiest kind of mutable reference to
+#       mistake for an immutable one, so two builds of one commit could otherwise
+#       ship two different runtimes with nothing in the build log to say so.
 FROM public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless@sha256:75f1cdabc3d8758f5499bf67046991bc7797e37156c7445f0048eb6d17c90dcf AS runtime
 
 # WHY : Alternatives Considered: running as root was rejected outright. Nothing
@@ -254,13 +271,11 @@ FROM public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless@sha256
 #       root would buy no capability while leaving a compromised process holding
 #       every privilege the container has.
 # WHY : Alternatives Considered: installing shadow-utils solely for useradd and
-#       groupadd was rejected. Inspecting the pinned digest shows shadow-utils is
-#       not installed and none of useradd, groupadd, adduser or addgroup exists,
-#       so the tooling path would mean adding a package, and its payload adds no
-#       runtime capability to a process that needs one fixed identity. Appending
-#       plain passwd and group records is the accepted fallback: it yields the
-#       same fixed 10001:10001 identity with no package and no repository access
-#       during the build.
+#       groupadd. Rejected because the pinned digest carries none of useradd,
+#       groupadd, adduser or addgroup, so that path means adding a package whose
+#       payload buys no runtime capability for a process needing one fixed
+#       identity. Appending plain passwd and group records yields the same fixed
+#       10001:10001 identity with no package and no repository access at build time.
 # WHY : Assumptions: the ECS task definition does not drop privileges, so the
 #       image must guarantee UID/GID 10001 itself. The process writes only below
 #       its owned working directory and the platform-provided /tmp.
@@ -275,13 +290,12 @@ RUN printf '%s\n' 'carddemo:x:10001:' >> /etc/group \
 #       fixed identity may modify.
 WORKDIR /app
 
-# WHY : Assumptions: the glob resolves to exactly one file, and the module POM is
-#       what guarantees it. The Boot repackage goal writes the bootable jar under
-#       the inherited default name and renames the plain one beside it with a
-#       .jar.original suffix, which `*.jar` does not match; services/auth-service/
-#       pom.xml deliberately leaves <finalName> uncustomised and records that the
-#       image build selects the artifact by a plain jar glob, so the two files are
-#       one contract read from both ends.
+# WHY : Assumptions: the glob resolves to exactly one file because the Boot
+#       repackage goal writes the bootable jar under the inherited default name and
+#       renames the plain one beside it with a .jar.original suffix, which `*.jar`
+#       does not match; services/auth-service/pom.xml leaves <finalName>
+#       uncustomised for that reason, so the two files are one contract read from
+#       both ends.
 # WHY : Alternatives Considered: naming auth-service-<version>.jar literally. It
 #       reads as the safer, more explicit form and is the opposite: the version
 #       lives in the parent POM, so a version bump would break every one of these
@@ -294,27 +308,48 @@ COPY --from=build --chown=10001:10001 \
     /build/services/auth-service/target/*.jar \
     /app/app.jar
 
+# WHY : Assumptions: the destination is the literal path application.yml resolves
+#       sslrootcert to and both environment roots pass as
+#       CARDDEMO_DB_SSL_ROOT_CERT, so the three statements are one contract read
+#       from three places rather than three independent settings that happen to
+#       agree. A gate in .github/workflows/services-ci.yml asserts that agreement
+#       and asserts this file is present and parseable in the built image, because
+#       the failure it prevents is invisible until a task tries to connect.
+# WHY : Assumptions: /etc/ssl/certs is a SYMLINK in this base --
+#       /etc/pki/ca-trust/extracted/pem/directory-hash -- so the file actually
+#       lands under /etc/pki and is reached through the link at run time. Verified
+#       by building against the pinned digest and reading the file back through
+#       both paths. It is worth stating because a reader assumes a real directory,
+#       and because a copy into a symlinked destination is the kind of thing that
+#       silently becomes a regular file called "certs" under a different builder.
+# WHY : Trade-offs: no --chown here, unlike the jar above. The anchor is
+#       root-owned and world-readable (0644), which is what a trust anchor should
+#       be: the application user must read it and no process in the task should be
+#       able to replace it. Verified readable as UID 10001 against the pinned
+#       digest. Placing it inside the hashed trust directory does NOT add it to the
+#       default OpenSSL trust store -- that lookup uses hash-named links -- so the
+#       bundle is used only where it is named explicitly.
+COPY --from=build /tmp/carddemo-rds-ca-bundle.pem \
+    /etc/ssl/certs/carddemo-rds-ca-bundle.pem
+
 # WHY : Assumptions: 8080 is a contract with the infrastructure rather than a
-#       local preference. It is the one port the security-group design permits
-#       from the load balancer to the application tier, so the application.yml
-#       server.port, the ALB target group and this declaration must agree; a
-#       different port here would produce a task that starts and never receives
-#       traffic, which is harder to diagnose than a task that fails to start.
-# WHY : Assumptions: 8080 carries BOTH the business REST surface and the actuator
-#       health group, over TLS, because the base profile enables server.ssl and
-#       declares one connector. A second port was considered and is not available
-#       without a management port, which would need its own certificate.
+#       local preference - it is the one port the security-group design permits
+#       from the load balancer to the application tier, so application.yml's
+#       server.port, the ALB target group and this declaration must agree, and a
+#       different port here yields a task that starts and never receives traffic.
+#       It carries BOTH the business REST surface and the actuator health group
+#       over TLS, because the base profile enables server.ssl on one connector; a
+#       second port would need a management port and its own certificate.
 EXPOSE 8080
 
-# WHY : Refactoring Rationale: the listener key pair and certificate are minted
-#       by THIS TASK at startup rather than injected from Secrets Manager. They
-#       used to be one shared pair, generated by a managed `tls_private_key` in
-#       each environment root, persisted in Terraform state and handed to every
-#       online task -- so a state reader held the server private key of all eight
-#       services. The script below draws a fresh 2048-bit RSA key and a
-#       self-signed leaf into a PKCS#12 keystore on the task's own encrypted
-#       ephemeral volume, which is destroyed with the task, and its own header
-#       records the three alternatives measured and rejected before this one.
+# WHY : Alternatives Considered: injecting one shared listener pair from Secrets
+#       Manager, generated by a managed `tls_private_key` in each environment root.
+#       Rejected because the private key would then be persisted in Terraform
+#       state and handed to every online task, so one state reader would hold the
+#       server private key of all eight services. The script below instead draws a
+#       fresh 2048-bit RSA key and a self-signed leaf into a PKCS#12 keystore on
+#       the task's own encrypted ephemeral volume, which is destroyed with the
+#       task, and its own header records the alternatives measured against it.
 # WHY : Assumptions: the script needs no package. /usr/bin/keytool, /usr/bin/tr,
 #       /usr/bin/head and a readable /dev/urandom were each verified inside this
 #       exact runtime digest, which is why the hardening below adds no layer of
@@ -355,13 +390,34 @@ USER carddemo:carddemo
 #       in the base profile, so the connector is TLS and a plaintext request would
 #       fail the check on every healthy task - a probe that always fails is worse
 #       than none, because it makes a working deployment look broken.
-# WHY : Trade-offs: --insecure is accepted for this one request. The certificate is
-#       supplied by the deployment and its subject names the service, never
-#       127.0.0.1, so verification could not succeed from inside the container
-#       regardless of how correct the certificate is. What is given up is identity
-#       checking on a loopback call inside the container's own network namespace,
-#       where there is no other party to impersonate; what is kept is that the
-#       encrypted listener is the one actually proven to answer.
+# WHY : Trade-offs: --insecure is accepted for this one request, and the reason is
+#       the trust ANCHOR rather than the name. config/docker/
+#       generate-listener-material.sh mints the leaf with
+#       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so the loopback address this
+#       probe dials IS carried by the certificate; what cannot succeed is
+#       anchoring, because the leaf is self-signed and no store in this image holds
+#       its issuer. Measured against the pinned digests rather than assumed: the
+#       identical request without --insecure exits 60 reporting "SSL certificate
+#       OpenSSL verify result: self-signed certificate (18)", and no
+#       subject-name error appears at all.
+# WHY : Refactoring Rationale: this note used to say the subject "names the
+#       service, never 127.0.0.1", which the generator contradicts on its own line
+#       164 and which sent a reader looking for a naming problem that does not
+#       exist. The distinction matters because the two causes have different fixes:
+#       a name mismatch would be corrected in the certificate, and an unanchored
+#       leaf can only be corrected by trusting it explicitly or by waiving
+#       verification as this probe does.
+# WHY : Alternatives Considered: exporting the minted leaf at start-up and
+#       verifying with --cacert, which was MEASURED to work -- with the exported PEM
+#       the identical loopback request succeeds. Rejected because CMD is a static
+#       exec array, so the PEM path would be a literal here while the directory
+#       holding it is CARDDEMO_SERVER_TLS_DIR, an overridable variable; a
+#       deployment that moved that directory would then fail the probe on a healthy
+#       task, which is the outcome this file already argues is worse than no probe.
+#       What is given up by waiving verification is identity checking on a call
+#       that never leaves this container's own network namespace, where there is no
+#       second party to impersonate; what is kept is that the ENCRYPTED listener is
+#       the one proven to answer.
 # WHY : Trade-offs: the four durations are configuration, and --start-period is the
 #       one that has to be reasoned about. It has to cover a cold JVM start plus
 #       the keystore generation this entry point performs plus the Flyway

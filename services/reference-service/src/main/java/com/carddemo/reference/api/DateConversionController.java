@@ -121,15 +121,15 @@ import org.springframework.web.bind.annotation.RestController;
  * raised refusal and arrives as the 400 the contract declares, carrying the shared problem shape
  * {@code ApiError} with its per-field array.</p>
  *
- * <p>Refactoring Rationale: this class supersedes an earlier delivery of the same surface, which
- * carried this method and this path under a class name that neither the migration plan's file list nor
- * the traceability register names. Two matters are settled by replacing it rather than adding beside
- * it. One method and one path admit exactly one handler, so a second class carrying them would leave
- * the container unable to choose and the contract with two answers to one question, which the
- * bidirectional comparison in {@code ReferenceApiRoutingContractTest} exists to keep from happening.
- * And the width bounds the contract declares for the two query parameters were stated on a private
- * member there, where the framework performs no validation, so those bounds were inert; they are
- * stated on the handler parameters below, where the framework does apply them.</p>
+ * <p>Assumptions: this class is the ONE handler of this method and path, and the migration plan's file
+ * list together with the traceability register name it as such. A second class carrying the same pair
+ * would leave the container unable to choose and the contract with two answers to one question, which
+ * the bidirectional comparison in {@code ReferenceApiRoutingContractTest} exists to prevent.</p>
+ *
+ * <p>Assumptions: the width bounds the contract declares for the two query parameters are stated on the
+ * HANDLER PARAMETERS below, because that is where the framework applies them. The same bounds declared
+ * on a private member are inert -- no validation runs there -- so a contract width stated in that
+ * position would read as enforced while admitting anything.</p>
  */
 @RestController
 @RequestMapping(DateConversionController.BASE_PATH)
@@ -212,13 +212,13 @@ public class DateConversionController {
      * boundary layer, whose whole obligation is to hold no date rule. The rules are held in one place
      * either way; what this choice settles is the ROUTE to them.</p>
      *
-     * <p>Refactoring Rationale: this parameter was typed
-     * {@code DateConversionMessageListener}, and its own documentation recorded the oddity of a
-     * controller depending on a type named for a queue listener as an accepted trade-off. That type no
-     * longer exists: it also carried a second queue consumer competing with
-     * {@code DateInquiryMessageListener} for the same request queue, and consolidating that flow left
-     * this evaluation as the only member it still needed to hold. The dependency is now typed for what
-     * it is, and the trade-off it used to justify has been removed rather than restated.</p>
+     * <p>Refactoring Rationale: this parameter is typed for the evaluation it reaches and not for a
+     * transport. It formerly took {@code DateConversionMessageListener}, a type that carried a second
+     * queue consumer competing with {@code DateInquiryMessageListener} for the same request queue;
+     * consolidating that flow removed the competing consumer and left this evaluation as the only
+     * member the controller needed, so the type was withdrawn rather than kept as a wrapper. A
+     * controller depending on a type named for a queue listener is a dependency a reader has to
+     * explain away, and there is now nothing to explain.</p>
      *
      * @param evaluator the holder of the migrated date rules, as a {@link DateConversionService};
      *     must not be {@code null}
@@ -274,14 +274,12 @@ public class DateConversionController {
             //       layer and would give the two behaviours two homes. The picture is handed on exactly
             //       as received, including as null, so that the default is applied in the one place
             //       that also echoes which picture was used.
-            // WHY : Refactoring Rationale: this comment used to justify the call by saying the member
-            //       reached is "the one the queue route calls", so that "the two transports answer one
-            //       input identically". That was false in fact: the queue route is
-            //       DateInquiryMessageListener, it emits the current system date and time, it reads no
-            //       field of its request, and it has never called this evaluation. The two routes
-            //       answer different questions and share no evaluation, and the justification is
-            //       restated as what actually holds rather than deleted, because a reader who believed
-            //       the old one would look for a shared path that does not exist.
+            // WHY : Assumptions: this evaluation is reached from this route ALONE, and no shared path
+            //       with the queue route exists to be preserved. The queue route is
+            //       DateInquiryMessageListener; it emits the current system date and time, reads no
+            //       field of its request and calls no evaluation, so the two transports answer
+            //       different questions. Stating that here keeps a reader from looking for a common
+            //       evaluation to hold the two to.
             return this.evaluator.convert(new DateConversionRequest(date, mask));
         } catch (DateEditValidator.DateWidthException widthRefusal) {
             // WHY : Refactoring Rationale: the width mismatch is re-raised as a caller refusal rather
@@ -290,18 +288,16 @@ public class DateConversionController {
             //       every internal invariant in the migration as a 400 the caller should act on. Left
             //       to propagate, this one would answer 500 while the contract states the case is 400,
             //       telling a caller its own input was the service's fault.
-            // WHY : Refactoring Rationale: the caught type is now the validator's OWN width condition
-            //       and no longer its supertype, and the compromise previously recorded here is
-            //       withdrawn rather than restated. Catching the supertype swept up every internal
-            //       invariant the validator raises -- a feedback record whose severity contradicts its
-            //       own code, an unknown date-component identity, a year outside the four-digit domain,
-            //       a value too wide for a four-digit field -- and reported each of them to the caller
-            //       as a four-hundred naming the date parameter. Two things were lost at once: a caller
-            //       was told to correct a request it had sent correctly, and a genuine service defect
-            //       never reached the five-hundred channel the alerting watches. The narrow catch was
-            //       previously said to require deciding at this boundary which picture demands which
-            //       width; it does not, because the decision moved to the validator, which is where the
-            //       rule already lived.
+            // WHY : Alternatives Considered: catching the validator's supertype instead of its OWN
+            //       width condition. Rejected because the supertype sweeps up every internal invariant
+            //       the validator raises -- a feedback record whose severity contradicts its own code,
+            //       an unknown date-component identity, a year outside the four-digit domain, a value
+            //       too wide for a four-digit field -- and would report each to the caller as a
+            //       four-hundred naming the date parameter. Two things would be lost at once: a caller
+            //       told to correct a request it had sent correctly, and a genuine service defect that
+            //       never reaches the five-hundred channel the alerting watches. Narrowing the catch
+            //       costs this boundary nothing, because deciding which picture demands which width
+            //       belongs to the validator, which is where the rule already lives.
             // WHY : Assumptions: no other input-dependent refusal reaches this catch, so narrowing it
             //       loses no case. A picture the rules do not recognise is RETURNED as the
             //       unusable-pattern verdict rather than raised; a component that is not numeric, a

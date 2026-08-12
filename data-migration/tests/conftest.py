@@ -1585,6 +1585,33 @@ class FakeAuroraCopy:
         self.database = database
         self.statement = statement
         self.closed = False
+        self.written = 0
+        self._failure: BaseException | None = None
+        self._fail_after = 0
+
+    def fail_after(self, error: BaseException, after_rows: int) -> None:
+        """Arrange this stream to raise part-way through, after accepting some rows.
+
+        Parameters
+        ----------
+        error : BaseException
+            The exception :meth:`write_row` raises once the row allowance is spent.
+        after_rows : int
+            How many rows this stream accepts before failing.
+
+        Returns
+        -------
+        None
+            Binds the arrangement to this stream; the cursor calls this at copy-open when the
+            database has a matching mid-stream failure arranged.
+
+        Raises
+        ------
+        None
+            The arrangement was validated when the test recorded it.
+        """
+        self._failure = error
+        self._fail_after = after_rows
 
     def write_row(self, row: Sequence[object]) -> None:
         """Record one row streamed into the copy operation.
@@ -1619,6 +1646,15 @@ class FakeAuroraCopy:
                 "pass write() a pre-encoded chunk instead"
             )
         values = tuple(_reject_float(value, context="a copy row field") for value in row)
+        # WHY : Assumptions: an arranged mid-stream failure is raised BEFORE the row is recorded,
+        #   so the copied-row log holds exactly the rows the stream accepted. A server that
+        #   refuses a row has not ingested it, so recording it and then failing would make the
+        #   double disagree with the driver about what reached the table -- and a test asserting
+        #   that a rollback discarded n rows would be asserting the wrong n.
+        if self._failure is not None and self.written >= self._fail_after:
+            failure, self._failure = self._failure, None
+            raise failure
+        self.written += 1
         self.database.copied_rows.append((self.statement, values))
 
     def write(self, data: bytes | str) -> None:
@@ -1755,6 +1791,13 @@ class FakeAuroraCursor:
             else tuple(_reject_float(value, context="a bound parameter") for value in params)
         )
         self.connection.database.record_statement(statement, bound)
+        # WHY : Assumptions: an arranged failure is raised AFTER the statement is recorded, so a
+        #   test can assert which statement failed as well as what the failure did. Raising first
+        #   would lose the record of the attempt, and "the merge was never issued" and "the merge
+        #   was issued and refused" would then look identical in the log.
+        arranged_failure = self.connection.database.failure_for(statement)
+        if arranged_failure is not None:
+            raise arranged_failure
         self.rows = list(self.connection.database.rows_for(statement))
         # WHY : Assumptions: an explicitly arranged affected-row count wins over the row count,
         #   so a statement that returns no rows can still report how many it affected. Without
@@ -1828,7 +1871,18 @@ class FakeAuroraCursor:
             raise FakeClientContractError(f"a copy was opened on a closed cursor: {statement!r}")
         self.connection.database.record_statement(statement, None)
         self.connection.database.copy_statements.append(statement)
-        return FakeAuroraCopy(self.connection.database, statement)
+        arranged_failure = self.connection.database.failure_for(statement)
+        if arranged_failure is not None:
+            raise arranged_failure
+        stream = FakeAuroraCopy(self.connection.database, statement)
+        # WHY : Assumptions: a mid-stream failure is bound to the stream at OPEN, so the row count
+        #   it fails after is counted by the stream itself rather than by the database. Two streams
+        #   opened in one load -- which the stage-and-merge path does not do today but a future
+        #   path could -- would otherwise share one counter and fail at the wrong row.
+        arranged_mid_stream = self.connection.database.copy_write_failure_for(statement)
+        if arranged_mid_stream is not None:
+            stream.fail_after(*arranged_mid_stream)
+        return stream
 
     def __enter__(self) -> FakeAuroraCursor:
         """Enter the cursor's context manager.
@@ -2060,6 +2114,13 @@ class FakeAuroraConnection:
         """
         if self.closed:
             raise FakeClientContractError("a commit was issued on a closed connection")
+        # WHY : Assumptions: an arranged commit failure is raised BEFORE the counters advance, so a
+        #   failed commit is not recorded as a commit. A real failed commit leaves nothing durable
+        #   and aborts the transaction, so counting it would let a loader that lost the whole
+        #   dataset look, to a test, exactly like one that saved it.
+        arranged_failure = self.database.commit_failure()
+        if arranged_failure is not None:
+            raise arranged_failure
         self.commits += 1
         self.database.commits += 1
 
@@ -2083,8 +2144,16 @@ class FakeAuroraConnection:
         """
         if self.closed:
             raise FakeClientContractError("a rollback was issued on a closed connection")
+        # WHY : Assumptions: the rollback counters advance BEFORE an arranged failure is raised,
+        #   which is the opposite of the commit above and is deliberate. A rollback that failed was
+        #   still ATTEMPTED, and the attempt is what a test needs to see: the property under test is
+        #   that the loader tried to discard the transaction, not that the discard succeeded -- a
+        #   connection whose rollback fails has no committed work either way.
         self.rollbacks += 1
         self.database.rollbacks += 1
+        arranged_failure = self.database.rollback_failure()
+        if arranged_failure is not None:
+            raise arranged_failure
 
     def close(self) -> None:
         """Close the connection, making every further operation an error.
@@ -2243,6 +2312,14 @@ class FakeAuroraDatabase:
         # report zero, so a loader that inserted every row and one that inserted none would be
         # indistinguishable here.
         self._arranged_affected: list[tuple[str, int]] = []
+        # WHY : Assumptions: the four failure arrangements are kept in four separate lists rather
+        #   than one, because they are consumed at four different points -- statement execution,
+        #   copy-row writing, commit and rollback -- and a single list keyed on a fragment could
+        #   not express a commit failure, which has no statement text to match on.
+        self._arranged_failures: list[tuple[str, BaseException]] = []
+        self._arranged_copy_failures: list[tuple[str, BaseException, int]] = []
+        self._arranged_commit_failures: list[BaseException] = []
+        self._arranged_rollback_failures: list[BaseException] = []
 
     def connect(self, **params: object) -> FakeAuroraConnection:
         """Acquire a connection from connection parameters, validating the TLS keywords.
@@ -2431,6 +2508,210 @@ class FakeAuroraDatabase:
             if fragment in folded:
                 return count
         return None
+
+    # WHY : Refactoring Rationale: the four arrangements below are a FAILURE-INJECTION seam this
+    #   double did not have, and its absence had a measurable consequence: a loader's transaction
+    #   handling could only be tested for the failures the loader raises about ITSELF -- a record
+    #   missing a mapped field -- while the failures a real server raises, a unique violation on a
+    #   re-run or a NOT NULL violation on an incomplete delivery, had no way to be provoked at all.
+    #   Those are the paths that decide whether a rollback happens, whether a commit failure is
+    #   caught, and whether a diagnostic quotes a row, so they are the paths most worth testing.
+    # WHY : Assumptions: an arrangement is ONE-SHOT -- the first operation it matches consumes it.
+    #   That is what lets one test fail a statement and then let the retry of the same statement
+    #   succeed, which is exactly the shape of a redrive; a persistent arrangement would make the
+    #   second attempt fail too and the test could not tell a retry that worked from one that was
+    #   never made.
+    # WHY : Assumptions: the injected object is supplied BY THE TEST rather than manufactured here,
+    #   so a test can inject the driver's own exception shape -- a class carrying `sqlstate` and a
+    #   `diag` object -- and assert what a loader does with those attributes. A double that
+    #   invented its own error type could only ever prove behaviour against itself.
+    def arrange_statement_failure(self, statement_fragment: str, error: BaseException) -> None:
+        """Arrange the failure a later matching statement or copy-open raises.
+
+        Parameters
+        ----------
+        statement_fragment : str
+            Text identifying the statement, matched case-insensitively as a substring against
+            both executed statements and opened ``COPY`` statements.
+        error : BaseException
+            The exception to raise. Supplied by the test so the driver's own shape can be used.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the first matching operation raises it and consumes it.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the fragment is blank, which would match every statement including ones the test
+            did not mean.
+        """
+        if not statement_fragment.strip():
+            raise FakeClientContractError("a failure fragment must be non-blank")
+        self._arranged_failures.append((statement_fragment.casefold(), error))
+
+    def arrange_copy_write_failure(
+        self, statement_fragment: str, error: BaseException, *, after_rows: int
+    ) -> None:
+        """Arrange the failure a copy stream raises part-way through writing its rows.
+
+        Parameters
+        ----------
+        statement_fragment : str
+            Text identifying the ``COPY`` statement whose stream fails, matched
+            case-insensitively as a substring.
+        error : BaseException
+            The exception to raise from ``write_row``.
+        after_rows : int
+            How many rows the stream accepts before failing. Zero fails on the first row.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the first stream matching the fragment raises it after the
+            given number of rows and consumes it.
+
+        Raises
+        ------
+        FakeClientContractError
+            If the fragment is blank or the row count is negative.
+        """
+        # WHY : Assumptions: a MID-STREAM failure is arrangeable separately from a failure at
+        #   copy-open, because the two prove different things. Failing at open proves the rollback
+        #   happens at all; failing after n rows proves the loader reports how many rows it had
+        #   accepted, which is the number an operator uses to tell "the delivery is malformed at
+        #   record n" from "the table refused the whole load".
+        if not statement_fragment.strip():
+            raise FakeClientContractError("a failure fragment must be non-blank")
+        if after_rows < 0:
+            raise FakeClientContractError(
+                f"a copy-write failure must be arranged after zero or more rows, not {after_rows}"
+            )
+        self._arranged_copy_failures.append((statement_fragment.casefold(), error, after_rows))
+
+    def arrange_commit_failure(self, error: BaseException) -> None:
+        """Arrange the failure the next commit raises.
+
+        Parameters
+        ----------
+        error : BaseException
+            The exception to raise from ``commit``.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the next commit on any connection of this database raises it
+            and consumes it.
+
+        Raises
+        ------
+        None
+            Any exception object is acceptable, including one that is not a driver error.
+        """
+        self._arranged_commit_failures.append(error)
+
+    def arrange_rollback_failure(self, error: BaseException) -> None:
+        """Arrange the failure the next rollback raises.
+
+        Parameters
+        ----------
+        error : BaseException
+            The exception to raise from ``rollback``.
+
+        Returns
+        -------
+        None
+            Records the arrangement; the next rollback on any connection of this database raises
+            it and consumes it.
+
+        Raises
+        ------
+        None
+            Any exception object is acceptable.
+        """
+        # WHY : Assumptions: a failing rollback is arrangeable because it is a real state and the
+        #   worst one to handle badly -- it happens when the connection is already broken, while
+        #   another failure is being reported, and a loader that let it propagate would replace its
+        #   diagnosis with "rollback failed".
+        self._arranged_rollback_failures.append(error)
+
+    def failure_for(self, statement: str) -> BaseException | None:
+        """Return and consume the failure arranged for a statement, if any matches.
+
+        Parameters
+        ----------
+        statement : str
+            The SQL text being executed or the ``COPY`` statement being opened.
+
+        Returns
+        -------
+        BaseException | None
+            The arranged exception, removed from the arrangements, or ``None`` when none matches.
+
+        Raises
+        ------
+        None
+        """
+        folded = statement.casefold()
+        for index, (fragment, error) in enumerate(self._arranged_failures):
+            if fragment in folded:
+                del self._arranged_failures[index]
+                return error
+        return None
+
+    def copy_write_failure_for(self, statement: str) -> tuple[BaseException, int] | None:
+        """Return and consume the mid-stream failure arranged for a copy statement.
+
+        Parameters
+        ----------
+        statement : str
+            The ``COPY`` statement whose stream is being opened.
+
+        Returns
+        -------
+        tuple[BaseException, int] | None
+            The arranged exception and the number of rows to accept first, removed from the
+            arrangements, or ``None`` when none matches.
+
+        Raises
+        ------
+        None
+        """
+        folded = statement.casefold()
+        for index, (fragment, error, after_rows) in enumerate(self._arranged_copy_failures):
+            if fragment in folded:
+                del self._arranged_copy_failures[index]
+                return error, after_rows
+        return None
+
+    def commit_failure(self) -> BaseException | None:
+        """Return and consume the failure arranged for the next commit.
+
+        Returns
+        -------
+        BaseException | None
+            The arranged exception, or ``None`` when none is arranged.
+
+        Raises
+        ------
+        None
+        """
+        return self._arranged_commit_failures.pop(0) if self._arranged_commit_failures else None
+
+    def rollback_failure(self) -> BaseException | None:
+        """Return and consume the failure arranged for the next rollback.
+
+        Returns
+        -------
+        BaseException | None
+            The arranged exception, or ``None`` when none is arranged.
+
+        Raises
+        ------
+        None
+        """
+        return self._arranged_rollback_failures.pop(0) if self._arranged_rollback_failures else None
 
     def rows_for(self, statement: str) -> tuple[tuple[object, ...], ...]:
         """Return the rows arranged for a statement, or none when nothing matches.

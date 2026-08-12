@@ -89,7 +89,7 @@ of the one exercised here and neither is a database action:
   `9999-ABEND` at L230 to L233 displays the message, moves 4 to `RETURN-CODE` and
   exits, with no `STOP RUN` on that path. It is a warn-tier soft reject that returns
   to the read loop at L93 to L96, not a termination. The sibling
-  [`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md) is the
+  [`../invalid_type_abend`](../invalid_type_abend/README.md) is the
   scenario for that arm.
 
 Neither arm is exercised here. Both are named so that this scenario's success path is
@@ -301,7 +301,7 @@ byte; a lowercase `a` falls through every named arm to `WHEN OTHER` at L122. The
 reasonable-looking alternative therefore does not weaken this scenario, it converts it
 into the sibling reject scenario while leaving the directory name reading
 `add_record`. That lowercase byte is the whole subject of
-[`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md), which is why
+[`../invalid_type_abend`](../invalid_type_abend/README.md), which is why
 these two rows and those two are one character apart in byte 0 and describe opposite
 outcomes.
 

@@ -79,7 +79,7 @@ def test_a_well_formed_seed_file_streams_its_lines(tmp_path: pathlib.Path) -> No
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the happy path is asserted first and against a THREE-line file, because
+    # Assumptions: the happy path is asserted first and against a THREE-line file, because
     #   the hardened reader replaces handle iteration with an explicit readline loop -- and the
     #   ways a hand-written loop goes wrong are dropping the last line, emitting a phantom empty
     #   line after a trailing separator, or losing the terminator that the record iterator strips.
@@ -123,7 +123,7 @@ def test_a_final_line_without_a_terminator_is_still_yielded(tmp_path: pathlib.Pa
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): this is the case the bounded read is most likely to get wrong, because a
+    # Assumptions: this is the case the bounded read is most likely to get wrong, because a
     #   final unterminated line of exactly the record width is indistinguishable from the head of
     #   an over-long one unless the bound leaves a character of headroom. The fixture is written at
     #   exactly the declared width for that reason.
@@ -148,7 +148,7 @@ def test_a_line_of_exactly_the_declared_width_with_both_terminators_is_accepted(
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): three of the nine shipped ASCII seeds carry carriage returns on some rows,
+    # Assumptions: three of the nine shipped ASCII seeds carry carriage returns on some rows,
     #   so the longest LEGAL line is the record width plus two terminator characters. A bound that
     #   allowed only one would refuse a shipped seed, which is why this boundary is asserted rather
     #   than assumed.
@@ -172,7 +172,7 @@ def test_an_over_long_line_is_refused_without_being_read_whole(tmp_path: pathlib
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the fixture's single line is two orders of magnitude longer than the
+    # Assumptions: the fixture's single line is two orders of magnitude longer than the
     #   record, and the assertion is on the reported length rather than only on the exception. The
     #   refusal must report a LOWER BOUND close to the record width, because reporting the true
     #   length would require reading the whole line -- which is the allocation being refused. A
@@ -218,7 +218,7 @@ def test_a_named_pipe_is_refused_instead_of_blocking(tmp_path: pathlib.Path) -> 
     None
         The assertion is the result.
     """
-    # WHY (Trade-offs): no timeout guards this case. A regression makes the suite HANG here, which
+    # Trade-offs: no timeout guards this case. A regression makes the suite HANG here, which
     #   is a blunter report than a failure but an unambiguous one; wrapping it in a timeout would
     #   turn an indefinite block into a soft failure, and an indefinite block in a nightly load
     #   step is exactly the outcome this refusal exists to prevent.
@@ -266,7 +266,7 @@ def test_a_dangling_symbolic_link_is_refused_even_when_the_source_is_optional(
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the operating system reports a missing name and a link to a missing target
+    # Assumptions: the operating system reports a missing name and a link to a missing target
     #   identically, and only the second is a fault. A link exists because somebody created it, so
     #   reporting it as absence lets an optional load complete having read nothing -- and the
     #   verification pass for that one record accepts zero rows by design, so nothing downstream
@@ -316,7 +316,7 @@ def test_an_unreadable_file_raises_rather_than_reporting_absence(tmp_path: pathl
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the case is skipped for a superuser rather than worked around, because a
+    # Assumptions: the case is skipped for a superuser rather than worked around, because a
     #   mode bit does not stop one and a test that cannot fail is worse than an absent one. CI runs
     #   this suite as an ordinary user, where the assertion holds.
     denied = tmp_path / "denied.txt"
@@ -371,7 +371,7 @@ def test_a_dataset_whose_size_does_not_divide_is_refused_before_a_handle_is_retu
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the up-front check is the property being asserted, not merely that a
+    # Assumptions: the up-front check is the property being asserted, not merely that a
     #   truncated dataset eventually fails. A stream source discovers the shortfall only at the end,
     #   which for a large dataset means a load that has already written rows; checking the size on
     #   the descriptor that will be read costs one stat and reports before any row exists.
@@ -397,7 +397,7 @@ def test_a_record_of_the_wrong_width_cannot_have_a_key_sliced_from_it() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): BOTH directions are asserted, because the guard replaced a
+    # Assumptions: BOTH directions are asserted, because the guard replaced a
     #   shorter-than-declared test that accepted an over-long record. An over-long record is the
     #   more dangerous of the two: the key sliced from it comes from the right offsets of the wrong
     #   record -- two rows concatenated, most plausibly -- so it looks entirely well formed and a
@@ -420,7 +420,7 @@ def test_the_data_region_width_is_the_furthest_published_field_end() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the FURTHEST end is asserted, not the last element's, because the two
+    # Assumptions: the FURTHEST end is asserted, not the last element's, because the two
     #   differ for a reader that publishes fields on both sides of a span it suppresses -- the
     #   security record does exactly that. Asserting the maximum states the property that holds for
     #   every reader rather than the one that happens to hold for a contiguous tuple.
@@ -438,7 +438,7 @@ def test_the_data_region_width_refuses_a_reader_that_publishes_no_field() -> Non
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): an empty tuple would make `max` raise a bare ValueError naming neither the
+    # Assumptions: an empty tuple would make `max` raise a bare ValueError naming neither the
     #   record nor the cause. The explicit refusal is what turns a misconfigured reader into a
     #   readable message.
     with pytest.raises(LayoutError, match="published no field"):
@@ -453,12 +453,12 @@ def test_a_source_line_stopping_inside_the_data_region_is_refused_before_padding
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the two fixtures differ by ONE character at the boundary, which is the only
+    # Assumptions: the two fixtures differ by ONE character at the boundary, which is the only
     #   comparison that establishes the bound is exact rather than merely present. A line reaching
     #   the data region must be accepted even though the rest of the record is pad -- that is the
     #   shipped cross-reference seed, whose fifty lines carry 36 characters against a declared 50 --
     #   and a line one character shorter must be refused.
-    # WHY (Assumptions): the check is asserted on the ITERATOR rather than on a padded record,
+    # Assumptions: the check is asserted on the ITERATOR rather than on a padded record,
     #   because the source length is the only exact test: the daily transaction's last published
     #   field is legitimately blank on all 300 shipped records, so inspecting a padded row for a
     #   trailing space would refuse every one of them.
@@ -489,7 +489,7 @@ def test_a_full_width_line_with_a_blank_trailing_field_is_still_accepted() -> No
     None
         The assertion is the result.
     """
-    # WHY (Refactoring Rationale): this is the case that decided WHERE the bound is applied. The
+    # Refactoring Rationale: this is the case that decided WHERE the bound is applied. The
     #   first form of this check inspected the padded row for a trailing space, which is exact for
     #   the cross-reference record and refuses every shipped daily transaction, all 300 of which
     #   carry a blank processing timestamp because the posting run that writes it has not run.
@@ -514,7 +514,7 @@ def test_a_data_region_bound_wider_than_the_record_is_refused() -> None:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): clamping would silently turn a mistaken bound into either "refuse
+    # Assumptions: clamping would silently turn a mistaken bound into either "refuse
     #   everything" or "bound nothing" depending on which way it clamped, with nothing reporting the
     #   mistake -- and "bound nothing" is exactly the unbounded behaviour the parameter exists to
     #   end.
@@ -542,7 +542,7 @@ def test_a_non_positive_record_length_is_refused(tmp_path: pathlib.Path, reclen:
     None
         The assertion is the result.
     """
-    # WHY (Assumptions): the guard is asserted against a path that does NOT exist, which proves the
+    # Assumptions: the guard is asserted against a path that does NOT exist, which proves the
     #   refusal happens before the open rather than after it. A bound derived from a non-positive
     #   width would make every read either empty or unbounded, so it has to be refused first.
     with pytest.raises(LayoutError):

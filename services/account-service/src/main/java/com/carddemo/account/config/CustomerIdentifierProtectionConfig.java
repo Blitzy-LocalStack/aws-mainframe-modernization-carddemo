@@ -1,23 +1,12 @@
 package com.carddemo.account.config;
 
 import com.carddemo.account.mapper.CustomerMapper.CustomerIdentifierProtection;
-import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.SecureRandom;
-import java.util.Arrays;
-import java.util.Map;
-import java.util.Objects;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
+import com.carddemo.account.service.CustomerIdentifierCipher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.services.kms.KmsClient;
-import software.amazon.awssdk.services.kms.model.DataKeySpec;
-import software.amazon.awssdk.services.kms.model.GenerateDataKeyRequest;
-import software.amazon.awssdk.services.kms.model.GenerateDataKeyResponse;
 
 /**
  * Supplies the implementation of the protected-identifier port the customer mapper declares.
@@ -37,77 +26,59 @@ import software.amazon.awssdk.services.kms.model.GenerateDataKeyResponse;
  * client, and its unit tests still satisfy the port with a substitute and hold every width, composition
  * and masking decision assertable with no key material in reach.</p>
  *
- * <p>Assumptions: ENVELOPE encryption under a data key, not direct encryption under the customer-managed
- * key, and the framing is deliberately the same as the one
- * {@code com.carddemo.card.service.CardVerificationValueCipher} uses for the card verification value.
- * Two protected columns in two contexts enciphered two different ways would mean two formats to re-key,
- * two to audit and two to get wrong. What envelope encryption buys here is the same thing it buys there:
- * the clear identifier never travels to a second service and never enters that service's request path,
- * and throughput is not bound to one key-management call per byte.</p>
+ * <p>⚠️ Refactoring Rationale: this class no longer ENCIPHERS anything. It held a private nested
+ * {@code KmsEnvelopeIdentifierProtection} that framed
+ * {@code [2-byte key length][wrapped key][IV][ciphertext]}, with no marker and no version byte, while
+ * {@code com.carddemo.account.service.CustomerIdentifierCipher} -- a {@code @Component}, and therefore
+ * the implementation that supersedes this one under {@code @ConditionalOnMissingBean} in any context
+ * that scans the service package -- frames
+ * {@code [CDCI][version][2-byte key length][wrapped key][IV][ciphertext]}. One {@code BYTEA} column
+ * consequently had two writers producing two formats differing in their first five bytes, selected by
+ * which beans a context happened to register. Nothing detected it because this context publishes no
+ * decipher path, so the bytes are never read back here; it would have surfaced at the first re-key or
+ * audit read, against rows already written, with no way to tell from a row which writer produced it. The
+ * bean method below now delegates to that one cipher, so there is exactly ONE writer of this envelope in
+ * the reactor and its declared constants are what
+ * {@code data-migration/src/carddemo_migration/loaders/protected_columns.py} reproduces.</p>
  *
- * <p>Assumptions: a FRESH data key per identifier, with no caching. A cached data key is plaintext key
- * material held in the process for as long as the cache lives, and the call it would save happens once
- * per customer write -- a path this context performs on an update, not on a read. The accepted cost is
- * one key-management call per identifier, so a customer update carrying both identifiers makes two.</p>
+ * <p>Assumptions: what remains here is WIRING. The cryptographic decisions -- envelope encryption under
+ * a fresh data key per identifier, Galois/Counter Mode, a twelve-byte vector, a hundred-and-twenty-eight
+ * bit tag, an encryption context naming the purpose and the column but never the customer, and the byte
+ * framing itself -- are all recorded on {@code CustomerIdentifierCipher}, which is where they are
+ * implemented. Restating any of them here would create a second statement of a contract that has one
+ * implementation, which is the shape of the defect above.</p>
  *
- * <p>Assumptions: the encryption context names the PURPOSE and the COLUMN and never the customer. The
- * context is authenticated additional data and is recorded in the key-management service's audit trail
- * in the clear, so putting a customer identifier in it would publish, to a log, exactly the association
- * the ciphertext exists to conceal. Naming the column still binds a national-identifier envelope to that
- * column, so an envelope moved between the two columns fails its authentication check rather than
- * deciphering.</p>
- *
- * <p>Trade-offs: there is no deciphering member here, and its absence is deliberate rather than an
- * omission. {@code Customer} publishes no accessor for either clear identifier and every response
- * renders the fixed redaction marker, so nothing in this context has a value to decipher FOR; a decipher
- * method would be an unused route from ciphertext back to a national identifier. The card context does
- * publish one because a verification value has a verification use. When a re-key or an export needs one,
- * it is added with the test that proves the framing round-trips -- which is the same standard the card
- * context met.</p>
+ * <p>Trade-offs: there is still no deciphering member anywhere on this path, and its absence is
+ * deliberate rather than an omission. {@code Customer} publishes no accessor for either clear identifier
+ * and every response renders the fixed redaction marker, so nothing in this context has a value to
+ * decipher FOR; a decipher method would be an unused route from ciphertext back to a national
+ * identifier. The card context does publish one because a verification value has a verification use.
+ * When a re-key or an export needs one, it is added with the test that proves the framing round-trips --
+ * which is the same standard the card context met, and it is now a single framing to round-trip rather
+ * than two.</p>
  *
  * <p><strong>Return value.</strong> Each member documents its own return value.</p>
  */
 @Configuration(proxyBeanMethods = false)
 public class CustomerIdentifierProtectionConfig {
 
-    /**
-     * The authenticated-encryption transformation both protected identifiers are enciphered with.
-     *
-     * <p>Assumptions: Galois/Counter Mode, so the ciphertext carries an authentication tag and an altered
-     * stored value fails to decipher rather than deciphering to different bytes. A mode without
-     * authentication would let an edit to the column go undetected, and this column is one whose value
-     * nothing downstream can sanity-check.</p>
+    /*
+     * WHY : ⚠️ Refactoring Rationale: seven constants stood here -- the transformation, the key
+     *       algorithm, the tag length, the vector length and the three encryption-context strings --
+     *       and every one of them was read only by the private nested implementation this class no
+     *       longer holds. They are deleted rather than kept, because a constant that no code in the
+     *       file reads is a SECOND STATEMENT of a contract with one implementation: the next author
+     *       to change the vector width on CustomerIdentifierCipher would leave these behind saying
+     *       twelve, and a reader comparing the two files would have no way to tell which one the
+     *       bytes came from. That divergence-by-duplication is precisely the defect that produced
+     *       two writers of this envelope in the first place.
+     * WHY : Alternatives Considered: keeping them as documentation of the framing this bean supplies.
+     *       Rejected -- the class javadoc already names CustomerIdentifierCipher as the place the
+     *       cryptographic decisions are recorded, and a cross-tree assertion in
+     *       data-migration/tests/test_protected_columns.py now reads those constants from the cipher
+     *       itself, so the one consumer that needed them to be declared somewhere reads them from
+     *       the file that uses them.
      */
-    private static final String TRANSFORMATION = "AES/GCM/NoPadding";
-
-    /** The key algorithm the data key material is interpreted under. */
-    private static final String KEY_ALGORITHM = "AES";
-
-    /**
-     * The authentication tag length in bits.
-     *
-     * <p>Assumptions: the maximum the mode admits. A shorter tag reduces the stored bytes by at most a
-     * few and weakens exactly the property the mode was chosen for.</p>
-     */
-    private static final int TAG_LENGTH_BITS = 128;
-
-    /**
-     * The initialisation vector length in bytes.
-     *
-     * <p>Assumptions: twelve, the length this mode is specified for, matching the card context's framing.
-     * A vector of another length is admissible to the provider but requires it to derive one internally,
-     * which changes the framing without saying so.</p>
-     */
-    private static final int INITIALISATION_VECTOR_LENGTH = 12;
-
-    /** The encryption-context key naming what the envelope is for. */
-    private static final String CONTEXT_PURPOSE_KEY = "carddemo:purpose";
-
-    /** The encryption-context value naming this context's protected identifiers. */
-    private static final String CONTEXT_PURPOSE_VALUE = "customer-identifier";
-
-    /** The encryption-context key naming which column the envelope belongs to. */
-    private static final String CONTEXT_COLUMN_KEY = "carddemo:column";
 
     /**
      * Creates the configuration.
@@ -160,164 +131,28 @@ public class CustomerIdentifierProtectionConfig {
     @ConditionalOnMissingBean
     public CustomerIdentifierProtection customerIdentifierProtection(KmsClient kms,
             @Value("${carddemo.security.customer-identifier.key-id}") String keyId) {
-        return new KmsEnvelopeIdentifierProtection(kms, keyId);
+        // WHY : ⚠️ Refactoring Rationale: this method used to construct a PRIVATE nested
+        //       KmsEnvelopeIdentifierProtection whose framing was
+        //       [2-byte key length][wrapped key][IV][ciphertext] -- with no marker and no version
+        //       byte -- while the component-scanned CustomerIdentifierCipher that supersedes it under
+        //       @ConditionalOnMissingBean frames [CDCI][version][2-byte key length][wrapped key][IV]
+        //       [ciphertext]. One column therefore had TWO writers producing TWO formats that differ
+        //       in their first five bytes, chosen by which beans a context happened to register. The
+        //       divergence was invisible because this context publishes no decipher path, so nothing
+        //       reads the bytes back today; it would have surfaced at the first re-key or audit read,
+        //       against rows already written, with no way to tell from a row which writer produced it
+        //       beyond guessing at its prefix.
+        // WHY : Assumptions: delegating removes the second format rather than aligning it. Copying the
+        //       marker and the version into a second private implementation would have made the two
+        //       agree today and left two places to change on the next format revision, which is the
+        //       arrangement that produced this defect. There is now exactly ONE writer of this
+        //       envelope in the reactor, and its constants are the ones the Python loader reproduces.
+        // WHY : Alternatives Considered: deleting this bean method outright and relying on the
+        //       component scan. Rejected because this method is what makes the port satisfiable in a
+        //       context that scans the mapper package without scanning the service package -- which is
+        //       the slice several of this module's own tests use -- so removing it would reintroduce
+        //       the unsatisfiable-port failure this class was created to fix.
+        return new CustomerIdentifierCipher(kms, keyId);
     }
 
-    /**
-     * Enciphers a customer identifier into a self-framing envelope under a per-value data key.
-     *
-     * <p>Assumptions: this is a private nested type rather than a separate class in the service package,
-     * because it is infrastructure that only the bean method above constructs and nothing else may reach.
-     * Publishing it would make a second, un-audited route to the encipherment available to any class in
-     * the module.</p>
-     */
-    private static final class KmsEnvelopeIdentifierProtection
-            implements CustomerIdentifierProtection {
-
-        /** Obtains the per-value data keys. */
-        private final KmsClient kms;
-
-        /** The customer-managed key the data keys are wrapped under. */
-        private final String keyId;
-
-        /**
-         * Supplies the initialisation vectors.
-         *
-         * <p>Assumptions: one instance per bean rather than one per call, because seeding a new
-         * cryptographic random source per encipherment is the expensive part and reusing the instance is
-         * the documented, thread-safe usage.</p>
-         */
-        private final SecureRandom random = new SecureRandom();
-
-        /**
-         * Creates the protection over a client and a key.
-         *
-         * @param kmsClient the key-management client; must not be {@code null}
-         * @param customerManagedKeyId the key identifier or alias; must not be {@code null} or blank
-         * @throws NullPointerException if either argument is {@code null}
-         * @throws IllegalArgumentException if {@code customerManagedKeyId} is blank
-         */
-        private KmsEnvelopeIdentifierProtection(KmsClient kmsClient, String customerManagedKeyId) {
-            this.kms = Objects.requireNonNull(kmsClient, "kmsClient must not be null");
-            this.keyId = Objects.requireNonNull(customerManagedKeyId, "keyId must not be null");
-            if (customerManagedKeyId.isBlank()) {
-                throw new IllegalArgumentException("the customer-identifier key id must not be blank,"
-                        + " because an unset key would encipher under the account's default key and"
-                        + " produce envelopes no re-key could locate");
-            }
-        }
-
-        /**
-         * Enciphers one identifier and returns the envelope to store.
-         *
-         * <p>Assumptions: the framing is the enciphered data key, its own two-byte length ahead of it, the
-         * initialisation vector, then the ciphertext. The length prefix is what makes the envelope
-         * self-framing: the wrapped-key length is chosen by the key-management service and is not a
-         * constant this class may assume, so a reader that split at a fixed offset would work until the
-         * service changed its wrapping and then decipher garbage. Two bytes is sufficient because a
-         * wrapped two-hundred-and-fifty-six-bit key is a few hundred bytes, and the value is written
-         * big-endian so the framing does not depend on the platform.</p>
-         *
-         * <p>Assumptions: the clear text is enciphered EXACTLY as given, with no trimming and no numeric
-         * conversion. Both identifiers admit a leading zero -- the national identifier is
-         * {@code PIC 9(09)} and the government-issued identifier {@code PIC X(20)} -- so reducing either
-         * to a number before enciphering would store ciphertext that deciphers to a different identifier
-         * than the reference held, with nothing downstream able to detect it.</p>
-         *
-         * <p>Assumptions: the key material and the plaintext bytes are both cleared in a finally block.
-         * They cannot be un-allocated, but leaving them intact keeps a national identifier and a live key
-         * in the heap for whatever reads it next, including a heap dump taken for an unrelated reason.</p>
-         *
-         * @param clearText the identifier exactly as it is to be stored; must not be {@code null} or empty
-         * @param field the column the value belongs to; must not be {@code null} or blank
-         * @return the envelope to store, never {@code null} and never empty
-         * @throws NullPointerException if either argument is {@code null}
-         * @throws IllegalArgumentException if {@code clearText} is empty or {@code field} is blank
-         * @throws IllegalStateException if the platform refuses the transformation, which is propagated
-         *     rather than caught because a row written with an unprotected identifier is worse than a
-         *     request that fails
-         */
-        @Override
-        public byte[] encrypt(String clearText, String field) {
-            Objects.requireNonNull(clearText, "clearText must not be null");
-            Objects.requireNonNull(field, "field must not be null");
-            if (clearText.isEmpty()) {
-                throw new IllegalArgumentException("clearText must not be empty for column " + field);
-            }
-            if (field.isBlank()) {
-                throw new IllegalArgumentException("field must name the column the value belongs to,"
-                        + " because it selects the encryption context the envelope is bound to");
-            }
-
-            GenerateDataKeyResponse dataKey = this.kms.generateDataKey(GenerateDataKeyRequest.builder()
-                    .keyId(this.keyId)
-                    .keySpec(DataKeySpec.AES_256)
-                    .encryptionContext(encryptionContext(field))
-                    .build());
-
-            byte[] keyMaterial = dataKey.plaintext().asByteArray();
-            byte[] plaintext = clearText.getBytes(StandardCharsets.UTF_8);
-            try {
-                byte[] initialisationVector = new byte[INITIALISATION_VECTOR_LENGTH];
-                this.random.nextBytes(initialisationVector);
-                Cipher cipher = Cipher.getInstance(TRANSFORMATION);
-                cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(keyMaterial, KEY_ALGORITHM),
-                        new GCMParameterSpec(TAG_LENGTH_BITS, initialisationVector));
-                return frame(dataKey.ciphertextBlob().asByteArray(), initialisationVector,
-                        cipher.doFinal(plaintext));
-            } catch (GeneralSecurityException refused) {
-                // WHY : Trade-offs: the cause is attached but this message names NO value and not even
-                //       the clear text's length. A security-provider message can quote the argument it
-                //       rejected, and the argument here is a national identifier, so the wrapper states
-                //       what failed and which column, and lets the cause carry the rest to a stack trace
-                //       rather than into a message a handler might render into a response or a log.
-                throw new IllegalStateException("the platform refused the " + TRANSFORMATION
-                        + " transformation while protecting column " + field, refused);
-            } finally {
-                Arrays.fill(keyMaterial, (byte) 0);
-                Arrays.fill(plaintext, (byte) 0);
-            }
-        }
-
-        /**
-         * Builds the authenticated additional data the envelope is bound to.
-         *
-         * @param field the column the value belongs to; must not be {@code null}
-         * @return the encryption context, never {@code null}
-         */
-        private static Map<String, String> encryptionContext(String field) {
-            return Map.of(CONTEXT_PURPOSE_KEY, CONTEXT_PURPOSE_VALUE, CONTEXT_COLUMN_KEY, field);
-        }
-
-        /**
-         * Frames the three envelope parts into the single byte array the column stores.
-         *
-         * @param encipheredDataKey the wrapped data key; must not be {@code null}
-         * @param initialisationVector the vector the ciphertext was produced under; must not be
-         *     {@code null}
-         * @param ciphertext the enciphered identifier including its authentication tag; must not be
-         *     {@code null}
-         * @return the framed envelope, never {@code null}
-         * @throws IllegalStateException if the wrapped data key is longer than the two-byte length prefix
-         *     can describe, which would make the envelope unreadable
-         */
-        private static byte[] frame(byte[] encipheredDataKey, byte[] initialisationVector,
-                byte[] ciphertext) {
-            if (encipheredDataKey.length > 0xFFFF) {
-                throw new IllegalStateException("the wrapped data key is " + encipheredDataKey.length
-                        + " bytes, which a two-byte length prefix cannot describe");
-            }
-            byte[] envelope = new byte[2 + encipheredDataKey.length + initialisationVector.length
-                    + ciphertext.length];
-            envelope[0] = (byte) (encipheredDataKey.length >>> 8);
-            envelope[1] = (byte) encipheredDataKey.length;
-            int cursor = 2;
-            System.arraycopy(encipheredDataKey, 0, envelope, cursor, encipheredDataKey.length);
-            cursor += encipheredDataKey.length;
-            System.arraycopy(initialisationVector, 0, envelope, cursor, initialisationVector.length);
-            cursor += initialisationVector.length;
-            System.arraycopy(ciphertext, 0, envelope, cursor, ciphertext.length);
-            return envelope;
-        }
-    }
 }

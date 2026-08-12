@@ -18,6 +18,7 @@ import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.dto.DatasetGeneration;
@@ -127,8 +128,8 @@ class CalculateInterestJobTest {
         this.ledgerOfSteps = mock(BatchStepLedger.class);
         this.generations = mock(DatasetGenerationService.class);
 
-        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any())).thenAnswer(call -> {
-            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(2).get();
+        when(this.ledgerOfSteps.runStep(anyString(), anyString(), any(BatchJobName.class), any())).thenAnswer(call -> {
+            BatchReturnCode outcome = call.<Supplier<BatchReturnCode>>getArgument(3).get();
             return new BatchStepLedger.StepOutcome(outcome, false);
         });
 

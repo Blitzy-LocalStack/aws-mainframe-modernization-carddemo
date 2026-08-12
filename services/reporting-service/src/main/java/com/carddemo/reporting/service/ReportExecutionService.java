@@ -7,29 +7,40 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.DateEditValidator.LanguageEnvironmentResult;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.mapper.ReportBandLayouts;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.LocalDate;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.ExecutionAlreadyExistsException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
 import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
 
 /**
  * Starts an on-demand transaction-report run for the report-request screen.
  *
- * <p>{@code app/cbl/CORPT00C.cbl} is a 649-line online program. It offers three mutually exclusive
- * report types, resolves each one to a pair of business dates, gates the run behind a confirmation
- * answer, and then hands the request to the job entry subsystem. This class carries the same four
- * steps and hands the request to a second, smaller state machine instead.</p>
+ * <p>{@code app/cbl/CORPT00C.cbl} is a 649-line online program. It offers three report types in an
+ * ORDERED condition chain -- the first marked one runs and the others are never evaluated -- resolves
+ * that one to a pair of business dates, gates the run behind a confirmation answer, and then hands the
+ * request to the job entry subsystem. This class carries the same four steps and hands the request to a
+ * second, smaller state machine instead.</p>
  *
  * <h2>Refactoring Rationale: the submission transport</h2>
  *
@@ -204,6 +215,47 @@ public class ReportExecutionService {
      */
     public static final String CUSTOM_REPORT_NAME = "Custom";
 
+    /**
+     * Header a caller sends a submission key in, and the field a refusal of one is named against.
+     *
+     * <p>Assumptions: the key travels as a HEADER and not as a member of the request body. It describes
+     * the submission ATTEMPT rather than the report being requested, and the body's own descriptor
+     * derives its component count arithmetically from the 17 named fields of {@code app/bms/CORPT00.bms}
+     * -- so a 14th component would be a member of that record which no field of the screen accounts for,
+     * and would falsify a derivation that is currently exact. A header is also where an idempotency key
+     * conventionally travels, and this contract already carries one caller-supplied header of the same
+     * kind in {@code X-Correlation-Id}.
+     */
+    public static final String IDEMPOTENCY_KEY_FIELD = "Idempotency-Key";
+
+    /**
+     * Longest submission key a caller may send.
+     *
+     * <p>Assumptions: the ceiling exists so that the composed execution name cannot exceed the
+     * orchestrator's own {@value #EXECUTION_NAME_LIMIT}-character limit. The arithmetic is in
+     * {@code validatedIdempotencyKey}, and it leaves room to spare at every report type and range.
+     */
+    public static final int IDEMPOTENCY_KEY_MAX_LENGTH = 40;
+
+    /**
+     * Longest name the orchestrator accepts for an execution.
+     *
+     * <p>Assumptions: the figure is the orchestrator's published limit and is recorded here because the
+     * key ceiling above is derived FROM it. Naming it makes that derivation checkable instead of leaving
+     * the key ceiling looking like a preference.
+     */
+    public static final int EXECUTION_NAME_LIMIT = 80;
+
+    /**
+     * Characters a submission key may hold.
+     *
+     * <p>Assumptions: the set is letters, digits, the hyphen and the underscore -- comfortably inside
+     * what an execution name admits, so it needs no revision if the orchestrator's own list of refused
+     * punctuation changes. It is compiled once as a constant rather than per call because a submission
+     * is a request-path operation.
+     */
+    private static final Pattern IDEMPOTENCY_KEY_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
+
     // Assumptions: the two accepted answers are the ones the baseline tests for at L478 and L480 of
     //     app/cbl/CORPT00C.cbl, where each is matched in upper and lower case. The comparison below
     //     is therefore case-insensitive rather than exact, and AAP Rule T8 keeps the letters
@@ -217,6 +269,65 @@ public class ReportExecutionService {
      * Answer that declines a submission deliberately.
      */
     public static final String CONFIRM_NO = "N";
+
+    /**
+     * Opening quotation mark the reference wraps an unrecognised confirmation answer in.
+     *
+     * <p>Assumptions: the reference builds this sentence with a {@code STRING} statement at L485 to
+     * L490 from three operands: this quotation mark delimited by size, the answer delimited by a
+     * space, and the fragment below delimited by size. The three are declared separately here so the
+     * assembly at the point of use reads against those five lines rather than hiding the
+     * interpolation inside one literal.</p>
+     */
+    public static final String INVALID_CONFIRM_PREFIX = "\"";
+
+    /**
+     * Verbatim fragment the reference appends to a quoted unrecognised confirmation answer.
+     *
+     * <p>Assumptions: reproduced character for character from L488 and L489 of
+     * {@code app/cbl/CORPT00C.cbl}, opening with the closing quotation mark and ending in three
+     * full stops with no space before them.</p>
+     */
+    public static final String INVALID_CONFIRM_SUFFIX = "\" is not a valid value to confirm...";
+
+    /**
+     * Verbatim sentence the reference emits when the start bound's month component is empty.
+     *
+     * <p>Assumptions: reproduced character for character from L261 of {@code app/cbl/CORPT00C.cbl},
+     * including the capitalised {@code NOT}, the spaced hyphen and the three trailing full stops. It
+     * is the FIRST arm of the six-way blank chain at L258 to L302, which is why it is the sentence an
+     * entirely empty start bound carries.</p>
+     */
+    public static final String MESSAGE_START_DATE_MONTH_EMPTY =
+            "Start Date - Month can NOT be empty...";
+
+    /**
+     * Verbatim sentence the reference emits when the end bound's month component is empty.
+     *
+     * <p>Assumptions: reproduced character for character from L282 of {@code app/cbl/CORPT00C.cbl},
+     * being the fourth arm of the same chain and the first one that concerns the end bound.</p>
+     */
+    public static final String MESSAGE_END_DATE_MONTH_EMPTY =
+            "End Date - Month can NOT be empty...";
+
+    /**
+     * Verbatim sentence the reference emits when the assembled start bound fails the date edit.
+     *
+     * <p>Assumptions: reproduced character for character from L400 of {@code app/cbl/CORPT00C.cbl}.
+     * Note the LOWER-CASE {@code date}, where the six blank messages and the six component-range
+     * messages capitalise their nouns -- the reference is inconsistent here and the inconsistency is
+     * carried rather than tidied, because transformation rule T8 admits no editorial improvement to a
+     * user-visible string.</p>
+     */
+    public static final String MESSAGE_START_DATE_INVALID = "Start Date - Not a valid date...";
+
+    /**
+     * Verbatim sentence the reference emits when the assembled end bound fails the date edit.
+     *
+     * <p>Assumptions: reproduced character for character from L420 of {@code app/cbl/CORPT00C.cbl},
+     * carrying the same lower-case {@code date} as its counterpart above.</p>
+     */
+    public static final String MESSAGE_END_DATE_INVALID = "End Date - Not a valid date...";
 
     // Assumptions: the four values below are the literals the baseline moves rather than derived
     //     quantities, so they are named here and used in place of bare digits. L219 moves '01' as
@@ -264,9 +375,78 @@ public class ReportExecutionService {
     private static final String REPORT_TYPE_FIELD = "reportType";
 
     /**
+     * The sentence the reference displays when no report type was marked.
+     *
+     * <p>Assumptions: the literal is {@code app/cbl/CORPT00C.cbl} L438 character for character,
+     * including the three ASCII full stops and the lower-case "report" in both positions. It is a named
+     * constant rather than an inline string because {@code reporting-api.yaml} publishes the same text at
+     * L1988 as one of the messages this operation may carry, and a test can hold the two to each other
+     * only if this side has a name.</p>
+     *
+     * <p>⚠️ Assumptions: the three full stops here have NO space before them, which is where this sentence
+     * differs from the submission sentence, whose three dots ARE preceded by a space. The two are similar
+     * enough to be mistaken for one string and are never merged.</p>
+     *
+     * <p>Refactoring Rationale: one constant carries this sentence where two briefly did, under two names
+     * that differed only in wording. Two public names for one verbatim string is a hazard rather than a
+     * convenience: a later edit correcting the text on one of them leaves the other stating that the same
+     * screen shows something else, and the contract test that holds this text to the published catalogue
+     * can only guard the name it was written against.</p>
+     */
+    public static final String MESSAGE_NO_REPORT_TYPE_SELECTED =
+            "Select a report type to print report...";
+
+    /**
      * Request field naming the confirmation answer.
      */
     private static final String CONFIRM_FIELD = "confirm";
+
+    // Assumptions: the five values below govern the EXECUTION NAME, which is the orchestrator's
+    //     uniqueness key rather than a label. A Standard Workflow refuses a name that any execution
+    //     of the same machine has already used and holds that history for 90 days, so what the name
+    //     is derived from decides which second submission is a duplicate and which is a new run.
+    /**
+     * Separator joining the parts of an execution name.
+     *
+     * <p>Assumptions: a hyphen, because an execution name admits a restricted character set and the
+     * colon a timestamp form would join values with is not in it.</p>
+     */
+    private static final String EXECUTION_NAME_SEPARATOR = "-";
+
+    /**
+     * Bytes of the submission digest that reach the execution name.
+     *
+     * <p>Assumptions: twelve is chosen because twelve bytes is ninety-six bits, an exact multiple of the
+     * six bits a base64 character carries, so the encoding needs no padding and renders to exactly
+     * sixteen characters. That is what makes the suffix a FIXED width -- ten bytes would render to
+     * fourteen characters and eleven to fifteen, both correct but neither landing on a whole character
+     * boundary. Eighty is the orchestrator's ceiling on a name and the longest fixed part here is a
+     * seven-character report type plus two ten-character bounds plus three separators, so a
+     * sixteen-character suffix leaves the assembled name at forty-six and the bound cannot be reached by
+     * any input. Ninety-six bits is far beyond what a per-submission key needs to avoid an accidental
+     * collision.</p>
+     */
+    private static final int SUBMISSION_DIGEST_BYTES = 12;
+
+    /**
+     * Digest algorithm the submission suffix is derived with.
+     *
+     * <p>Assumptions: the platform specification requires every implementation to provide this
+     * algorithm, so the checked lookup exception the standard library declares is unreachable here and
+     * is converted rather than propagated. It is named rather than inlined so the one place it is
+     * declared stays the only place it appears.</p>
+     */
+    private static final String SUBMISSION_DIGEST_ALGORITHM = "SHA-256";
+
+    /**
+     * The segment that identifies a state machine inside its own ARN.
+     */
+    private static final String STATE_MACHINE_ARN_SEGMENT = ":stateMachine:";
+
+    /**
+     * The segment that identifies an execution inside an execution ARN.
+     */
+    private static final String EXECUTION_ARN_SEGMENT = ":execution:";
 
     // Assumptions: the failure path below renders through ThrowableDigest rather than through the
     //     throwable itself, because that helper bounds what reaches an operational record -- 8 cause
@@ -320,9 +500,11 @@ public class ReportExecutionService {
     /**
      * Resolves which of the three report types a request selected.
      *
-     * <p>Assumptions: the three selections are mutually exclusive one-character marks, and the
-     * baseline chooses between them with a single condition chain whose arms are at L213, L239 and
-     * L256 of {@code app/cbl/CORPT00C.cbl}. Each arm tests its mark against BOTH the space and the
+     * <p>Assumptions: the three selections are one-character marks and the baseline chooses between
+     * them with a single ordered condition chain whose arms are at L213, L239 and L256 of
+     * {@code app/cbl/CORPT00C.cbl}. They are not mutually EXCLUSIVE -- nothing refuses a request that
+     * marks two -- they are mutually PRECEDENT: the first marked arm runs and the rest are never
+     * evaluated. Each arm tests its mark against BOTH the space and the
      * low-value figurative constants, so a mark holding low values is absent and not present. A test
      * against blankness alone would misclassify it, because a low-value character is not whitespace;
      * that is why the presence test below goes through the shared field-state helper, whose
@@ -340,92 +522,152 @@ public class ReportExecutionService {
      *     {@value #MONTHLY_REPORT_NAME}, {@value #YEARLY_REPORT_NAME} or
      *     {@value #CUSTOM_REPORT_NAME}; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
-     * @throws ClientInputException if no type is selected or more than one is, neither of which the
-     *     baseline's condition chain resolves to a range
+     * @throws ClientInputException if no type is marked at all, carrying
+     *     {@value #MESSAGE_NO_REPORT_TYPE_SELECTED}, which is the reference's own final arm. More than
+     *     one mark is NOT refused: the reference resolves the first marked arm and ignores the rest
      */
     public String resolveReportName(ReportRequest request) {
         Objects.requireNonNull(request, "request must not be null");
 
-        boolean monthly = isMarked(request.monthly());
-        boolean yearly = isMarked(request.yearly());
-        boolean custom = isMarked(request.custom());
-        int selected = (monthly ? 1 : 0) + (yearly ? 1 : 0) + (custom ? 1 : 0);
-
-        // WHY : Assumptions: the marks are counted rather than merely tested for emptiness, because
-        //       two distinct request faults both reach here and the count is what names which one
-        //       occurred. A request with no mark has no range to run over, and the baseline answers
-        //       it from the final arm of the chain at L437 to L440. A request with two marks has two
-        //       candidate ranges, and the baseline resolves only the first arm that matches, so
-        //       accepting it would silently discard a selection the caller made.
-        if (selected != 1) {
-            // WHY : Assumptions: the refusal is the shared client-input type rather than a plain
-            //       argument exception, so GlobalExceptionHandler renders it under
-            //       ApiError.CODE_VALIDATION as one entry in the structured per-field error array,
-            //       carrying the correlation identity and the request path the problem shape needs.
-            //       This class holds none of those three, which is why the package charter places
-            //       the handler in the shared kernel and not here. The baseline answers the same
-            //       fault from the final arm of its own chain, at L437 to L440 of
-            //       app/cbl/CORPT00C.cbl.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, REPORT_TYPE_FIELD,
-                    "exactly one of monthly, yearly or custom must be selected but " + selected
-                            + " were");
-        }
-        if (monthly) {
+        // WHY : Assumptions: the three marks are tested in the baseline's own order and the FIRST
+        //       present one wins, because that is what its condition chain does. EVALUATE TRUE
+        //       selects the first arm whose subject is true and leaves the rest unevaluated, so a
+        //       request marking both monthly and yearly runs the MONTHLY report at
+        //       app/cbl/CORPT00C.cbl L213 and never reaches the yearly arm at L239 or the custom arm
+        //       at L256. The precedence is therefore monthly, then yearly, then custom, and it is a
+        //       property of the reference rather than a preference of this method.
+        // WHY : Refactoring Rationale: this method COUNTED the marks and refused any request that
+        //       carried more than one, on the stated ground that accepting it would silently discard
+        //       a selection the caller made. That reasoning described the target's own contract
+        //       rather than the reference's behaviour, and the reference is the specification: it
+        //       accepts the request and runs the first marked type, so the stricter rule refused a
+        //       request the baseline answers and answered 400 where the baseline produces a report.
+        //       Functional parity is a non-negotiable constraint of this migration and no exception
+        //       covers this branch, so the count is gone and the chain is the reference's.
+        //       Trade-offs: a caller that marks two types is told nothing about the one that was
+        //       ignored, which is the cost of parity here and is the reference's own behaviour --
+        //       the screen it answered showed the report that ran, and a caller reads which type it
+        //       got from the reportName the response carries.
+        if (isMarked(request.monthly())) {
             return MONTHLY_REPORT_NAME;
         }
-        return yearly ? YEARLY_REPORT_NAME : CUSTOM_REPORT_NAME;
+        if (isMarked(request.yearly())) {
+            return YEARLY_REPORT_NAME;
+        }
+        if (isMarked(request.custom())) {
+            return CUSTOM_REPORT_NAME;
+        }
+
+        // WHY : Assumptions: the refusal is the shared client-input type rather than a plain
+        //       argument exception, so GlobalExceptionHandler renders it under
+        //       ApiError.CODE_VALIDATION as one entry in the structured per-field error array,
+        //       carrying the correlation identity and the request path the problem shape needs.
+        //       This class holds none of those three, which is why the package charter places
+        //       the handler in the shared kernel and not here. This is the reference's own final
+        //       arm, the WHEN OTHER at app/cbl/CORPT00C.cbl L437 to L440.
+        // WHY : Refactoring Rationale: the sentence is now the reference literal VERBATIM, where an
+        //       earlier revision reported "exactly one of monthly, yearly or custom must be selected
+        //       but 0 were". That sentence was authored here, described the refusal that has just
+        //       been withdrawn, and was not in the catalogue reporting-api.yaml publishes as the
+        //       messages this operation may carry -- which lists this literal, at L1988, and states
+        //       that every message is carried verbatim from the reference. Transformation rule T8
+        //       requires user-visible strings to be reproduced character for character, and the
+        //       three trailing full stops and the capitalisation are part of the text.
+        throw new ClientInputException(ApiError.CODE_VALIDATION, REPORT_TYPE_FIELD,
+                MESSAGE_NO_REPORT_TYPE_SELECTED);
     }
 
     /**
-     * Reports whether a request confirmed its submission.
+     * Resolves which of the reference's three confirmation answers a request carries.
      *
-     * <p>Assumptions: the baseline distinguishes THREE answers and this method distinguishes the same
-     * three. An absent answer is refused with its own sentence at L464 to L474 of
-     * {@code app/cbl/CORPT00C.cbl}; an affirmative answer continues to the write loop through L478
-     * and L479; a negative answer clears the screen and stops at L480 to L483; and an unrecognised
-     * answer is refused at L484 to L493. The gate that guards the loop is the flag test at L476,
-     * which is why a submission is reached at L496 only for the affirmative case.</p>
+     * <p>Assumptions: the baseline distinguishes THREE answers plus one refusal and this method
+     * distinguishes the same four outcomes. An absent answer re-prompts with its own sentence at L464
+     * to L474 of {@code app/cbl/CORPT00C.cbl}; an affirmative answer continues to the write loop
+     * through L478 and L479; a negative answer clears the screen and stops at L480 to L483; and an
+     * unrecognised answer is refused at L484 to L493. The gate that guards the loop is the flag test
+     * at L476, which is why a submission is reached at L496 only for the affirmative case.</p>
      *
-     * <p>Trade-offs: the two refusal sentences below are constants and neither repeats the answer
-     * that caused it, whereas the baseline interpolates the offending value into its message at L487.
-     * The compromise accepted is a slightly less specific sentence in exchange for a message an alert
-     * rule can match on without matching on caller input, which is the same discipline the rest of
-     * this module applies to operational records. Nothing about the CONTROL FLOW differs: the same
-     * three answers reach the same three outcomes.</p>
+     * <p>Refactoring Rationale: this returns a three-valued answer where an earlier revision returned
+     * a boolean and RAISED for an absent one, and the change is a correction of the outcome rather
+     * than a tidier signature. An absent answer is not a failure in the baseline: L464 to L474 sets
+     * the flag purely to suppress the success block and re-displays the screen carrying a PROMPT, so
+     * the caller is being asked a question, not told it made a mistake. Raising made that turn a
+     * validation failure -- an HTTP 400 with a problem body -- where the published contract at
+     * {@code src/main/resources/openapi/reporting-api.yaml} declares 200 with the prompt as the
+     * message. A boolean cannot carry three states, so the type is what forced the wrong answer; the
+     * enum below removes the choice.</p>
+     *
+     * <p>Refactoring Rationale: the unrecognised answer is now refused with the reference's own
+     * interpolated sentence. The earlier revision emitted a constant naming the two accepted letters
+     * and the answer's LENGTH, and justified withholding the offending value as keeping caller input
+     * out of a string an alert rule matches on. That reasoning does not survive contact with two
+     * facts: transformation rule T8 requires user-visible strings to cross verbatim and admits no
+     * exception for alertability, and the value withheld is one character drawn from a domain the
+     * request type bounds at a single position -- so nothing unbounded was ever being kept out.
+     * Operational matching is served by the error CODE, which is what the alerting reads.</p>
      *
      * @param request the report request whose confirmation answer is wanted; must not be {@code null}
-     * @return {@code true} when the answer confirms the submission, {@code false} when it declines
-     *     deliberately
+     * @return which of the three answers the request carries; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
-     * @throws ClientInputException if the answer is absent, or is neither of the two the baseline
-     *     recognises
+     * @throws ClientInputException if the answer is neither of the two the baseline recognises,
+     *     carrying the reference's own quoted-value sentence
      */
-    public boolean isConfirmed(ReportRequest request) {
+    public Confirmation resolveConfirmation(ReportRequest request) {
         Objects.requireNonNull(request, "request must not be null");
 
         String answer = request.confirm();
         if (FieldValidationFlag.isNeverSupplied(answer)) {
-            // WHY : Assumptions: an absent answer is answered separately from an unrecognised one
+            // WHY : Assumptions: an absent answer is reported separately from an unrecognised one
             //       because the baseline answers them separately, at L464 and L484 respectively, with
-            //       two different sentences. Collapsing them would tell a caller who supplied nothing
-            //       that it supplied something invalid.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, CONFIRM_FIELD,
-                    "confirm must be supplied before a report is submitted");
+            //       two different sentences and two different outcomes. Collapsing them would tell a
+            //       caller who supplied nothing that it supplied something invalid.
+            // WHY : Assumptions: the never-supplied predicate is used rather than a blankness test,
+            //       because L464 compares the answer against BOTH the space and the low-value
+            //       figurative constants and a low-value character is not whitespace.
+            return Confirmation.UNANSWERED;
         }
         if (CONFIRM_YES.equalsIgnoreCase(answer)) {
-            return true;
+            return Confirmation.CONFIRMED;
         }
         if (CONFIRM_NO.equalsIgnoreCase(answer)) {
-            return false;
+            return Confirmation.DECLINED;
         }
-        // WHY : Assumptions: this arm stays reachable even though ReportRequest constrains the
-        //       answer declaratively to the 4 letters of its pattern within 1 declared position,
-        //       because that constraint is applied only on the way in over HTTP. A caller inside the
-        //       application reaches this method directly, and a service that trusted a boundary it
-        //       does not own would start a run on an answer nobody validated.
+        // WHY : Assumptions: this arm is the ONLY place an unrecognised answer is refused, and the
+        //       request type deliberately no longer constrains the answer declaratively. Both a
+        //       declarative pattern and this branch produce an HTTP 400, so the choice is about which
+        //       one composes the message: a constraint violation is rendered by the shared advice as
+        //       its generic aggregate sentence, which is not the reference's, whereas this refusal
+        //       carries the reference's own. The published schema keeps its pattern as the statement
+        //       of the accepted domain, which stays true -- a pattern says what is accepted, and this
+        //       branch says, in the reference's words, why a value outside it was not.
+        // WHY : Assumptions: the answer is interpolated as submitted, unquoted-value first and then
+        //       wrapped, which is the operand order of the STRING statement at L485 to L490. The
+        //       reference delimits the answer BY SPACE, which for the single declared position of
+        //       CONFIRMI at L114 of app/cpy-bms/CORPT00.CPY yields the character itself -- an answer
+        //       that WAS a space reached the absent branch above and never arrives here.
         throw new ClientInputException(ApiError.CODE_VALIDATION, CONFIRM_FIELD,
-                "confirm must be " + CONFIRM_YES + " or " + CONFIRM_NO + " but was of length "
-                        + answer.length());
+                INVALID_CONFIRM_PREFIX + answer + INVALID_CONFIRM_SUFFIX);
+    }
+
+    /**
+     * Which of the reference's three confirmation answers a request carries.
+     *
+     * <p>Assumptions: the three constants below are the three arms of the baseline's own condition
+     * chain and there is deliberately no fourth for an invalid answer. An invalid answer is refused
+     * rather than described, because the baseline refuses it too -- L484 to L493 raises the error flag
+     * and re-displays with a message -- so representing it as a value would let a caller carry an
+     * unrunnable state past the point that rejects it.</p>
+     */
+    public enum Confirmation {
+
+        /** The answer was {@code Y} or {@code y}: the run proceeds, per L478 and L479. */
+        CONFIRMED,
+
+        /** The answer was {@code N} or {@code n}: nothing runs and nothing is reported, per L480 to L483. */
+        DECLINED,
+
+        /** No answer was supplied: the caller is re-prompted, per L464 to L474. */
+        UNANSWERED
     }
 
     /**
@@ -628,8 +870,29 @@ public class ReportExecutionService {
      */
     private static LocalDate requireEditedBound(String bound, String field) {
         if (FieldValidationFlag.isNeverSupplied(bound)) {
+            // WHY : Refactoring Rationale: the sentence is the reference's MONTH-component blank
+            //       message, and an earlier revision emitted a target-authored one naming the request
+            //       member. Two facts settle which reference string belongs here. The reference tests
+            //       the six typed components in one first-match chain at L258 to L302 of
+            //       app/cbl/CORPT00C.cbl, opening with the start month at L258, so a bound with
+            //       nothing in it reports the MONTH message and never reaches the day or year arm.
+            //       And the published contract at src/main/resources/openapi/reporting-api.yaml
+            //       enumerates the complete catalog a field error of this operation may carry and
+            //       says of it "these strings are the contract", so a sentence outside the catalog is
+            //       off-contract regardless of how well it reads.
+            // WHY : Trade-offs: naming the month specifically is less precise than the target could
+            //       be, because this class receives the bound already ASSEMBLED and cannot tell which
+            //       of the three components the caller left out. The imprecision is the reference's
+            //       own and is preferred to inventing a seventh sentence for a seam the reference does
+            //       not have; the assembly's relocation to the client edge is registered on
+            //       resolveCustomRange, which explains why the six components never arrive here.
+            // WHY : Assumptions: the state is BLANK and not the not-ok default the three-argument
+            //       constructor supplies. Transformation rule T7 maps the reference's two validation
+            //       flags onto these two states, and the contract records that BLANK additionally
+            //       renders the literal asterisk marker the reference writes into an empty field --
+            //       so a blank bound reported as not-ok would lose that marker.
             throw new ClientInputException(ApiError.CODE_VALIDATION, field,
-                    field + " must be supplied for a custom report");
+                    FieldValidationFlag.BLANK, blankMonthMessage(field));
         }
 
         // WHY : Assumptions: the width is established HERE, before the shared edit is called, and
@@ -642,9 +905,16 @@ public class ReportExecutionService {
         //       app/cbl/CORPT00C.cbl declares at L72, so no value that clears this test can still
         //       trip that condition.
         if (bound.length() != DateEditValidator.MASKED_DATE_LENGTH) {
+            // WHY : Refactoring Rationale: a wrong-width bound carries the ASSEMBLED-DATE message and
+            //       not a target-authored width sentence. The reference cannot reach this condition at
+            //       all -- its three components are fixed-width screen fields, so an assembled value
+            //       is always ten characters -- and the published catalog contains no width message,
+            //       so there is no in-contract sentence for the condition as such. The assembled-date
+            //       message is the reference's answer for a value that cannot be a date under the
+            //       'YYYY-MM-DD' mask at L72, which a wrong-width value cannot be, so it is the one
+            //       catalog entry that is true of this input rather than merely available.
             throw new ClientInputException(ApiError.CODE_VALIDATION, field,
-                    field + " must be exactly " + DateEditValidator.MASKED_DATE_LENGTH
-                            + " characters in the form " + DateEditValidator.DATE_FORMAT_MASK);
+                    invalidDateMessage(field));
         }
 
         LanguageEnvironmentResult edited = DateEditValidator.evaluateWithLanguageEnvironment(
@@ -666,9 +936,48 @@ public class ReportExecutionService {
             return LocalDate.parse(bound);
         }
 
-        throw new ClientInputException(ApiError.CODE_VALIDATION, field,
-                field + " was rejected by the date edit with severity " + edited.severity()
-                        + " and message number " + edited.messageNumber());
+        // WHY : Refactoring Rationale: the sentence is the reference's own assembled-date message,
+        //       where an earlier revision reported the edit's severity code and message number. Those
+        //       two values are the LANGUAGE ENVIRONMENT's diagnostic, and the reference does not show
+        //       them to an operator: it tests them at L396 and L399 for the start bound and L416 and
+        //       L419 for the end bound, and on failure moves 'Start Date - Not a valid date...' at
+        //       L400 or 'End Date - Not a valid date...' at L420. Reporting the codes instead
+        //       disclosed an internal diagnostic to a caller AND withheld the string the published
+        //       catalog names, so it failed twice over.
+        // WHY : Assumptions: the diagnostic is not lost, it is relocated. The severity and message
+        //       number remain available to the caller of the shared edit and are the datum an
+        //       operator needs; what changes is that they no longer travel in a user-visible sentence
+        //       transformation rule T8 requires to be the reference's own.
+        throw new ClientInputException(ApiError.CODE_VALIDATION, field, invalidDateMessage(field));
+    }
+
+    /**
+     * Selects the reference's blank-month sentence for whichever bound is empty.
+     *
+     * <p>Assumptions: the two sentences differ only in their leading words and are declared as whole
+     * strings rather than assembled from a shared tail, because they are two separate MOVE literals in
+     * the reference -- L261 and L282 of {@code app/cbl/CORPT00C.cbl} -- and a shared tail would invite
+     * a later reader to "fix" one of them into agreement with a screen caption.</p>
+     *
+     * @param field the request member the bound arrived on, one of the two range bounds
+     * @return the reference's sentence for an empty bound of that end; never {@code null}
+     */
+    private static String blankMonthMessage(String field) {
+        return START_DATE_FIELD.equals(field)
+                ? MESSAGE_START_DATE_MONTH_EMPTY
+                : MESSAGE_END_DATE_MONTH_EMPTY;
+    }
+
+    /**
+     * Selects the reference's assembled-date sentence for whichever bound failed the edit.
+     *
+     * @param field the request member the bound arrived on, one of the two range bounds
+     * @return the reference's sentence for an unusable bound of that end; never {@code null}
+     */
+    private static String invalidDateMessage(String field) {
+        return START_DATE_FIELD.equals(field)
+                ? MESSAGE_START_DATE_INVALID
+                : MESSAGE_END_DATE_INVALID;
     }
 
     /**
@@ -724,19 +1033,34 @@ public class ReportExecutionService {
      * never reaches the queue. Re-testing here rather than trusting the call order means a future
      * caller that inverted the sequence could not start a run the requester had declined.</p>
      *
+     * <p>Assumptions: a submission that the orchestrator has already accepted under the same name is
+     * answered with the handle of that run rather than as a failure, so a caller retrying one request
+     * observes one execution. Which second request counts as the same submission is decided by
+     * {@link #currentSubmissionKey()} and joined into the name by
+     * {@link #executionName(String, String, String, String)}; the two documents together are the whole
+     * of this method's deduplication behaviour.</p>
+     *
      * @param request the confirmed report request; must not be {@code null}
      * @param reportName the resolved report name, as {@link #resolveReportName(ReportRequest)}
      *     returns it; must not be {@code null}
      * @param rangeStart the first business date of the resolved range; must not be {@code null}
      * @param rangeEnd the last business date of the resolved range; must not be {@code null}
+     * @param idempotencyKey the caller's submission key, or {@code null} when the caller supplied none.
+     *     Supplying one makes a re-sent request a duplicate the orchestrator refuses; omitting one makes
+     *     every submission a distinct run. See {@code executionName} for why the choice is the
+     *     caller's
      * @return a description of the accepted run, carrying the execution ARN a caller observes it
      *     through; never {@code null}
-     * @throws NullPointerException if any argument is {@code null}
+     * @throws NullPointerException if the request, the report name or either bound is {@code null}; the
+     *     submission key is the one argument that may be absent
      * @throws ClientInputException if the request does not carry a confirming answer, so that nothing
-     *     is started for a request that declined or never answered
+     *     is started for a request that declined or never answered, or if a supplied submission key
+     *     carries a character or a length an execution name may not hold
      * @throws IllegalStateException if the orchestrator refuses the start, which is the loud failure
      *     that replaces the discarded write and is raised from the guarded call below rather than
-     *     declared by it
+     *     declared by it; and, for the one refusal that is not a failure -- a name already in use --
+     *     only when the configured machine ARN is not the plain shape an execution handle can be
+     *     derived from, since every other such refusal is answered with the existing run
      * @throws IllegalArgumentException if the assembled description is one the response contract
      *     refuses, which has two reachable causes worth naming because neither is visible from this
      *     method's own statements: a {@code reportName} that is not one of the three the baseline
@@ -746,18 +1070,28 @@ public class ReportExecutionService {
      *     type stays the single authority on what a submission description may hold
      */
     public ReportSubmissionResponse start(
-            ReportRequest request, String reportName, LocalDate rangeStart, LocalDate rangeEnd) {
+            ReportRequest request, String reportName, LocalDate rangeStart, LocalDate rangeEnd,
+            String idempotencyKey) {
 
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(reportName, "reportName must not be null");
         Objects.requireNonNull(rangeStart, "rangeStart must not be null");
         Objects.requireNonNull(rangeEnd, "rangeEnd must not be null");
 
-        if (!isConfirmed(request)) {
+        // WHY : Assumptions: the gate re-asserts the confirmation rather than trusting the caller's
+        //       call order, and the sentence it carries is deliberately NOT one of the reference's.
+        //       This condition is unreachable through the published operation, which resolves the
+        //       answer and branches on it before it reaches here; it is reachable only from a caller
+        //       inside the application that started a run for a request it had already been told was
+        //       declined or unanswered. That is an internal invariant failure with no baseline
+        //       counterpart, so there is no reference string to carry and inventing one would put a
+        //       sentence on a screen the reference never shows it on.
+        if (resolveConfirmation(request) != Confirmation.CONFIRMED) {
             throw new ClientInputException(ApiError.CODE_VALIDATION, CONFIRM_FIELD,
                     "a report is started only for a confirmed request");
         }
 
+        String suppliedKey = validatedIdempotencyKey(idempotencyKey);
         String startDate = rangeStart.toString();
         String endDate = rangeEnd.toString();
 
@@ -773,13 +1107,85 @@ public class ReportExecutionService {
                 + "\",\"startDate\":\"" + startDate
                 + "\",\"endDate\":\"" + endDate + "\"}";
 
+        // WHY : Assumptions: the key is resolved ONCE, before the call, and the same value is used
+        //       for the name and for the log line that reports a duplicate, so that an operator
+        //       reading the record can tell which submission was folded onto which run.
+        // WHY : Refactoring Rationale: the key has TWO sources and the caller's wins. A caller that
+        //       sends the Idempotency-Key header is stating whether a second submission of the same
+        //       range is a retry of one attempt or a genuinely new run, and it is the only party that
+        //       knows -- an execution name is reserved for the 90 days the orchestrator remembers a
+        //       completed run, so a name derived from the range alone refuses every legitimate rerun.
+        //       When the header is absent the key is derived from the request's own correlation
+        //       identifier instead, which folds the retries of ONE abandoned call onto one run (the
+        //       client's per-call ceiling can abandon a call the orchestrator went on to accept)
+        //       without making a later, separately-correlated submission collide with it.
+        // WHY : Alternatives Considered: a random distinguisher when the header is absent. Rejected
+        //       because it makes every retry of an abandoned call start another run, which is the
+        //       duplicate-submission defect this deduplication exists to prevent.
+        String submissionKey = suppliedKey == null ? currentSubmissionKey() : suppliedKey;
+        String executionName = executionName(reportName, startDate, endDate, submissionKey);
+
         StartExecutionResponse started;
         try {
             started = sfnClient.startExecution(StartExecutionRequest.builder()
                     .stateMachineArn(stateMachineArn)
-                    .name(executionName(reportName, startDate, endDate))
+                    .name(executionName)
                     .input(executionInput)
                     .build());
+        } catch (ExecutionAlreadyExistsException alreadyStarted) {
+            // WHY : Assumptions: this arm is ABOVE the SdkException arm below and must stay there.
+            //       The already-exists type is a subclass of that supertype, so an arm placed after
+            //       it would never be entered and every duplicate would be reported as an outage.
+            // WHY : Refactoring Rationale: a duplicate is ANSWERED here, where an earlier revision
+            //       had no arm for it and let the supertype arm raise a state exception -- reporting
+            //       500 for the one condition the deterministic name exists to create. The whole
+            //       point of deriving the name from a submission key is that a retry of the SAME
+            //       submission collides; answering that collision with an outage would make the
+            //       collision a defect rather than the deduplication it is.
+            // WHY : Assumptions: the reference has no equivalent -- every submission it writes to the
+            //       transient data queue is independent -- so folding a retry onto its own run is an
+            //       intentional behavioural difference and is registered as
+            //       D-REPORT-SUBMISSION-DEDUPLICATED in
+            //       docs/architecture/cobol-to-service-traceability.md.
+            // WHY : Trade-offs: the answer is the SAME 201 the first attempt received, carrying the
+            //       handle of the run that already exists, and the acceptance stamp on it is read
+            //       from the clock now rather than recovered from the first attempt. Recovering it
+            //       would need a describe call whose only product is a timestamp, and the stamp
+            //       documents when THIS request was accepted, which is what a caller correlating its
+            //       own retry against its own log needs.
+            String existing = executionArnOf(executionName);
+            if (existing == null) {
+                // WHY : Assumptions: the ARN could not be derived, which happens only for a
+                //       configured machine ARN that is qualified by a version or an alias, and the
+                //       failure is reported rather than guessed at. Answering a handle this method
+                //       assembled wrongly would give a caller an identifier that resolves to
+                //       nothing, which is worse than the loud failure.
+                LOG.error("event=report.submission.duplicate.unresolved reportName={}"
+                        + " startDate={} endDate={} failure={}",
+                        reportName, startDate, endDate, ThrowableDigest.of(alreadyStarted));
+                throw new IllegalStateException(
+                        "a " + reportName + " report submission was already started but its handle"
+                                + " could not be derived from the configured state machine",
+                        alreadyStarted);
+            }
+
+            // WHY : Assumptions: this is an INFO record and not a warning, because nothing failed --
+            //       a retry was recognised and folded onto the run it was retrying. The submission
+            //       key is recorded because it is the only field that ties the two requests together,
+            //       and it is a digest of the correlation identity rather than the identity itself,
+            //       so the record carries no caller-supplied text.
+            LOG.info("event=report.submission.deduplicated reportName={} startDate={} endDate={}"
+                    + " submission={} execution={}",
+                    reportName, startDate, endDate, submissionKey, executionName);
+
+            return new ReportSubmissionResponse(
+                    existing,
+                    reportName,
+                    ReportBandLayouts.REPORT_SHORT_NAME,
+                    ReportBandLayouts.REPORT_LONG_NAME,
+                    startDate,
+                    endDate,
+                    TimestampFormatter.formatNow(clock));
         } catch (SdkException refused) {
             // WHY : Assumptions: the guard is SdkException, the software development kit's own
             //       exception supertype, and NOTHING wider -- the same 1 type S3ArtifactWriter in
@@ -832,25 +1238,205 @@ public class ReportExecutionService {
     /**
      * Builds the execution name a submission is started under.
      *
-     * <p>Alternatives Considered: generating a name with a random component, which never collides.
-     * Rejected because the 10-second per-call ceiling
-     * {@code com.carddemo.reporting.config.StepFunctionsConfig} sets on the client can abandon a call
-     * the orchestrator went on to accept, and a caller retrying after that would start the same report
-     * twice, producing 2 sets of output objects with nothing to say which was current. Deriving the
-     * name from the report type and both bounds makes the second attempt a refusal by the orchestrator
-     * instead, which is the behaviour a duplicate submission should have.</p>
-     *
      * <p>Assumptions: the separator is a hyphen because an execution name admits a restricted
      * character set, and the colon that a timestamp form would join values with is not in it. The 3
      * parts joined are the report type and the 2 bounds, each bound already 10 characters.</p>
      *
+     * <p>Assumptions: a name that no caller supplied a key for carries a fresh random component, so 2
+     * submissions of the same report over the same range are 2 distinct executions. A name a caller DID
+     * supply a key for is a pure function of the report type, the 2 bounds and that key, so re-sending
+     * one request with one key is refused by the orchestrator as the duplicate it is. Which of the 2
+     * behaviours applies is therefore the caller's decision and not this method's, which is the point:
+     * only the caller knows whether a second submission is a retry of the first or a genuinely new run
+     * of the same report.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this method returned the report type and the 2 bounds alone, with no
+     * 4th part, and its rationale recorded that as a deliberate rejection of a random component. The
+     * argument it gave was sound as far as it went -- the 10-second per-call ceiling
+     * {@code com.carddemo.reporting.config.StepFunctionsConfig} sets on the client can abandon a call
+     * the orchestrator went on to accept, and a caller retrying after that would otherwise start the
+     * same report twice, producing 2 sets of output objects with nothing to say which was current --
+     * but it bought that protection with a cost it did not weigh. A deterministic name is unique to the
+     * report and the range for as long as the orchestrator remembers it, and it remembers a completed
+     * execution's name for 90 days. So the FIRST submission of a month's report succeeded and every
+     * later one inside that window was refused, whatever its reason: a rerun after the underlying rows
+     * were corrected, a rerun after an operator deleted the output objects, a rerun of yesterday's
+     * report today. Those are not duplicate submissions and refusing them is not idempotency, it is a
+     * 90-day lockout of a legitimate operation -- and the refusal surfaced as an orchestrator-raised
+     * {@code ExecutionAlreadyExists} that this class did not translate, so the caller received a 500
+     * rather than anything it could act on. The 4th part resolves both halves at once by moving the
+     * choice to the caller: retry protection is still available, but it is now REQUESTED with a key
+     * rather than imposed on every submission, so asking for it twice is a duplicate and asking for a
+     * new run is not.</p>
+     *
+     * <p>Alternatives Considered: keeping the name deterministic and translating the orchestrator's
+     * refusal into a 409 instead. Rejected because it names the condition without making the operation
+     * available: a caller told that this report already ran 3 weeks ago still has no way to run it
+     * again, so the 409 would be an accurate description of a capability the service does not offer.
+     * Also considered was appending a timestamp rather than a random token, which is shorter and sorts
+     * usefully; rejected because 2 submissions inside the same clock tick would collide, which
+     * reintroduces the refusal this change exists to remove, and because a name is not an ordering
+     * device -- the orchestrator records its own start time and this method does not need to restate
+     * it.</p>
+     *
+     * <p>Trade-offs: a caller that retries WITHOUT a key after an abandoned call starts a second run,
+     * which is the exact failure the previous shape prevented. That is the price of making a rerun
+     * possible at all, and it is mitigated rather than ignored: the key is published on the operation,
+     * the header's contract description states plainly what omitting it means, and the whole point of
+     * the key being optional is that a client which retries automatically can send one and get the old
+     * behaviour back for the requests it retries.</p>
+     *
      * @param reportName the resolved report name
      * @param startDate the first business date of the range, in its ten-character form
      * @param endDate the last business date of the range, in its ten-character form
+     * @param idempotencyKey the caller's submission key, already validated by
+     *     {@link #validatedIdempotencyKey(String)}, or {@code null} when the caller supplied none
      * @return the execution name; never {@code null}
      */
-    private static String executionName(String reportName, String startDate, String endDate) {
-        return reportName.toLowerCase(Locale.ROOT) + "-" + startDate + "-" + endDate;
+    private static String executionName(
+            String reportName, String startDate, String endDate, String idempotencyKey) {
+
+        // WHY : Refactoring Rationale: the key is REQUIRED here rather than defaulted, because the
+        //       caller resolves it -- the Idempotency-Key header when one arrives, the request's
+        //       correlation digest otherwise -- and a second default in this method would make the
+        //       name depend on which of two places had filled it in.
+        Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
+        return reportName.toLowerCase(Locale.ROOT) + "-" + startDate + "-" + endDate
+                + "-" + idempotencyKey;
+    }
+
+    /**
+     * Derives the ARN of an execution of the configured state machine from its name.
+     *
+     * <p>Assumptions: an execution ARN is its machine's ARN with the machine segment replaced by the
+     * execution segment and the execution name appended, which is the published shape of the
+     * identifier. Deriving it is what lets a recognised duplicate answer with the handle of the run it
+     * was folded onto without a further call.</p>
+     *
+     * <p>Alternatives Considered: listing the machine's executions and matching on the name. Rejected
+     * because it pages over every execution the retention window holds to recover a value that is a
+     * function of two strings this method already has, and it needs a list permission the task role
+     * does not hold -- widening a role to recover derivable information is the wrong trade.</p>
+     *
+     * <p>Assumptions: a configured ARN that is qualified further -- by a version or an alias, both of
+     * which append another colon-separated part -- yields {@code null} rather than a guess, because
+     * the execution of a qualified machine is not named by simple substitution and a wrong handle is
+     * worse for a caller than a reported failure.</p>
+     *
+     * @param executionName the execution name, as {@link #executionName(String, String, String,
+     *     String)} assembled it
+     * @return the execution ARN, or {@code null} when the configured machine ARN is not the plain
+     *     unqualified shape this substitution is defined for
+     */
+    private String executionArnOf(String executionName) {
+        int marker = stateMachineArn.lastIndexOf(STATE_MACHINE_ARN_SEGMENT);
+        if (marker < 0) {
+            return null;
+        }
+
+        String machineName = stateMachineArn.substring(marker + STATE_MACHINE_ARN_SEGMENT.length());
+        if (machineName.isEmpty() || machineName.indexOf(':') >= 0) {
+            return null;
+        }
+
+        return stateMachineArn.substring(0, marker) + EXECUTION_ARN_SEGMENT + machineName
+                + ":" + executionName;
+    }
+
+    /**
+     * Derives the key identifying THIS submission, so that a retry of it is recognisable.
+     *
+     * <p>Assumptions: the correlation identifier is the per-submission key, and it is read from the
+     * mapped diagnostic context that {@link CorrelationIdFilter} populates for every request. That
+     * filter accepts a caller-supplied identifier and generates one only when none arrives, so a
+     * client retrying with the identifier it used the first time is recognised as retrying, and a
+     * client submitting afresh gets a new identifier and a new run. Idempotency is therefore something
+     * a caller asks for by resending the header it already owns, rather than something inferred from
+     * the request's content -- which is the only reading that can tell a retry from a reprint, since a
+     * reprint and a retry carry byte-identical bodies.</p>
+     *
+     * <p>Assumptions: a random key is used when the context carries none, which happens for a caller
+     * that is not an HTTP request -- a scheduled invocation or a test. Such a caller has no stable key
+     * to retry under, so the alternative to a random one is a constant one, and a constant would make
+     * every non-HTTP submission a duplicate of the first for 90 days.</p>
+     *
+     * <p>Assumptions: the identifier is DIGESTED rather than used verbatim, for two reasons that are
+     * both about not depending on another class's rules. Its width is bounded by a constant that class
+     * owns, and the punctuation it admits includes the full stop, which is admissible in an execution
+     * name today; a digest is a fixed sixteen characters drawn from the base64url alphabet, so the
+     * assembled name is provably within the orchestrator's ceiling and provably within its character
+     * set whatever the identifier holds. It also keeps caller-supplied text out of a name that appears
+     * in operational records.</p>
+     *
+     * @return the per-submission key, sixteen base64url characters; never {@code null}
+     * @throws IllegalStateException if the platform does not provide
+     *     {@value #SUBMISSION_DIGEST_ALGORITHM}, which the platform specification forbids
+     */
+    private static String currentSubmissionKey() {
+        String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+        String source = correlationId == null || correlationId.isBlank()
+                ? UUID.randomUUID().toString()
+                : correlationId;
+
+        byte[] digest;
+        try {
+            digest = MessageDigest.getInstance(SUBMISSION_DIGEST_ALGORITHM)
+                    .digest(source.getBytes(StandardCharsets.UTF_8));
+        } catch (NoSuchAlgorithmException unavailable) {
+            // WHY : Assumptions: unreachable on any conforming platform, which is required to provide
+            //       this algorithm, so the checked exception is converted rather than declared. It is
+            //       converted and not swallowed because a platform that truly lacked it could not
+            //       derive a submission key at all, and silently substituting a random one would turn
+            //       every retry into a second run without saying so.
+            throw new IllegalStateException(
+                    "the platform does not provide " + SUBMISSION_DIGEST_ALGORITHM, unavailable);
+        }
+
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(Arrays.copyOf(digest, SUBMISSION_DIGEST_BYTES));
+    }
+
+    /**
+     * Checks a caller-supplied submission key against what an execution name is allowed to hold.
+     *
+     * <p>Assumptions: the key is validated HERE rather than by an annotation on the handler, because
+     * what makes a key acceptable is not a general opinion about identifiers but the orchestrator's own
+     * restriction on the names it accepts -- and this class is the one that composes those names. A
+     * constraint declared on the transport would have to be kept in agreement with a rule stated here,
+     * which is 2 statements of 1 fact.</p>
+     *
+     * <p>Assumptions: the admitted characters are letters, digits, the hyphen and the underscore. The
+     * orchestrator refuses a name containing whitespace, a control character or any of a list of
+     * punctuation marks, so admitting only this set is comfortably inside what it accepts and needs no
+     * revision if that list changes. The length ceiling is {@value #IDEMPOTENCY_KEY_MAX_LENGTH}, which
+     * leaves the composed name inside the orchestrator's {@value #EXECUTION_NAME_LIMIT}-character limit
+     * for every report type and range: the longest report type is 7 characters and the 2 bounds with
+     * their 3 separators are 23 more, so the widest name this admits is 60.</p>
+     *
+     * <p>Trade-offs: a key that is too long or carries an unadmitted character is REFUSED rather than
+     * trimmed or rewritten into an acceptable one. Sanitising it would be friendlier at the moment of
+     * the call and wrong afterwards, because 2 different keys can sanitise to the same string -- and 2
+     * submissions a caller believes are distinct would then be 1 execution, with the second silently
+     * refused as a duplicate of the first. A refusal the caller can read and correct is the safer of
+     * the 2 failures.</p>
+     *
+     * @param supplied the key as the caller sent it, which may be {@code null} or blank
+     * @return the key to distinguish this submission by, or {@code null} when the caller supplied none
+     *     and the submission is to be given a fresh identity
+     * @throws ClientInputException if a key was supplied but is longer than the ceiling or carries a
+     *     character an execution name may not hold, named against the header the caller sent it in
+     */
+    private static String validatedIdempotencyKey(String supplied) {
+        if (supplied == null || supplied.isBlank()) {
+            return null;
+        }
+        if (supplied.length() > IDEMPOTENCY_KEY_MAX_LENGTH
+                || !IDEMPOTENCY_KEY_PATTERN.matcher(supplied).matches()) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, IDEMPOTENCY_KEY_FIELD,
+                    "a submission key may hold at most " + IDEMPOTENCY_KEY_MAX_LENGTH
+                            + " letters, digits, hyphens or underscores");
+        }
+        return supplied;
     }
 
     /**
@@ -870,4 +1456,3 @@ public class ReportExecutionService {
         return !FieldValidationFlag.isNeverSupplied(field);
     }
 }
-

@@ -1,6 +1,8 @@
 package com.carddemo.batch.config;
 
 import com.carddemo.batch.dto.BatchErrorEvent;
+import com.carddemo.batch.service.BatchErrorPublisher;
+import com.carddemo.batch.service.BatchFailureReporter;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.messaging.QueueClientBudget;
@@ -22,6 +24,7 @@ import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Wires publish-only access to the terminal error sink, and nothing else.
@@ -57,6 +60,46 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * queue and never published to one, so there is no ordering contract, no reply contract and no
  * expiry contract to preserve. Anyone "completing" this class by adding a consumer would be adding
  * behaviour the reference does not have and that nothing in this module selects work from.</p>
+ *
+ * <h2>Who publishes, and the two things outside this file that let them</h2>
+ *
+ * <p>Refactoring Rationale: this section exists because the rest of this documentation once
+ * described a publish path that did not exist. Every claim below about what "a published event
+ * carries" was true of the binding this class validates and false of the running system: <b>nothing
+ * sent anything.</b> There was no production sender, no environment supplied the gate property, and
+ * the batch task role held no {@code sqs:SendMessage} grant -- so the class was skipped in every
+ * deployment and the delivered security inventory named an egress the workload did not have. All
+ * three halves are now present, and they are named here together because a reader checking whether
+ * this path is real has to check all three and only one of them is in this file.</p>
+ *
+ * <ul>
+ *   <li><b>The sender.</b> {@code com.carddemo.batch.service.BatchErrorPublisher} is the one
+ *       production sender, and {@code BatchStepLedger}'s failure path is its one caller. The ledger
+ *       holds it as an {@link java.util.Optional}, which is empty exactly when this configuration is
+ *       skipped, so the gate is honoured in one place.</li>
+ *   <li><b>The grant.</b> {@code sqs:SendMessage} on the error queue alone, from the
+ *       {@code batch_task_runtime} policy document in each environment root. That document wraps the
+ *       batch dataset document rather than extending it, because the data-migration task inherits the
+ *       latter and publishes no event.</li>
+ *   <li><b>The address.</b> The {@code CARDDEMO_MESSAGING_ERROR_QUEUE_URL} runtime parameter,
+ *       published by both roots from the queue module's error-queue output and admitted by name in
+ *       {@code infra/modules/ecs-service}. It is admitted and deliberately NOT required, because this
+ *       configuration is conditional on it: a task handed no address records its failures in the log
+ *       alone, which is a supported configuration and the one a local run uses. That module's
+ *       reader-set precondition does constrain it in the other direction -- a workload carrying the
+ *       address must be batch -- so the name is optional for this workload and forbidden to every
+ *       other one, which is the only asymmetric clause in that block and is annotated there as such.
+ *       </li>
+ * </ul>
+ *
+ * <p>Assumptions: publishing a batch failure to a queue is <b>behaviour the reference does not
+ * have</b> -- its batch programs report a failure through the job log and a condition code and nothing
+ * else -- so it is registered as divergence {@code D-BATCH-FAILURE-EVENT-PUBLISHED} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than presented as a
+ * transcription. The paragraph above about adding a CONSUMER still stands unchanged and is a different
+ * question: a consumer would take work from a queue and change what the module processes, whereas this
+ * publishes a copy of a diagnosis the log already carries and changes what the module processes not at
+ * all.</p>
  *
  * <h2>The field vocabulary is inherited, not invented</h2>
  *
@@ -129,8 +172,22 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * value committed to a profile would be a value this repository holds, and the first key is a queue
  * address; the module's base profile states in its own header that no queue name, queue address,
  * bucket, key identifier or account identifier appears in it, and adding one here would falsify
- * that. All four are supplied per environment through the parameter-store import that profile
- * already declares, from the queue module's own outputs.</p>
+ * that.</p>
+ *
+ * <p>Refactoring Rationale: the sentence that stood here said all four keys were "supplied per
+ * environment through the parameter-store import that profile already declares", and it was wrong
+ * twice over. No root published any of the four at all, so the gate never opened in any environment;
+ * and the channel it named is not the channel that carries them. What both roots now publish is the
+ * gate key alone, as the per-service runtime parameter {@code batch|CARDDEMO_MESSAGING_ERROR_QUEUE_URL}
+ * whose value is the queue module's {@code error_queue_url} output, which the task definition injects
+ * as a container environment variable and the framework's relaxed binding resolves onto
+ * {@value #PROPERTY_ERROR_QUEUE_URL}. That is the same channel {@code carddemo.dataset.bucket}
+ * arrives on, and it is the reason the key is absent from every profile rather than declared with an
+ * empty default: a declared-but-blank key is PRESENT to the gate condition, so it would open this
+ * configuration onto an address that then fails validation, which is precisely the startup failure
+ * the gate exists to avoid in an environment that publishes no sink. The remaining three keys carry
+ * defaults and are published by no root, which is why the sink's media type, source application and
+ * source program are the values this file declares until a deployment states otherwise.</p>
  *
  * <ul>
  *   <li>{@value #PROPERTY_ERROR_QUEUE_URL} -- the address of the terminal error sink, and the GATE
@@ -203,8 +260,12 @@ public class SqsConfig {
      * The property carrying the terminal error sink's address, and the gate for this configuration.
      *
      * <p>Assumptions: the value is an ADDRESS rather than a queue name, and the choice is not
-     * cosmetic. The environment roots publish the queue module's error-queue address output into the
-     * per-service runtime parameters, so an address is what a deployment actually supplies; and an
+     * cosmetic. Both environment roots publish the queue module's {@code error_queue_url} output as
+     * the batch workload's own runtime parameter under the environment name
+     * {@code CARDDEMO_MESSAGING_ERROR_QUEUE_URL}, and the queue module's
+     * {@code service_queue_permissions.batch_service} entry grants the batch task role
+     * {@code sqs:SendMessage} on that one queue and nothing else -- so an address is what a deployment
+     * actually supplies; and an
      * address needs no name-resolution call, so the task role needs the send action alone and a
      * container that runs one job and exits spends no round trip discovering where to send. A name
      * would need a resolution call whose failure mode -- an absent queue -- would surface on the
@@ -412,8 +473,6 @@ public class SqsConfig {
                     + QueueClientBudget.PROPERTY_API_CALL_TIMEOUT);
         }
 
-        // WHAT: the one relationship this module can be wrong about, checked while both halves are
-        //       visible in one place.
         // WHY : Assumptions: the shutdown window is the period a publish has to finish inside on a
         //       task that runs one job and exits, and it is owned by the module's base profile rather
         //       than by this class. Equality is refused as well as excess: a send that used its entire
@@ -461,7 +520,8 @@ public class SqsConfig {
      *     not be {@code null}, must not be blank and must not name an ordered queue
      * @param contentType the media type published on the {@value #ATTRIBUTE_CONTENT_TYPE} attribute,
      *     from {@value #PROPERTY_ERROR_CONTENT_TYPE}, defaulting to {@value #DEFAULT_CONTENT_TYPE};
-     *     must not be {@code null} and must not be blank
+     *     must not be {@code null}, must not be blank and must equal
+     *     {@value #DEFAULT_CONTENT_TYPE} exactly
      * @param sourceApplication the value populating {@code ERR-APPLICATION}, from
      *     {@value #PROPERTY_ERROR_SOURCE_APPLICATION}, defaulting to an eight-character token naming
      *     the deployment because the module's own artifact name does not fit the field; must not be
@@ -473,8 +533,9 @@ public class SqsConfig {
      *     {@value #ERR_PROGRAM_LENGTH} characters
      * @return the validated binding a publisher builds its send request from, never {@code null}
      * @throws NullPointerException if any argument is {@code null}
-     * @throws IllegalStateException if any value is blank, if the address names an ordered queue, or
-     *     if either source identifier exceeds its copybook width
+     * @throws IllegalStateException if any value is blank, if the address names an ordered queue, if
+     *     the media type is any value other than {@value #DEFAULT_CONTENT_TYPE}, or if either source
+     *     identifier exceeds its copybook width
      */
     @Bean
     public ErrorSinkBinding batchErrorSinkBinding(
@@ -487,7 +548,6 @@ public class SqsConfig {
         ErrorSinkBinding binding = new ErrorSinkBinding(queueUrl, contentType, sourceApplication,
                 sourceProgram);
 
-        // WHAT: the single record that the property gate opened and what it opened it for.
         // WHY : Trade-offs: the gate's cost is that an environment which meant to publish but did not
         //       supply the address publishes nothing and reports nothing, because a skipped
         //       configuration has no voice. One line at the level a deployment collects is the
@@ -500,6 +560,88 @@ public class SqsConfig {
                 PROPERTY_ERROR_QUEUE_URL, binding.contentType(), binding.sourceApplication(),
                 binding.sourceProgram());
         return binding;
+    }
+
+    /**
+     * Publishes the producer that actually sends a failure notification through the binding above.
+     *
+     * <p>Refactoring Rationale: <b>this bean is what makes the rest of this class reachable.</b> Before
+     * it existed the property gate opened a configuration that validated an address, framed a media
+     * type, bounded two source identifiers and built a send request, and nothing in the module called
+     * any of it -- the binding's only callers were its own tests. A configuration that no production
+     * path reaches is not a dormant feature, it is a claim the deployment cannot keep: the class
+     * documented an error sink the orchestrator's failure-notification state could route on, and no
+     * message was ever put on the wire. The producer is declared HERE, behind the same property gate as
+     * the binding, so the address, the send shape and the send itself appear or are absent together.</p>
+     *
+     * <p>Assumptions: the producer lives in this module's service package rather than in this
+     * configuration class, and only its wiring is here. This class's whole authority is configuration;
+     * a send loop, a swallow policy and a log contract are behaviour, and putting them in a
+     * {@code @Configuration} class would make them unreachable to a unit test that does not build a
+     * context.</p>
+     *
+     * <p>Assumptions: the mapper is INJECTED rather than constructed. The context's own mapper carries
+     * the shared kernel's modules -- decisively the money module, which is the reason no amount in this
+     * migration is ever framed as a JSON number -- so a mapper built here would be a second, unmodified
+     * wire form for one message. This payload carries no amount today, and that is exactly why the
+     * shortcut would be invisible until one was added.</p>
+     *
+     * @param sqs the client declared by {@link #sqsClient}, or a caller-supplied replacement; must not
+     *     be {@code null}
+     * @param binding the binding declared by {@link #batchErrorSinkBinding}; must not be {@code null}
+     * @param objectMapper the context's own mapper, carrying the shared kernel's modules; must not be
+     *     {@code null}
+     * @return the producer the entry point publishes one notification per failed run through, never
+     *     {@code null}
+     * @throws NullPointerException if any argument is {@code null}
+     */
+    @Bean
+    public BatchErrorPublisher batchErrorPublisher(SqsClient sqs, ErrorSinkBinding binding,
+            ObjectMapper objectMapper) {
+        return new BatchErrorPublisher(sqs, binding, objectMapper);
+    }
+
+    /**
+     * Declares the step-level failure reporter the durable ledger publishes its diagnoses through.
+     *
+     * <p>Purpose. The module publishes to the terminal error sink on two distinct occasions, and this
+     * declares the wiring for the second of them. {@link #batchErrorPublisher} serves the entry point,
+     * which announces ONE graded notification per failed run as the process exits. This serves
+     * {@code com.carddemo.batch.service.BatchStepLedger}, which reports EACH failed step with the
+     * diagnostics that step produced. The two carry different payloads -- the run notification carries
+     * no {@code AbendDetail} and the step report carries a redacted one -- so neither is the other's
+     * duplicate, and a failed run may legitimately place more than one message on an error queue.</p>
+     *
+     * <p>Refactoring Rationale: the ledger takes {@code Optional<BatchFailureReporter>} and Spring
+     * resolves an absent candidate to empty, so a missing declaration here does not fail a context, does
+     * not fail a test that builds one, and does not fail a build. It silently disables the step-level
+     * report instead: every step failure would still be recorded in the ledger row and none would ever
+     * reach the sink. Declaring the implementation is therefore the whole of what makes that path live,
+     * and it is declared behind the same gate as the rest of the sink so an unconfigured deployment
+     * contributes nothing at all.</p>
+     *
+     * <p>Assumptions: the implementation is the one class in this package that issues the step-level
+     * send, and it is constructed here rather than annotated as a component so that its wiring is
+     * gated by this class alone. A component-scanned bean would be contributed whether or not the
+     * sink's address was supplied, which is the property {@code SqsConfigTest} asserts against by
+     * requiring that an unconfigured deployment gets no sink wiring of any kind.</p>
+     *
+     * <p>Alternatives Considered: pointing the ledger at {@link BatchErrorPublisher} directly, which
+     * needs no declaration here because that bean already exists. Rejected because the ledger sits in
+     * the service package and that would put an AWS client type in its constructor, where the port it
+     * takes today keeps the transport on the far side of an interface -- the same reason the ledger's
+     * own unit test can exercise the report path with a recording stub and no client at all.</p>
+     *
+     * @param sqs the client declared by {@link #sqsClient}, or a caller-supplied replacement; must not
+     *     be {@code null}
+     * @param binding the binding declared by {@link #batchErrorSinkBinding}; must not be {@code null}
+     * @return the reporter the durable step ledger publishes each step failure through, never
+     *     {@code null}
+     * @throws NullPointerException if either argument is {@code null}
+     */
+    @Bean
+    public BatchFailureReporter batchFailureReporter(SqsClient sqs, ErrorSinkBinding binding) {
+        return new SqsBatchFailureReporter(sqs, binding);
     }
 
     /**
@@ -628,8 +770,9 @@ public class SqsConfig {
          *
          * @param queueUrl the address as configured, before trimming; must not be {@code null}, must
          *     not be blank once trimmed, and must not end in {@value SqsConfig#FIFO_QUEUE_SUFFIX}
-         * @param contentType the media type as configured, before trimming; must not be {@code null}
-         *     and must not be blank once trimmed
+         * @param contentType the media type as configured, before trimming; must not be {@code null},
+         *     must not be blank once trimmed, and must equal {@value SqsConfig#DEFAULT_CONTENT_TYPE}
+         *     exactly, because that is the wire form the publisher actually produces
          * @param sourceApplication the {@code ERR-APPLICATION} value as configured, before trimming;
          *     must not be {@code null}, must not be blank once trimmed, and must be at most
          *     {@value SqsConfig#ERR_APPLICATION_LENGTH} characters
@@ -638,12 +781,15 @@ public class SqsConfig {
          *     {@value SqsConfig#ERR_PROGRAM_LENGTH} characters
          * @throws NullPointerException if any component is {@code null}
          * @throws IllegalStateException if any component is blank, if {@code queueUrl} names an
-         *     ordered queue, or if either source identifier exceeds its copybook width; each failure
-         *     names the property that carries the value so it is repaired where it was set
+         *     ordered queue, if {@code contentType} is any value other than
+         *     {@value SqsConfig#DEFAULT_CONTENT_TYPE}, or if either source identifier exceeds its
+         *     copybook width; each failure names the property that carries the value so it is
+         *     repaired where it was set
          */
         public ErrorSinkBinding {
             queueUrl = requireConfigured(queueUrl, PROPERTY_ERROR_QUEUE_URL);
-            contentType = requireConfigured(contentType, PROPERTY_ERROR_CONTENT_TYPE);
+            contentType = requireExactMediaType(
+                    requireConfigured(contentType, PROPERTY_ERROR_CONTENT_TYPE));
             sourceApplication = requireWithin(
                     requireConfigured(sourceApplication, PROPERTY_ERROR_SOURCE_APPLICATION),
                     ERR_APPLICATION_LENGTH, PROPERTY_ERROR_SOURCE_APPLICATION, "ERR-APPLICATION");
@@ -651,7 +797,6 @@ public class SqsConfig {
                     requireConfigured(sourceProgram, PROPERTY_ERROR_SOURCE_PROGRAM),
                     ERR_PROGRAM_LENGTH, PROPERTY_ERROR_SOURCE_PROGRAM, "ERR-PROGRAM");
 
-            // WHAT: the standard-versus-ordered check, raised as a startup failure.
             // WHY : Assumptions: an ordered queue REQUIRES a message-group identifier on every send
             //       and accepts a deduplication identifier, and a standard queue accepts neither -- so
             //       the two are not interchangeable destinations for one send shape. Sending the
@@ -731,7 +876,6 @@ public class SqsConfig {
             requireCanonicalIdentity(correlationId, "correlationId");
             requireCanonicalIdentity(messageId, "messageId");
 
-            // WHAT: the closed attribute set, built in a fixed order so one assertion covers it.
             // WHY : Assumptions: the set is exactly three, as the migration plan's section 0.4.1.8
             //       maps the inherited message descriptor, and it is closed here rather than left open
             //       for a caller to extend. The two further attributes that mapping admits, a reply
@@ -781,6 +925,52 @@ public class SqsConfig {
                         + " is when a step has already failed");
             }
             return trimmed;
+        }
+
+        /**
+         * Refuses a media type other than the one the publisher actually produces.
+         *
+         * <p>Assumptions: the check is EQUALITY against a single admitted value rather than a
+         * structural test that the value parses as a media type, because the attribute is a promise
+         * about the body and only one body shape is ever built. The one publisher on this binding,
+         * {@code com.carddemo.batch.service.BatchErrorSink}, serialises {@link BatchErrorEvent}
+         * through the context's own JSON mapper and has no second wire form to select, so any other
+         * configured value labels a JSON document as something it is not. A consumer that trusts the
+         * label then reads the body with the wrong reader and reports a malformed message on the one
+         * occasion the sink is used, which is the failure this refusal converts into a startup
+         * failure.</p>
+         *
+         * <p>Alternatives Considered: accepting any value whose base type is {@code application/json},
+         * so a deployment could append a charset parameter. Rejected because the body is serialised as
+         * UTF-8 by the mapper unconditionally and the transport carries the attribute as an opaque
+         * string, so a charset parameter could only ever restate that or contradict it -- and a value
+         * that may restate but may not contradict is exactly a value with one admitted spelling.
+         * Accepting a family also reopens the question of which member is meant, which is what the
+         * class contract closed by naming one.</p>
+         *
+         * <p>Trade-offs: the property therefore cannot change the wire form, only confirm it, so its
+         * remaining value is that a deployment may state the contract explicitly and be checked
+         * against it. Removing the property outright was the other option and was declined: the
+         * attribute has to be built from something, and reading it from configuration keeps the
+         * published contract and the built attribute the same value rather than two constants that
+         * could drift.</p>
+         *
+         * @param contentType the configured media type, already trimmed and non-blank; must not be
+         *     {@code null}
+         * @return the value unchanged, never {@code null}
+         * @throws IllegalStateException if the value is anything other than
+         *     {@value SqsConfig#DEFAULT_CONTENT_TYPE}
+         */
+        private static String requireExactMediaType(String contentType) {
+            if (!DEFAULT_CONTENT_TYPE.equals(contentType)) {
+                throw new IllegalStateException(PROPERTY_ERROR_CONTENT_TYPE + " is '" + contentType
+                        + "', and the only admitted value is '" + DEFAULT_CONTENT_TYPE + "': the"
+                        + " publisher serialises the event as JSON and has no second wire form, so"
+                        + " any other value would label a JSON document as something it is not and a"
+                        + " consumer trusting the label would fail to read the one message the sink"
+                        + " exists to deliver");
+            }
+            return contentType;
         }
 
         /**

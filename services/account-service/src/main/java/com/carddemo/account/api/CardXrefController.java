@@ -1,6 +1,7 @@
 package com.carddemo.account.api;
 
 import com.carddemo.account.dto.AccountLookupRequest;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefLookupRequest;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
@@ -299,10 +300,21 @@ public class CardXrefController {
      * and again at L513 with {@code Did not find this account in cards database}. Both are left exactly as
      * they stand, neither is chosen over the other and the two are not merged.</p>
      *
+     * <p>Refactoring Rationale: this operation answers with {@link CardXrefByAccountView} and no longer with
+     * the two-identifier {@link CardXrefView} the card-keyed lookup answers with. The shared shape carried no
+     * card number -- deliberately, for the card-keyed caller that supplied one -- and that made it the one
+     * shape this operation could not use: an account-keyed caller supplied the account and the value it asked
+     * for IS the card. Its consumers transcribe {@code READ-CXACAIX-FILE} at lines 576 to 604 of
+     * {@code app/cbl/COTRN02C.cbl} and the same read at line 414 of {@code app/cbl/COBIL00C.cbl}, both of
+     * which take {@code XREF-CARD-NUM} from the record and write it into the row they produce, so neither
+     * could produce a row at all. The card number is carried in full and the reason it is not masked here
+     * while the paged end-user walk beside it does mask the same column is recorded on the response
+     * record.</p>
+     *
      * @param request the lookup request carrying the account identifier; must satisfy its declared
      *     constraints
-     * @return the account and customer the lowest-ordering cross-referenced card resolves to, a
-     *     {@link CardXrefView}, never {@code null}
+     * @return the account, the customer and the card number the lowest-ordering cross-referenced card
+     *     resolves to, a {@link CardXrefByAccountView}, never {@code null}
      * @throws NoSuchElementException if the account has no cross-referenced card, which the shared advice
      *     renders as 404 and which a consuming context reads as its account-not-cross-referenced decision
      *     input
@@ -310,7 +322,7 @@ public class CardXrefController {
     @PostMapping(path = LOOKUP_BY_ACCOUNT_PATH,
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public CardXrefView lookupByAccount(@Valid @RequestBody AccountLookupRequest request) {
+    public CardXrefByAccountView lookupByAccount(@Valid @RequestBody AccountLookupRequest request) {
         return this.reads.resolveCardCrossReferenceByAccount(request.accountId());
     }
 

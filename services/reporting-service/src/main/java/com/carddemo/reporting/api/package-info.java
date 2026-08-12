@@ -36,8 +36,8 @@
  * <ul>
  *   <li>{@code ReportController} carries the report request and submission surface, replacing
  *       {@code app/cbl/CORPT00C.cbl}, a 649-line online program driving the {@code CR00}
- *       transaction. It exposes the three mutually exclusive report types that the screen offers,
- *       and the confirmation gate standing in front of submission.</li>
+ *       transaction. It exposes the three report types that the screen offers, in the precedence its
+ *       condition chain applies, and the confirmation gate standing in front of submission.</li>
  *   <li>{@code StatementController} carries the statement retrieval surface over a pair of batch
  *       programs, {@code app/cbl/CBSTM03A.CBL} at 924 lines and {@code app/cbl/CBSTM03B.CBL} at
  *       230 lines. Note the uppercase extension on each: a lowercase citation of either one is a
@@ -187,7 +187,10 @@
  * redisplays cleared with no feedback about which of the two occurred. The flag is set in that
  * branch for one purpose only, to suppress the success block at L445 to L456, which is gated on the
  * flag being off. Splitting the two outcomes across 200 and 400 preserves that suppression while
- * giving the caller the feedback a single flag could not carry.
+ * giving the caller the feedback a single flag could not carry. The cancellation body carries NO
+ * message, on the strength of the same two lines: an earlier revision supplied an invented sentence
+ * there, and transformation rule T8 carries user-visible strings across verbatim rather than
+ * composing new ones, so what a screen shows on a decline is the screen's decision.
  *
  * <p>Refactoring Rationale: the focus hint in a response body names the first failing field and the
  * client uses that name to place focus, so it is a field-name pointer and not a length value, which

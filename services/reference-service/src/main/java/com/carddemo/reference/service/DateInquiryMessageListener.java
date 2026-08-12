@@ -4,6 +4,7 @@ import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.codec.InquiryRequestCodec.InquiryRequest;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.reference.mapper.DateInquiryReplyMapper;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import java.time.Clock;
@@ -48,8 +49,9 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * which does apply one. Rejected because it would refuse requests the baseline answers, and because the two
  * flows differ for a reason: the account inquiry needs a key to look something up, while this flow's answer
  * does not depend on its input at all. Imposing one flow's rule on the other would be a behavioural change
- * dressed as consistency. The request is still DECODED, so that a diagnostic can report what arrived and so
- * that a future consumer of the fields does not have to reconstruct the layout.</p>
+ * dressed as consistency. The request is still DECODED, so that a diagnostic can report which KIND of request
+ * arrived -- a closed classification of the function field, never its bytes -- and so that a future consumer
+ * of the fields does not have to reconstruct the layout.</p>
  *
  * <h2>Delivery discipline: no outbox</h2>
  * <p>Assumptions: as with the account-inquiry consumer, and for the same reason drawn from the reference
@@ -59,6 +61,12 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * reply is lost. The target discipline is delete-on-success plus the queue's visibility timeout: this method
  * returns normally only after the reply has been sent, so a failed send propagates, the request becomes visible
  * again, and repeated failure carries it to the dead-letter queue at the configured receive count.</p>
+ *
+ * <p>Assumptions: a failure is REPORTED to the configured error queue before it propagates, which is the
+ * reference program's own order -- its reply-put failure branch at physical lines 396 to 402 fills the
+ * diagnostic group, performs {@code 9000-ERROR} and only then terminates. The report is a positional
+ * fixed-width diagnostic carrying no wire content, and a failure of the report itself is attached to the
+ * original rather than replacing it.</p>
  *
  * <p>Assumptions: no database transaction is declared on the listener, unlike the account-inquiry consumer's.
  * This flow reads no row, so a transaction would open and commit a connection to protect nothing while holding
@@ -98,40 +106,55 @@ public class DateInquiryMessageListener {
     private static final String ATTRIBUTE_CONTENT_TYPE = "contentType";
 
     /**
-     * The media type the fixed-width reply is published as.
+     * The media type the fixed-width reply and the fixed-width error diagnostic are published as.
      *
-     * <p>Assumptions: this is the ONE value the migration maps {@code MQFMT-STRING} to, across all three
-     * message flows. {@code docs/architecture/messaging-contracts.md} states the mapping as a row of the
-     * descriptor table -- string format indicator to a {@code contentType} of {@code text/csv} -- and the
-     * plan's messaging design states the same, so the value is a fixed contract rather than a per-flow
-     * choice. The sibling consumers carry it under their own names:
-     * {@code com.carddemo.account.service.InquiryMessageListener.CONTENT_TYPE} and
-     * {@code com.carddemo.authorization.domain.AuthReplyOutbox.CONTENT_TYPE_CSV}. A fourth holder exists
-     * inside THIS context -- {@code DateConversionMessageListener.CONTENT_TYPE}, the co-resident second
-     * rendering of the same {@code CODATE01} reply -- and it already carried {@code text/csv}. That is worth
-     * naming rather than counting as a fourth flow: it means the value below is corroborated by an
-     * in-repository stamper for this very exchange, so the correction is checkable here and not only against
-     * the contract document.</p>
+     * <p>Assumptions: a media type is a PARSING INSTRUCTION, so the value has to describe how this payload
+     * is actually laid out. Nothing this class publishes is delimited: the reply is the
+     * forty-six-character positional block {@code DateInquiryReplyMapper} renders and pins by offset, and
+     * the diagnostic is the positional nine-member group {@code InquiryRequestCodec.errorDiagnostic}
+     * composes. A consumer that split either on commas would recover one field holding the whole record.</p>
      *
-     * <p>Refactoring Rationale: this constant held {@code text/plain}, and the divergence was not
-     * cosmetic. The contract document gives the attribute one job -- it is the DISCRIMINATOR a consumer
-     * uses to tell a positional payload from the additive JSON envelope the same document reserves the
-     * right to introduce -- so a discriminator that takes a different value on one of three flows
-     * discriminates the FLOW rather than the encoding, and a consumer written to the documented rule would
-     * read this reply as neither form. The account-service constant additionally asserted in prose that
-     * "it is the same one the authorization and date-inquiry replies carry", which was true of the
-     * authorization reply and false of this one; correcting the value here is what makes that statement
-     * true rather than requiring it to be weakened.</p>
+     * <p>Refactoring Rationale: this constant held {@code text/csv}, and the value was wrong on the
+     * contract's own terms. {@code docs/architecture/messaging-contracts.md} carries a section headed "The
+     * inquiry replies declare {@code text/plain}, not {@code text/csv}", which states that the
+     * {@code text/csv} row of the descriptor table "belongs to the authorization flow alone" -- that flow
+     * really is delimited, eighteen comma-separated request fields and six reply fields through
+     * {@code com.carddemo.common.codec.CsvAuthCodec} -- and reserves {@code text/plain} for the positional
+     * inquiry replies. The earlier rationale here read the descriptor-table row as an across-all-flows
+     * mapping and did not mention the section that qualifies it. Two further claims it made were false in
+     * their own right: it cited {@code DateConversionMessageListener.CONTENT_TYPE} as an in-repository
+     * corroborator, and no such type exists -- it was superseded by
+     * {@code com.carddemo.reference.service.DateConversionService}, which records the supersession in its own
+     * documentation; and {@code com.carddemo.account.service.InquiryMessageListener} declares
+     * {@code text/plain} rather than the {@code text/csv} the rationale implied, so the two positional
+     * inquiry consumers were the ones disagreeing while each described its own value as the shared one.</p>
      *
-     * <p>Assumptions: {@code text/csv} labels the FORMAT INDICATOR and is not a claim that this particular
-     * payload is comma-delimited -- it is a forty-six-character fixed-width block whose fields are located
-     * by offset, and its exact bytes are pinned by {@code DateInquiryReplyMapperTest}. Alternatives
-     * Considered: a third value naming the fixed-width shape honestly, such as {@code text/plain} kept with
-     * a documented exception. Rejected because the value's purpose is to separate positional from
-     * structured, a distinction on which this payload and the two comma-delimited ones fall on the same
-     * side; a per-flow spelling would give a consumer three values to branch on to learn one bit.</p>
+     * <p>Trade-offs: {@code text/plain} states less than a registered fixed-width type would. No such type
+     * is registered, and inventing one under an {@code application/vnd.} name would give consumers a label
+     * no library recognises while still telling them nothing about the offsets. What matters at this
+     * boundary is the negative claim -- this is not delimited -- and {@code text/plain} makes it in a value
+     * every client library already understands. This is the same reasoning, and the same value, that the
+     * account-inquiry consumer records for the same wire.</p>
      */
-    private static final String CONTENT_TYPE_FIXED_WIDTH = "text/csv";
+    private static final String CONTENT_TYPE_FIXED_WIDTH = "text/plain";
+
+    // WHY : Assumptions: the reported paragraph name is the BASELINE's paragraph rather than a Java method
+    //   name, because an operator reading this sink is diagnosing against the reference program and a name
+    //   only the target uses would not locate anything in it.
+    // WHY : Trade-offs: the reference's own diagnostic would NOT carry this name on a reply-put failure. Its
+    //   paragraph field is set once, to 'CICS RETRIEVE' at physical line 149, and no later branch resets it
+    //   -- so a failure in 4000-PROCESS-REQUEST-REPLY reports the paragraph that ran at start-up. Naming the
+    //   paragraph that actually failed is a deliberate, documented improvement rather than a parity claim,
+    //   and it matches what the account-inquiry consumer already reports for the identical group.
+    private static final String PARAGRAPH_PROCESS_REQUEST_REPLY = "4000-PROCESS-REQUEST-REPLY";
+
+    /**
+     * The verbatim return message the baseline reports for a failed reply put.
+     *
+     * <p>Assumptions: this is the literal moved into the diagnostic's return-message field at physical line
+     * 400 of {@code app/app-vsam-mq/cbl/CODATE01.cbl}, carried across character for character.</p>
+     */
+    private static final String DIAGNOSTIC_PUT_FAILED = "MQPUT ERR";
 
     /**
      * The renderer for the reply body.
@@ -257,10 +280,82 @@ public class DateInquiryMessageListener {
             InquiryRequest request = InquiryRequestCodec.decode(message.getPayload());
             LocalDateTime now = LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC);
 
-            LOG.info("event=date.inquiry.answered function={}", request.trimmedFunction());
+            // WHY : Refactoring Rationale: the CLASSIFICATION is journalled, where the trimmed function code
+            //   itself was. That field is four characters of wire content and this flow constrains it in no
+            //   way at all -- it answers every value alike -- so a producer could put a line terminator and a
+            //   forged event prefix in it and write its own records into this journal. That is CWE-117, and
+            //   it was reachable on the SUCCESS path here, which is the path every request takes.
+            // WHY : Trade-offs: the line no longer reports what a requester sent, which was its stated
+            //   purpose -- "the only diagnostic available for a flow whose answer is input-independent". The
+            //   classification keeps the part of that which is actionable: whether the request named the
+            //   inquiry function this system serves, named nothing, or named something else. The bytes
+            //   themselves changed no outcome, because this flow branches on none of them.
+            LOG.info("event=date.inquiry.answered function={}", request.functionLabel());
             publishReply(this.replies.frame(this.replies.systemDateAndTime(now)), correlationId);
+        } catch (RuntimeException failure) {
+            // WHY : Refactoring Rationale: this arm did not exist, and its absence was a parity gap rather
+            //   than an omission of convenience. The reference program answers a failed reply put by moving
+            //   the queue name and the literal 'MQPUT ERR' into its diagnostic group at physical lines 399
+            //   and 400, performing 9000-ERROR at 401 to put that diagnostic on a SEPARATE error queue, and
+            //   only then terminating at 402. Without this arm a decode or send failure propagated straight
+            //   out: the request became visible again, was redelivered, and eventually reached the
+            //   dead-letter queue -- and nothing was ever written to the error queue the deployment
+            //   provisions and this class is configured with, so an operator watching that queue saw a
+            //   silent flow while requests were failing.
+            // WHY : Assumptions: the failure is REPORTED and then RETHROWN, in that order, which is the
+            //   reference's own order. Swallowing it would acknowledge a request this consumer did not
+            //   answer, and reporting after the rethrow is not possible.
+            reportFailure(failure);
+            throw failure;
         } finally {
             MDC.remove(MDC_CORRELATION_ID);
+        }
+    }
+
+    /**
+     * Reports an unexpected failure to the error sink without letting the report replace it.
+     *
+     * <p>Purpose: this is the target form of the reference program's failure branch at physical lines 396 to
+     * 402, which fills the diagnostic fields, performs {@code 9000-ERROR} and only then performs
+     * {@code 8000-TERMINATION}. The caller rethrows afterwards, which is this flow's form of that
+     * termination.</p>
+     *
+     * <p>Assumptions: a failure in the REPORT is attached to the original failure rather than thrown, so an
+     * unreachable error sink can never disguise the fault an operator is actually looking for. That matters
+     * concretely here: when the queue client is what failed, the report will fail for the same reason, and
+     * without this guard the second failure would replace the first on its way out.</p>
+     *
+     * <p>Assumptions: the report's failure is attached only when it is a DIFFERENT object from the original.
+     * Attaching a throwable to itself is rejected outright by the platform, so a client that answers both
+     * sends with one exception instance -- which a client is free to do, and which a single unreachable queue
+     * makes reachable because it fails the reply and the report identically -- would turn a queue outage into
+     * an unrelated argument failure and lose the outage entirely. The guard is an identity comparison rather
+     * than an equality one because it is object identity the platform refuses.</p>
+     *
+     * <p>Assumptions: the failure is rendered as its chain of TYPES with no message text, by the shared
+     * digest. A driver's or parser's own message is the one part of a failure into which a request value can
+     * be interpolated, and this buffer is published onto a queue, so the type chain answers what failed
+     * without opening that channel. It is the same reason this class logs an expiry's LENGTH rather than its
+     * value.</p>
+     *
+     * @param failure the failure to report; must not be {@code null}
+     * @throws NullPointerException if {@code failure} is {@code null}, raised by the digest below. It is the
+     *     ONE precondition here whose violation is not swallowed: every other failure inside this method is
+     *     attached to {@code failure} and suppressed deliberately, so a null argument is the only way this
+     *     method can throw, and it means the caller had no failure to report
+     */
+    private void reportFailure(RuntimeException failure) {
+        String digest = ThrowableDigest.of(failure);
+        LOG.error("event=date.inquiry.error-sink paragraph={} failure={}",
+                PARAGRAPH_PROCESS_REQUEST_REPLY, digest);
+
+        try {
+            publishError(InquiryRequestCodec.errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY,
+                    DIAGNOSTIC_PUT_FAILED, this.errorQueue, digest));
+        } catch (RuntimeException reportingFailure) {
+            if (reportingFailure != failure) {
+                failure.addSuppressed(reportingFailure);
+            }
         }
     }
 
@@ -293,14 +388,24 @@ public class DateInquiryMessageListener {
      * Publishes a diagnostic to the configured error queue.
      *
      * <p>Assumptions: this is the target form of the reference program's {@code 9000-ERROR} paragraph at
-     * physical lines 405 to 425, which puts a fixed-width diagnostic block on a separate error queue. It is
-     * deliberately NOT called from the reply path, because this flow has no business outcome that would
-     * warrant one: its answer does not depend on its input, so there is nothing it can be asked for and fail
-     * to provide.</p>
+     * physical lines 405 to 425, which puts a fixed-width diagnostic block on a separate error queue.</p>
+     *
+     * <p>Refactoring Rationale: this documentation said the operation was "deliberately NOT called from the
+     * reply path, because this flow has no business outcome that would warrant one". The premise was right
+     * and the conclusion did not follow: a flow with no business refusal can still fail TECHNICALLY, and the
+     * reference reports exactly that -- its reply-put failure branch at physical lines 396 to 402 performs
+     * this paragraph. The operation now has a production caller,
+     * {@link #reportFailure(RuntimeException)}, and it stays public because the sink is reachable in the
+     * baseline before any request exists: {@code 1000-CONTROL} opens the error queue ahead of the input and
+     * output queues and enters {@code 9000-ERROR} on a start-up failure, at a point where there is nothing
+     * to reply to.</p>
      *
      * @param diagnostic the diagnostic text, which must name no value that came off the wire; must not be
      *     {@code null}
      * @throws NullPointerException if {@code diagnostic} is {@code null}
+     * @throws IllegalArgumentException if the text is longer than the message length, which is a defect in
+     *     the caller's own formatting rather than a wire condition and must not be silently truncated
+     * @throws software.amazon.awssdk.core.exception.SdkException if the send fails
      */
     public void publishError(String diagnostic) {
         Objects.requireNonNull(diagnostic, "diagnostic must not be null");

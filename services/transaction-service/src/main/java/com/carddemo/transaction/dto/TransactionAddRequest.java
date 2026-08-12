@@ -15,6 +15,13 @@ import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.regex.Matcher;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonParser;
+import tools.jackson.core.JsonToken;
+import tools.jackson.databind.DeserializationContext;
+import tools.jackson.databind.ValueDeserializer;
+import tools.jackson.databind.annotation.JsonDeserialize;
 
 /**
  * The capture payload of the migrated transaction-add screen, carrying the twelve transaction
@@ -87,7 +94,7 @@ import java.lang.annotation.Target;
  * maximum. Whatever resolves that contention is a concern of the writing service, and a component
  * here would put a client inside it.
  *
- * <h2>Exactly one key field is supplied, and the other is derived</h2>
+ * <h2>At least one key field is supplied, and the account identifier wins</h2>
  *
  * <p>{@code app/cbl/COTRN02C.cbl} lines 193 to 230 encode a three-way branch, and it is the single
  * most consequential rule this record carries. When the account identifier is present it must be
@@ -102,15 +109,15 @@ import java.lang.annotation.Target;
  * <p>Assumptions: whichever key is supplied, the other is a lookup result rather than an input.
  * Lines 209 and 223 are the evidence: each writes the field the operator did not fill from the
  * cross-reference record. Both components here are therefore individually nullable, and the
- * constraint that binds them is that exactly one arrives.
+ * constraint that binds them is that at least one arrives.
  *
- * <p>Alternatives Considered: three ways of expressing that mutual exclusion were considered, and
+ * <p>Alternatives Considered: three ways of expressing that pairing rule were considered, and
  * the reason two were rejected is mechanical rather than stylistic. It cannot be expressed by
  * component ordering, which carries no constraint at all, nor by a per-component annotation, since
  * neither component can see the other. Leaving it to the service layer was rejected because the
  * violation would then be raised after binding and outside the accumulated violation set, so a
  * submission with no key and three other defects would answer with two separate shapes on two
- * separate paths. What is used instead is {@link ExactlyOneKey}, a class-level constraint declared as
+ * separate paths. What is used instead is {@link AtLeastOneKey}, a class-level constraint declared as
  * a NESTED annotation of this record: a class-level constraint is evaluated in the same pass as every
  * component constraint, so the violation joins the same accumulated set and reaches the same per-field
  * array, and its validator attributes the violation to {@code accountId} and {@code cardNumber} so a
@@ -464,8 +471,8 @@ import java.lang.annotation.Target;
  * @param accountId the account the transaction is being captured against, as digit characters;
  *     not a transaction record field at all but the first of the two key alternatives, from
  *     {@code ACTIDINI PIC X(11)} at line 60 of {@code app/cpy-bms/COTRN02.CPY}; at most eleven
- *     characters and digits-only when present, null when the card number is supplied instead, and
- *     derived from the cross-reference in that case
+ *     characters and digits-only when present, and null when only the card number was supplied, in
+ *     which case it is derived from the cross-reference
  * @param typeCode the two-character transaction type, as digit characters, from
  *     {@code TRAN-TYPE-CD PIC X(02)} at line 6 of {@code app/cpy/CVTRA05Y.cpy}; required, at most
  *     two characters, and digits-only despite the record declaring it as characters
@@ -496,8 +503,9 @@ import java.lang.annotation.Target;
  *     field of these four the screen keys at full record width
  * @param cardNumber the card the transaction is presented on, as digit characters, from
  *     {@code TRAN-CARD-NUM PIC X(16)} at line 15; the second of the two key alternatives, at most
- *     sixteen characters and digits-only when present, null when the account identifier is supplied
- *     instead, and derived from the cross-reference in that case
+ *     sixteen characters and digits-only when present, and derived from the cross-reference when the
+ *     account identifier was supplied -- whether this component was supplied alongside it or not,
+ *     because the account arm resolves first and line 209 overwrites whatever arrived here
  * @param originDate the date the transaction was originated, as text in the form
  *     {@code YYYY-MM-DD}; the ten-character date portion of {@code TRAN-ORIG-TS PIC X(26)} at line
  *     16, keyed at {@code TORIGDTI PIC X(10)} on line 102 of the map; required, at most ten
@@ -512,11 +520,11 @@ import java.lang.annotation.Target;
  *     character and restricted to the affirmative and negative characters the reference recognises,
  *     null or blank when the submission is the first turn of the confirmation exchange
  */
-@TransactionAddRequest.ExactlyOneKey
+@TransactionAddRequest.AtLeastOneKey
 public record TransactionAddRequest(
     // WHY : Assumptions: COTRN02C.cbl line 209 fills the card number from the cross-reference when
     //       this field is the one supplied, so requiring both would reject a submission the
-    //       reference accepts. The pairing rule is carried by the ExactlyOneKey constraint on this
+    //       reference accepts. The pairing rule is carried by the AtLeastOneKey constraint on this
     //       record, whose validator is the only place either component can see the other, and which
     //       reports its violation against this component and cardNumber rather than against a name no
     //       submitted field carries.
@@ -568,8 +576,28 @@ public record TransactionAddRequest(
     //       isAmountWithinRecordDomain(), and a violation of it was then reported against a property
     //       called amountWithinRecordDomain that no submitted field is named after. A client cannot
     //       attach that to an input, so the bound now reports against amount.
+    // WHY : ⚠️ Refactoring Rationale: the RAW wire text is validated before it is parsed, and this
+    //       annotation is what preserves it long enough to be looked at. The reference validates the
+    //       twelve characters the operator keyed, position by position, at app/cbl/COTRN02C.cbl lines
+    //       339 to 351. The service layer's own shape test runs on the value AFTER the wire boundary
+    //       has parsed it into the shared money type and then re-renders it through the edited picture,
+    //       so the string it inspects is canonical by construction and the test can only ever fail on
+    //       magnitude. An under-padded form such as "1234.5", or an unsigned or grouped form, therefore
+    //       passed validation and was silently rewritten to "1234.50" -- while the published
+    //       TransactionAmount schema refuses all three outright, so the service accepted bodies its own
+    //       contract calls malformed. Once the parse has happened the original characters are gone, and
+    //       a deserialiser is the only place they still exist.
+    //       Alternatives Considered: a second String component carrying the submitted text. Rejected
+    //       because the published request schema closes its object, so an extra property would be
+    //       refused by any strict client, and because two members describing one value can disagree.
+    //       Alternatives Considered: tightening the shared money type's own grammar in common-lib.
+    //       Rejected because that grammar is deliberately lenient for a reason its own note records --
+    //       a value read back from a report's edit mask carries a leading plus that the reference itself
+    //       wrote -- so narrowing it would break the codec paths that depend on the leniency. The
+    //       narrowing belongs to this one request, which is where the contract narrows it.
     @NotNull(message = AMOUNT_REQUIRED)
     @AmountWithinRecordDomain
+    @JsonDeserialize(using = WireFormAmountDeserializer.class)
     Money amount,
     @NotBlank(message = MERCHANT_ID_REQUIRED)
     @Size(max = MERCHANT_ID_WIDTH)
@@ -729,7 +757,7 @@ public record TransactionAddRequest(
    * called malformed and nothing compared them.
    *
    * <p>Assumptions: the empty arm is retained because this component is individually optional --
-   * exactly one of it and the card number is supplied, which {@link ExactlyOneKey} decides -- so a
+   * at least one of it and the card number is supplied, which {@link AtLeastOneKey} decides -- so a
    * caller that supplies the other must be able to omit this one without drawing a composition
    * message for a field it deliberately left out. The same arm on a REQUIRED component, below,
    * exists for the neighbouring reason: the reference keeps presence and composition in separate
@@ -961,19 +989,35 @@ public record TransactionAddRequest(
   public static final String CONFIRM_INVALID_VALUE = "Invalid value. Valid values are (Y/N)...";
 
   /**
-   * Requires exactly one of the two key alternatives, reporting against both of them.
+   * Requires at least one of the two key alternatives, reporting against both of them.
    *
    * <p><b>Purpose.</b> This is the pairing rule of the transaction-add screen expressed as a
    * class-level constraint, because it is the only rule here that has to see two components at
    * once. {@code app/cbl/COTRN02C.cbl} lines 193 to 230 select on the account identifier first and
-   * the card number second, and each branch then fills the field the operator left empty from the
-   * cross-reference -- the card number at line 209 and the account identifier at line 223.
-   * Supplying both is therefore not a richer submission but a contradiction, since one of the two
-   * would be overwritten by a lookup; supplying neither reaches the third branch at lines 224 to
-   * 229. Exclusive disjunction is what those three branches describe.
+   * the card number second, and supplying neither reaches the third branch at lines 224 to 229,
+   * which is the one refusal the paragraph contains. Inclusive disjunction is what those three
+   * branches describe.
+   *
+   * <p>⚠️ Refactoring Rationale: this constraint required EXACTLY one key and was named
+   * {@code ExactlyOneKey}, and that refused submissions the baseline accepts. The paragraph is a
+   * selection, not a validation: line 196 tests the account identifier, and because that arm is
+   * taken the card-number arm at line 210 is never evaluated at all, so a submission carrying both
+   * is processed on the account and the card number the operator supplied is simply discarded --
+   * overwritten at line 209 by the cross-reference lookup. There is no branch anywhere in the
+   * paragraph that reports a contradiction, and no sentence in the program for one. The previous
+   * reading -- that supplying both "is not a richer submission but a contradiction" -- described a
+   * rule the reference does not have, and enforcing it answered 400 where the baseline answers a
+   * captured transaction, which also meant the account-first precedence the service transcribes
+   * could never be exercised: the request was rejected before the service saw it.
+   *
+   * <p>Trade-offs: a client may now send a card number that disagrees with the account and receive a
+   * success naming neither the disagreement nor the value that won. That is accepted because it is
+   * the baseline's own behaviour, and reporting the conflict would refuse submissions this screen
+   * accepts today. {@code TransactionAddService.validateInputKeyFields} carries the same trade-off
+   * note at the point where the discard actually happens.
    *
    * <p>Refactoring Rationale: a class-level constraint whose validator names the two components
-   * replaces the {@code @AssertTrue} predicate an earlier revision declared. Bean Validation derives
+   * replaces the {@code @AssertTrue} predicate an even earlier revision declared. Bean Validation derives
    * a property path for a predicate constraint from the METHOD it annotates, so that revision
    * reported its violation against a property named {@code keySelectionValid} -- a name no submitted
    * field carries and no form control can be bound to, so a client received an error it could not
@@ -996,7 +1040,7 @@ public record TransactionAddRequest(
   @Target(ElementType.TYPE)
   @Retention(RetentionPolicy.RUNTIME)
   @Constraint(validatedBy = KeySelectionValidator.class)
-  public @interface ExactlyOneKey {
+  public @interface AtLeastOneKey {
 
     /**
      * The message both raised violations carry.
@@ -1067,7 +1111,127 @@ public record TransactionAddRequest(
   }
 
   /**
-   * Enforces {@link ExactlyOneKey} and attributes its violation to the two key components.
+   * Refuses an amount whose submitted characters are not the exact wire form the contract publishes,
+   * before those characters are parsed.
+   *
+   * <p><b>Purpose.</b> {@code app/cbl/COTRN02C.cbl} validates the amount POSITIONALLY at lines 339 to
+   * 351, over the twelve characters the operator keyed: the first must be a sign at line 340, eight
+   * characters from the second must be numeric at line 341, the tenth must be a decimal point at line
+   * 342 and two characters from the eleventh must be numeric at line 343. All four alternatives share
+   * one action block, so however many of them hold the reference emits the single sentence at line 345.
+   * This class is that test, applied at the only point in the target where the submitted characters
+   * still exist.</p>
+   *
+   * <p>Assumptions: the shape enforced here is the {@code TransactionAmount} schema's own pattern from
+   * {@code openapi/transaction-api.yaml} rather than the reference's twelve-character edit, and the two
+   * differ in two respects that are both deliberate. The published form admits one to nine integer
+   * digits where the reference's edit fixes eight and zero-pads, because the RECORD holds nine --
+   * {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} -- and the eight-digit
+   * display picture is a screen artefact the migration does not carry onto the wire. The published form
+   * admits no leading plus where the reference's edit requires a sign, because a JSON decimal string is
+   * not a fixed-width display field and an unsigned value is unambiguously positive. Both divergences
+   * are the contract's, not this class's, and enforcing the contract is what makes the service and its
+   * own document agree.</p>
+   *
+   * <p>Assumptions: the magnitude bound is NOT enforced here and is left where it already is. The
+   * component's own {@code AmountWithinRecordDomain} constraint bounds the value to the record's nine
+   * integer digits and reports against {@code amount} with the reference's own sentence, and the
+   * service's shape test bounds it again through the edited picture. A third bound here would report the
+   * same condition through a third mechanism, and a deserialiser failure is rendered as a malformed-body
+   * 400 rather than as the per-field array a client can attach to an input -- so the narrower failure is
+   * deliberately left to the constraint that can name the field.</p>
+   *
+   * <p>Alternatives Considered: replacing the shared money deserialiser for this whole service rather
+   * than for this one component. Rejected because the same type carries the account balance on the
+   * bill-payment responses, whose published pattern admits TEN integer digits, and the report and
+   * statement paths read values back from edit masks that carry a leading plus. A service-wide narrowing
+   * would refuse values those paths legitimately produce.</p>
+   *
+   * <p>Alternatives Considered: duplicating the shared deserialiser's token handling here -- its numeric-
+   * token branch, its non-string branch, its empty-string branch and its two failure branches. Rejected
+   * because those five diagnostics are carefully worded and one of them exists specifically to stop a
+   * producer emitting JSON numbers; a second copy would drift from the first. This class adds one gate
+   * and delegates everything else to the module-registered handler, so a token that is not a string
+   * still receives the shared message.</p>
+   */
+  public static final class WireFormAmountDeserializer extends ValueDeserializer<Money> {
+
+    /**
+     * The exact lexical form the published {@code TransactionAmount} schema admits.
+     *
+     * <p>Assumptions: the expression is written out here rather than derived from the schema file,
+     * because a request handler cannot read its own contract document at bind time. It is asserted
+     * against that document by {@code TransactionApiContractTest}, so the two cannot drift silently.
+     * </p>
+     *
+     * <p>Assumptions: anchored at both ends and with no whitespace tolerance at all, which is stricter
+     * than the shared deserialiser's own handling. That handler strips surrounding whitespace on the
+     * ground that a producer copying a fixed-width field can carry padding; this component's contract
+     * publishes a JSON string with a fixed pattern, so padding here is a malformed value rather than an
+     * artefact of a field width.</p>
+     */
+    private static final java.util.regex.Pattern WIRE_FORM =
+        java.util.regex.Pattern.compile("-?[0-9]{1,9}\\.[0-9]{2}");
+
+    /**
+     * Reads one amount, refusing any string that is not the published wire form.
+     *
+     * @param parser the parser positioned on the value to read; never {@code null}
+     * @param ctxt the context a mismatch is reported through; never {@code null}
+     * @return the amount, at a scale of two and never {@code null}
+     * @throws JacksonException if the current token is a string that does not match the published
+     *     pattern, or if the shared handler this method delegates to refuses the value for any of the
+     *     reasons its own contract states -- a numeric token, a non-string token, an empty string,
+     *     unparseable text, or a magnitude outside the reference money picture
+     */
+    @Override
+    public Money deserialize(JsonParser parser, DeserializationContext ctxt) throws JacksonException {
+      // WHY : Assumptions: the gate runs only for a string token and every other token falls straight
+      //       through to the shared handler, which owns the diagnostics for them. Reporting a pattern
+      //       mismatch for a JSON number would replace the shared message that tells a producer WHY a
+      //       number is refused on purpose, which is the message that actually changes producer
+      //       behaviour.
+      if (parser.currentToken() == JsonToken.VALUE_STRING) {
+        String submitted = parser.getString();
+        Matcher shape = WIRE_FORM.matcher(submitted);
+        if (!shape.matches()) {
+          // WHY : Assumptions: the submitted characters are NOT quoted in the diagnostic, for the
+          //       reason the shared handler's own note records at length: the value is a monetary
+          //       amount, and a message travelling to a caller's logs is the one destination the
+          //       masking applied at the API edge does not reach. The expected form is stated instead,
+          //       which is what a producer needs in order to correct the request, and the document
+          //       location the context attaches already names where the value was.
+          return ctxt.reportInputMismatch(this,
+              "Cannot read a transaction amount: the value is not the published wire form. An amount"
+                  + " is carried as a JSON string of one to nine digits, a single decimal point and"
+                  + " exactly two further digits, optionally preceded by a minus sign, such as"
+                  + " \"-2065.00\". A shorter fractional part, a leading plus, a grouping separator or"
+                  + " surrounding whitespace are refused rather than normalised, because"
+                  + " app/cbl/COTRN02C.cbl lines 339 to 345 refuse the keyed characters positionally"
+                  + " and answer with \"Amount should be in format -99999999.99\".");
+        }
+      }
+
+      // WHY : Assumptions: the parser is still positioned on the same token after getString, so the
+      //       shared handler re-reads the value it was going to read anyway. Delegating by type rather
+      //       than by calling the handler directly is what keeps this class from holding a reference to
+      //       a package-private type in another module.
+      return ctxt.readValue(parser, Money.class);
+    }
+
+    /**
+     * Reports the value type this deserialiser handles.
+     *
+     * @return the {@link Money} class, never {@code null}
+     */
+    @Override
+    public Class<?> handledType() {
+      return Money.class;
+    }
+  }
+
+  /**
+   * Enforces {@link AtLeastOneKey} and attributes its violation to the two key components.
    *
    * <p>Assumptions: the validator is declared here beside the request it validates rather than in a
    * package of its own, because the rule is a property of this one payload and of no other. It holds
@@ -1075,16 +1239,16 @@ public record TransactionAddRequest(
    * framework to share across requests.
    */
   public static final class KeySelectionValidator
-      implements ConstraintValidator<ExactlyOneKey, TransactionAddRequest> {
+      implements ConstraintValidator<AtLeastOneKey, TransactionAddRequest> {
 
     /**
-     * Reports whether exactly one of the two key alternatives was supplied.
+     * Reports whether at least one of the two key alternatives was supplied.
      *
      * @param request the bound request, which the framework may pass as {@code null} when the body
      *     itself was absent
      * @param context the context a violation is raised through; never {@code null}
-     * @return {@code true} when exactly one of the account identifier and the card number carries a
-     *     value, and {@code false} when both were supplied or neither was
+     * @return {@code true} when either the account identifier or the card number carries a value,
+     *     including when both do, and {@code false} only when neither was supplied
      */
     @Override
     public boolean isValid(TransactionAddRequest request, ConstraintValidatorContext context) {
@@ -1094,16 +1258,23 @@ public record TransactionAddRequest(
       if (request == null) {
         return true;
       }
-      // WHY : Assumptions: exclusive disjunction is the whole rule, so it is written as one operator
-      //       rather than as a pair of nested tests that would have to agree with each other.
-      if (isSupplied(request.accountId()) ^ isSupplied(request.cardNumber())) {
+      // WHY : ⚠️ Assumptions: INCLUSIVE disjunction, where this line used to be exclusive. The
+      //       reference's paragraph selects rather than validates -- line 196 takes the account arm
+      //       and the card arm at line 210 is then never evaluated -- so a submission carrying both
+      //       keys is processed on the account and the card number is discarded at line 209 by the
+      //       cross-reference lookup. Only the fall-through at lines 224 to 229 refuses anything, and
+      //       it is reached when NEITHER key was supplied. An exclusive test therefore refused a
+      //       submission the baseline captures, and refused it before the service's own account-first
+      //       precedence could run at all.
+      if (isSupplied(request.accountId()) || isSupplied(request.cardNumber())) {
         return true;
       }
 
       // WHY : Assumptions: the default violation is suppressed and replaced by one violation per key
       //       component, so the accumulated set a client receives names submitted fields only. Both
       //       are raised rather than one, because either field can be the one the operator should
-      //       change and the request alone cannot say which.
+      //       fill in and the request alone cannot say which. Reaching here now means neither was
+      //       supplied, so naming both is naming exactly the choice the operator has.
       context.disableDefaultConstraintViolation();
       String template = context.getDefaultConstraintMessageTemplate();
       context.buildConstraintViolationWithTemplate(template)

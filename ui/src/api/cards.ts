@@ -10,13 +10,14 @@
  * target is derived from the operation manifest below rather than written as a literal, for the
  * reason recorded in `ui/src/api/types.ts`.
  *
- * Ownership of the shared page envelope
- * -------------------------------------
- * Assumptions: `PageResponse` and `PageDirection` are RE-EXPORTED from `./types` rather than owned
- * here, because all five browser-facing contracts publish the same envelope and the same direction
- * pair. The re-export keeps this module's public surface unchanged for the three card screens that
- * import both names from it, while the declarations and their rationale live in one place. The
- * detail is argued at the re-export itself.
+ * Ownership of the wire shapes
+ * ----------------------------
+ * Assumptions: this module declares NO wire shape. Every card shape, and the shared page envelope and
+ * reading direction alongside them, is declared once in `./types` and re-exported here, so the three
+ * card screens that import these names from this module still resolve while each shape has exactly one
+ * definition. `ui/src/api/contracts.test.ts` asserts both halves: that no client module declares a wire
+ * shape, and that every client module still re-exports its contract's shapes. The detail is argued at
+ * the re-exports themselves.
  *
  * Selector discipline
  * -------------------
@@ -28,15 +29,37 @@
  * declares for that purpose and returns the selector the other four use.
  */
 
-import { getApiClient } from './client';
-import { requestPath } from './types';
-import type { ContractOperation, PageDirection, PageResponse } from './types';
+import { getApiClient, requestPath } from './client';
+import type {
+  AdminCardDetail,
+  CardDetail,
+  CardListQuery,
+  CardSummary,
+  CardUpdateRequest,
+  ContractOperation,
+  PageResponse,
+} from './types';
 import {
   isCardNumber,
   isCardSelector,
   requireCardNumber,
   requireCardSelector,
 } from '../routes/cards';
+
+/*
+ * WHY : Refactoring Rationale: the card wire shapes are RE-EXPORTED from ./types rather than declared
+ *       here. The re-export keeps this module's public surface exactly as it was -- the three card
+ *       screens import these names from '../../api/cards' and still may -- while the single definition
+ *       of each shape, with the full rationale for each member, sits beside the other contracts' shapes
+ *       in ./types, where the erasure guarantee also applies.
+ */
+export type {
+  CardSummary,
+  CardDetail,
+  AdminCardDetail,
+  CardUpdateRequest,
+  CardListQuery,
+} from './types';
 
 /*
  * WHY : Refactoring Rationale: `PageResponse` and `PageDirection` are RE-EXPORTED from ./types rather
@@ -114,124 +137,6 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   UPDATE_CARD,
   GET_ADMIN_CARD_DETAIL,
 ];
-
-/**
- * Summary row returned by the card browse endpoint.
- *
- * Refactoring Rationale: this carries the row's masked rendering, its account and its status, and
- * NOT the embossed name or the expiration date. An earlier revision of this interface declared those
- * two as well, and the browse it types has no such columns to fill them from: the baseline list row
- * is twenty-eight characters — an eleven-character account number, a sixteen-character card number
- * and a one-character status, declared at `app/cbl/COCRDLIC.cbl:258-260` — and `card-api.yaml`
- * publishes exactly those three. Two fields typed as present and never sent would have rendered as
- * blank columns, and a list disclosing more of each row than the screen it replaces disclosed is a
- * widening no requirement asks for. Both fields remain on the detail shape, which is where the update
- * screen reads them.
- *
- * Refactoring Rationale: a FOURTH member, `key`, carries the opaque selector that addresses this
- * row's card. It was withdrawn once, on the ground that "publishing an addressable value per row would
- * put back exactly what masking the rendering exists to prevent, since a caller could then lift an
- * addressable identity for every row of a page at once". That objection is answered rather than
- * overruled, and on two independent grounds. Masking exists so that a list response discloses no card
- * NUMBER; the selector is sealed by the service and carries no digit of one, so lifting every selector
- * on a page yields every row's address and not one digit of any card. And the withdrawal removed no
- * exposure, it relocated one: with no address on the row, every single-card route had to carry the
- * number itself, into browser history and into access-log objects the load balancer and the
- * distribution both write verbatim before any application code runs. What further bounds the selector
- * is that it is bound by the service to the resource, to the authenticated subject and to the query
- * scope, and that it expires — so what can be lifted from a page addresses, for this caller and for a
- * bounded time, exactly the rows this caller was already shown.
- */
-export interface CardSummary {
-  readonly key: string;
-  readonly displayCardNumber: string;
-  readonly accountId: string;
-  readonly activeStatus: 'Y' | 'N';
-}
-
-/**
- * Card-detail representation returned for one card.
- *
- * Assumptions: this extends the summary rather than restating it, so the selector, the masked
- * rendering, the account and the status are described once. The three members declared here are the
- * ones the detail carries and the list does not — two editable attributes and the concurrency token —
- * which together with the four inherited ones are exactly the seven `CardDetailCore` declares in
- * `card-api.yaml`.
- *
- * Assumptions: the selector IS inherited rather than omitted, because the contract's `CardDetailCore`
- * declares `key` as one of its seven required properties and the Java record carries it as its first
- * component. A detail read is addressed BY a selector, so it would be defensible for the response to
- * leave the caller holding the one it already had; the contract does not take that option, and it is
- * right not to, because an update MINTS A FRESH selector — the value the caller sent is spent once the
- * version moves, and omitting the new one would leave the update screen unable to re-read the row it
- * had just written.
- */
-export interface CardDetail extends CardSummary {
-  readonly embossedName: string;
-  readonly expirationDate: string;
-  readonly version: number;
-}
-
-/**
- * Fields the card update operation permits a browser to change.
- *
- * Refactoring Rationale: the expiry travels as a month and a year and NOT as a whole date, matching
- * `CardUpdateRequest` in `card-api.yaml`. The baseline's update screen edits only those two parts: its
- * day input is rendered non-display at `app/cbl/COCRDUPC.cbl:1285`, is redisplayed from the pre-edit
- * snapshot at `:1123` rather than from anything entered, and has no validation paragraph at all. An
- * earlier revision of this interface sent one ISO date, which let a browser set an expiry day the
- * baseline does not expose — and the day the stored date keeps is now supplied by the service from the
- * row's own current value, so no browser can influence it.
- *
- * Trade-offs: a caller therefore cannot send a detail response straight back as an update, because the
- * detail carries the whole stored date. That asymmetry matches the screens, where the detail map
- * declares `EXPMONI` and `EXPYEARI` and no day field while the stored record holds a whole date.
- */
-export interface CardUpdateRequest {
-  readonly embossedName: string;
-  readonly expirationMonth: string;
-  readonly expirationYear: string;
-  readonly activeStatus: 'Y' | 'N';
-  readonly version: number;
-}
-
-/**
- * Card-detail representation returned for one card by the administrative operation.
- *
- * Assumptions: this extends the ordinary detail with the one member that distinguishes it, the
- * UNMASKED card number, matching `AdminCardDetail` in `card-api.yaml` -- which is `CardDetailCore`
- * plus a sixteen-digit `cardNumber`. The two operations differ in what they are permitted to render
- * and never in what they may change, which is why no update counterpart exists.
- *
- * Trade-offs: this is the one shape in the SPA that carries a full primary account number, and it is
- * typed here rather than left as an untyped response so that the disclosure is visible in the type
- * system instead of only in a runtime body. The offsetting risk is that a screen could render it
- * where the ordinary detail belonged; what bounds that is the address -- the value is reachable only
- * through `/api/v1/admin/cards`, which `card-service`'s authority table restricts to the
- * administrative group, so an ordinary caller receives 403 rather than a number.
- */
-export interface AdminCardDetail extends CardDetail {
-  readonly cardNumber: string;
-}
-
-/**
- * Criteria a card browse request may narrow by.
- *
- * Assumptions: every member is optional and the object itself may be omitted, because a browse with
- * no criteria is the first page of the unfiltered set, which is the screen's initial state. They are
- * grouped into one object rather than passed positionally so that a caller adding a filter cannot
- * silently supply it in the cursor's position.
- *
- * Refactoring Rationale: a `cardNumber` member is withdrawn, and with it the only card filter this
- * browse had. The contract no longer declares a card-number query parameter, because a query string is
- * persisted verbatim by the load balancer's mandatory access log on exactly the same terms as a path
- * segment. Reaching one card by its number is `lookupCard`, which sends the number in a body.
- */
-export interface CardListQuery {
-  readonly accountId?: string | undefined;
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
 
 /**
  * Lists cards, optionally narrowed by account.

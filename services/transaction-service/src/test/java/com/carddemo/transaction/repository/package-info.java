@@ -1,18 +1,41 @@
 /**
- * Holds the Testcontainers-backed repository integration tests of the LEDGER
- * bounded context, which exercise the four Spring Data JPA interfaces of
- * {@code com.carddemo.transaction.repository} against a real PostgreSQL engine.
+ * Holds the repository verification of the LEDGER bounded context: six
+ * Testcontainers-backed integration tests exercising the persistence types of
+ * {@code com.carddemo.transaction.repository} -- including the one cross-schema
+ * access path beside them -- against a real PostgreSQL engine, and one static
+ * test that boots nothing.
  *
  * <h2>Purpose, and the rule elements with no subject here</h2>
  *
  * <p><b>Purpose.</b> This package is the persistence-layer test boundary of
- * transaction-service. Every class in it starts a PostgreSQL container, lets
+ * transaction-service. Five of its six tests start a PostgreSQL container, let
  * Flyway build the {@code ledger} schema from
  * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql},
- * and then asserts that the four repository interfaces declared in the main
- * tree's package of the same name reach the rows that migration defines,
- * through the keys and in the order the COBOL baseline reached them. Nothing
- * here substitutes a mock for a database. The main-tree charter at
+ * and then assert that the persistence types declared in the main tree's
+ * package of the same name reach the rows that migration defines, through the
+ * keys and in the order the COBOL baseline reached them. Nothing here
+ * substitutes a mock for a database. The seventh starts nothing, because the
+ * type it covers names columns that belong to another context and no migration
+ * of this module builds them, so the only question it can answer -- whether the
+ * columns named still exist where they are owned -- is answerable from that
+ * owner's migration read as text.
+ *
+ * <p>Refactoring Rationale: two classes here reach a table this migration does
+ * NOT define, and they are the exception the main-tree charter's cross-schema
+ * member creates rather than a widening of this package's remit. That member is a
+ * schema-qualified access path onto {@code account.accounts}, which the account
+ * context owns; the migration above cannot define it, so a Testcontainers init
+ * script supplies it in the state a provisioned environment already has, and the
+ * init script's own header records the alternatives it rejects. The remit is
+ * unchanged -- what is asserted is still that an access path declared in the main
+ * tree reaches the rows it claims to, against a real engine -- and the one
+ * property that path adds is that it does so inside the CALLER's transaction,
+ * which is the whole reason it exists. One of the two pins the two statements
+ * themselves; the other pins the UNIT OF WORK they take part in, that the payment
+ * row and the balance change commit together and that neither survives a failure
+ * of the other.
+ *
+ * <p>The main-tree charter at
  * {@code services/transaction-service/src/main/java/com/carddemo/transaction/repository/package-info.java}
  * owns the query contracts and the access-path rulings; this charter governs
  * their verification and cites that file rather than restating it, because two
@@ -40,20 +63,40 @@
  * rediscovered per test. Rejected on two independent grounds. Each test in this
  * package inherits its isolation, determinism, paging and single-sourcing
  * rulings from here, so without the charter every one of them would be restated
- * four times and could drift three ways. And the documentation gate treats a
+ * seven times and could drift six ways. And the documentation gate treats a
  * directory as a file set: {@code JavadocPackage} demands a
  * {@code package-info.java} in any directory holding an audited compilation
  * unit, so an integration test here without this file beside it fails the
  * build.
  *
- * <h2>The closed set: four integration tests and no fifth type</h2>
+ * <h2>The closed set: six integration tests, one static drift guard, and no ninth type</h2>
  *
- * <p>Exactly five {@code .java} files constitute this package -- this charter, and one integration
- * test per repository interface -- and ALL FIVE are landed. The count no longer mirrors the main-tree
- * package, which stands at seven: that package's category-balance write path is a fragment interface
- * and its implementation beside the repository, and all three are exercised by the single integration
- * test named for that repository. A write member is not a fourth access path deserving a test of its
- * own; it is part of the contract of the interface that composes it.
+ * <p>Exactly EIGHT {@code .java} files constitute this package -- this charter, one integration test per
+ * repository type, one for the cross-schema unit of work, and one static test -- and ALL EIGHT are landed.
+ * The count no longer mirrors the main-tree package, which stands at eight for different reasons: that
+ * package's category-balance write path is a fragment interface and its implementation beside the
+ * repository, and all three are exercised by the single integration test named for that repository. A write
+ * member is not an access path deserving a test of its own; it is part of the contract of the interface that
+ * composes it.
+ *
+ * <p>Refactoring Rationale: the count has risen twice and each rise is named, because a closed-set claim
+ * that is revised silently is a habit rather than a measurement. It rose when the main tree gained a
+ * cross-schema balance access path that is a CLASS and not a Spring Data interface, so "one integration
+ * test per repository interface" stopped covering the package: that member needed a test of the two
+ * statements themselves and a static guard over the columns they name, neither of which the four interface
+ * tests touch. It rose again when a test of the payment UNIT OF WORK landed beside them, whose subject is
+ * the transaction boundary rather than any access path -- that the ledger row and the balance change commit
+ * together and that neither survives a failure of the other, which no mocked test can observe because a
+ * stand-in records a call without touching a connection.
+ *
+ * <p>Refactoring Rationale: the seventh file is the reason this heading now names two KINDS of test. Every
+ * other file here boots an engine, because every other type in the main-tree package maps a table this
+ * module owns and the question worth asking is what the engine does with it. {@code AccountBalanceRepository}
+ * maps nothing and reaches a table {@code account-service} owns, so it raises a second question an engine
+ * cannot answer: whether the columns it names are the columns that context declares. A container provisioned
+ * from the same migration agrees by construction. {@code AccountBalanceSchemaAgreementTest} reads that
+ * migration as text instead, which is the only form in which the disagreement is detectable, and it needs no
+ * engine at all.
  *
  * <p>Refactoring Rationale: this paragraph twice reported fewer landed files than the directory holds
  * -- first TWO of five and then FOUR of five -- and the distinction between planned and landed was
@@ -104,20 +147,47 @@
  *       never reads it back, which makes the read side of this repository a
  *       migration affordance rather than a transcribed behaviour, and makes
  *       this test the only place the shape of the stream is checked at all.</li>
+ *   <li>{@code AccountBalanceRepositoryIT}, which pins the TWO native statements the payment path issues
+ *       against {@code account.accounts} -- a locked read of the balance and a reduction of it. It is one of
+ *       two tests here whose fixture table is created by the test rather than by a migration, because this
+ *       module's Flyway configuration migrates the {@code ledger} schema alone and the table belongs to
+ *       another context; its own file records why that partial fixture is accepted and what closes the drift
+ *       it admits. What it pins that no service test can is that both statements PARSE and run: the
+ *       subtraction subtracts rather than assigns, the owning context's version column advances, and the
+ *       reduction reports how many rows it changed so a vanished account stays distinguishable from a
+ *       settled one;</li>
+ *   <li>{@code BillPaymentAtomicityIT}, which pins the payment UNIT OF WORK rather than either statement in
+ *       it: that the ledger row and the reduction of {@code account.accounts.curr_bal} commit together, and
+ *       that neither survives a failure of the other. It is the only class here that drives a service rather
+ *       than a persistence type, and the only one whose subject is a transaction BOUNDARY -- both departures
+ *       made for one reason, that enrolment in the caller's transaction is not observable from a mocked test
+ *       because a stand-in records a call without touching a connection. It supplies the foreign table
+ *       through the Testcontainers init script under {@code src/test/resources/db/testharness} that the
+ *       test above uses, drives the real service against the real access path with only the cross-context
+ *       HTTP seam stood in for, and reads both tables back outside any transaction. The batch context puts
+ *       its own cross-schema unit-of-work test in the same place for the same reasons, at
+ *       {@code services/batch-service/src/test/java/com/carddemo/batch/repository/PostingUnitOfWorkIT.java};
+ *       and</li>
+ *   <li>{@code AccountBalanceSchemaAgreementTest}, the one file here that boots nothing. It reads
+ *       {@code services/account-service/src/main/resources/db/migration/V1__account.sql} as text and fails
+ *       the build if any column those two statements name is absent from it. It exists because the
+ *       repository maps no entity, so the provider's start-up schema check covers none of those columns, and
+ *       without it a rename in the owning migration would surface at the first bill payment rather than in
+ *       CI.</li>
  * </ul>
  *
  * <p>Alternatives Considered: extracting the container declaration, the
  * profile annotation and the row builders into a shared abstract base class
- * that the four tests extend, or into a {@code @TestConfiguration} they
- * import. Rejected, and that rejection is why there is no sixth file here: no
+ * that the six integration tests extend, or into a {@code @TestConfiguration} they
+ * import. Rejected, and that rejection is why there is no NINTH file here: no
  * shared abstract base class, no test-utility class, no fixture-loader class
  * and no {@code @TestConfiguration}. A base class holding a container is
  * shared mutable state, and the concrete consequence is that rows one test
  * inserts become rows another test reads, so a failure names the test that ran
  * afterwards rather than the test that caused it. Each test in this package
- * owns its own schema state instead, which is what lets any one of the four be
+ * owns its own schema state instead, which is what lets any one of the five be
  * run alone and still mean something. The cost accepted is that the container
- * field and the profile annotation are declared four times; what is bought is
+ * field and the profile annotation are declared five times; what is bought is
  * that removing, renaming or reordering any one test cannot change what
  * another one proves.
  *
@@ -144,7 +214,13 @@
  *       positioning is a maximum-key derivation rather than a second list
  *       implementation -- a distinction the main-tree charter draws from the
  *       source and that this package must not blur by attaching a page
- *       envelope to it.</li>
+ *       envelope to it. This program supplies one further contract, and it is
+ *       not an access path: its lines 233, 234 and 235 write the payment row,
+ *       compute the reduced balance and rewrite the account master inside ONE
+ *       CICS task, so the implicit task-end syncpoint commits all three as a
+ *       unit. That unit is what {@code BillPaymentAtomicityIT} asserts, and it
+ *       is the only claim in this package about a transaction boundary rather
+ *       than about a key or an order.</li>
  * </ul>
  *
  * <p>Two further programs are read for the physical contract alone, and
@@ -179,8 +255,21 @@
  * {@code app/cpy/CVTRA01Y.cpy} is 13 lines and declares
  * {@code TRAN-CAT-BAL-RECORD} at 50.
  *
+ * <p>Assumptions: a fourth record layout is read from OUTSIDE this context and
+ * is named here so its provenance is not mistaken for local. The account row
+ * {@code BillPaymentAtomicityIT} seeds derives from
+ * {@code app/cpy/CVACT01Y.cpy}, which declares {@code ACCOUNT-RECORD} at a
+ * record length of 300 and its balance as {@code ACCT-CURR-BAL PIC S9(10)V99}
+ * at line 7 -- a zoned-decimal money field, which is why the column is
+ * {@code NUMERIC(12,2)} and never a floating-point type. This package does not
+ * transcribe that copybook: it mirrors the column list of
+ * {@code services/account-service/src/main/resources/db/migration/V1__account.sql},
+ * which is the account context's own transcription of it, and the init script
+ * that carries the mirror records why a copy is preferable to the three
+ * alternatives it rejects.
+ *
  * <p>Assumptions: the reject stream has no copybook at all, which is why only
- * three are named for four tables. Its 430-byte layout is declared inline in
+ * three are named for the four tables this module owns. Its 430-byte layout is declared inline in
  * the posting program, as a 350-byte record beside an 80-byte trailer at that
  * program's lines 82 to 84, with the trailer decomposed at its lines 180 to
  * 182 into a four-digit reason and a 76-character description. A test looking
@@ -255,7 +344,7 @@
  * application context starts, with no PostgreSQL support registered. That
  * failure arrives at run time and not at build time, which is exactly why it
  * is written down where the tests that would meet it can be read: the symptom
- * is a container that starts, a schema that is never built, and four suites
+ * is a container that starts, a schema that is never built, and five suites
  * failing on absent tables.
  *
  * <h2>Keyset paging only: no offset, no page number, no total count</h2>
@@ -357,8 +446,9 @@
  * failure rather than as a silently skipped assertion. Both plugins are
  * configured by {@code services/pom.xml} and neither is declared by this
  * module, whose sole build plugin is the Spring Boot packaging plugin. The
- * {@code RepositoryIT} naming already matches Failsafe's default include
- * pattern, so no include configuration exists and none should be added.
+ * {@code RepositoryIT} and {@code AtomicityIT} names already match Failsafe's
+ * default include pattern, which is any class whose simple name ends
+ * {@code IT}, so no include configuration exists and none should be added.
  *
  * <p>Assumptions: both runners are left at their DEFAULT report directories,
  * {@code target/surefire-reports} and {@code target/failsafe-reports}, and the

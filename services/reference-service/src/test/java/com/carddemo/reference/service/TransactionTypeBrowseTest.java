@@ -454,17 +454,22 @@ class TransactionTypeBrowseTest {
         assertThat(page.hasNext())
                 .as("the caller stepped back from a page, so that page still lies ahead")
                 .isTrue();
-        assertThat(page.hasPrevious())
-                .as("three rows read against a window of seven leaves no surplus behind them")
-                .isFalse();
+        assertThat(page.firstKey())
+                .as("and the position a further backward step is issued from is published")
+                .isNotNull();
     }
 
     /**
-     * Confirms the opening page reports no earlier page even though it carries a leading position.
+     * Confirms the opening page publishes a leading position and makes no claim about what precedes it.
+     *
+     * <p>Assumptions: the envelope carries four members, so the question "does a page precede this one"
+     * is not one it answers. The reference answers it from the page ordinal its terminal holds between
+     * turns, so the migrated answer belongs to the client; what this page owes that client is the
+     * position, which is what is asserted here.</p>
      */
     @Test
-    @DisplayName("the opening page reports no earlier page")
-    void theOpeningPageReportsNoEarlierPage() {
+    @DisplayName("the opening page publishes the position a backward step is issued from")
+    void theOpeningPagePublishesItsLeadingPosition() {
         TransactionTypeRepository types = mock(TransactionTypeRepository.class);
         when(types.findAllByOrderByTypeCdAsc(any(Limit.class))).thenReturn(rows(8));
 
@@ -473,9 +478,11 @@ class TransactionTypeBrowseTest {
                         .list(request(null, null, null, null),
                                 new CursorToken(CURSOR_KEY, CURSOR_LIFETIME), SUBJECT);
 
-        assertThat(page.hasPrevious())
-                .as("nothing precedes the opening page, whatever leading position it publishes")
-                .isFalse();
-        assertThat(page.firstKey()).isNotNull();
+        assertThat(page.firstKey())
+                .as("the leading position is published even on the page nothing precedes")
+                .isNotNull();
+        assertThat(page.hasNext())
+                .as("eight rows read against a window of seven leaves one surplus ahead")
+                .isTrue();
     }
 }

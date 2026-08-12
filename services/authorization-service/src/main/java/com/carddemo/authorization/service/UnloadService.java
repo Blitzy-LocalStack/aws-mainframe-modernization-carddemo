@@ -302,12 +302,17 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>Trade-offs accepted</h2>
  *
- * <p>Trade-offs: the root walk is PAGED where the reference walk holds one root at a time, so this
- * class holds up to a page of summaries and one account's children at once. The page size is a batch
- * size and not a contract: the walk resumes from the last key it returned, so no page boundary is
- * observable in the output, and a reader must not depend on the figure. What is bought is one round
- * trip per page instead of one per root; what is given up is a working set proportional to the page
- * rather than to a single row.
+ * <p>Trade-offs: BOTH walks are PAGED where the reference walks hold one row at a time, so this class
+ * holds at most one page of summaries and one chunk of one account's children at once. Neither figure
+ * is a contract: each walk resumes from the last key it returned, under the same ordering, so no page
+ * or chunk boundary is observable in either output file and a reader must not depend on the figures.
+ * What is bought is one round trip per page instead of one per row; what is given up is a working set
+ * proportional to a page rather than to a single row -- and, critically, NOT proportional to the
+ * database. Refactoring Rationale: this paragraph said "one account's children" without qualification,
+ * which was accurate and was the problem: the inner read was unbounded, so the outer page cap bounded
+ * only how many parents were resident while a single account with a large history was still loaded
+ * whole. Both halves are now bounded, and the inner bound is recorded here rather than only at the
+ * method, because the memory characteristic of the class is what a reader consults this section for.
  *
  * <p>Trade-offs: the export is written row by row to the two streams as the walk proceeds, rather than
  * assembled and then written. A failure part-way therefore leaves both files partially written, which
@@ -363,6 +368,23 @@ public class UnloadService {
      * trade-off records.
      */
     private static final int SUMMARY_PAGE_SIZE = 200;
+
+    /**
+     * The number of one account's authorizations fetched per step of the inner walk.
+     *
+     * <p>Assumptions: this is independent of {@link #SUMMARY_PAGE_SIZE} above, because the two bound
+     * different things. That figure caps how many SUMMARIES are held at once; this one caps how many
+     * CHILDREN are held at once beneath any single summary. A single figure could not serve both: the
+     * outer page is sized for a walk that writes two records per summary, while the inner walk is a
+     * bulk read of one account's whole history and is sized so that a large history costs a handful of
+     * queries rather than one per few rows.
+     *
+     * <p>Assumptions: five hundred matches {@code PurgeJob}'s own child chunk exactly, and the
+     * agreement is deliberate rather than coincidental. Both classes walk the same table beneath the
+     * same parent in the same descending order, so two different figures would invite a reader to look
+     * for a reason one walk reads more per query than the other when there is none.
+     */
+    private static final int CHILD_CHUNK_SIZE = 500;
 
     /**
      * The export shape used when a caller names none.
@@ -474,7 +496,7 @@ public class UnloadService {
             }
             long resumeFrom = position;
             for (PendingAuthSummary summary : page) {
-                Long accountId = exportableAccountId(summary, outcome.rootsSkipped());
+                Long accountId = exportableAccountId(summary, outcome);
                 if (accountId == null) {
                     outcome = outcome.andRootSkipped();
                     continue;
@@ -495,8 +517,18 @@ public class UnloadService {
             //       the table, whose key column is declared not null and therefore cannot answer that
             //       predicate at all; it is reachable only from a summary source that is not the table.
             if (resumeFrom == position) {
-                LOG.warn("unload walk ended at resumeKey={} because the page it received carried no"
-                        + " account identifier to resume from; rootsSkipped={}", Long.valueOf(position),
+                // WHY : ⚠️ Refactoring Rationale: this line reported the resume KEY, which is an account
+                //       identifier and therefore exactly the value AAP section 0.7.8 requires this
+                //       migration to stop putting where the baseline put it. It is replaced by three
+                //       run-local counts. Nothing diagnostic is lost: the condition is that a page
+                //       carried no resumable key at all, so the useful facts are how far the run had
+                //       got and how much it had passed over, and the counts state both. An operator
+                //       who needs the row can reach it from the run's own output, which is the
+                //       artefact this job exists to produce.
+                LOG.warn("event=authorization.unload.walk-ended-without-resume-key rootsWritten={}"
+                        + " childrenWritten={} rootsSkipped={}",
+                        Integer.valueOf(outcome.rootsWritten()),
+                        Integer.valueOf(outcome.childrenWritten()),
                         Integer.valueOf(outcome.rootsSkipped()));
                 return outcome;
             }
@@ -523,23 +555,40 @@ public class UnloadService {
      * test, and testing nothing would leave the branch untranscribed.
      *
      * @param summary the summary row the walk has reached; must not be {@code null}
-     * @param alreadySkipped how many roots the run has skipped before this one, reported so the log
-     *     line names the position of this occurrence within the run
+     * @param soFar the counters the run has accumulated before reaching this row; the skipped count it
+     *     carries plus one is the run-local ordinal the diagnostic reports, which is the ONLY locator
+     *     that appears -- no identifier of any subject appears on this path
      * @return the account identifier to export the root under, or {@code null} when the row carries
      *     none and must be skipped
-     * @throws NullPointerException if {@code summary} is {@code null}
+     * @throws NullPointerException if {@code summary} or {@code soFar} is {@code null}
      */
-    private static Long exportableAccountId(PendingAuthSummary summary, int alreadySkipped) {
+    private static Long exportableAccountId(PendingAuthSummary summary, UnloadOutcome soFar) {
         Objects.requireNonNull(summary, "summary must not be null");
+        Objects.requireNonNull(soFar, "soFar must not be null");
         Long accountId = summary.getAccountId();
         if (accountId == null) {
-            // WHY : Assumptions: the report names the customer identifier and not the account, because
-            //       the account is exactly the value that is absent. It is the only other identifier
-            //       the summary segment carries -- cpy/CIPAUSMY.cpy declares it at L20 -- so it is the
-            //       one handle an operator has on which row was passed over.
-            LOG.warn("unload skipped a summary row carrying no account identifier, so neither it nor"
-                    + " its authorizations were exported; customerId={} skippedSoFar={}",
-                    summary.getCustomerId(), Integer.valueOf(alreadySkipped));
+            // WHY : ⚠️ Refactoring Rationale: this line named the CUSTOMER IDENTIFIER, and the paragraph
+            //       that stood here argued for it -- that the account identifier is the value that is
+            //       absent, so the customer identifier is "the one handle an operator has on which row
+            //       was passed over". That argument justified emitting a subject identifier into a log
+            //       stream, which is the disclosure AAP section 0.7.8 narrows rather than a diagnostic
+            //       this module is entitled to. The rationale is inverted accordingly: the omission is
+            //       REQUIRED, and no identifier of any subject may appear on this path.
+            // WHY : Assumptions: what replaces it is a run-local ORDINAL, being the count of rows this
+            //       run had already passed over. That is enough to distinguish two occurrences within
+            //       one run and to tell an operator how many rows are affected, which are the two
+            //       questions the line is read for. Trade-offs: it cannot be used to look the row up,
+            //       and that is the point -- a log line that could would be a second, unaudited copy
+            //       of the identifier the response and export paths already mask.
+            // WHY : Assumptions: the reason text names no identifier NOUN either, not merely no value.
+            //       AuthorizationDiagnosticDisclosureTest scans these templates for the two nouns in any
+            //       spelling, so a message that described the absent value by name would fail it -- which
+            //       is the intended outcome, because the next edit after naming the noun is naming the
+            //       value beside it.
+            LOG.warn("event=authorization.unload.root-skipped-unexportable skippedOrdinal={}"
+                    + " reason=the summary row carries no exportable key, so neither it nor its"
+                    + " authorizations were written",
+                    Integer.valueOf(soFar.rootsSkipped() + 1));
         }
         return accountId;
     }
@@ -607,11 +656,40 @@ public class UnloadService {
      * L284</strong> and {@code cbl/DBUNLDGS.CBL} <strong>L263 to L295</strong> -- which repeats a
      * get-next-within-parent until the parent's children are exhausted.
      *
-     * <p>Assumptions: the whole child set of one account is read in one call, because both reference
-     * loops run to exhaustion within the parent with no page boundary anywhere in them, and the
-     * ordering the read declares is the sequence those loops return. Paging the children would
-     * introduce a boundary the reference walk does not have inside a group whose order the output
-     * depends on.
+     * <p>Assumptions: the children are read in STRICT KEYSET CHUNKS of {@value #CHILD_CHUNK_SIZE} and
+     * each chunk is written before the next is read, so the memory this method needs is set by that
+     * figure and not by the account's history. The reference loop holds ONE authorization at a time --
+     * it is a get-next-within-parent repeated until the parent is exhausted -- so a bounded read is
+     * closer to it than an unbounded one, not further from it.
+     *
+     * <p>Refactoring Rationale: this method read the whole child set of one account in a single
+     * unbounded query, and its own documentation defended that by arguing that "paging the children
+     * would introduce a boundary the reference walk does not have inside a group whose order the output
+     * depends on". That argument was wrong in a way worth recording, because it is the argument a
+     * reader would reach for again. A keyset chunk introduces no boundary into the OUTPUT at all: each
+     * chunk resumes from the last key of the one before, under the same descending order, so the
+     * records written are the same records in the same sequence and the file is byte-identical. The
+     * only thing the chunk bounds is how many rows are resident at once. What the unbounded read did
+     * introduce was a footprint set by data volume on a path an operator invokes against production --
+     * the outer walk was already paged at {@value #SUMMARY_PAGE_SIZE} summaries, so the page cap
+     * bounded how many parents were held while placing no bound at all on how many children were, and
+     * one account with a large history defeated the outer cap entirely. {@code PurgeJob} had already
+     * been corrected for the identical defect over the identical table, and this method now uses the
+     * same two bounded repository reads in the same order.
+     *
+     * <p>Assumptions: the chunk boundary can never fall inside a record or between a root and its
+     * children. Each chunk is a whole number of rows, every row is encoded and written before the next
+     * chunk is requested, and the root has already been written by the caller before this method is
+     * entered -- so the interleaving of the two files is unchanged from the unbounded form.
+     *
+     * <p>Trade-offs: the walk issues one query per chunk plus one that returns nothing, where the
+     * unbounded form issued exactly one. That is accepted because the extra queries are proportional to
+     * the data actually exported rather than to the number of accounts, and because a bulk export is
+     * throughput-bound on the file it writes rather than on query count. Alternatives Considered:
+     * streaming the read instead, which some other walks in this migration use. Rejected here because
+     * the two bounded reads already exist on the repository, are already exercised by its integration
+     * test, and were already documented as the safe way to page this table under concurrent insertion
+     * and expiry -- reaching for a second mechanism would put two paging disciplines over one table.
      *
      * @param form which record shape the child file carries; must not be {@code null}
      * @param childFile the stream the records are written to; must not be {@code null}
@@ -620,12 +698,45 @@ public class UnloadService {
      * @throws UncheckedIOException if the stream cannot be written
      */
     private int writeChildren(UnloadForm form, OutputStream childFile, Long accountId) {
-        List<PendingAuthDetail> children =
-                this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId);
-        for (PendingAuthDetail child : children) {
-            write(childFile, childRecord(form, child));
+        int written = 0;
+        Integer afterDate = null;
+        Integer afterTime = null;
+        while (true) {
+            // WHY : Assumptions: the FIRST chunk uses the account-only read and every later chunk uses
+            //       the strictly-older read, which is the same two-call shape PurgeJob uses over this
+            //       table. The first chunk cannot use the older-than read because there is no position
+            //       to resume from, and a sentinel position would have to be a date-and-time pair above
+            //       every real one -- a value this schema does not define and that a future row could
+            //       exceed.
+            List<PendingAuthDetail> chunk = afterDate == null
+                    ? this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(accountId,
+                            Limit.of(CHILD_CHUNK_SIZE))
+                    : this.details.findOlderThan(accountId, afterDate, afterTime,
+                            Limit.of(CHILD_CHUNK_SIZE));
+            if (chunk.isEmpty()) {
+                break;
+            }
+            for (PendingAuthDetail child : chunk) {
+                // WHY : Assumptions: the cursor advances to EVERY row's key, not only the last one, so
+                //       it holds the position of the row most recently written even if the loop were
+                //       ever to leave early. Reading the pair off chunk.getLast() instead would be one
+                //       statement, and would be a position ahead of the last record actually written
+                //       the moment anything was added between the write and the end of the loop.
+                afterDate = child.getId().getAuthDate();
+                afterTime = child.getId().getAuthTime();
+                write(childFile, childRecord(form, child));
+                written++;
+            }
+            // WHY : Assumptions: a short chunk ends the walk without a further query, because a chunk
+            //       smaller than the limit is proof the ordering is exhausted. The empty-chunk break
+            //       above is still required and is not redundant: an account whose history is an exact
+            //       multiple of the chunk size yields a full final chunk, so the walk must ask once
+            //       more and be told nothing remains.
+            if (chunk.size() < CHILD_CHUNK_SIZE) {
+                break;
+            }
         }
-        return children.size();
+        return written;
     }
 
     /**
@@ -722,7 +833,48 @@ public class UnloadService {
          * opt-in and not the default, and why it is kept at all rather than being treated as a subset
          * of the prefixed one.
          */
-        SEQUENTIAL
+        SEQUENTIAL;
+
+        /**
+         * The value an operator or the orchestrator writes to select each form, in declaration order.
+         *
+         * <p>Assumptions: the wire values are LOWER CASE and therefore differ from the constant names,
+         * which is deliberate rather than incidental: every other operator-facing option in this module
+         * is written in lower case, and a form option that alone required capitals would be the one an
+         * operator mistyped. The list is published so that the refusal below and the usage text can both
+         * name the admitted values from the same source.</p>
+         */
+        public static final List<String> WIRE_VALUES = List.of("prefixed", "sequential");
+
+        /**
+         * Converts the value an operator wrote into the form it selects.
+         *
+         * <p>Assumptions: the conversion lives HERE, on the type that owns the two forms, and is called
+         * both by the argument validation that runs before the application context starts and by the task
+         * that performs the export. Alternatives Considered: parsing in the runner and mapping again in
+         * the task. Rejected because it would state the set of admitted values twice, and the copy that
+         * drifts is the one an operator meets -- a value the runner accepts and the task cannot map fails
+         * after a container has started, reported as a job failure rather than as a mistyped argument.</p>
+         *
+         * @param value the wire value to convert; must not be {@code null}
+         * @return the selected form, never {@code null}
+         * @throws IllegalArgumentException if {@code value} is not one of {@link #WIRE_VALUES}
+         * @throws NullPointerException if {@code value} is {@code null}
+         */
+        public static UnloadForm fromRequestParameter(String value) {
+            Objects.requireNonNull(value, "value must not be null");
+            int ordinal = WIRE_VALUES.indexOf(value);
+            if (ordinal < 0) {
+                throw new IllegalArgumentException(
+                        "unknown extract form; the published forms are " + String.join(", ", WIRE_VALUES));
+            }
+            // WHY : Assumptions: the position in the published list IS the constant's ordinal, which the
+            //       list's declaration order fixes and which the export round-trip test pins. Matching by
+            //       an upper-cased valueOf was rejected because it would silently admit any future
+            //       constant added to this enum before it had a documented wire value and a consumer that
+            //       could read what it produces.
+            return values()[ordinal];
+        }
     }
 
     /**

@@ -133,15 +133,14 @@ public class DisclosureGroupController {
     /**
      * The shortest account group the contract admits.
      *
-     * <p>Refactoring Rationale: the three bounds and three expressions declared here and below are
-     * transcribed from the schemas this operation's path parameters reference in
-     * {@code openapi/reference-api.yaml} -- {@code AccountGroupId}, {@code TransactionTypeCode} and
-     * {@code TransactionCategoryCode}. They are declared because the handler previously bound all three
-     * segments as unconstrained text, so a malformed segment reached the identity type in the domain
-     * layer, whose refusal is a bare {@code IllegalArgumentException}. The shared advice tests for the
-     * caller-refusal subtype and deliberately not for its supertype, so that refusal rendered as a 500 --
-     * telling a caller its own malformed path was the service's fault -- while the contract publishes 400
-     * for exactly this case.</p>
+     * <p>Assumptions: the three bounds and three expressions declared here and below are transcribed from
+     * the schemas this operation's path parameters reference in {@code openapi/reference-api.yaml} --
+     * {@code AccountGroupId}, {@code TransactionTypeCode} and {@code TransactionCategoryCode}. They are
+     * declared at the boundary because a segment bound as unconstrained text reaches the identity type in
+     * the domain layer, whose refusal is a bare {@code IllegalArgumentException}; the shared advice tests
+     * for the caller-refusal subtype and deliberately not for its supertype, so such a refusal renders as
+     * a 500 -- telling a caller its own malformed path was the service's fault -- while the contract
+     * publishes 400 for exactly this case.</p>
      */
     private static final int ACCT_GROUP_ID_MIN_WIDTH = 1;
 
@@ -159,13 +158,12 @@ public class DisclosureGroupController {
      * The exact width of a transaction type, from the {@code TransactionTypeCode} schema.
      *
      * <p>Refactoring Rationale: the four constants declared here and below are ALIASES for the values the
-     * two entities that own those codes publish, rather than copies of the expressions. They were copies
-     * first, and the copies were withdrawn once a second and a third boundary needed the same two
-     * expressions: three transcriptions of one domain, applied at three different addresses, can drift into
-     * disagreeing without anything failing, because each is only ever exercised by requests to its own
-     * route. The aliases are kept as named members rather than the references being inlined into the
-     * annotations, so that the middle and third components of this key still read as this operation's own
-     * contract at the point of use.</p>
+     * two entities that own those codes publish, rather than copies of the expressions. Three boundaries
+     * need the same two expressions, and three transcriptions of one domain applied at three different
+     * addresses can drift into disagreeing without anything failing, because each is only ever exercised by
+     * requests to its own route. The aliases are kept as named members rather than the references being
+     * inlined into the annotations, so that the middle and third components of this key still read as this
+     * operation's own contract at the point of use.</p>
      *
      * <p>Assumptions: the two codes in this composite key ARE the transaction type and category codes --
      * {@code app/cpy/CVTRA02Y.cpy} names them {@code DIS-TRAN-TYPE-CD} at line 7 and
@@ -227,8 +225,8 @@ public class DisclosureGroupController {
      * <p>Assumptions: each segment is constrained to the schema its published path parameter references,
      * so a malformed segment is refused BEFORE the value reaches the domain identity type. The framework
      * raises its own method-validation failure, which the shared advice renders as the 400 this operation
-     * publishes with the offending segment named -- where the same value previously produced a 500 from a
-     * bare domain refusal the advice does not classify.</p>
+     * publishes with the offending segment named. Left unconstrained the same value would reach a bare
+     * domain refusal the advice does not classify, and answer 500.</p>
      *
      * <p>Refactoring Rationale: a miss on the account group asked for is an ORDINARY outcome of this
      * operation and answers 200, not 404. The reference paragraph settles that at line 422 of

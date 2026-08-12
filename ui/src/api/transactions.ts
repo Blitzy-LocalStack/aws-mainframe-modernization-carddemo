@@ -29,9 +29,40 @@
  * mistake this boundary can make that money depends on.
  */
 
-import { getApiClient } from './client';
-import { requestPath } from './types';
-import type { ContractOperation, PageDirection, PageResponse } from './types';
+import { getApiClient, requestPath } from './client';
+import type {
+  BillPaymentOutcome,
+  BillPaymentPreview,
+  BillPaymentRequest,
+  BillPaymentResponse,
+  ContractOperation,
+  PageResponse,
+  TransactionAddOutcome,
+  TransactionAddPreview,
+  TransactionCreateRequest,
+  TransactionCreated,
+  TransactionDetail,
+  TransactionListQuery,
+  TransactionSummary,
+} from './types';
+
+/*
+ * WHY : Refactoring Rationale: the ledger wire shapes are RE-EXPORTED from ./types rather than declared
+ *       here, so every consumer's import path is unchanged while each shape has one definition.
+ */
+export type {
+  TransactionSummary,
+  TransactionDetail,
+  TransactionCreateRequest,
+  TransactionAddPreview,
+  TransactionCreated,
+  TransactionAddOutcome,
+  BillPaymentRequest,
+  BillPaymentPreview,
+  BillPaymentResponse,
+  BillPaymentOutcome,
+  TransactionListQuery,
+} from './types';
 
 const LIST_TRANSACTIONS: ContractOperation = {
   method: 'GET',
@@ -43,6 +74,20 @@ const ADD_TRANSACTION: ContractOperation = {
   method: 'POST',
   path: '/api/v1/transactions',
   operationId: 'addTransaction',
+};
+
+/*
+ * WHY : Refactoring Rationale: the copy-last action is declared here because the service now publishes
+ *       it. `app/cbl/COTRN02C.cbl` binds it to PF5 at L146 and L147 and performs COPY-LAST-TRAN-DATA at
+ *       L471, and the migrated transcription existed with no route, no contract entry and no client --
+ *       so a documented baseline capability was unreachable. Declaring it here is what keeps this
+ *       manifest exhaustive against the contract, which `ui/src/api/contracts.test.ts` compares in both
+ *       directions.
+ */
+const COPY_LAST_TRANSACTION: ContractOperation = {
+  method: 'POST',
+  path: '/api/v1/transactions/copy-last',
+  operationId: 'copyLastTransaction',
 };
 
 const VIEW_TRANSACTION: ContractOperation = {
@@ -66,6 +111,7 @@ const PAY_ACCOUNT_BALANCE_IN_FULL: ContractOperation = {
 export const TRANSACTION_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   LIST_TRANSACTIONS,
   ADD_TRANSACTION,
+  COPY_LAST_TRANSACTION,
   VIEW_TRANSACTION,
   PAY_ACCOUNT_BALANCE_IN_FULL,
 ];
@@ -76,136 +122,27 @@ const HTTP_CREATED = 201;
 /** Matches the masked rendering a transaction detail must carry: twelve asterisks, four digits. */
 const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
-/**
- * One row of the transaction browse.
- *
- * Assumptions: FOUR members, matching `TransactionSummary` in the contract, and no card number among
- * them. The baseline list row shows the identifier, the originating timestamp, the description and the
- * amount; adding the card would disclose more per row than the screen it replaces disclosed, on a
- * response that returns a whole page at once.
- */
-export interface TransactionSummary {
-  readonly transactionId: string;
-  readonly originTimestamp: string;
-  readonly description: string;
-  readonly amount: string;
-}
-
-/**
- * One transaction in full, as the detail screen renders it.
- *
- * Assumptions: `cardNumber` is the MASKED rendering and `processTimestamp` is nullable, both exactly
- * as the contract declares. A transaction that has been accepted but not yet posted carries no
- * processing timestamp, so null here is a real state and not a missing value.
- */
-export interface TransactionDetail {
-  readonly transactionId: string;
-  readonly typeCode: string;
-  readonly categoryCode: string;
-  readonly source: string;
-  readonly description: string;
-  readonly amount: string;
-  readonly merchantId: string;
-  readonly merchantName: string;
-  readonly merchantCity: string;
-  readonly merchantZip: string;
-  readonly cardNumber: string;
-  readonly originTimestamp: string;
-  readonly processTimestamp: string | null;
-  readonly returnMessage?: string | null | undefined;
-}
-
-/**
- * The fields the create operation accepts.
- *
- * Assumptions: `accountId` and `cardNumber` are both optional and exactly one identifies the card to
- * post against, which is why neither is required by the contract. `confirmation` is optional too: its
- * absence is the unconfirmed first pass that answers 200 with nothing written.
- */
-export interface TransactionCreateRequest {
-  readonly accountId?: string | undefined;
-  readonly cardNumber?: string | undefined;
-  readonly typeCode: string;
-  readonly categoryCode: string;
-  readonly source: string;
-  readonly description: string;
-  readonly amount: string;
-  readonly originDate: string;
-  readonly processDate: string;
-  readonly merchantId: string;
-  readonly merchantName: string;
-  readonly merchantCity: string;
-  readonly merchantZip: string;
-  readonly confirmation?: string | undefined;
-}
-
 /** The unconfirmed outcome of a create: the amount as the service read it, and nothing written. */
-export interface TransactionAddPreview {
-  readonly amount: string;
-  readonly written: boolean;
-  readonly returnMessage?: string | null | undefined;
-}
 
 /** The confirmed outcome of a create: the identifier the service assigned. */
-export interface TransactionCreated {
-  readonly transactionId: string;
-  readonly amount: string;
-  readonly returnMessage: string;
-}
-
-/**
- * Which of the two create outcomes occurred, discriminated so neither can be read as the other.
- *
- * Assumptions: the discriminant is derived from the HTTP status and not from the `written` member of
- * the preview shape. Both are present in the 200 body, and the status is the one the contract makes
- * normative -- 201 for a written record -- so deriving from it keeps this client agreeing with the
- * contract rather than with one property of one body.
- */
-export type TransactionAddOutcome =
-  | { readonly outcome: 'PREVIEWED'; readonly preview: TransactionAddPreview }
-  | { readonly outcome: 'CREATED'; readonly created: TransactionCreated };
 
 /** The fields the bill-payment operation accepts. */
-export interface BillPaymentRequest {
-  readonly accountId: string;
-  readonly confirmation?: string | undefined;
-}
 
 /** The unconfirmed outcome of a bill payment: the balance that would be paid, and nothing paid. */
-export interface BillPaymentPreview {
-  readonly accountId: string;
-  readonly payableBalance: string;
-  readonly paid: boolean;
-  readonly returnMessage?: string | null | undefined;
-}
-
-/** The confirmed outcome of a bill payment: the transaction written and the balance after it. */
-export interface BillPaymentResponse {
-  readonly transactionId: string;
-  readonly accountId: string;
-  readonly currentBalance: string;
-  readonly paid: boolean;
-  readonly returnMessage?: string | null | undefined;
-}
-
-/** Which of the two bill-payment outcomes occurred, discriminated for the same reason as a create. */
-export type BillPaymentOutcome =
-  | { readonly outcome: 'PREVIEWED'; readonly preview: BillPaymentPreview }
-  | { readonly outcome: 'PAID'; readonly payment: BillPaymentResponse };
 
 /**
- * Criteria a transaction browse may narrow by.
+ * The confirmed outcome of a bill payment: the transaction written and the balance that was paid.
  *
- * Assumptions: the contract's only filter is an exact transaction identifier, so no free-text or
- * range criterion is offered here. The baseline browse screen accepts a starting identifier and
- * nothing else, and offering a criterion the service does not implement would fail at the edge with
- * 400 against a field the user was invited to fill.
+ * Refactoring Rationale: this said "the balance after it", and that is the opposite of what the member
+ * carries. `transaction-api.yaml` documents `currentBalance` as the balance as it stood BEFORE the
+ * payment, fixed by statement order in the reference: `app/cbl/COBIL00C.cbl` L193 moves the balance to
+ * the display field, L224 reuses the same untouched value as the transaction amount, L233 writes and only
+ * L234 subtracts. The figure after the payment is invariably zero, because this baseline pays the balance
+ * in full, so a caller rendering this value under the old description would have shown the operator a
+ * paid amount labelled as a remaining balance.
  */
-export interface TransactionListQuery {
-  readonly transactionIdFilter?: string | undefined;
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
+
+/** Which of the two bill-payment outcomes occurred, discriminated for the same reason as a create. */
 
 /**
  * Lists transactions, optionally starting from a given identifier.
@@ -290,11 +227,44 @@ export async function addTransaction(
 }
 
 /**
+ * Re-captures the most recently stored transaction as a new one, previewing or writing it.
+ *
+ * Assumptions: the request shape is the SAME one `addTransaction` takes, because the baseline reaches
+ * this action from the same screen with the same fields keyed. Eleven of those fields are overwritten
+ * from the copied record -- `app/cbl/COTRN02C.cbl` L480 to L493 -- so values supplied for them are
+ * replaced rather than merged; they stay required because the contract requires them, the baseline
+ * having validated the key fields at L473 against the screen the operator was already on.
+ * Assumptions: the outcome is discriminated from the HTTP status exactly as `addTransaction`
+ * discriminates it, because L495 re-enters PROCESS-ENTER-KEY and the copied capture is therefore
+ * written or prompted by the identical rule.
+ * @param {TransactionCreateRequest} request - The submission whose key fields select the account or
+ *   card and whose `confirmation` decides whether the copied capture is written.
+ * @returns {Promise<TransactionAddOutcome>} `CREATED` with the assigned identifier when the service
+ *   wrote the copied record, otherwise `PREVIEWED` with the amount it read.
+ * @throws {Error} If the request fails, including HTTP 400 for a field the service rejected, 404 for
+ *   an unknown card or account or for an empty table with no row to copy, and 409 for a concurrent
+ *   change.
+ */
+export async function copyLastTransaction(
+  request: TransactionCreateRequest,
+): Promise<TransactionAddOutcome> {
+  const response = await getApiClient().post<TransactionAddPreview | TransactionCreated>(
+    requestPath(COPY_LAST_TRANSACTION),
+    request,
+  );
+
+  if (response.status === HTTP_CREATED) {
+    return { outcome: 'CREATED', created: response.data as TransactionCreated };
+  }
+  return { outcome: 'PREVIEWED', preview: response.data as TransactionAddPreview };
+}
+
+/**
  * Pays an account's balance in full, either as an unconfirmed preview or as a confirmed write.
  * @param {BillPaymentRequest} request - The account, with `confirmation` set to a 'Y' answer to pay
  *   and omitted or set to 'N' to preview the payable balance.
- * @returns {Promise<BillPaymentOutcome>} `PAID` with the transaction written and the balance after
- *   it, otherwise `PREVIEWED` with the balance that would be paid.
+ * @returns {Promise<BillPaymentOutcome>} `PAID` with the transaction written and the balance that was
+ *   paid, otherwise `PREVIEWED` with the balance that would be paid.
  * @throws {Error} If the request fails, including HTTP 404 for an unknown account and 409 for a
  *   concurrent change.
  */
@@ -309,5 +279,18 @@ export async function payAccountBalanceInFull(
   if (response.status === HTTP_CREATED) {
     return { outcome: 'PAID', payment: response.data as BillPaymentResponse };
   }
-  return { outcome: 'PREVIEWED', preview: response.data as BillPaymentPreview };
+
+  // WHY : Assumptions: this branch carries NO assertion where the one above does, and the asymmetry is
+  //       a property of the two shapes rather than an oversight. Every member `BillPaymentPreview`
+  //       declares is one `BillPaymentResponse` also declares or leaves optional, so the response shape
+  //       is structurally assignable to the preview shape and the union already satisfies this slot; an
+  //       assertion here would be refused by the type-aware lint rule as unnecessary. The reverse does
+  //       not hold, because the response declares `transactionId` and `currentBalance` that the preview
+  //       has no member for, which is why the branch above must narrow explicitly.
+  // WHY : Assumptions: the discriminator is the STATUS and not a member of the body, because that is
+  //       what the published contract discriminates on -- 201 with a required `Location` header for the
+  //       turn that moved money, 200 for the three that did not. Reading `paid` from the body instead
+  //       would work today and would silently start reporting a payment if a future body ever carried
+  //       that member set on a non-paying turn.
+  return { outcome: 'PREVIEWED', preview: response.data };
 }

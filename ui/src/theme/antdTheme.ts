@@ -106,8 +106,8 @@ export const cardDemoTheme: ThemeConfig = {
    * three-step gap hierarchy collapses to two steps. All seven of those tokens
    * are snaps whose recorded rationale is the nearest step on the system's own
    * scale, and compact moves that scale out from under all seven at once while
-   * changing no colour and no font family, so the audit record in `tokens.ts`
-   * would no longer describe what the theme produces.
+   * changing no colour and no font family, leaving the record in `tokens.ts`
+   * describing something the theme does not produce.
    *
    * Trade-offs: the density that made compact attractive is answered instead by
    * the recorded G1 resolution — a responsive layout, with two-column description
@@ -196,12 +196,10 @@ export const cardDemoTheme: ThemeConfig = {
    * Assumptions: the fixed-pitch requirement is met by the default rather than by
    * an override, which is why it is recorded here as reasoning and not as an
    * entry. Column alignment was free on the source terminal because its character
-   * cell grid is monospaced, and the baseline leans on that: 27 field definitions
-   * carry right-justification and 2 more carry it with zero-fill, and 5 money
-   * fields in `app/bms/COACTVW.bms` — at lines 120, 141, 162, 174 and 195, on the
-   * credit limit, cash credit limit, current balance and the two cycle totals —
-   * carry a decimal edit mask as well as right-justification. In a proportional
-   * face those 29 columns no longer line up on the decimal point. The token the
+   * cell grid is monospaced, and the baseline leans on that: 29 field definitions
+   * carry right-justification, five of them money fields in `app/bms/COACTVW.bms`
+   * carrying a decimal edit mask as well. In a proportional face those columns stop
+   * lining up on the decimal point. The token the
    * bridge assigns to that data already resolves to a monospaced stack at the
    * pinned version, and neither algorithm considered above alters it, so setting
    * it would restate what the library supplies. Money also reaches the browser as
@@ -211,21 +209,18 @@ export const cardDemoTheme: ThemeConfig = {
    * to be read as a column.
    *
    * Refactoring Rationale: the two entries below exist because two token names
-   * were deriving one rendered colour, which the bridge cannot fix by naming
-   * alone. At the pinned version the library's own seed sets the primary and the
-   * informational colour to the same value, so the 384 field definitions the
-   * source marks blue and the 157 it marks turquoise — 289 and 127 across the
-   * base 17 — resolved identically even though `tokens.ts` keeps them on two
-   * distinct names. A previous revision left the seed layer alone and recorded
-   * that collapse as an auditable consequence. That is withdrawn as inconsistent:
-   * the gap register states that the turquoise original is preserved, and the same
-   * collapse is rejected outright for the four pink fields on the grounds that
-   * "collapsing them erases exactly the distinction being migrated" — so
-   * accepting it for 157 fields while refusing it for 4 was indefensible. The
-   * seed layer is where the correction belongs, because the design-token
-   * reference's own rule is that the bridge sets the seed layer wherever a seed
-   * token expresses the role, precisely so that everything derived from it moves
-   * together.
+   * would otherwise derive one rendered colour, which the bridge cannot fix by
+   * naming alone. At the pinned version the library's own seed sets the primary and
+   * the informational colour to the same value, so the field definitions the source
+   * marks blue and those it marks turquoise resolve identically even though
+   * `tokens.ts` keeps them on two distinct names. Accepting that collapse is
+   * inconsistent with the gap register, which states that the turquoise original is
+   * preserved and rejects the same collapse outright for the four pink fields on the
+   * grounds that "collapsing them erases exactly the distinction being migrated" --
+   * accepting it for 157 fields while refusing it for 4 is indefensible. The seed
+   * layer is where the separation belongs, because the design-token reference's own
+   * rule is that the bridge sets the seed layer wherever a seed token expresses the
+   * role, precisely so that everything derived from it moves together.
    *
    * Alternatives Considered: two, and both are rejected. A bespoke turquoise hex
    * value, which is the literal the design-token reference forbids — it would have
@@ -233,8 +228,8 @@ export const cardDemoTheme: ThemeConfig = {
    * origin, could not be diffed against the library, and would survive a palette
    * change while everything around it moved. And overriding the derived
    * informational shades directly instead of the seed, which pins one shade of a
-   * ten-step ramp while the other nine keep deriving from a value it no longer
-   * agrees with. What is used instead is the design system's OWN cyan palette
+   * ten-step ramp while the other nine keep deriving from a value that shade
+   * contradicts. What is used instead is the design system's OWN cyan palette
    * anchor, read out of the library's default seed through the name recorded in
    * `BMS_SEED_PALETTE_ANCHORS`: it is the system's only cyan-family hue, it is a
    * settable seed token rather than a literal, and reading it here means the hue

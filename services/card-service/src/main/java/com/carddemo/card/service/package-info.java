@@ -9,7 +9,20 @@
  *
  * <p>The line counts below are the physical lengths of the reference
  * sources. Those sources are the specification for this package: they are
- * read and never modified.
+ * read and never modified. The roster is complete for this directory and is held
+ * to it mechanically:
+ *
+ * <pre>
+ * this directory: 6 java files = 5 classes + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: the roster previously closed at three classes and
+ * omitted {@code CardAdminViewService} and {@code CardVerificationValueCipher},
+ * both of which sat beside it. The marker line above is the form
+ * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures against this
+ * directory on every build, and the same test requires each member enumerated below
+ * to be a file here, so the next class that lands fails the build instead of
+ * silently falsifying this roster.
  *
  * <ul>
  *   <li>{@code CardListService} carries the paginated card browse, from
@@ -34,11 +47,25 @@
  *       transaction {@code CCUP}). That program commits in exactly one
  *       place, the {@code SYNCPOINT} at line 470, and that single commit
  *       point is the one transaction boundary this package reproduces.</li>
+ *   <li>{@code CardAdminViewService} carries the administrative detail read, which is
+ *       the one path in this context that discloses a whole card number rather than
+ *       its last four digits. Assumptions: it is a class of its own rather than a
+ *       flag on {@code CardViewService}, because the widest disclosure this context
+ *       performs should have one entry point that a reader and a filter-chain rule
+ *       can both name; a boolean parameter would make the disclosure decision a
+ *       property of a call site instead.</li>
+ *   <li>{@code CardVerificationValueCipher} enciphers and deciphers the stored
+ *       verification value {@code CARD-CVV-CD PIC 9(03)}, which the baseline holds in
+ *       the clear inside the 150-byte record. Assumptions: it is a service rather
+ *       than a mapper or a domain type because it holds key material and reaches a
+ *       key-management client, and no endpoint of this context returns the value it
+ *       protects -- the cipher exists so the column can be written and compared, not
+ *       so it can be published.</li>
  * </ul>
  *
  * <h2>The record contract every class here operates on</h2>
  *
- * <p>All three classes work on the 150-byte {@code CARD-RECORD} declared at
+ * <p>Every read and write path here works on the 150-byte {@code CARD-RECORD} declared at
  * {@code app/cpy/CVACT02Y.cpy} line 4: {@code CARD-NUM PIC X(16)},
  * {@code CARD-ACCT-ID PIC 9(11)}, {@code CARD-CVV-CD PIC 9(03)},
  * {@code CARD-EMBOSSED-NAME PIC X(50)},

@@ -286,15 +286,33 @@ jobs:
           aws ecr get-login-password --region "${{ vars.CARDDEMO_AWS_REGION }}" |
             docker login --username AWS --password-stdin "$registry"
 
+          # WHY : Refactoring Rationale: the third column is the build CONTEXT, and for
+          #       the eight service rows it read `services` and had to become `.`. Every
+          #       service Dockerfile is written against the repository root -- it copies
+          #       services/<name>/pom.xml and the unpublished services/common-lib source,
+          #       config/checkstyle for its inherited documentation gate, and
+          #       config/docker for the shared entry point and the database trust-anchor
+          #       installer -- so with `services` as the context none of config/ is inside
+          #       the context at all and the build fails at the first COPY of it, with
+          #       "/config/docker/generate-listener-material.sh: not found". Measured by
+          #       running that exact build. This step is the one that produces the
+          #       artifacts that ship, so the divergence meant no deployment could reach
+          #       its first push; services-ci.yml passes `.` for the same eight files and
+          #       each Dockerfile's own header states the contract.
+          # WHY : Assumptions: the ui and data-migration rows keep their own narrower
+          #       contexts and are correct as they stand. Each of those images copies
+          #       nothing from outside its own tree and each carries its own
+          #       .dockerignore at that context root, which is also why the root
+          #       .dockerignore governs exactly the eight service builds.
           cat > "$RUNNER_TEMP/carddemo-images.tsv" <<'IMAGES'
-          auth-service	services/auth-service/Dockerfile	services
-          account-service	services/account-service/Dockerfile	services
-          card-service	services/card-service/Dockerfile	services
-          transaction-service	services/transaction-service/Dockerfile	services
-          reference-service	services/reference-service/Dockerfile	services
-          batch-service	services/batch-service/Dockerfile	services
-          authorization-service	services/authorization-service/Dockerfile	services
-          reporting-service	services/reporting-service/Dockerfile	services
+          auth-service	services/auth-service/Dockerfile	.
+          account-service	services/account-service/Dockerfile	.
+          card-service	services/card-service/Dockerfile	.
+          transaction-service	services/transaction-service/Dockerfile	.
+          reference-service	services/reference-service/Dockerfile	.
+          batch-service	services/batch-service/Dockerfile	.
+          authorization-service	services/authorization-service/Dockerfile	.
+          reporting-service	services/reporting-service/Dockerfile	.
           ui	ui/Dockerfile	ui
           data-migration	data-migration/Dockerfile	data-migration
           IMAGES
@@ -335,29 +353,200 @@ jobs:
       #       local.telemetry_collector_image_tag in both roots, and NOT this
       #       release's commit tag. The artifact is not built here, so tagging it
       #       with a CardDemo commit would claim a provenance it does not have.
-      #       Assumptions: the push is unconditional rather than gated on the image
-      #       being absent. A re-push of identical content is a no-op at the layer
-      #       level, whereas a conditional would need a describe-images call whose
-      #       "not found" path is indistinguishable from a permissions failure.
-      #       Trade-offs: the source reference is a mutable version TAG rather than a
-      #       digest, so the mirror inherits whatever that tag points at upstream on
-      #       the day it is copied. Accepted because the tag is an immutable release
-      #       tag by upstream convention and because the mirror repository is itself
-      #       configured for immutable tags, so a subsequent copy of different
-      #       content under the same tag is refused by the registry rather than
-      #       silently accepted.
+      #       Refactoring Rationale: the push was UNCONDITIONAL, on the reasoning that
+      #       "a re-push of identical content is a no-op at the layer level" and that a
+      #       conditional would need a describe-images call whose "not found" path is
+      #       indistinguishable from a permissions failure. The first half is wrong for
+      #       this registry and the second half is answerable. infra/modules/ecr sets
+      #       image_tag_mutability to IMMUTABLE, so re-pushing an existing tag is not a
+      #       no-op -- the registry refuses it with ImageTagAlreadyExistsException -- and
+      #       because the collector tag is a fixed upstream version rather than this
+      #       release's commit, EVERY deployment after the first pushed the same tag
+      #       again. The failure therefore did not depend on anything changing: the
+      #       second deployment of any release broke here, before the apply. The two
+      #       "not found" cases are also distinguishable, because the API names the
+      #       exception, and the check below tests for that name rather than for a
+      #       non-zero status.
+      #       Refactoring Rationale: the source reference was a mutable version TAG,
+      #       accepted on the reasoning that upstream release tags are immutable by
+      #       convention. A convention is not a control, and the artifact this pulls is
+      #       the one container attached to every workload, so the pull now names the
+      #       reviewed OCI index DIGEST and the tag is used only as the mirror's label.
+      #       Assumptions: the digest below and local.telemetry_collector_image_tag in
+      #       both roots describe the same upstream artifact, and a gate in
+      #       .github/workflows/infra-ci.yml asserts the tag halves agree.
+      #       Assumptions: the mirror's own digest is NOT the upstream digest. This
+      #       copies through the local daemon, which resolves one platform manifest out
+      #       of the upstream index, so the pushed manifest is a different object with a
+      #       different digest. That is why the value recorded for Terraform is read
+      #       back from the registry rather than reused from the pull.
       - name: Mirror the pinned telemetry collector image into the private registry
         shell: bash
         run: |
           set -euo pipefail
           repos="$(cat deploy-reports/ecr-repositories.json)"
           collector_repository="$(jq -er '."aws-otel-collector"' <<<"$repos")"
-          collector_tag="v0.48.0"
-          upstream="public.ecr.aws/aws-observability/aws-otel-collector:${collector_tag}"
+          collector_repository_name="${collector_repository#*/}"
+          collector_tag="v0.49.0"
+          collector_digest="sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
+          upstream="public.ecr.aws/aws-observability/aws-otel-collector@${collector_digest}"
+          mirror="${collector_repository}:${collector_tag}"
 
-          docker pull "$upstream"
-          docker tag "$upstream" "${collector_repository}:${collector_tag}"
-          docker push "${collector_repository}:${collector_tag}"
+          # WHY : Assumptions: a describe-images failure is classified by the exception
+          #       the API names, not by its exit status. ImageNotFoundException means the
+          #       tag is absent and the mirror has work to do; anything else -- an access
+          #       denial, a throttle, a missing repository -- must fail the deployment
+          #       rather than be read as "absent" and turned into a push that then fails
+          #       for a second reason. This is what the previous comment treated as
+          #       impossible to distinguish.
+          existing=""
+          if describe_output="$(aws ecr describe-images \
+                --repository-name "$collector_repository_name" \
+                --image-ids "imageTag=${collector_tag}" \
+                --query 'imageDetails[0].imageDigest' --output text 2>describe.err)"; then
+            existing="$describe_output"
+          elif grep -q 'ImageNotFoundException' describe.err; then
+            existing=""
+          else
+            echo "[deploy] describe-images failed for ${collector_repository_name}:${collector_tag}" >&2
+            cat describe.err >&2
+            rm -f describe.err
+            exit 1
+          fi
+          rm -f describe.err
+
+          if [ -n "$existing" ]; then
+            echo "[deploy] mirror already holds ${mirror} at ${existing}; skipping the push"
+            mirror_digest="$existing"
+          else
+            docker pull "$upstream"
+            docker tag "$upstream" "$mirror"
+            docker push "$mirror"
+            mirror_digest="$(aws ecr describe-images \
+              --repository-name "$collector_repository_name" \
+              --image-ids "imageTag=${collector_tag}" \
+              --query 'imageDetails[0].imageDigest' --output text)"
+            echo "[deploy] mirrored ${upstream} to ${mirror} at ${mirror_digest}"
+          fi
+
+          # WHY : Assumptions: the digest is merged into the SAME image_digests object
+          #       the built images use, so the task definitions name the sidecar by
+          #       digest exactly as they name a service. Both roots declare
+          #       aws-otel-collector as an admissible key and prefer a digest when one is
+          #       present, so a plan run before any mirror exists still resolves the tag
+          #       form instead of failing on a missing key.
+          root="infra/envs/${{ inputs.environment }}"
+          jq --arg digest "$mirror_digest" \
+            '.image_digests["aws-otel-collector"] = $digest' \
+            "$root/deployment.auto.tfvars.json" > "$root/deployment.auto.tfvars.json.tmp"
+          mv "$root/deployment.auto.tfvars.json.tmp" "$root/deployment.auto.tfvars.json"
+          jq --arg digest "$mirror_digest" \
+            '. + {"aws-otel-collector": $digest}' \
+            deploy-reports/image-digests.json > deploy-reports/image-digests.json.tmp
+          mv deploy-reports/image-digests.json.tmp deploy-reports/image-digests.json
+
+      # WHY : This gate exists because scan-on-push produced findings that nothing read.
+      #       infra/modules/ecr enables image_scanning_configuration.scan_on_push for every
+      #       repository, and its own comment records the limit of that setting: the scan
+      #       runs after the push has already succeeded, so it is not a push-blocking
+      #       control. Nothing downstream consumed the result either, which left the
+      #       registry generating a vulnerability report per image and the deployment
+      #       proceeding regardless of what it said. This step is the missing consumer:
+      #       it waits for each pushed image's scan and refuses the deployment on a
+      #       CRITICAL or HIGH finding.
+      #       Assumptions: it runs BEFORE the apply and after every push, which is the
+      #       only window in which the finding is both available and still actionable --
+      #       the images exist, so they can be scanned, and no task definition names them
+      #       yet, so refusing costs nothing but a release.
+      #       Alternatives Considered: registry-level Amazon Inspector enhanced scanning
+      #       instead. Rejected here for the reason infra/modules/ecr records for
+      #       aws_ecr_registry_scanning_configuration -- it is one account-wide,
+      #       region-wide object that two environment roots would each declare and each
+      #       apply would revert the other -- and because enhanced scanning is continuous
+      #       and asynchronous, so it reports on an image after a deployment rather than
+      #       gating one.
+      #       Alternatives Considered: an override input so an operator can deploy past a
+      #       finding. Deliberately NOT added: an override that exists is an override that
+      #       is used, and the remedy this repository already has is better -- every base
+      #       image is digest-pinned, so the answer to a finding is to advance the pin and
+      #       rebuild, which is a reviewed change rather than a waived one.
+      #       Trade-offs: a new advisory published against an unchanged base image can
+      #       block a deployment of unrelated code, and that is the accepted cost of the
+      #       gate. It fails with the repository, the tag and the severity counts, so the
+      #       required action -- advance a base-image or collector pin -- is legible from
+      #       the log rather than requiring a console visit.
+      #       Assumptions: the deployment role needs ecr:DescribeImageScanFindings in
+      #       addition to the ECR actions the push already uses. docs/runbooks/deploy.md
+      #       lists it with the others.
+      - name: Gate the deployment on image vulnerability findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          repos="$(cat deploy-reports/ecr-repositories.json)"
+          collector_tag="v0.49.0"
+          blocking=0
+          : > deploy-reports/image-scan-findings.txt
+
+          while IFS= read -r name; do
+            repository="$(jq -er --arg name "$name" '.[$name]' <<<"$repos")"
+            repository_name="${repository#*/}"
+            if [ "$name" = "aws-otel-collector" ]; then
+              tag="$collector_tag"
+            else
+              tag="$CARDDEMO_IMAGE_TAG"
+            fi
+
+            # WHY : Assumptions: the waiter is allowed to fail. It returns non-zero when a
+            #       scan finishes in a state other than COMPLETE, and the status is read
+            #       explicitly below so each terminal state gets its own decision rather
+            #       than every one of them becoming the same failure.
+            aws ecr wait image-scan-complete \
+              --repository-name "$repository_name" \
+              --image-id "imageTag=${tag}" || true
+
+            findings="$(aws ecr describe-image-scan-findings \
+              --repository-name "$repository_name" \
+              --image-id "imageTag=${tag}" --output json 2>/dev/null || echo '{}')"
+            status="$(jq -r '.imageScanStatus.status // "UNKNOWN"' <<<"$findings")"
+
+            case "$status" in
+              COMPLETE)
+                critical="$(jq -r '.imageScanFindings.findingSeverityCounts.CRITICAL // 0' <<<"$findings")"
+                high="$(jq -r '.imageScanFindings.findingSeverityCounts.HIGH // 0' <<<"$findings")"
+                medium="$(jq -r '.imageScanFindings.findingSeverityCounts.MEDIUM // 0' <<<"$findings")"
+                printf '%s:%s status=%s critical=%s high=%s medium=%s\n' \
+                  "$repository_name" "$tag" "$status" "$critical" "$high" "$medium" \
+                  | tee -a deploy-reports/image-scan-findings.txt
+                if [ "$critical" -gt 0 ] || [ "$high" -gt 0 ]; then
+                  echo "[deploy] BLOCKING: ${repository_name}:${tag} carries ${critical} critical and ${high} high findings" >&2
+                  blocking=1
+                fi
+                ;;
+              UNSUPPORTED_IMAGE)
+                # WHY : Trade-offs: an image the registry cannot scan is reported and
+                #       allowed through, because there is no finding set to gate on and
+                #       refusing would make a registry capability -- not a vulnerability --
+                #       block a release. The compensating control is that every base image
+                #       in this repository is digest-pinned and reviewed.
+                printf '%s:%s status=%s (registry cannot scan this image; not gated)\n' \
+                  "$repository_name" "$tag" "$status" \
+                  | tee -a deploy-reports/image-scan-findings.txt
+                ;;
+              *)
+                printf '%s:%s status=%s\n' "$repository_name" "$tag" "$status" \
+                  | tee -a deploy-reports/image-scan-findings.txt
+                echo "[deploy] BLOCKING: no completed scan for ${repository_name}:${tag} (status ${status})" >&2
+                blocking=1
+                ;;
+            esac
+          done < <(jq -r 'keys[]' <<<"$repos")
+
+          if [ "$blocking" -ne 0 ]; then
+            echo "[deploy] refusing to apply: at least one image carries a critical or high finding, or has no completed scan" >&2
+            echo "[deploy] advance the affected base-image or collector pin and rebuild; findings are summarised in deploy-reports/image-scan-findings.txt" >&2
+            exit 1
+          fi
+          echo "[deploy] image vulnerability gate: PASS"
 
       # Alternatives Considered: a bare auto-approved apply. Rejected because it
       # re-plans at execution time; applying the saved plan guarantees the

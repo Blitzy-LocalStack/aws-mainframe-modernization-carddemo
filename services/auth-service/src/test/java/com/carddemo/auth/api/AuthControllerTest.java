@@ -460,10 +460,11 @@ class AuthControllerTest {
     /**
      * Asserts the sign-on route is served to a caller presenting no token at all.
      *
-     * <p>Assumptions: the committed contract declares {@code security: []} on this operation at
-     * {@code src/main/resources/openapi/auth-api.yaml} L362, and the chain permits its exact path. A
-     * caller has no token at sign-on, that being what the exchange exists to obtain, so a rule that
-     * challenged this path would make the whole service unreachable.</p>
+     * <p>Assumptions: the committed contract at
+     * {@code src/main/resources/openapi/auth-api.yaml} declares {@code security: []} on its
+     * {@code signOn} operation, and the chain permits that exact path. A caller has no token at sign-on,
+     * that being what the exchange exists to obtain, so a rule that challenged this path would make the
+     * whole service unreachable.</p>
      *
      * <p>Assumptions: no forgery token accompanies this state-changing request and it is not refused,
      * which is the observable half of the chain disabling that protection. The reason it is safe to

@@ -364,7 +364,7 @@ spring:
   #   happening not to.
   # Assumptions: the connecting role is carddemo_batch, created by
   #   data-migration/sql/V0__schemas_and_roles.sql, which owns the `batch`
-  #   schema (V0:469) and holds narrowly scoped grants on the other four
+  #   schema (V0:723) and holds narrowly scoped grants on the other four
   #   schemas named in the search path below. This module never grants itself
   #   anything and never creates a role.
   # Alternatives Considered: exactly ONE datasource is configured, and
@@ -400,39 +400,61 @@ spring:
       #   module OWNS wins any future name collision and so the job-repository
       #   tables, the batch_run ledger and Flyway's own history table all resolve
       #   there:
-      #     batch     owned; V0:699 creates it AUTHORIZATION
+      #     batch     owned; V0:723 creates it AUTHORIZATION
       #               carddemo_batch_owner -- the NOLOGIN role this module's
       #               migration assumes with SET ROLE -- and
       #               db/migration/V1__batch.sql declares everything in it.
-      #     ledger    write under grant; V0:666-667 grants SELECT, INSERT and
+      #     ledger    write under grant; V0:1162-1163 grants SELECT, INSERT and
       #               UPDATE on all its tables. Owned by transaction-service.
-      #     account   read plus one narrow write; V0:719 grants SELECT on all its
-      #               tables and V0:730 grants UPDATE on account.accounts alone.
-      #     reference read only, V0:766. Required because app/cbl/CBACT04C.cbl:47
+      #     account   read plus one narrow write; V0:1215 grants SELECT on all its
+      #               tables and V0:1226 grants UPDATE on account.accounts alone.
+      #     reference read only, V0:1277. Required because app/cbl/CBACT04C.cbl:47
       #               opens DISCGRP for the disclosure-group rate, and that
       #               program is CalculateInterestJob.
+      #     card      read only, V0:1268 grants SELECT on all its tables. Owned by
+      #               card-service. Required because app/cbl/CBEXPORT.cbl:513
+      #               opens the card master and :527-:545 writes one export record
+      #               per card, and that program is ExportJob.
       #   Omitting `reference` fails the interest state at the database rather
-      #   than in this file. No two of the four own a table of the same name, so
-      #   the extra resolution candidates cannot shadow anything.
-      # Refactoring Rationale: a fifth entry, `card`, stood between `account` and
-      #   `reference` and was removed. It was justified on the grounds that
-      #   app/cbl/CBTRN01C.cbl validates the daily feed against the card master,
-      #   and that reading is wrong: the program OPENS CARD-FILE at
-      #   app/cbl/CBTRN01C.cbl:309 and never issues a READ against it, its only
-      #   three reads being DALYTRAN at :203, XREF at :229 and ACCOUNT at :243.
-      #   The cross-reference it does read is CVACT03Y, which the target maps to
-      #   account.card_xref, not to the card schema. No entity in this module
-      #   declares @Table(schema = "card") either, so no statement this module
-      #   issues could ever have resolved there. A resolution candidate with no
-      #   consumer is path surface that can only shadow a future name, so it is
-      #   withdrawn rather than kept against a hypothetical reader.
+      #   than in this file, and omitting `card` fails the export state the same
+      #   way. No two of the five own a table of the same name, so the extra
+      #   resolution candidates cannot shadow anything.
+      # Refactoring Rationale: `card` was REMOVED from this list by an earlier
+      #   revision and is now REINSTATED, so both movements are recorded rather
+      #   than the second silently reversing the first. The removal was right on
+      #   its facts and right for the tree it was made against. Its facts: the
+      #   entry had been justified on the grounds that app/cbl/CBTRN01C.cbl
+      #   validates the daily feed against the card master, which is wrong -- that
+      #   program OPENS CARD-FILE at app/cbl/CBTRN01C.cbl:309 and never issues a
+      #   READ against it, its only three reads being DALYTRAN at :203, XREF at
+      #   :229 and ACCOUNT at :243, and the cross-reference it does read is
+      #   CVACT03Y, which the target maps to account.card_xref rather than to the
+      #   card schema. All of that still holds. What changed is the second half of
+      #   the removal's argument: it observed that no entity in this module
+      #   declared @Table(schema = "card"), so no statement could resolve there,
+      #   and that a resolution candidate with no consumer is path surface that can
+      #   only shadow a future name. There is now a consumer.
+      #   com.carddemo.batch.domain.Card maps card.cards, because ExportJob was
+      #   emitting three of the five record types app/cbl/CBEXPORT.cbl writes and
+      #   silently reporting zero for the other two. So the entry returns on the
+      #   correct ground -- a real read of a real table -- rather than on the
+      #   incorrect one it originally carried.
+      # Assumptions: the entry sits LAST rather than back between `account` and
+      #   `reference`, and the position is deliberate. Order is resolution order
+      #   for an unqualified name, and the two entries added earliest after the
+      #   owned schema are the two this module writes to; a read-only candidate
+      #   belongs behind every schema whose objects a statement is more likely to
+      #   have meant. The card entity is schema-qualified, so it does not depend on
+      #   this entry at all -- the entry exists so that an unqualified statement
+      #   cannot resolve to a card table by accident and so that this list states
+      #   the module's true reach.
       # Alternatives Considered: a currentSchema parameter on the JDBC URL, and a
       #   role-level search path. Both rejected, and not only by this file. The
       #   URL arrives from the environment and is outside this artifact's
       #   control, so an operator editing the Parameter Store value would
       #   silently drop the pin and every query would resolve against the default
       #   path with no error to show for it; all three peer services reject it on
-      #   the same ground. V0:543-552 separately declines a role-level path,
+      #   the same ground. V0:149-153 separately declines a role-level path,
       #   because one setting with two owners drifts and the drift stays
       #   invisible until a query resolves an unqualified name in the wrong
       #   schema. This key is consequently the single owner of schema resolution
@@ -440,7 +462,7 @@ spring:
       # Assumptions: the pool runs this once per PHYSICAL connection, so Flyway's
       #   connections are pinned by the same mechanism as the application's
       #   without a second declaration.
-      connection-init-sql: "SET search_path TO batch, ledger, account, reference"
+      connection-init-sql: "SET search_path TO batch, ledger, account, reference, card"
 
       # Assumptions: this is a correctness requirement for the streaming
       #   readers, not a tuning preference, and it is inseparable from the
@@ -849,6 +871,40 @@ spring:
       #   than as a silent skip; this key keeps a script from becoming that
       #   second creator.
       mode: never
+
+# =============================================================================
+# Terminal error sink -- deliberately NOT declared as a key in this document.
+#
+# WHY : Assumptions: carddemo.messaging.error-queue-url is the CONDITION on
+#       config/SqsConfig.java, not merely one of its settings, so declaring it
+#       here with an empty default would be worse than leaving it out.
+#       @ConditionalOnProperty treats any value other than the literal "false"
+#       as a match, and the empty string is such a value -- so a
+#       "${CARDDEMO_MESSAGING_ERROR_QUEUE_URL:}" placeholder would OPEN the gate
+#       in every environment and then fail context refresh inside the binding,
+#       whose constructor refuses a blank address on purpose. An absent property
+#       closes the gate cleanly and a supplied one opens it; there is no third
+#       spelling that does both, which is why this block is a comment.
+# WHY : Assumptions: the value arrives as the container environment variable
+#       CARDDEMO_MESSAGING_ERROR_QUEUE_URL, which relaxed binding maps onto this
+#       property with no declaration needed. Both environment roots publish it
+#       from the queue module's error-queue address, infra/modules/ecs-service
+#       requires it of this workload by name so a root that drops it fails at
+#       plan time, and the task role's matching sqs:SendMessage grant on that one
+#       queue comes from the queue module's batch_service boundary.
+# WHY : Trade-offs: running this image locally with no such variable therefore
+#       publishes nothing and logs nothing about publishing, which is the
+#       intended local behaviour -- a developer running one job has no terminal
+#       sink to notify. The startup line event=batch.error.sink.enabled is what
+#       distinguishes the two states in a deployed environment: its presence
+#       means publishing is on, and its absence means the gate is closed.
+# WHY : Alternatives Considered: three companion settings exist for this sink --
+#       carddemo.messaging.error-content-type, error-source-application and
+#       error-source-program -- and none is declared here either. Each carries a
+#       default at its own @Value parameter, beside the property name it belongs
+#       to, so declaring them here would put two spellings of one default in two
+#       files and let a reader trust the wrong one.
+# =============================================================================
 
 # WHY : Trade-offs: the actuator web surface is narrowed to health even though
 #       the Prometheus registry is present. A run-and-exit task may finish between

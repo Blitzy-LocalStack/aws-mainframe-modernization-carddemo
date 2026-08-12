@@ -74,15 +74,13 @@ import java.util.Objects;
  * <h2>All seven live in one class</h2>
  *
  * <p>Alternatives Considered: one class per artifact -- report masks in one type, statement masks
- * in another, the sort-utility mask in a third -- was evaluated and rejected. The defining
- * property of these seven is that they COEXIST and are never interchangeable: the same 133-column
- * report emits a leading-minus detail amount from line 30 of {@code app/cpy/CVTRA07Y.cpy} and a
- * leading-plus total from lines 54, 60 and 66 of the same copybook, and the same 80-byte
- * statement emits a zero-preserving balance from line 113 of {@code app/cbl/CBSTM03A.CBL} beside
- * a zero-blanking amount from line 137. Splitting them across the files that call them would
- * scatter the one table in which that non-interchangeability is visible, and a maintainer
- * reaching for a mask would see one regime rather than the seven it has to be distinguished
- * from. The accepted cost is a larger single type.</p>
+ * in another, the sort-utility mask in a third. Rejected because the defining property of these
+ * seven is that they COEXIST and are never interchangeable: one 133-column report emits a
+ * leading-minus detail amount and a leading-plus total, and one 80-byte statement emits a
+ * zero-preserving balance beside a zero-blanking amount. Splitting them across their callers would
+ * scatter the one table in which that non-interchangeability is visible, so a maintainer reaching
+ * for a mask would see one regime rather than the seven it must be told apart from. The accepted
+ * cost is a larger single type.</p>
  *
  * <h2>No locale-sensitive formatter is constructed anywhere in this class</h2>
  *
@@ -98,28 +96,21 @@ import java.util.Objects;
  * the same number to a human -- so the golden comparison would catch it and no reviewer
  * would.</p>
  *
- * <p>Assumptions: only one kind of test detects a regression against that hazard, so a test author
- * working from the example tables below should know which one it is. Running every method a
- * second time with the virtual machine's default locale set to one that groups with a period and
- * separates the decimal places with a comma, and asserting the output is byte-identical to the
- * first run, is the ONLY assertion that fails when a locale-sensitive formatter is reintroduced
- * without its root-locale argument. Every other assertion in this file's example tables passes on
- * a machine whose own default locale happens to agree with the artifact, which is why a suite
- * that omits the second run can be entirely green on one build agent and wrong on another.</p>
+ * <p>Assumptions: only one kind of assertion detects a regression against that hazard -- running
+ * every method a second time under a default locale that groups with a period and separates the
+ * decimal places with a comma, and requiring byte-identical output. Every other assertion passes on
+ * a machine whose own default locale happens to agree with the artifact, so a suite omitting that
+ * second run can be green on one build agent and wrong on another.</p>
  *
- * <p>Trade-offs: the compromise accepted for that immunity is code volume and allocation
- * behaviour. A single shared {@code DecimalFormat} instance built once with
- * {@code DecimalFormatSymbols.getInstance(Locale.ROOT)} would express three of these regimes in
- * a pattern string instead of a loop, and would allocate nothing per call. It was rejected
- * because {@code DecimalFormat} is mutable and carries no thread-safety guarantee, and this
- * service composes report bands and statement bands concurrently, so a shared instance would
- * need either a lock on every amount or a thread-local holder -- and a per-invocation instance
- * allocates more than the loop it would replace. Correctness under concurrent band composition
- * decided it. The pattern languages are a second, independent reason: no
- * {@code #,##0.00}-family pattern blanks a grouping separator that stands to the left of the
- * first significant digit, and none blanks the decimal places of a zero value, so both regimes 1
- * and 2 would need a post-pass over the pattern's output. Composing the string directly makes
- * those two rules the loop's own logic, where each is one branch that a test can address.</p>
+ * <p>Trade-offs: the compromise accepted for that immunity is code volume. A shared
+ * {@code DecimalFormat} built once with {@code DecimalFormatSymbols.getInstance(Locale.ROOT)} would
+ * express three of these regimes in a pattern string instead of a loop, and was rejected on two
+ * independent grounds: {@code DecimalFormat} is mutable with no thread-safety guarantee while this
+ * service composes report and statement bands concurrently, so a shared instance would need a lock
+ * or a thread-local and a per-invocation instance allocates more than the loop it replaces; and no
+ * {@code #,##0.00}-family pattern blanks a grouping separator standing left of the first significant
+ * digit or blanks the decimal places of a zero, so regimes 1 and 2 would each need a post-pass over
+ * the pattern's output. Composing the string directly makes those two rules one branch each.</p>
  *
  * <h2>This class performs no rounding and no rescaling</h2>
  *
@@ -158,6 +149,13 @@ import java.util.Objects;
  * at lines 134, 135 and 136 of {@code app/cbl/CBTRN03C.cbl}, which is exactly the nine integer
  * positions both report masks provide. The guard is still reachable, because {@link Money}
  * admits ten integer digits by {@link Money#MAX_MAGNITUDE} where these masks provide nine.</p>
+ *
+ * <h2>The exhaustive vectors live in the test, not here</h2>
+ *
+ * <p>Assumptions: each method below carries a short table of the values that turn on an edge -- zero,
+ * a negative, and the widest magnitude the mask admits -- while the full vector set for all seven
+ * regimes is asserted by {@code CobolEditMaskTest}. A second exhaustive table in a docstring is free
+ * to disagree with the assertions, and only the assertions fail when it does.</p>
  *
  * <h2>Every method guarantees its declared width</h2>
  *
@@ -304,21 +302,15 @@ public final class CobolEditMask {
      * {@code app/cpy/CVTRA07Y.cpy} is a suppression position, the two decimal positions among
      * them, and the editing rules blank the entire item when such a mask receives zero. The
      * result is neither a zero, nor a bare decimal point with two zeros, nor a signed zero -- it
-     * is a blank field, and that was confirmed by executing the declaring clause rather than
-     * reasoned about. Suppression stops at the decimal point rather than crossing it, which is
+     * is a blank field. Suppression stops at the decimal point rather than crossing it, which is
      * why a value below one still shows its decimal places while all nine integer positions and
      * both separators stand blank.</p>
      *
      * <pre>
      *          0.00   |               |
-     *          0.05   |            .05|
      *         -0.05   |-           .05|
-     *        999.99   |         999.99|
-     *       1234.56   |       1,234.56|
      *      -1234.56   |-      1,234.56|
-     *    1000000.00   |   1,000,000.00|
      *  999999999.99   | 999,999,999.99|
-     * -999999999.99   |-999,999,999.99|
      * </pre>
      *
      * @param amount the transaction amount to edit; must not be {@code null}, must carry exactly
@@ -381,7 +373,7 @@ public final class CobolEditMask {
      * regime 1 -- every digit position at lines 54, 60 and 66 of {@code app/cpy/CVTRA07Y.cpy} is
      * a suppression position -- and it blanks the sign position along with the digits. A report
      * page whose transactions net to zero therefore carries a blank total field rather than a
-     * signed zero, and that was confirmed by executing the declaring clause.</p>
+     * signed zero.</p>
      *
      * <p>Assumptions: the three accumulators that reach this mask are declared
      * {@code PIC S9(09)V99} at lines 134, 135 and 136 of {@code app/cbl/CBTRN03C.cbl}, which is
@@ -392,11 +384,8 @@ public final class CobolEditMask {
      * <pre>
      *          0.00   |               |
      *          0.05   |+           .05|
-     *         -0.05   |-           .05|
-     *       1234.56   |+      1,234.56|
      *      -1234.56   |-      1,234.56|
      *  999999999.99   |+999,999,999.99|
-     * -999999999.99   |-999,999,999.99|
      * </pre>
      *
      * @param total the accumulated total to edit; must not be {@code null}, must carry exactly
@@ -544,7 +533,6 @@ public final class CobolEditMask {
      *
      * <pre>
      *          0.00   |000000000.00|
-     *       1234.56   |000001234.56|
      *      -1234.56   |000001234.56|
      *  999999999.99   |999999999.99|
      * </pre>
@@ -603,8 +591,6 @@ public final class CobolEditMask {
      * <pre>
      *          0.00   |+00000000.00|
      *         -0.05   |-00000000.05|
-     *       1234.56   |+00001234.56|
-     *   12345678.90   |+12345678.90|
      *  -12345678.90   |-12345678.90|
      * </pre>
      *
@@ -665,8 +651,6 @@ public final class CobolEditMask {
      * <pre>
      *          0.00   |000000000.00 |
      *         -0.05   |000000000.05-|
-     *       1234.56   |000001234.56 |
-     *      -1234.56   |000001234.56-|
      *  999999999.99   |999999999.99 |
      * </pre>
      *
@@ -745,11 +729,8 @@ public final class CobolEditMask {
      *
      * <pre>
      *          0.00   |         .00 |
-     *          0.05   |         .05 |
      *         -0.05   |         .05-|
-     *       1234.56   |     1234.56 |
      *      -1234.56   |     1234.56-|
-     *    1000000.00   |  1000000.00 |
      *  999999999.99   |999999999.99 |
      * </pre>
      *

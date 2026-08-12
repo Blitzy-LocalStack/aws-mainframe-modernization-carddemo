@@ -242,8 +242,14 @@ public record UserResponse(
      * two sources and neither is an inference. The owning schema migration declares the column as a
      * character type of exactly this many positions, and the published contract declares the same
      * maximum length, so all three agree.
+     *
+     * <p>Refactoring Rationale: package-private rather than private, so that
+     * {@link CreatedUserResponse} -- the create operation's body, which repeats these five properties
+     * beside the one-time credential -- constrains its own identifier against THIS figure rather than
+     * against a copy of it. A copy would be a second statement of a width the copybook states once, free
+     * to disagree with this one after a review had read only the other.
      */
-    private static final int USER_ID_WIDTH = 8;
+    static final int USER_ID_WIDTH = 8;
 
     /**
      * The number of positions the baseline declares for each of the two name fields.
@@ -253,8 +259,10 @@ public record UserResponse(
      * declare the same width, and the delete-view map repeats it for both fields at
      * {@code app/cpy-bms/COUSR03.CPY} L66 and L72. One constant serves both components because the
      * baseline gives them one width, not because the two happen to agree today.
+     *
+     * <p>Refactoring Rationale: package-private for the reason recorded on the identifier width above.
      */
-    private static final int NAME_WIDTH = 20;
+    static final int NAME_WIDTH = 20;
 
     /**
      * The expression the stored role has to match in full.
@@ -266,8 +274,12 @@ public record UserResponse(
      * cannot quietly widen. No anchor is written because none is needed: a pattern constraint is
      * satisfied only when the whole value matches, so a one-character class admits exactly one
      * character and refuses the two letters together without one.
+     *
+     * <p>Refactoring Rationale: package-private for the reason recorded on the identifier width above.
+     * The domain matters more than the widths do: a copy of it in a sibling record could admit a third
+     * letter, and a user type outside {@code 'A'} and {@code 'U'} maps to no group at all.
      */
-    private static final String USER_TYPE_DOMAIN = "[AU]";
+    static final String USER_TYPE_DOMAIN = "[AU]";
 
     /**
      * The placeholder that stands in for a component this record refuses to render.

@@ -15,7 +15,7 @@ the byte-encoding contract. Both are cited by section number throughout. A secon
 copy of an encoding rule is free to drift from the first, and a reader who found
 two copies disagreeing would have no way to tell which one the loader implements.
 
-## Read this as the folder's docstring
+## This document is the folder's docstring
 
 Rule 1 asks for purpose, inputs, outputs and error conditions. Those four map onto
 a fixture folder as follows, and the rest of this document expands each one.
@@ -539,8 +539,8 @@ account's expiration date one day earlier instead of moving the transaction date
 one day later, and that was rejected on ownership grounds. The expiration date is a
 column of `account.accounts`, owned by another module, and section 4.2 records that
 this folder ships no account image at all. Shifting a value this folder does not
-own would put the discriminator outside the folder that documents it, so the
-fixture would no longer be self-describing. Moving the driver record's date keeps
+own would put the discriminator outside the folder that documents it, leaving the
+fixture not self-describing. Moving the driver record's date keeps
 both halves of the pair inside `ledger`, which is the one schema this module owns.
 
 Alternatives Considered: `tcatbal.txt` could have carried the seed's `+0.00`
@@ -558,9 +558,10 @@ Trade-offs: this document cites the immutable baseline by line number but cites 
 migration by column name and type instead. That asymmetry is deliberate. Files
 under `app/**` are reference-only and never change, so a line number into
 `CBTRN02C.cbl` stays correct indefinitely and is the most precise citation
-available. `V1__ledger.sql` is a live target file that grows as it is authored, and
-line numbers into it have already drifted once on this branch, so citing
-`reason_code SMALLINT` by name is both stable and sufficient to locate. The cost is
+available. `V1__ledger.sql` is a live target file that grows as it is authored, and a line
+number into a file still being edited goes wrong silently while continuing to look
+precise, so citing `reason_code SMALLINT` by name is both stable and sufficient to
+locate. The cost is
 that a reader must search the migration rather than jump to a line; the benefit is
 that no citation here can rot into pointing at the wrong statement, which folder
 section 8 identifies as worse than carrying no citation at all.
@@ -569,14 +570,11 @@ section 8 identifies as worse than carrying no citation at all.
 
 ## 7. What consumes these fixtures
 
-Availability below uses the `[present]` and `[planned]` convention of master
-section 9.3, whose purpose is to stop a document describing a future artifact as
-though it already exists. Every entry was measured on the branch, and a path that
-does not yet exist is written as a plain code span rather than a link so that no
-link in this folder resolves to nothing.
+Assumptions: a path this folder names is written as a link only where it resolves,
+so no link here points at nothing.
 
 - [`TransactionFixtureContractTest`](../../../java/com/carddemo/transaction/fixtures/TransactionFixtureContractTest.java)
-  -- **[present]**, and it reads this folder. It is the executable guard on the byte
+  reads this folder. It is the executable guard on the byte
   claims made above, and it holds three of them directly:
   - that all three files here are whole records at their declared widths and carry
     no carriage return, which is section 4.1;
@@ -590,14 +588,14 @@ link in this folder resolves to nothing.
   So the parts of this document that are byte facts are checked by a test rather
   than trusted. A boundary value moving by one day here fails that test.
 - [`TransactionRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionRepositoryIT.java)
-  -- **[present]**, and it does **not** read this folder. It builds every row it
-  needs in code through `save(...)` calls on literal values, and runs against a real
-  PostgreSQL container rather than an in-memory substitute.
-- [`../../application-test.yml`](../../application-test.yml) -- **[present]**. It
-  pins schema resolution to `ledger` for both the connection and the migration tool.
+  is **not** a consumer of this folder. It builds every row it needs in code through
+  `save(...)` calls on literal values, and runs against a real PostgreSQL container
+  rather than an in-memory substitute.
+- [`../../application-test.yml`](../../application-test.yml) pins schema resolution
+  to `ledger` for both the connection and the migration tool.
   It does **not** pin the clock -- its own exclusion list rules out any clock or
   current-time property -- and the pinned instant is instead
-  `TransactionRepositoryIT.FIXED_CLOCK` at that class's lines 259 and 260,
+  `TransactionRepositoryIT.FIXED_CLOCK`,
   `Clock.fixed(Instant.parse("2022-07-18T00:00:00Z"), ZoneOffset.UTC)`. A pinned
   instant is what makes any assertion on a 26-character timestamp reproducible at
   all, because otherwise the value would change between runs.
@@ -605,19 +603,40 @@ link in this folder resolves to nothing.
   **[present]**. It creates the four `ledger` tables these files load into,
   including `ledger.transaction_rejects` with the three columns section 3 asserts
   against.
-- A test that **loads these three records into PostgreSQL and asserts the reject
-  contract of section 3** -- **[planned]**. Nothing yet drives a record from this
-  folder through a repository and checks that a reject row appears with reason 103
-  and that `ledger.transactions` is unchanged. That is the assertion this folder
-  exists to support and the one still to be written; a plausible home for it is
+- [`TransactionRejectRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java)
+  -- **[present]**, and it **does** drive this folder's `dailytran.txt` into a real
+  PostgreSQL container. Its case
+  `anOriginatingDateOneDayBeyondTheExpirationDateYieldsReasonOneHundredAndThree`, at
+  line 1136, reads the record, stores the reject row it produces and asserts
+  `reason_code` 103 with the verbatim `reason_desc`
+  `TRANSACTION RECEIVED AFTER ACCT EXPIRATION`; the read itself asserts the
+  350-character image width. Its case
+  `whenBothBoundaryGuardsFailTheStoredRowCarriesReasonOneHundredAndThreeAndItsDescription`,
+  at line 1177, reads the same record and additionally asserts that neither the
+  over-limit code nor its text survives, which is the later-guard-wins ordering. The
+  paired pass case `anOriginatingDateEqualToTheExpirationDateProducesNoRejectStreamRow`,
+  at line 1106, drives `boundary_expiry_equal` and asserts an empty reject table, so
+  the inclusive guard is straddled from this folder's bytes and from its pair's.
+- The **decision** that this record arrives after expiration -- **[present]**, and
+  deliberately asserted elsewhere. It belongs to `PostingValidationService` in the
+  batch deployable, the module `app/cbl/CBTRN02C.cbl` migrates to, and
+  `PostingValidationServiceTest` there reports reason 103 with this same verbatim
+  text. A test that both performed and asserted the decision could only agree with
+  itself, so the integration test above asserts the persistence contract alone.
+- A test asserting that **`ledger.transactions` is unchanged** by the rejection --
+  **[planned]**. The integration test above clears and inspects
+  `ledger.transaction_rejects` alone, so the untouched-ledger half of section 3 is the
+  one assertion this folder still waits on; a plausible home for it is
   `src/test/java/com/carddemo/transaction/fixtures/PostingRejectContractIT.java`.
 
-Assumptions: availability is recorded as a measurement rather than as a plan,
-because it has already moved. These files were authored before any consumer existed,
-and the fixture-contract test above arrived afterwards; a document that had written
-the consumer off as permanently absent would now be wrong, and one that had promised
-a specific class name would have been wrong on arrival. Naming what is measured, and
-naming the one assertion that is genuinely still missing, is what leaves the next
+Assumptions: availability is recorded as a measurement rather than as a plan, and
+every entry above is re-measurable on the branch by the blocks of section 8.
+Alternatives Considered: writing a consumer off as permanently absent, or naming a
+required class for one that does not exist. Both are rejected -- the first is
+falsified the moment a consumer lands, and the second commits a later author to a
+name this folder has no standing to choose, which is why the one missing assertion
+above offers a plausible home rather than a mandated one. Naming what is measured,
+and naming the one assertion that is genuinely still missing, leaves the next
 author something to falsify rather than something to trust.
 
 ---

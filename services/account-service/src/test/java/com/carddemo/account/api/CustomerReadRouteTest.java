@@ -248,8 +248,7 @@ class CustomerReadRouteTest {
     @DisplayName("the scan route answers 200 with the page envelope and both boundaries")
     void theScanRouteAnswersOkWithThePageEnvelope() throws Exception {
         when(this.reads.listCustomers(isNull(), anyInt())).thenReturn(
-                PageResponse.ofRows(List.of(customer()), OPENING_POSITION, TRAILING_POSITION, true,
-                        false));
+                PageResponse.ofRows(List.of(customer()), OPENING_POSITION, TRAILING_POSITION, true));
 
         this.mockMvc.perform(get(SCAN_ROUTE))
                 .andExpect(status().isOk())

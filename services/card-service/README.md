@@ -163,9 +163,29 @@ services/card-service/
 |   |-- openapi/card-api.yaml            OpenAPI 3.1 contract of record
 |-- src/test/
     |-- java/com/carddemo/card/**        22 test classes, package-info per package
+                                         (21 *Test + 1 *IT)
     |-- resources/application-test.yml
-    |-- resources/fixtures/              12 CVACT02Y records, 150 bytes each
+    |-- resources/fixtures/              12 fixture files, 40 CVACT02Y records, 150 bytes each
 ```
+
+**The fixture line counts files and records separately, deliberately.** The
+directory holds **12 fixture files carrying 40 records in total**, every record
+exactly **150 bytes** plus its line terminator — the declared length of a
+`CVACT02Y` card record. The two figures differ because most fixtures carry more
+than one record: the list-page corpus holds 18 so that a seven-row browse window
+has a row beyond it to discover, the by-account corpus and the expiry-boundary
+fixture hold 4 each, and several rule-rejection fixtures pair a rejected record
+with an accepted one. One file, `card-empty-input.txt`, is **deliberately zero
+bytes** — it is the empty-input case, and a fixture-contract test measures it as
+zero rather than treating the absence of records as a broken file.
+
+Refactoring Rationale: this line read "12 CVACT02Y records, 150 bytes each", which
+conflated files with records and understated the corpus by 28 records. The
+conflation matters beyond arithmetic: a reader sizing a paging assertion would have
+believed no fixture could exercise a page boundary, since 12 records spread over 12
+files cannot fill a seven-row window with a row to spare — which is exactly what
+the 18-record corpus exists to do. The per-record byte contract is retained
+unchanged, because that is the part a fixture author must not violate.
 
 Three absences in that tree are deliberate and are recorded so that a reader does
 not read them as omissions.
@@ -197,7 +217,7 @@ recognises, and cites the baseline line that the decision answers to.
 
 ### Keyset pagination, never offset paging
 
-**Alternatives Considered:** the baseline browse state is *already* a keyset
+Alternatives Considered: the baseline browse state is *already* a keyset
 cursor, so the target does not invent a paging model -- it names one that is
 present. `app/cbl/COCRDLIC.cbl:229-248` declares `WS-THIS-PROGCOMMAREA` and
 persists five things across the pseudo-conversational gap: a last-key pair
@@ -236,7 +256,7 @@ The backward result set is reversed in the service before it is returned, so a
 caller always receives rows in ascending key order regardless of which direction
 produced them.
 
-**Assumptions:** the extra row in the `size + 1` fetch is not an optimisation
+Assumptions: the extra row in the `size + 1` fetch is not an optimisation
 device and is not the target's idea. It is exactly how the COBOL discovers whether
 a next page exists -- it reads one record more than the screen can hold, at
 `app/cbl/COCRDLIC.cbl:1197`, and sets its next-page indicator from whether that
@@ -245,12 +265,34 @@ rows, and reports `hasNext` from whether the extra row arrived. Drop the extra r
 and the indicator has nothing to derive itself from.
 
 The COMMAREA cursor fields become the `PageResponse` envelope supplied by
-`common-lib` -- `items`, `firstKey`, `lastKey`, `hasNext` -- which is a renaming of
-the five baseline fields and not an addition to them.
+`common-lib` -- `items`, `firstKey`, `lastKey` and `hasNext` -- which is a renaming
+of the baseline's two key pairs and its further-rows indicator and not an addition
+to them. The one COMMAREA field with no envelope member is the screen ordinal at
+`app/cbl/COCRDLIC.cbl:237-238`, whose migrated home is the browser client's own
+navigation state.
+
+**Backward availability is not a component of the envelope, and
+`CardListService.backwardAvailable` answers expressibility rather than
+availability.** It reports whether the page names a position a backward request
+could be issued from -- which is `firstKey` being present -- and that is
+deliberately not a claim that a row waits there. The two questions are separated
+because only one of them is a property of the page: whether a row waits at that
+position is a property of where the CALLER stands in the walk, and the reference
+keeps exactly that on the terminal side. `app/cbl/COCRDLIC.cbl:237-238` declares
+the one-digit page ordinal with `88 CA-FIRST-PAGE VALUE 1`, `:902-903` raises
+`'NO PREVIOUS PAGES TO DISPLAY'` on that condition **without reading anything**,
+and `:492` and `:508` move the ordinal as the two paging keys are pressed. A
+revision of the shared envelope published the availability answer as a fifth
+component; it is withdrawn, `PageResponseTest` refuses that member by name, and
+the SPA refuses the backward key while it holds the first page, rendering the
+reference's own notice at `:1301-1302`. What the envelope owes such a client is
+the position to seek from, and its canonical constructor admits `hasNext == true`
+only alongside a present `lastKey` so a caller told to continue always holds the
+position to continue from.
 
 ### Optimistic concurrency, and HTTP 409
 
-**Refactoring Rationale:** `app/cbl/COCRDUPC.cbl:470` commits the update with
+Refactoring Rationale: `app/cbl/COCRDUPC.cbl:470` commits the update with
 `EXEC CICS SYNCPOINT`, and it is the only syncpoint verb in the program. The
 program also carries its own before-image discipline, snapshotting the pre-edit
 record into `CCUP-OLD-DETAILS` at `app/cbl/COCRDUPC.cbl:291` onwards so that it can
@@ -266,7 +308,7 @@ mapped by `GlobalExceptionHandler` in `common-lib`. Rollback is exception
 propagation, never a manual rollback call, so a failed update cannot leave a
 partially applied row behind.
 
-**Assumptions:** the difference in guarantee between the two platforms must be
+Assumptions: the difference in guarantee between the two platforms must be
 stated honestly rather than presented as a repair. `CARDDAT` and `CARDAIX` are both
 defined `RECOVERY(NONE)` (`app/csd/CARDDEMO.CSD:33` and `:21`) with `JOURNAL(NO)`
 (`:31` and `:19`) and `READINTEG(UNCOMMITTED)` (`:27` and `:15`), and each is
@@ -278,7 +320,7 @@ recovery, and the target runs on one that has it.
 
 ### The alternate index becomes a real secondary index
 
-**Assumptions:** `CARDAIX` at `app/csd/CARDDEMO.CSD:13-24` is an account-keyed
+Assumptions: `CARDAIX` at `app/csd/CARDDEMO.CSD:13-24` is an account-keyed
 VSAM path over the card data, surfaced to CICS as a file in its own right with
 `BROWSE(YES)` and `READ(YES)` at `app/csd/CARDDEMO.CSD:19`. It is a real access
 path that the online code reads: `app/cbl/COCRDLIC.cbl:215-217` holds its name in
@@ -295,7 +337,7 @@ cannot drift apart in their cursor handling.
 
 ### Primary account number masking, and total CVV suppression
 
-**Trade-offs:** the primary account number is masked to its last four digits on
+Trade-offs: the primary account number is masked to its last four digits on
 every response body **except** the administrative card-detail body, which is
 reachable only with the `carddemo-admin` authority. The compromise accepted is
 plain: an administrator can see a whole primary account number where an ordinary
@@ -305,7 +347,7 @@ human read a card record. Removing the disclosure entirely would have removed a
 baseline function; widening it to every caller would have disclosed more than the
 function needs.
 
-**Refactoring Rationale:** the card verification value has **no serialised
+Refactoring Rationale: the card verification value has **no serialised
 representation at all** -- not masked, not truncated, not a placeholder, absent. It
 is persisted as `cvv_encrypted BYTEA`, and it is never returned in a success body,
 never returned in an error body, and never written to a log line. Masking it was
@@ -335,7 +377,7 @@ which are precisely the places the masking above exists to keep it out of.
 
 ### The corrected misspelling, and the dropped FILLER
 
-**Refactoring Rationale:** the baseline field name `CARD-EXPIRAION-DATE` at
+Refactoring Rationale: the baseline field name `CARD-EXPIRAION-DATE` at
 `app/cpy/CVACT02Y.cpy:9` is misspelled -- the second `T` of "expiration" is absent.
 The target column is `expiration_date` and the Java field is `expirationDate`. This
 is the **only** renamed field in this module. The rename is recorded in
@@ -351,7 +393,7 @@ fields plus 59 bytes of padding continue to account for the full record.
 
 ### Fixed-width identifiers travel as strings
 
-**Assumptions:** the card number is `PIC X(16)` at `app/cpy/CVACT02Y.cpy:5`, so its
+Assumptions: the card number is `PIC X(16)` at `app/cpy/CVACT02Y.cpy:5`, so its
 fixed width is part of the contract and not an artefact of storage. It is `CHAR(16)`
 in SQL and a digits-only **string** in every DTO, never a numeric type. A 16-digit
 value routed through an IEEE-754 double loses its low-order digits silently, and a
@@ -374,7 +416,7 @@ field is preserved as part of that structure. Every user-visible string is carri
 across verbatim, character for character, keyed by the copybook or program it came
 from.
 
-**Assumptions:** the message-line width governing this module is the
+Assumptions: the message-line width governing this module is the
 **75-character** form declared at `app/cpy/CVCRD01Y.cpy:28-30`:
 `CCARD-ERROR-MSG PIC X(75)` at `:28`, `CCARD-RETURN-MSG PIC X(75)` at `:29`, and the
 `LOW-VALUES` sentinel condition `CCARD-RETURN-MSG-OFF` at `:30`. It must not be
@@ -402,7 +444,7 @@ that answers with a status code and a field-error array has no first-entry versu
 re-entry distinction to draw. Error presentation is driven purely by the response
 body.
 
-**Assumptions:** all three card transactions declare `TWASIZE(0)` --
+Assumptions: all three card transactions declare `TWASIZE(0)` --
 `app/csd/CARDDEMO.CSD:348` for `CCDL`, `:358` for `CCLI` and `:369` for `CCUP` --
 so no transaction work area was allocated and every scrap of continuation state
 travelled in the COMMAREA. That is why replacing the COMMAREA with a request-carried
@@ -414,7 +456,7 @@ session store, and no affinity requirement between a caller and a task.
 
 ### Authorization moves to a signed claim
 
-**Refactoring Rationale:** all three card transactions declare `RESSEC(NO)` and
+Refactoring Rationale: all three card transactions declare `RESSEC(NO)` and
 `CMDSEC(NO)`, both on a single line each at `app/csd/CARDDEMO.CSD:354` for `CCDL`,
 `:364` for `CCLI` and `:375` for `CCUP`. CICS therefore performed no resource-level
 and no command-level authorization for these transactions, and the administrator
@@ -472,7 +514,8 @@ satisfies.
 a page-number pagination control.** Paging is by key only. The list request body is
 `CardPageQuery`, whose three components are an optional account-number filter, an
 opaque `cursor` and a `direction`; the response is the `PageResponse` envelope with
-`items`, `firstKey`, `lastKey` and `hasNext`. There is no field a caller could set
+`items`, `firstKey`, `lastKey` and `hasNext`. There is no field a
+caller could set
 to "row 200 onwards", which is the point -- see the rejection rationale in
 [Keyset pagination, never offset paging](#keyset-pagination-never-offset-paging).
 
@@ -539,7 +582,7 @@ inside a different schema.
 
 ### Flyway needs two coordinates, not one
 
-**Assumptions:** Flyway 10 and later moved PostgreSQL support out of `flyway-core`
+Assumptions: Flyway 10 and later moved PostgreSQL support out of `flyway-core`
 into a separate dialect artifact, so `org.flywaydb:flyway-database-postgresql` is
 declared explicitly at `services/card-service/pom.xml:349-352` alongside the Spring
 Boot Flyway starter at `services/card-service/pom.xml:345-348`. This is worth
@@ -549,7 +592,7 @@ application startup when Flyway cannot resolve a database type for the JDBC URL 
 was handed. A missing dialect is discovered by starting the service, not by
 building it.
 
-**Trade-offs:** the same asymmetry applies one level up, and the starter is declared
+Trade-offs: the same asymmetry applies one level up, and the starter is declared
 rather than relied on as a transitive of the JPA starter. The cost accepted is one
 more coordinate in a file that a reader might expect to inherit it. What it buys is
 that the activation cannot disappear when an unrelated starter reorganises its own
@@ -606,16 +649,88 @@ mvn -B -f services/pom.xml -pl card-service -am verify
 mvn -B -f services/pom.xml -pl card-service -am test
 ```
 
+Starting locally takes two steps, and the first is not optional: the ten variables
+under [Configuration](#configuration) that have no fallback must already be in the
+environment, and they are prepared **out of band** so that no credential or key
+identifier is ever typed on a command line.
+
 ```bash
-# WHAT: start the service locally against the dev profile.
-# WHY : Assumptions: the profile is named on the command line and is never baked
-#       into the image, because the same image artifact must be able to run under
-#       either profile; an image carrying a profile could only ever serve one.
-# WHY : Assumptions: ten variables listed under Configuration have NO fallback in
-#       application.yml, so an incomplete environment stops at startup naming the
-#       key it could not resolve rather than serving requests bound to nothing.
-#       That is the failure mode worth having.
+# WHAT: create the environment file with owner-only permissions, before writing
+#       any value into it, then fill it in with an editor.
+# WHY : Assumptions: the name is `.env.card-service.local` specifically because
+#       `.gitignore` ignores `.env.*`, which the `git check-ignore` line confirms
+#       by printing the rule and its line number. A name such as
+#       `card-service.env` matches no ignore rule in this repository and would be
+#       staged by `git add -A` along with the CVV key identifier and the card
+#       selector signing key it holds.
+# WHY : Assumptions: `umask 077` is applied BEFORE creation rather than corrected
+#       afterwards. A later `chmod` leaves a window in which the file was group-
+#       and world-readable; the `chmod` below is a second assertion for a file
+#       surviving from an earlier session, not the primary control.
+umask 077
+touch .env.card-service.local
+chmod 600 .env.card-service.local
+git check-ignore -v .env.card-service.local
+
+# Fill in one KEY=value per line, with no `export` and no quoting:
+#   SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD,
+#   SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD,
+#   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI,
+#   CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID, CARDDEMO_SECURITY_CVV_KEY_ID,
+#   CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY
+```
+
+```bash
+# WHAT: the COMPLETE local launch contract, in the order it has to be performed.
+# WHY : (1) Refactoring Rationale: this block used to be the package step and the
+#       `java -jar` alone. Following it could not start the service, and the two
+#       reasons are independent. Ten variables listed under Configuration have NO
+#       fallback in application.yml, so the process stopped at startup naming the
+#       first key it could not resolve; and `application.yml` enables TLS and opens
+#       a PKCS#12 keystore that exists only inside the deployed image, so even a
+#       complete environment failed on the keystore. The environment source and the
+#       TLS disable are therefore part of the launch contract rather than asides,
+#       and they are ordered before it because that is the order they have to
+#       happen in.
+#       (2) Assumptions: the profile is named on the command line and is never
+#       baked into the image, because the same image artifact must be able to run
+#       under either profile; an image carrying a profile could only ever serve one.
+#       (3) Assumptions: the ELEVEN no-fallback variables stop the process at startup
+#       rather than letting it serve requests bound to nothing, and Configuration
+#       marks each of the eleven `none` so an environment file can be checked against
+#       it. Ten are `${...}` placeholders in `application.yml`; the eleventh,
+#       CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, is not written in any profile and
+#       reaches the shared kernel through relaxed binding, so an audit of the
+#       profiles alone will not find it -- see the rationale under Configuration. Trade-offs: the failure names the SYMPTOM rather than the key for the
+#       framework-bound values. Measured on the sibling transaction service with
+#       nothing set, the first failure is `'url' must start with "jdbc"` -- Spring
+#       Boot's binder leaves an unresolvable placeholder as its own literal text, so
+#       the property holds the characters `${SPRING_DATASOURCE_URL}` rather than
+#       being reported absent. Values injected with `@Value` do name themselves,
+#       because that path resolves through the environment rather than the binder.
+#       An earlier revision of this note said the startup failure names the key it
+#       could not resolve; that is true of some values and not of these.
+#       (4) Trade-offs: those values are supplied from an environment file that is
+#       deliberately not committed, rather than typed on the command line, because
+#       a shell history is a poor place for a credential and `.gitignore` already
+#       excludes `.env`. THREE of the eleven are key material -- the card selector
+#       key, the card-verification key identifier and the paging cursor key -- so
+#       this is not a hypothetical concern for this service.
+#       (5) Assumptions: `SERVER_SSL_ENABLED` is not a `${...}` placeholder in any
+#       profile; it reaches `server.ssl.enabled` through the framework's relaxed
+#       binding of an environment name onto a property. Its fallback is therefore
+#       `true` rather than `none`, which is why an absent value does not stop
+#       startup -- the listener stays encrypted and then cannot open its keystore.
+# WHY : Alternatives Considered: minting a local certificate so a local run also
+#       speaks TLS. Rejected because the certificate would not match the loopback
+#       name for any caller that verified it, and because the deployed path mints
+#       its own material per task in the image entry point; disabling the listener
+#       locally states plainly that a local run does not exercise the deployed
+#       transport rather than appearing to.
 mvn -B -f services/pom.xml -pl card-service -am package
+
+export SERVER_SSL_ENABLED=false
+set -a && . ./card-service.env && set +a
 java -jar services/card-service/target/card-service.jar --spring.profiles.active=dev
 ```
 
@@ -633,11 +748,32 @@ java -jar services/card-service/target/card-service.jar --spring.profiles.active
 docker build -f services/card-service/Dockerfile -t carddemo/card-service:local .
 ```
 
-That container build is **validation-only**. It proves the image assembles, that
+That container build is **validation-only**: it proves the image assembles, that
 the offline reactor inside it resolves, and that the documentation gate passes
-inside the build context. Nothing in this repository pushes the image to a
-registry, and nothing here has run it against a live AWS account -- see
-[Known limitations](#known-limitations).
+inside the build context. It publishes nothing.
+
+Publication is a **separate workflow**, and the distinction is between the two
+pipelines rather than between the repository and the outside world.
+[`.github/workflows/services-ci.yml`](../../.github/workflows/services-ci.yml) —
+the continuous-integration workflow that runs on a change — declares no registry
+login
+and no cloud credential at any scope, so nothing it does can push an image.
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) does push:
+it assumes a role by **GitHub OIDC** rather than holding a long-lived access key,
+logs in to **Amazon ECR**, and builds and pushes the project's **ten** immutable
+service images, this module's among them; it additionally mirrors the AWS
+OpenTelemetry collector image, which is why
+[`infra/modules/ecr`](../../infra/modules/ecr) provisions **eleven** repositories
+rather than ten.
+
+Refactoring Rationale: this paragraph stated that nothing in this repository
+pushes the image to a registry. That was false of `deploy.yml`, and the error was
+not merely factual — a reader auditing how images reach production would have
+concluded the path was undocumented or manual and gone looking for a credential
+that does not exist, when the actual path is keyless OIDC role assumption and is
+worth knowing precisely because it holds no stored secret. What remains true, and
+is now said separately, is that **nothing here has been run against a live AWS
+account** — see [Known limitations](#known-limitations).
 
 > **Note.** The documentation gate must never be weakened, in this module or in
 > any command that builds it. Passing `-Dcheckstyle.skip`, adding a plugin-level
@@ -668,6 +804,8 @@ account identifier or a key identifier.
 | `CARDDEMO_SECURITY_CVV_KEY_ID` | Key used to protect the verification value | none |
 | `CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY` | Key that seals the opaque card selector | none |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Password of the listener keystore | none |
+| `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Key that seals the paging cursor the card list issues | none |
+| `CARDDEMO_ONLINE_WRITES_PARAMETER` | Names the SSM flag that closes writes during the batch window | none in effect |
 | `CARDDEMO_SERVER_TLS_KEYSTORE` | Location of the listener keystore | present |
 | `CARDDEMO_SERVER_TLS_KEY_ALIAS` | Listener key alias inside that keystore | present |
 | `CARDDEMO_COGNITO_ADMIN_GROUP_NAME` | Group mapped to the administrator authority | present |
@@ -675,6 +813,35 @@ account identifier or a key identifier.
 | `CARDDEMO_DB_SSL_ROOT_CERT` | Trust anchor for the database connection | present |
 | `CARDDEMO_ENVIRONMENT` | Environment tag applied as a Micrometer common tag | present |
 | `CARDDEMO_VERSION` | Build identity reported by the actuator | present |
+| `SERVER_SSL_ENABLED` | Whether the listener is encrypted; set `false` for a loopback-only local run | `true`, set in `application.yml` |
+
+The **eleven** rows marked `none` have no fallback on purpose, rather than letting the
+service come up bound to a default that happens to be wrong. Trade-offs: a missing one
+does not always name itself. The values read through `@Value` do, but the
+framework-bound ones do not — measured on the sibling transaction service with its
+Flyway rows omitted, the first failure was `FATAL: password authentication failed for
+user "${SPRING_FLYWAY_USER}"`, because the binder leaves an unresolvable placeholder as
+its own literal text and the driver was handed those characters as a username.
+
+Refactoring Rationale: **three rows above are not `${...}` placeholders in any
+profile**, and two of them were missing from this table entirely.
+`CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` and `CARDDEMO_ONLINE_WRITES_PARAMETER` reach
+`carddemo.pagination.cursor.signing-key` and `carddemo.online-writes.parameter` through
+relaxed binding, and both properties are declared in the shared kernel's
+auto-configuration rather than here — so an audit of this module's profiles could not
+see them. They fail in opposite ways, which is why both are named: the cursor key
+**stops startup**, because its bean is `@ConditionalOnProperty` and
+`service/CardListService` takes a `CursorToken` as a mandatory constructor argument with
+no `ObjectProvider` wrapper, so the card list is unreachable without it; the write gate
+**removes itself silently**, because both its beans are conditional on the same property
+and nothing outside the auto-configuration injects them, so an absent value leaves the
+card update accepting writes during the nightly batch window with nothing in the log to
+say the gate is gone. `infra/modules/ecs-service` requires the cursor key by name and
+makes the gate name biconditional for the seven web workloads, so a root that drops
+either fails at `plan`. `SERVER_SSL_ENABLED` is the third and the only harmless one: it
+reaches `server.ssl.enabled` the same way, which is why it is listed with a fallback
+rather than as required, and why a local run has to set it even though nothing complains
+when it does not.
 
 Three properties are configured rather than injected, and are named here because a
 reader looking for an environment variable will not find one:
@@ -694,7 +861,7 @@ Parameter Store and AWS Secrets Manager, sourced from Terraform module outputs.
 **No service hard-codes an endpoint**, and no credential, endpoint or identifier
 appears anywhere in this repository.
 
-**Assumptions:** `src/main/java/com/carddemo/card/config/DataSourceConfig.java` pins
+Assumptions: `src/main/java/com/carddemo/card/config/DataSourceConfig.java` pins
 the JDBC session `search_path` to `card`, and the migration side is pinned
 independently at `src/main/resources/application.yml:596-597`, which names `card` as
 both the Flyway schema and its default schema, with schema creation switched off at
@@ -714,17 +881,49 @@ is running in without this module restating it.
 
 ## Tests
 
+<!-- test-inventory: 21 tests + 1 integration tests -->
+**22** test classes: **21** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses the
+comment above and re-measures both figures against this module's test tree, so the count fails the
+build when it drifts rather than ageing quietly in prose.
+
 The five classes below carry the parity assertions that matter most to this module.
 They are named individually because each one is the only place a particular
 guarantee is checked.
 
 | Test class | Kind | What it proves |
 |---|---|---|
-| `api/CardControllerTest` | `@WebMvcTest` | The administrator and ordinary-caller split on the card-detail route, both directions; that an unauthenticated request is challenged rather than served; that a token carrying no recognised group reaches no card route; that a masked read discloses only the last four digits; that a stale revision is answered with the reference sentence; and that every asserted sentence fits the program-side message width |
+| `api/CardControllerTest` | MockMvc over a hand-assembled web context | The administrator and ordinary-caller split on the card-detail route, both directions; that an unauthenticated request is challenged rather than served; that a token carrying no recognised group reaches no card route; that a masked read discloses only the last four digits; that a stale revision is answered with the reference sentence; and that every asserted sentence fits the program-side message width |
 | `service/CardListServiceTest` | unit | A forward step resumes past the last returned key; a backward step resumes before the first returned key; the row beyond the window discovers a further page; a row arriving between two requests is neither hidden nor repeated; and the browse window is seven rows |
 | `service/CardUpdateServiceTest` | unit | Every transcribed validation gate, including that all four gates run so every fault is reported, that the summary sentence follows the reference gate order, that a refused submission is never written, and that a stale token is refused even when nothing would change |
 | `repository/CardRepositoryIT` | Testcontainers | The account-keyed access path that replaces `CARDAIX`, the keyed read, forward and backward keyset paging, the concurrent-insert boundary, empty results, and that the migration was applied |
 | `mapper/CardMapperTest` | unit | That no serialised body carries the verification value, that the card number is masked on every non-administrative body, that the administrative disclosure returns it whole, that no body carries the record's trailing padding, and that both identifiers travel as digit strings with leading zeros intact |
+
+**`CardControllerTest` does not use `@WebMvcTest`, and cannot.** It builds an
+`AnnotationConfigWebApplicationContext` itself, registers the controller and the
+security configuration into it, and wraps the result with
+`MockMvcBuilders.webAppContextSetup(context)`, applying the real
+`springSecurityFilterChain` bean. Assumptions: this is a deliberate shape, not an
+older style left in place — Spring Boot 4 moved the servlet slice annotation into a
+separate artifact that this module's POM does not declare and that
+`spring-boot-starter-test` does not carry, so the annotation is not on the test
+class path at all. The class records that finding at its own head, along with the
+verification that the resolved `spring-boot-test-autoconfigure` jar contains a
+slice descriptor only for the JSON testers. Trade-offs: assembling the context by
+hand costs a few lines of setup and buys two things worth more than the brevity —
+the REAL resource-server filter, authentication converter and role converter all
+run, so the authority split under assertion is the deployed one rather than a
+mocked stand-in; and `standaloneSetup`, the other obvious route, was rejected
+because it installs no filter chain and so could not assert that an
+unauthenticated request is challenged. The sign-on slice in `auth-service` reached
+the same conclusion and is assembled the same way.
+
+Refactoring Rationale: the table labelled this class `@WebMvcTest`. The label was
+wrong in a way that would cost a reader real time: someone extending the suite
+would have copied an annotation that does not resolve, and someone auditing the
+authority assertions would have assumed the framework was auto-configuring a
+sliced context when in fact the full security chain is exercised — an assumption
+that understates what the class proves.
 
 The wider test tree holds more than those five. It contains contract-census tests
 that assert the published members of each DTO and each route against
@@ -742,7 +941,7 @@ nothing skipped** -- 301 from the Surefire execution, 9 from the architecture-ru
 execution and 25 from Failsafe. Those figures were measured from the reports that run
 produced rather than carried over from a previous one.
 
-**Assumptions:** the architecture rules arrive as a separate Surefire execution
+Assumptions: the architecture rules arrive as a separate Surefire execution
 because a rule can only analyse the classpath of the module whose tests run it, and
 Maven passes a module's main classes to its consumers but never its test classes. The
 rules are authored once in `common-lib` and delivered here through that module's test
@@ -750,7 +949,7 @@ jar, which is what makes them apply to `com.carddemo.card` at all. Without that
 delivery the rules would be written but would analyse nothing here, which is not
 distinguishable from not having written them.
 
-**Alternatives Considered:** an embedded in-memory database for
+Alternatives Considered: an embedded in-memory database for
 `CardRepositoryIT`, rejected in favour of a real PostgreSQL engine through
 Testcontainers. All three properties that test exists to check are engine
 behaviours: keyset ordering under a strictly-greater-than predicate, `CHAR(16)`
@@ -759,7 +958,7 @@ whether the planner actually selects `idx_cards_account_id`, the index standing 
 for `CARDAIX` at `app/csd/CARDDEMO.CSD:13-24`. An in-memory engine reproduces each of
 the three differently, or not at all, so a green test against one would say nothing
 about the engine the service runs on -- which is the opposite of what an integration
-test is for. **Trade-offs:** the cost accepted is that this test needs a container
+test is for. Trade-offs: the cost accepted is that this test needs a container
 runtime available, which is why it is bound to `verify` rather than to `test` and why
 a plain `test` invocation deliberately excludes it.
 
@@ -807,7 +1006,7 @@ boundary of this work:
   non-breaking hyphens normalised to ASCII hyphens: it "aggregates a worst-case
   return code across all layers ... and returns that single status to the caller, so
   CI gets one deterministic pass/fail signal."
-  **Assumptions:** the COBOL 0/2/4/8/16 return-code rubric must never reach a Maven,
+  Assumptions: the COBOL 0/2/4/8/16 return-code rubric must never reach a Maven,
   Surefire, Failsafe or JUnit gate. A Java gate is binary -- it passes or it fails --
   so a rubric that treats 4 as an acceptable outcome cannot be expressed there, and
   attempting to express it would turn a soft warn in one system into a green build in
@@ -920,7 +1119,7 @@ missing audit entry.
 
 This module deliberately does **not** re-declare the Checkstyle plugin in its own
 `pom.xml`, and holds no module-local `checkstyle.xml` or `suppressions.xml`.
-**Trade-offs:** single-sourcing the configuration in the parent means that reading
+Trade-offs: single-sourcing the configuration in the parent means that reading
 this module's POM alone does not tell you which rules apply, and that cost is
 accepted because re-declaring the plugin would open three ways to diverge at once --
 re-pinning the Checkstyle version so this module lints under a different ruleset than

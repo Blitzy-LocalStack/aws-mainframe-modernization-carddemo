@@ -3,7 +3,7 @@
  * batch-service permitted to hold a decision.
  *
  * <p><b>Purpose.</b> The job definitions above this package wire readers, processors,
- * writers and step ordering; the repositories below it move rows; the four classes here
+ * writers and step ordering; the repositories below it move rows; the four rule classes here
  * hold the rules that neither of those layers may own. Each significant COBOL paragraph
  * becomes one named method, which is the property that lets
  * {@code docs/architecture/cobol-to-service-traceability.md} cite a paragraph-to-method
@@ -30,7 +30,7 @@
  * real Javadoc rather than merely existing. The plugin is bound to Maven's
  * {@code validate} phase and fails the build at warning severity, so both fire before
  * anything in this directory is compiled. The consequence is worth stating plainly: the
- * absence of this file would fail the four sibling classes, not itself.</p>
+ * absence of this file would fail the six sibling classes, not itself.</p>
  *
  * <p>Trade-offs: no in-source escape hatch exists here and none is wanted. The
  * annotation-based suppression filter and both comment-based ones are deliberately omitted
@@ -48,7 +48,8 @@
  * else, and that every class named below was planned rather than delivered. Measured at this revision
  * all FOUR are delivered -- {@code PostingValidationService}, {@code CategoryBalanceService},
  * {@code InterestCalculationService} and {@code DatasetGenerationService} -- alongside
- * {@code BatchStepLedger}, which is named separately below because it transcribes no paragraph. The
+ * {@code BatchStepLedger} and {@code BatchErrorPublisher}, both of which are named separately below
+ * because neither transcribes a paragraph. The
  * earlier wording was accurate when written and became the single most misleading paragraph in the file
  * once the classes landed: a reader consulting it to learn whether the posting reject chain existed was
  * told it did not, and the four rules it governs -- the reject precedence, the two category-balance
@@ -75,10 +76,20 @@
  *
  * <h2>Service classes and their baseline provenance</h2>
  *
- * <p>Four classes, and no fifth. The list is closed, so the question "which class does
- * this rule belong in" keeps a definite answer as the tree grows. A fifth class must not
+ * <p>Four RULE classes, and no fifth. The list is closed, so the question "which class does
+ * this rule belong in" keeps a definite answer as the tree grows. A fifth rule class must not
  * be added to this package on the strength of being useful: usefulness is not an
  * authority, and the authorities are the migration plan and the project rules.</p>
+ *
+ * <p>Assumptions: the directory holds SIX non-charter classes and this roster names four of them, so
+ * the closure is over transcriptions and not over files. The other two are
+ * {@code BatchStepLedger} and {@code BatchErrorPublisher}; each is named and justified in the
+ * orchestration section below, and neither may be read into this roster. Refactoring Rationale: the
+ * word RULE is emphasised here because the previous wording, "Four classes, and no fifth", was true of
+ * this roster and false of the directory from the moment {@code BatchStepLedger} landed -- a reader
+ * counting files found five, then six, and had to reach the section three hundred lines below to learn
+ * that the closure was never over files. Saying which population is closed is cheaper than the sentence
+ * that reconciles two readings of it.</p>
  *
  * <dl>
  *   <dt>{@code PostingValidationService}</dt>
@@ -97,8 +108,8 @@
  *       line 413 closes the first and line 414 opens the second with no test of the reason
  *       between them -- so a transaction failing BOTH has the second assignment overwrite
  *       the first and is reported as 103. First-reason-wins over the first two, last-writer-wins
- *       over the last two. An earlier revision of this entry described the whole chain as
- *       first-reason-wins, which is exactly the reading a naive transcription produces: it
+ *       over the last two. Reading the whole chain as first-reason-wins is exactly what a naive
+ *       transcription produces, and it is wrong in a way no single-fault case reveals: it
  *       yields 102 for a transaction that is both over the limit and late, where the
  *       reference yields 103. The order is therefore preserved as an order, and the
  *       precedence itself is not decided here -- see the boundary section below for the
@@ -209,9 +220,9 @@
  * 441, then {@code 2900-WRITE-TRANSACTION-FILE} at line 442, all inside the
  * {@code 2000-POST-TRANSACTION} paragraph.</p>
  *
- * <p>Refactoring Rationale: the reason this rule is stated as a rule is a <b>readability</b> one,
- * not a correctness one, and an earlier revision of this paragraph got that backwards. It claimed
- * that annotating a method here "would open a nested boundary inside that one". It would not:
+ * <p>Assumptions: the reason this rule is stated as a rule is a <b>readability</b> one and not a
+ * correctness one, and the distinction is worth stating because the intuitive justification for it is
+ * false. Annotating a method here does NOT open a nested boundary inside the caller's:
  * {@code Transactional} defaults to {@code Propagation.REQUIRED}, which JOINS the caller's
  * transaction and opens nothing, so an ordinary annotation on a method in this package is
  * behaviourally inert when the job layer has already begun the unit of work. The two propagation
@@ -221,12 +232,29 @@
  * writes stop being one commit: a posted transaction whose category balance has not moved, or an
  * updated account balance with no matching transaction row, are states the baseline cannot produce,
  * and a golden-master comparison would report either as a parity failure and would be right to.
- * Trade-offs: the rule stays absolute -- no annotation of any propagation -- even though the
+ * Trade-offs: the rule stays absolute for every class that touches a business schema -- no annotation
+ * of any propagation -- even though the
  * default one is harmless, because "annotate only with the default, never with the other two"
  * relies on every future author knowing which of eight enum constants is safe here, whereas "no
  * annotation in this package" is checkable by grep and states where the boundary lives. What is
  * given up is the ability to annotate a method for documentation value; the boundary is documented
  * here instead, once.</p>
+ *
+ * <p>Refactoring Rationale: there is now exactly ONE named exception, {@code BatchStepLedgerWriter},
+ * and it is stated here because the rule above is otherwise absolute and a reader who found that
+ * annotation would be entitled to conclude the rule had simply been broken. Every method of that class
+ * is annotated {@code Propagation.REQUIRES_NEW} deliberately, and what keeps the invariant intact is
+ * the schema it writes: {@code batch.batch_run} is this module's OWN ledger metadata and is none of the
+ * three writes the reference commits together. The independence is the entire point. A ledger row saved
+ * inside the step's transaction is rolled back by the very failure it exists to record, so before that
+ * class existed a hard-failed run left no failed row at all. Trade-offs: the exception is named rather
+ * than expressed as a general clause such as "except when writing the ledger", because a general clause
+ * invites a second exception argued by analogy and the next thing argued by analogy is a business
+ * write. One name is checkable; a category is not.</p>
+ *
+ * <p>Assumptions: that exception cannot reach a business schema even by mistake. The class holds one
+ * collaborator, the ledger row's own repository, so there is no path from it to {@code ledger} or to
+ * {@code account} for an independent transaction to split.</p>
  *
  * <p>Assumptions: a method here reached with <b>no</b> ambient transaction runs each of its
  * statements in its own implicit one, which is the case a unit test exercises. That is why the job
@@ -265,9 +293,9 @@
  *       first-reason-wins across reasons 100 and 101, which short-circuit their successors,
  *       and last-writer-wins across reasons 102 and 103, whose two assignment blocks at
  *       {@code :407} and {@code :414} are sequential and unguarded so that 103 overwrites
- *       102. Stating it as uniformly first-reason-wins, as an earlier revision did, describes
- *       an implementation that reports 102 for a transaction failing both boundaries, which
- *       is a divergence on a combination that is ordinary rather than contrived.</dd>
+ *       102. Stating it as uniformly first-reason-wins would describe an implementation that
+ *       reports 102 for a transaction failing both boundaries, which is a divergence on a
+ *       combination that is ordinary rather than contrived.</dd>
  *
  *   <dt>Reject codes and their message text belong to
  *       {@code com.carddemo.batch.dto.RejectReason}</dt>
@@ -308,15 +336,40 @@
  * here are the named decisions a job calls, and each one corresponds to a cited COBOL
  * paragraph so that the traceability matrix can pair the two.</p>
  *
- * <p>The four classes here define the named methods a job calls, and each such method is
+ * <p>The four rule classes here define the named methods a job calls, and each such method is
  * the migrated form of a COBOL paragraph, which is what makes the traceability matrix
- * citable. Refactoring Rationale: a fifth class, {@code BatchStepLedger}, sits beside them and is NOT
+ * citable. Assumptions: the fifth class, {@code BatchStepLedger}, sits beside them and is NOT
  * a fifth transcription -- it transcribes no paragraph, because the baseline has no checkpoint contract
  * to transcribe: the only {@code RESTART=} anywhere is commented out at
  * {@code app/jcl/DEFGDGD.jcl:2} and there is no {@code CHKPT=} in the tree at all. It is here rather
  * than in the job layer because the decision it makes -- whether a step of a run has already finished,
  * and with what graded outcome -- is a decision and not a wiring concern, and because the job layer is
- * the layer it exists to be called BY. Everything about HOW those methods are driven belongs to the job layer: step
+ * the layer it exists to be called BY.</p>
+ *
+ * <p>Refactoring Rationale: a SIXTH class, {@code BatchErrorPublisher}, sits beside them on the same
+ * terms and for a different reason, and both the placement and the reason are worth stating. It
+ * transcribes no paragraph because the baseline publishes no such message at all -- a reference batch
+ * program signals failure by terminating abnormally, at {@code app/cbl/CBTRN02C.cbl:707-711} and at the
+ * matching paragraph of each sibling program -- so it is an addition and is registered as one. It is
+ * here rather than in this module's configuration package because a send loop, a swallow policy and a
+ * log contract are behaviour: a class declared inside a {@code @Configuration} type could not be
+ * exercised without building a context, which is the property this package's tests depend on not
+ * needing. Its wiring alone is declared there, behind the property that gates the whole sink.</p>
+ *
+ * <p>Assumptions: it holds no rule and takes no decision about the run. What to publish is decided by
+ * the entry point, which alone knows the job name, the run identifier and the graded return code
+ * together; whether the tier is one that stops the chain is decided by
+ * {@code com.carddemo.batch.dto.BatchReturnCode}; and what a payload may carry is decided by
+ * {@code com.carddemo.batch.dto.BatchErrorEvent}, whose own constructor refuses a success tier and
+ * redacts an identifier-shaped or credential-naming component. This class serialises, sends, and
+ * reports whether the send landed.</p>
+ *
+ * <p>Trade-offs: it is the second class in this package with a WRITING surface, alongside
+ * {@code DatasetGenerationService} and the accrual's persistence noted above, so the "a rule here is a
+ * function of its arguments" property does not extend to it. That is accepted rather than worked
+ * around: the alternative places the only producer of this module's one outbound message in the job
+ * layer, where seven jobs would each have to know the sink, or in the configuration layer, where it
+ * could not be unit tested at all. Everything about HOW those methods are driven belongs to the job layer: step
  * wiring, reader and writer construction, chunk boundaries, the transaction boundary of
  * invariant 1, the process return code, the reject tally, and the end-of-run summary the
  * baseline renders at {@code app/cbl/CBTRN02C.cbl:227-228} -- two {@code DISPLAY}

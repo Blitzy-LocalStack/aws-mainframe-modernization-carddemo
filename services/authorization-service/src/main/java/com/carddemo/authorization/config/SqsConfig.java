@@ -1,18 +1,25 @@
 package com.carddemo.authorization.config;
 
+import com.carddemo.authorization.service.AuthorizationRequestListener;
 import com.carddemo.common.codec.CsvAuthCodec;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.QueueClientBudget;
+import com.carddemo.common.messaging.RethrowingDigestErrorHandler;
 import com.carddemo.common.observability.MetricsConfig;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.web.CorrelationIdFilter;
 import io.awspring.cloud.autoconfigure.core.AwsClientBuilderConfigurer;
 import io.awspring.cloud.sqs.config.SqsMessageListenerContainerFactory;
 import io.awspring.cloud.sqs.listener.QueueNotFoundStrategy;
 import io.awspring.cloud.sqs.listener.SqsContainerOptionsBuilder;
+import io.awspring.cloud.sqs.listener.SqsHeaders;
 import io.awspring.cloud.sqs.listener.acknowledgement.AcknowledgementOrdering;
 import io.awspring.cloud.sqs.listener.acknowledgement.handler.AcknowledgementMode;
+import io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
+import java.util.function.Predicate;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +28,7 @@ import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.Message;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import software.amazon.awssdk.services.sqs.SqsClient;
 
@@ -292,6 +300,27 @@ import software.amazon.awssdk.services.sqs.SqsClient;
  * could be terminated by the very budget that exists to let it finish. Each is now set explicitly and
  * each carries its reasoning at the point it is applied.</p>
  *
+ * <h2>Where a failure on this path becomes a record</h2>
+ *
+ * <p>Refactoring Rationale: this class publishes the listener's error handler, and it does so because
+ * nothing else could. In the web contexts of this migration the shared kernel's
+ * {@code GlobalExceptionHandler} is where a failure becomes both a record and a response, but it is a
+ * {@code @RestControllerAdvice} and a queue delivery never reaches the web dispatcher, so on this path
+ * it sees nothing. With no handler installed the container's own pipeline logs the failure at DEBUG and
+ * stops there, which means a request that exhausted its redelivery allowance and dead-lettered left
+ * nothing behind at a level any deployment collects. {@link com.carddemo.common.messaging.RethrowingDigestErrorHandler} closes that
+ * gap and is written so that closing it costs nothing else: every arm re-raises, because the pipeline
+ * composes a handler's normal completion back into the message's own outcome and would then acknowledge
+ * a message whose transaction had rolled back.</p>
+ *
+ * <p>Assumptions: this configuration depends on the service package and the service package does not
+ * depend on this one -- the handler names
+ * {@link AuthorizationRequestListener.WindowClosedException} so that a deliberate deferral is not
+ * recorded as a fault, and no class under {@code com.carddemo.authorization.service} imports anything
+ * from {@code com.carddemo.authorization.config}. The direction is stated because it is what keeps the
+ * dependency acyclic: configuration wires services, and a service that reached back for its own
+ * configuration would make the pair impossible to construct in either order.</p>
+ *
  * <h2>What parity rests on here</h2>
  *
  * <p>Assumptions: NO GOLDEN MASTER EXISTS for this path, and the reason is direct rather than
@@ -345,6 +374,16 @@ public class SqsConfig {
     private static final String ALL_MESSAGE_ATTRIBUTES = "All";
 
     /**
+     * What a failure record shows in place of a transport header the delivery did not carry.
+     *
+     * <p>Assumptions: an absent header degrades the record and never the handling, so a placeholder is
+     * substituted rather than the value being required. The token is parenthesised and holds no space,
+     * which keeps the {@code key=value} record parseable by the same split every other statement in this
+     * context is read with -- an empty value would silently merge two fields for that reader.</p>
+     */
+    private static final String UNKNOWN_HEADER = "(absent)";
+
+    /**
      * How many account-context round trips one authorization request can cost.
      *
      * <p>Assumptions: three, and they are the reads {@code COPAUA0C.cbl} performs at its paragraphs 5100,
@@ -366,15 +405,46 @@ public class SqsConfig {
     private static final Logger LOG = LoggerFactory.getLogger(SqsConfig.class);
 
     /**
+     * Names this service's listener in every failure record the shared handler writes.
+     *
+     * <p>Assumptions: the value matches the prefix this listener's own event names already use, so a query
+     * that selects {@code auth.request} records finds its failures alongside its outcomes rather than in a
+     * separate vocabulary.</p>
+     */
+    public static final String LISTENER_SOURCE = "auth.request";
+
+    /**
+     * The event a delivery declined by the admission window is recorded under.
+     *
+     * <p>Purpose: this listener bounds its own intake at the reference's per-window message allowance and
+     * REFUSES a delivery that arrives while the window is closing, so the broker redelivers it in the next
+     * window. That refusal reaches the error handler like any other throwable, and recording it as a
+     * listener FAILURE would report a burst of faults at every window boundary -- for a service doing
+     * exactly what it was built to do. This event name is how the two are told apart in one log stream.</p>
+     */
+    public static final String EVENT_WINDOW_DEFERRED = "event=auth.listener.deferred";
+
+    /**
+     * Recognises the admission window's own refusal, so it is recorded as a deferral and not as a fault.
+     *
+     * <p>Assumptions: the discrimination is by TYPE and not by message. The refusal carries a sentence
+     * naming the window generation, which would make a message match brittle for no gain, and the type is
+     * declared by the listener for exactly this purpose.</p>
+     */
+    private static final Predicate<Throwable> WINDOW_DEFERRAL =
+            AuthorizationRequestListener.WindowClosedException.class::isInstance;
+
+    /**
      * Supplies the synchronous queue client the outbox drain publishes replies with.
      *
      * <p>Trade-offs: this is the SYNCHRONOUS client, while the starter auto-configures an
-     * asynchronous one for the listener container. The drain sends inside a database transaction
-     * that is holding row locks, and it must know each send's outcome before it decides what to
-     * write on the row, so it would have to block on a future immediately in any case. Blocking
+     * asynchronous one for the listener container. Each send the drain issues sits BETWEEN two of its
+     * own short transactions -- the claim that leased the row, and the record or retirement that
+     * settles it -- and which of those settlements runs is decided by the send's outcome, so the drain
+     * would have to block on a future immediately in any case. Blocking
      * explicitly on a synchronous call is the same wait with none of the ambiguity about which
-     * thread the continuation runs on, and that ambiguity matters because the continuation touches a
-     * transaction-bound persistence context that is not safe to use from another thread.</p>
+     * thread the continuation runs on, and that ambiguity matters because the continuation opens a
+     * transaction whose persistence context is bound to the thread that opened it.</p>
      *
      * <p>Assumptions: the builder is handed to the starter's own configurer rather than being
      * configured here, so region, credentials and any endpoint override resolve exactly as they do
@@ -384,7 +454,9 @@ public class SqsConfig {
      *
      * <p>Refactoring Rationale: the client is given a whole-call bound and a per-attempt bound, and it
      * had neither -- the software development kit's default for both is no bound at all, so a stalled
-     * send retried indefinitely. For the drain that is a stuck scheduled pass holding row locks. For the
+     * send retried indefinitely. For the drain that is a scheduled pass wedged between a claim and its
+     * settlement, leaving every row it leased unpublishable by any other publisher until the lease
+     * expires and making no further progress in the meantime. For the
      * request consumer the same absence is worse, because a handler that outlives its message's
      * visibility period does not merely run late: the queue makes the request visible again, a second
      * consumer takes it, and two handlers decide one authorization at once. The durable
@@ -512,6 +584,44 @@ public class SqsConfig {
     }
 
     /**
+     * Publishes the shared listener error handler so a failed delivery is recorded without its message text.
+     *
+     * <p>Purpose: the starter's own failure record is switched off in
+     * {@code carddemo-common-defaults.yml}, because it logs the throwable as a trailing argument and the
+     * logging facade then renders every message in the cause chain. On this queue the payload is the
+     * eighteen-field authorization request, so those messages can carry a primary account number verbatim
+     * -- a driver quoting the statement it could not run, or the codec quoting the field it could not read.
+     * This bean is the replacement record: the chain of TYPES and the frames, with no message text, and the
+     * failure rethrown unchanged.</p>
+     *
+     * <p>Refactoring Rationale: the handler is published as a BEAN rather than set on the factory inside the
+     * post-processor below. The starter's own factory method already takes an {@code ErrorHandler} from the
+     * context and installs it on the factory it builds, so a bean is the supported extension point and it
+     * leaves the post-processor with the one job it is named for.</p>
+     *
+     * <p>Assumptions: the rethrow is what preserves this queue's redrive contract, and on a first-in
+     * first-out queue it preserves more than that. The starter installs its error-handler stage as a
+     * RECOVERY step, so a handler that returned normally would leave the pipeline result successful and the
+     * acknowledgement stage that runs after it would DELETE the message -- which on a FIFO queue would also
+     * release the message group and let a LATER request for the same card be handled before the one that
+     * failed, silently reordering a per-card sequence the baseline guarantees.</p>
+     *
+     * <p>Trade-offs: this bean carries no {@code @ConditionalOnMissingBean}, unlike the client above it. A
+     * condition would let the handler be absent whenever something else happened to publish an error
+     * handler first, and an absent handler is not a missing log line -- it is the framework's own
+     * full-throwable record coming back in its place, since that record is switched off by name and not by
+     * the presence of a replacement.</p>
+     *
+     * @return the shared handler, typed as the starter's context-supplied error handler so its factory
+     *     method finds it, never {@code null}
+     */
+    @Bean
+    public ErrorHandler<Object> authorizationListenerErrorHandler() {
+        return new RethrowingDigestErrorHandler<>(LISTENER_SOURCE,
+                WINDOW_DEFERRAL, EVENT_WINDOW_DEFERRED);
+    }
+
+    /**
      * Applies the container settings that carry a transport semantic the listener cannot express.
      *
      * <p>Alternatives Considered: declaring a listener-container factory bean here instead. The
@@ -565,6 +675,8 @@ public class SqsConfig {
         return new ListenerContainerOptionsCustomizer(Duration.ofSeconds(listenerShutdownSeconds),
                 Duration.ofSeconds(acknowledgementShutdownSeconds), shutdownPhaseTimeout);
     }
+
+
 
     /**
      * Carries the authorization queue references whose names were verified to be ordered.

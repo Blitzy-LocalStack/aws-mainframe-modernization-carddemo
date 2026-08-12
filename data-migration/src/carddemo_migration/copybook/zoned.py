@@ -8,27 +8,24 @@ base-master records is stored. A display field holds one printable digit per byt
 SIGNED one folds its sign into its LOW-ORDER DIGIT byte as a trailing overpunch, so the
 sign occupies no byte of its own and the field's width is its digit count exactly.
 :func:`decode_zoned` turns one such span into an exact :class:`decimal.Decimal` carried at
-the field's declared scale; :func:`encode_zoned` is its exact inverse. The two
-field-oriented forms, :func:`decode_zoned_field` and :func:`encode_zoned_field`, do the
-same for a span located by a field descriptor, which is what keeps a caller anchored on
-the declared offset rather than on anything it found in the data.
+the field's declared scale and :func:`encode_zoned` is its exact inverse;
+:func:`decode_zoned_field` and :func:`encode_zoned_field` do the same for a span located by
+a field descriptor, which is what keeps a caller anchored on the declared offset rather
+than on anything it found in the data. Nothing else in the package converts these bytes and
+this module converts no others: packed decimal belongs to
+``carddemo_migration.copybook.packed``, cp037 character decoding to
+``carddemo_migration.copybook.ebcdic_codec``, and the byte geometry of every field to
+``carddemo_migration.copybook.layouts``, which this module imports and never restates.
 
-Nothing else in the package converts these bytes, and this module converts no others.
-``COMP-3`` packed decimal belongs to ``carddemo_migration.copybook.packed``, cp037
-character decoding to ``carddemo_migration.copybook.ebcdic_codec``, and the byte geometry
-of every field to ``carddemo_migration.copybook.layouts``, which this module imports and
-never restates.
-
-Why this module carries more explanation than its size suggests
---------------------------------------------------------------
-A defect here is SILENT. A misread overpunch does not raise, does not misalign the record
-and does not fail a length check: it produces a plausible amount that is wrong, and it
-surfaces much later as a balance that does not reconcile. The single most likely such
-defect is to read the trailing byte as a bare sign marker rather than as a digit that also
-carries the sign. Under that misreading the span ``0000005047G`` decodes to 50.47 instead
-of 504.77 -- out by a factor of ten, still entirely plausible, and accepted by every other
-check this module performs. Every decision below is therefore recorded with the specific
-consequence of getting it wrong.
+Why a defect here is silent
+---------------------------
+A misread overpunch does not raise, does not misalign the record and does not fail a length
+check: it produces a plausible amount that is wrong, and it surfaces much later as a
+balance that does not reconcile. The most likely such defect is to read the trailing byte
+as a bare sign marker rather than as a digit that also carries the sign -- under that
+misreading the span ``0000005047G`` decodes to 50.47 instead of 504.77, out by a factor of
+ten, still entirely plausible, and accepted by every other check this module performs. Each
+decision below is therefore recorded with the consequence of getting it wrong.
 
 The two overpunch tables
 ------------------------
@@ -42,144 +39,89 @@ the sign::
 An UNSIGNED display field -- ``PIC 9(n)`` with no leading ``S`` -- carries plain ASCII
 digits in every byte including the last, and no sign is extracted from it at any point.
 
-Signed and unsigned are two contracts, and the flag is declared rather than sniffed
-------------------------------------------------------------------------------------
-``app/cpy/CVACT01Y.cpy`` line 5 declares ``ACCT-ID PIC 9(11)`` and line 6 declares
-``ACCT-ACTIVE-STATUS PIC X(01)``. Line 1 of ``app/data/ASCII/acctdata.txt`` opens
-``00000000001Y00000001940{00000020200{00000010200{2014-11-20``, and line 7 of the same
-dataset opens ``00000000007Y00000001930{00000020650{00000002640{2012-10-12``. In both, the
-byte at zero-based offset 11 is the letter ``Y`` -- a character value that is not an
-overpunch and must never be read as one -- while the three ``{`` bytes at offsets 12, 24
-and 36 are the low-order digits of three signed amounts, each a positive zero. Every entry
-point here is therefore TOLD which contract applies, taking the flag from the field
-descriptor ``layouts`` declares, so the regime is decided by the copybook and never by the
-data.
+The sign flag is declared, never sniffed
+----------------------------------------
+Every entry point here is TOLD which of those two contracts applies, taking the flag from
+the field descriptor ``layouts`` declares, so the regime is decided by the copybook and
+never by the data. Inferring it from the trailing byte does not merely read badly; it
+corrupts real data in this corpus, and two demonstrations from ``app/data/ASCII`` fix why:
 
-The false-positive class the corpus proves
-------------------------------------------
-Inferring the regime from the trailing byte does not merely read badly; it corrupts real
-data in this corpus. ``app/data/ASCII/dailytran.txt`` contains the eleven-character spans
-``3580010001P``, ``2252010001P``, ``1861010001P``, ``2564010001P`` and ``4260030001O``.
-Each ends in a letter that appears in the negative table, so each looks exactly like a
-signed ``PIC S9(09)V99`` amount. None of them is a field at all: every one sits at
-zero-based offset 12 of its own 350-byte record, straddling the tail of
-``DALYTRAN-ID PIC X(16)``, then ``DALYTRAN-TYPE-CD``, then ``DALYTRAN-CAT-CD``, and ending
-on the first byte of ``DALYTRAN-SOURCE`` -- the ``P`` of ``POS TERM`` or the ``O`` of
-``OPERATOR``. Because ``P`` is the negative seven and ``O`` the negative six, a
-trailing-byte sniffer reads the first as -358001000.17 and the last as -426003000.16: a
-source-terminal label reported as a nine-figure negative amount. The same records carry
-their genuine amounts at offset 132, where line 1 holds ``0000005047G`` and decodes to
-504.77, so one record exhibits both the aligned decode and the misaligned hazard.
+* ``acctdata.txt`` line 1 opens ``00000000001Y00000001940{``. The ``Y`` at zero-based
+  offset 11 is ``ACCT-ACTIVE-STATUS PIC X(01)`` and must never be read as an overpunch,
+  while the ``{`` at offset 12 is the low-order digit of a signed amount and is a positive
+  zero.
+* ``dailytran.txt`` holds eleven-character spans such as ``3580010001P`` and
+  ``4260030001O``, each ending in a letter from the negative table and so looking exactly
+  like a signed ``PIC S9(09)V99`` amount. Neither is a field at all: each sits at
+  zero-based offset 12 of its own 350-byte record, straddling ``DALYTRAN-ID``,
+  ``DALYTRAN-TYPE-CD`` and ``DALYTRAN-CAT-CD`` and ending on the first byte of
+  ``DALYTRAN-SOURCE`` -- the ``P`` of ``POS TERM`` or the ``O`` of ``OPERATOR``. Because
+  ``P`` is the negative seven and ``O`` the negative six, a trailing-byte sniffer reads a
+  source-terminal label as -358001000.17 and -426003000.16, while the genuine amounts in
+  those records sit at offset 132.
 
 Decode per field, never per record
 ----------------------------------
-A span reaches this module already sliced to one field. A whole record is never handed to
-a character decoder, because a record contains bytes that are not text: overpunch
-characters, packed nibbles in the records that use them, and low values inside padding. A
-character decoder maps every byte it cannot interpret to a replacement character of the
-same width, so the record keeps its declared length and still parses field by field
-afterwards -- only the amounts are wrong. The parity oracle takes the same position from
-the other direction, treating its mainframe-character-set datasets as opaque binary and
-never transcoding them, and its helper comments record that routing those bytes through a
-text write mangles them into replacement characters. Transcoding therefore stays upstream
-in ``ebcdic_codec``, which performs it one field at a time; this module receives
-characters that are already correct.
+A span reaches this module already sliced to one field. A whole record is never handed to a
+character decoder, because a record contains bytes that are not text -- overpunch
+characters, packed nibbles in the records that use them, and low values inside padding --
+and a character decoder maps every byte it cannot interpret to a replacement character of
+the same width. The record therefore keeps its declared length and still parses field by
+field afterwards, and only the amounts are wrong. The parity oracle takes the same position
+from the other direction, treating its mainframe-character-set datasets as opaque binary
+and never transcoding them. Transcoding stays upstream in ``ebcdic_codec``, which performs
+it one field at a time; this module receives characters that are already correct.
 
-The EBCDIC sign convention, and the naming trap around it
----------------------------------------------------------
-This module implements the EBCDIC sign-overpunch convention explicitly rather than
-implicitly. ``tests/README.md`` line 268 records the house compile invocation as
-``cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy``, and its lines 273 and 274 state
-why the flag is required: the default ``-fsign=ASCII`` misreads the zoned-decimal sign
-overpunch and silently corrupts negative balances. The reference data this module reads
-was produced under the EBCDIC convention, so that is the convention decoded here.
-
-Two names collide around this point and both are correct, so the collision is recorded
-rather than resolved by dropping one of them. ``tests/helpers/record_codec.py`` line 135
-calls this very mapping "the canonical IBM ASCII trailing-sign mapping", while
-``tests/README.md`` lines 273 and 274 require ``-fsign=EBCDIC``. The overpunch characters
-themselves (``{``, ``A`` to ``I``, ``}``, ``J`` to ``R``) are ASCII-printable, which is
-what the first name describes; the CONVENTION those characters implement is the EBCDIC
-one, which is what the second name describes.
-
-The sharper trap matters inside this subpackage: here "EBCDIC" names a SIGN CONVENTION and
-not a character encoding. It is entirely distinct from the cp037 CHARACTER decode that
-``carddemo_migration.copybook.ebcdic_codec`` owns, and the two must not be conflated. This
-module never transcodes a character; that module never interprets a sign. A matching note
-sits in ``ebcdic_codec`` where the two meet.
-
-The zoned fields this module serves
------------------------------------
-Every money field in all eleven base-master records is in this regime. The widths follow
-mechanically from the picture clause, because the implied decimal point occupies no byte::
-
-    declaration                     declared at                     bytes   SQL column
-    ACCT-CURR-BAL  PIC S9(10)V99    app/cpy/CVACT01Y.cpy line  7       12    NUMERIC(12,2)
-    TRAN-AMT       PIC S9(09)V99    app/cpy/CVTRA05Y.cpy line 10       11    NUMERIC(11,2)
-    DALYTRAN-AMT   PIC S9(09)V99    app/cpy/CVTRA06Y.cpy line 10       11    NUMERIC(11,2)
-    TRAN-CAT-BAL   PIC S9(09)V99    app/cpy/CVTRA01Y.cpy line  9       11    NUMERIC(11,2)
-    DIS-INT-RATE   PIC S9(04)V99    app/cpy/CVTRA02Y.cpy line  9        6    NUMERIC(6,2)
-    ACCT-ID        PIC 9(11)        app/cpy/CVACT01Y.cpy line  5       11    BIGINT
-    CUST-ID        PIC 9(09)        app/cpy/CVCUS01Y.cpy line  5        9    BIGINT
-    CUST-SSN       PIC 9(09)        app/cpy/CVCUS01Y.cpy line 17        9    encrypted, masked
-
-``app/cpy/CVACT01Y.cpy`` declares four further amounts at ``PIC S9(10)V99`` -- the credit
-limit and the cash credit limit at lines 8 and 9, and the cycle credit and cycle debit at
-lines 13 and 14. Those four plus the current balance are the five ``NUMERIC(12,2)`` columns
-the load's money-total parity pass aggregates, which is why the twelve-byte form is both
-the commonest in the corpus and the canonical exemplar.
-
-The eleven-byte width is corroborated by an artifact that shares no code with the
-copybooks: ``app/jcl/PRTCATBL.jcl`` declares the sort symbol ``TRAN-CAT-BAL,18,11,ZD`` at
-line 50, whose ``ZD`` type code names the zoned regime outright and whose width is eleven,
-at the one-based position 18 that the preceding fields of ``app/cpy/CVTRA01Y.cpy`` put it
-at. A sort position is ONE-based and a field offset here is ZERO-based, so that 18 is the
-offset 17 this module is handed.
-
-Two field names in the citations above keep a baseline misspelling that is deliberately not
-altered: ``ACCT-EXPIRAION-DATE`` and ``CARD-EXPIRAION-DATE`` are spelled as the copybooks
-spell them, and the corrections happen in the target column naming downstream. No other
-field is renamed anywhere in this package.
-
-Why ``COMP-3`` is a separate module and not a branch of this one
+"EBCDIC" here names a sign convention, not a character encoding
 ---------------------------------------------------------------
-Searching all eleven base-master copybooks for ``COMP``, ``COMP-3`` or ``OCCURS`` returns
-nothing at all: those eleven records are one hundred per cent zoned display, so this module
-alone is sufficient for the whole seed corpus. Packed decimal is a genuinely different byte
-layout -- two digits per byte with the sign in the low-order nibble of the last byte -- and
-it appears only in the export record at ``app/cpy/CVEXPORT.cpy`` and, heavily, in the two
-authorization segments at ``app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy`` and
-``.../CIPAUDTY.cpy``. Two regimes, two codecs, and never one module branching between them,
-because a codec that inspected bytes to decide which regime it was in would be back to
-guessing from data what the copybook already states.
+The house compile invocation is ``cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy``,
+and ``tests/README.md`` states why the flag is required: the default ``-fsign=ASCII``
+misreads the sign overpunch and silently corrupts negative balances. The reference data
+this module reads was produced under the EBCDIC convention, so that is the convention
+decoded here. The overpunch characters themselves are ASCII-printable, which is why the
+reference codec calls the same mapping a canonical IBM ASCII trailing-sign mapping; the
+CONVENTION they implement is the EBCDIC one. Both names are correct, and neither of them is
+the cp037 CHARACTER decode ``carddemo_migration.copybook.ebcdic_codec`` owns: this module
+never transcodes a character, and that module never interprets a sign.
+
+The fields served, and where their widths are declared
+-----------------------------------------------------
+Every money field in all eleven base-master records is in this regime, and each width
+follows mechanically from the picture clause because the implied decimal point occupies no
+byte: ``PIC S9(10)V99`` is twelve bytes against a ``NUMERIC(12,2)`` column,
+``PIC S9(09)V99`` eleven against ``NUMERIC(11,2)``, ``PIC S9(04)V99`` six against
+``NUMERIC(6,2)``, and the unsigned identifiers ``PIC 9(11)`` and ``PIC 9(09)`` are eleven
+and nine bytes against ``BIGINT``. Which field is declared where, at what offset and
+against which column is held once in ``carddemo_migration.copybook.layouts`` and tabulated
+in ``docs/architecture/data-model-and-schema-mapping.md``, so a correction has one home.
+Searching those eleven copybooks for ``COMP``, ``COMP-3`` or ``OCCURS`` returns nothing at
+all: they are one hundred per cent zoned display, so this module alone serves the whole seed
+corpus, and packed decimal is a separate module rather than a branch of this one because a
+codec that inspected bytes to decide which regime it was in would be back to guessing what
+the copybook already states.
 
 The round-trip law, and its single documented exception
 -------------------------------------------------------
 For every span this module accepts, encoding what it decoded reproduces the original span
 byte for byte: ``encode_zoned(decode_zoned(raw, i, d, s), i, d, s) == raw``. That law is
-not a convenience. The parity oracle compares batch output byte for byte after timestamp
+not a convenience: the parity oracle compares batch output byte for byte after timestamp
 normalisation, so a re-encoded record differing in one character is a failed comparison
 rather than a cosmetic difference.
 
-There is exactly one exception, and it is a deliberate cross-language parity policy rather
-than a limitation of this language or a defect on either side. COBOL distinguishes the
-opening brace, a positive zero, from the closing brace, a negative zero, as two distinct
-bytes, so the baseline has a negative zero. The reference implementation preserves it:
-``tests/helpers/record_codec.py`` documents at its line 241 that a closing-brace zero
-yields a signed zero, and its line 395 reads the sign back out of it. Python could preserve
-it too -- ``Decimal`` represents a signed zero and ``Decimal("-0").is_signed()`` is true --
-so nothing here forces the normalisation. What forces it is the Java parity anchor:
-``BigDecimal`` has no signed zero at all, so a value it decodes from a closing-brace span
-is indistinguishable from one decoded from an opening-brace span. This module normalises to
-match that anchor, because a value decoded here and the same span decoded there have to be
-the same value; preserving the sign here would make the two implementations disagree on one
-input while agreeing on every other, which is the hardest kind of disagreement to notice.
-The consequence is stated plainly: a closing-brace zero decodes to an unsigned zero,
-encoding any zero always emits the opening brace, and a closing-brace zero therefore
-normalises to an opening brace across a round trip. That is the one and only span for which
-the law above does not hold. The baseline stores the distinction, this module deliberately
-does not represent it, and the divergence is documented here, in the Java charter and in the
-migration's traceability matrix.
+The one exception is the negative zero, and it is a deliberate cross-language parity policy
+rather than a limitation of this language. COBOL distinguishes the opening brace, a positive
+zero, from the closing brace, a negative zero, and the reference codec preserves that
+distinction; Python could preserve it too, since ``Decimal("-0").is_signed()`` is true, so
+nothing here forces the normalisation. What forces it is the Java parity anchor:
+``BigDecimal`` has no signed zero at all, so a value it decodes from a closing-brace span is
+indistinguishable from one decoded from an opening brace. A value decoded here and the same
+span decoded there have to be the same value, and preserving the sign here would make the
+two implementations disagree on one input while agreeing on every other -- the hardest kind
+of disagreement to notice. So a closing-brace zero decodes to an unsigned zero, encoding any
+zero always emits the opening brace, and a closing-brace zero normalises to an opening brace
+across a round trip. That is the one and only span for which the law above does not hold,
+and the divergence is recorded here, in the Java charter and in the migration's
+traceability matrix.
 
 Diagnostics and sensitive fields
 --------------------------------
@@ -188,8 +130,9 @@ content is quoted only when the caller supplies a field descriptor AND that desc
 declares the field not sensitive, which is an explicit statement that the span may be read.
 Supplying no descriptor withholds the content, because sensitivity is a property of the
 field and a caller that named no field has stated nothing about it. The unsigned national
-identifier at ``app/cpy/CVCUS01Y.cpy`` line 17 is a display field and does reach this
-module, so the default has to be the closed one.
+identifier ``CUST-SSN PIC 9(09)`` is a display field and does reach this module, so the
+default has to be the closed one.
+
 
 Known-answer vectors
 --------------------
@@ -242,10 +185,8 @@ Trade-offs:
     codec imports and runs against its known-answer vectors on a bare checkout with no
     database driver installed, no cloud SDK present and no credential configured, which is
     exactly the isolation a module whose defects are silent needs in order to stay
-    testable. The reference codec states the same discipline for the same stated reason, so
-    that even a bare checkout, before any test dependency is installed, can import and use
-    it. The accepted cost is that a convenience such as resolving a dataset location cannot
-    live here and belongs to a loader instead.
+    testable. The accepted cost is that a convenience such as resolving a dataset location
+    cannot live here and belongs to a loader instead.
 Assumptions:
     **Every validation raises; none asserts.** ``python -O`` strips ``assert`` statements
     outright, so an assertion is not a validation but a check that disappears in the
@@ -253,30 +194,13 @@ Assumptions:
     is enforced by an explicit ``raise``, and the two error types below exist so a caller
     can tell an alignment fault from a content fault.
 Assumptions:
-    **Exact fixed point at every hop, and no ``float`` anywhere.** A binary
-    floating-point number cannot represent ten cents exactly, so a single conversion
-    through one would silently corrupt a monetary total. Decoding therefore produces
-    :class:`decimal.Decimal` and encoding accepts ``Decimal``, ``int`` or ``str`` and
-    refuses ``float`` outright, exactly as the reference codec does. The same discipline
-    carries downstream: ``NUMERIC(p,2)`` in the target schema and ``NUMERIC`` in every
-    money aggregate the verification queries compute.
-
-Parameters
-----------
-None.
-    The module is imported for its codec API and performs no caller-supplied work at
-    import time.
-
-Returns
--------
-None.
-    Importing the module defines constants, errors and functions; it does not produce a
-    value.
-
-Raises
-------
-None.
-    Import-time table construction and function definition do not inspect record data.
+    **Exact fixed point at every hop, and no ``float`` anywhere.** A binary floating-point
+    number cannot represent ten cents exactly, so a single conversion through one would
+    silently corrupt a monetary total. Decoding therefore produces
+    :class:`decimal.Decimal`, encoding accepts ``Decimal``, ``int`` or ``str`` and refuses
+    ``float`` outright, and the same discipline carries downstream into the target schema's
+    ``NUMERIC(p,2)`` columns and the ``NUMERIC`` aggregates the verification queries
+    compute.
 """
 
 from __future__ import annotations
@@ -286,13 +210,6 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Final
 
 from carddemo_migration.copybook.layouts import FieldSpec, Kind, mask_field, zoned_width
-
-# Trade-offs: keeping this import boundary to the standard library plus ``layouts``
-#   makes the codec importable in a bare checkout before a database driver, AWS SDK, or
-#   character-set package is installed. The accepted cost is that record loading,
-#   transcoding, and persistence stay outside this module; the concrete benefit is that a
-#   money-field decode can be reproduced without infrastructure that might hide the actual
-#   byte-to-value decision.
 
 # Assumptions: the public surface is declared explicitly and in sorted order so a
 #   consumer's import list can be checked against it mechanically, and so that the two
@@ -359,12 +276,9 @@ _QUANTIZE_PRECISION_MARGIN: Final[int] = 8
 _DISPLAY_KINDS: Final[frozenset[Kind]] = frozenset({Kind.ZONED, Kind.UINT})
 
 
-# Assumptions: every contract violation below is enforced with an explicit exception
-#   rather than an ``assert``. Optimised Python removes assertions under ``python -O``;
-#   losing a width or sign check in that mode would turn malformed financial input into a
-#   plausible value instead of a visible failure. Both public errors remain ValueError
-#   subclasses so existing parse guards still catch them, while the width subtype lets a
-#   caller distinguish misalignment from malformed numeric content.
+# Assumptions: both public errors remain ``ValueError`` subclasses so an existing parse
+#   guard still catches them, and the width subtype exists so a caller can distinguish
+#   misalignment -- a record-geometry fault -- from malformed numeric content.
 class ZonedDecimalError(ValueError):
     """Report malformed display-numeric content or an impossible exact encoding.
 
@@ -379,14 +293,9 @@ class ZonedDecimalError(ValueError):
     args : tuple[object, ...]
         Standard exception arguments, normally one human-readable diagnostic string.
 
-    Returns
-    -------
-    ZonedDecimalError
-        A newly constructed content-or-encoding exception.
-
-    Raises
-    ------
-    None.
+    Notes
+    -----
+    Raised by every content and exact-encoding check in this module.
     """
 
 
@@ -404,15 +313,10 @@ class ZonedSpanWidthError(ZonedDecimalError):
     args : tuple[object, ...]
         Standard exception arguments, normally one human-readable diagnostic string.
 
-    Returns
-    -------
-    ZonedSpanWidthError
-        A newly constructed width exception that is also a
-        :class:`ZonedDecimalError`.
-
-    Raises
-    ------
-    None.
+    Notes
+    -----
+    Raised only for a width or alignment fault, and catchable as a
+    :class:`ZonedDecimalError`.
     """
 
 
@@ -664,10 +568,8 @@ def _field_geometry(field: FieldSpec) -> tuple[int, int, bool]:
     if not isinstance(field, FieldSpec):
         raise TypeError(f"field must be FieldSpec, not {type(field).__name__}")
     if field.kind not in _DISPLAY_KINDS:
-        # Assumptions: all eleven base masters contain zero ``COMP`` or
-        #   ``COMP-3`` declarations, so their numerics are display fields. Packed and
-        #   binary storage occurs in other record families and has different digit and
-        #   sign placement; accepting either here would make one codec guess between
+        # Assumptions: packed and binary storage place their digits and sign
+        #   differently, so accepting either here would make one codec guess between
         #   incompatible byte layouts instead of obeying the descriptor.
         raise ZonedDecimalError(
             _failure(
@@ -763,17 +665,13 @@ def decode_zoned(
 
     negative = False
     if signed:
-        # Assumptions: signed mode means the EBCDIC SIGN CONVENTION explicitly.
-        #   ``tests/README.md`` lines 273-274 warn that the ASCII sign default misreads
-        #   these bytes and silently corrupts negative balances, so a caller cannot
-        #   switch modes by presenting a different-looking final character.
+        # Assumptions: signed mode means the EBCDIC SIGN CONVENTION explicitly, so the
+        #   final byte is looked up in the two overpunch tables and a caller cannot switch
+        #   conventions by presenting a different-looking final character. The ASCII sign
+        #   default misreads these bytes and silently corrupts negative balances.
         positive_digit = _POS_OVERPUNCH.find(last)
         negative_digit = _NEG_OVERPUNCH.find(last)
 
-        # Assumptions: the printable characters are the IBM ASCII trailing-sign
-        #   MAPPING while the contract is named ``-fsign=EBCDIC`` by the COBOL compiler.
-        #   Both names are retained because one describes the characters and the other
-        #   describes their sign convention; neither invokes cp037 character decoding.
         if positive_digit >= 0:
             last_digit = str(positive_digit)
         elif negative_digit >= 0:
@@ -833,31 +731,22 @@ def decode_zoned(
 
     # Trade-offs: constructing Decimal from one explicit numeric string costs one
     #   allocation, but it is independent of the caller's decimal precision and cannot
-    #   overflow an integer intermediate. That keeps every twelve-digit money field
-    #   exact under any ambient decimal context.
+    #   overflow an integer intermediate, which keeps every twelve-digit money field exact
+    #   under any ambient decimal context. Keeping exactly ``dec_digits`` characters after
+    #   the point is also what preserves the declared scale: ``normalize()`` would make
+    #   2065.00 and 2065 compare equal while discarding the exponent the golden-master
+    #   comparison and the downstream ``NUMERIC(p,2)`` column both depend on.
     if dec_digits:
         number = f"{integer_part}.{digits[integer_boundary:]}"
     else:
         number = integer_part
 
-    # Assumptions: preserving exactly ``dec_digits`` characters after the point is
-    #   what preserves the declared scale. Calling ``normalize()`` would make 2065.00
-    #   and 2065 compare equal while discarding the exponent needed by golden-master
-    #   checks and downstream NUMERIC(p,2) parity.
-
-    # Trade-offs: a closing-brace zero is normalised to an opening-brace zero on
-    #   re-encode, matching the Java parity codec's ORDINARY decimal API -- the
-    #   ``decode``/``encode`` pair, whose ``BigDecimal`` carries no negative zero. This is
-    #   the one accepted non-byte-identical round trip on that pair; retaining a minus
-    #   here would make Python and Java disagree on the same source span.
-    # Assumptions: the Java codec DOES offer a byte-exact alternative, and this function
-    #   is deliberately not it. ``ZonedDecimalCodec.decodePreservingSign`` returns a
-    #   ``SignedZoned`` carrying the overpunch class beside the value, and
-    #   ``encodePreservingSign`` reproduces the original span from that pair with no
-    #   exception at all. A caller here that must reproduce a dataset byte for byte
-    #   therefore has a Java counterpart to compare against; a Python equivalent belongs
-    #   with the loader that needs it rather than on this ordinary decode path, which
-    #   every reader calls and none of which re-emits the span it read.
+    # Trade-offs: a closing-brace zero yields an unsigned zero, the one accepted
+    #   non-byte-identical round trip, for the cross-language reason the module docstring
+    #   records. The Java codec exposes a sign-preserving pair for a caller that must
+    #   reproduce a dataset byte for byte; a Python equivalent belongs with the loader that
+    #   needs it rather than on this ordinary decode path, which every reader calls and
+    #   none of which re-emits the span it read.
     if negative and any(digit != _PAD_DIGIT for digit in digits):
         number = f"-{number}"
     return Decimal(number)
@@ -913,10 +802,8 @@ def encode_zoned(
     """
     width = _require_geometry(int_digits, dec_digits, signed, field=field)
 
-    # Assumptions: a binary floating-point value cannot represent ten cents
-    #   exactly, and ``bool`` is an ``int`` subclass despite not being a monetary value.
-    #   Rejecting both before Decimal conversion prevents ``0.10`` from carrying a hidden
-    #   approximation and prevents ``True`` from silently becoming one unit.
+    # Assumptions: ``bool`` is refused as well as ``float``, because it is an ``int``
+    #   subclass and would otherwise make ``True`` silently encode as one unit.
     if isinstance(value, bool):
         raise TypeError(
             _failure(
@@ -1078,21 +965,12 @@ def decode_zoned_field(record: str, field: FieldSpec) -> Decimal:
             )
         )
 
-    # Assumptions: decoding is anchored on one declared field and never on a
-    #   pattern scan over a record. ``3580010001P`` occurs at zero-based offset 12 in
-    #   ``dailytran.txt`` only because it straddles DALYTRAN-ID and three following code
-    #   fields; scanning would report it as a nine-figure negative amount, while slicing
-    #   the declared AMT at offset 132 yields the actual 504.77.
+    # Assumptions: decoding is anchored on one declared field and never on a pattern scan
+    #   over a record, and only the sliced span travels onward. Scanning would report
+    #   ``3580010001P`` -- which occurs at offset 12 of a daily-transaction record only
+    #   because it straddles four fields -- as a nine-figure negative amount, where slicing
+    #   the declared amount at offset 132 yields the actual 504.77.
     span = text[field.start : field.end]
-
-    # Assumptions: a whole record may contain sign bytes, packed nibbles, padding
-    #   low values, and ordinary text, so it is never handed to a text decoder. The
-    #   rule is a prohibition rather than a prediction, because what such a decode
-    #   does is charset-dependent: a single-byte codec maps all 256 values and
-    #   mistranslates in silence with no replacement at all, while a multi-byte codec
-    #   emits replacements whose count need not equal the bytes consumed and so moves
-    #   every later offset. Passing only this fixed-width span keeps both outcomes out
-    #   of reach instead of relying on either one being the benign case.
     return decode_zoned(span, *geometry, field=field)
 
 

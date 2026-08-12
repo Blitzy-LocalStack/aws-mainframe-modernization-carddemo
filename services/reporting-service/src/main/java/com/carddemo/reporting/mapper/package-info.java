@@ -2,32 +2,22 @@
  * Byte-exact artifact assembly and API projection for the CardDemo reporting and statement
  * bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>What this package contains</h2>
  *
- * <p>Assumptions: every type name, band inventory and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, and all seven types it
- * governs have now landed beside it, so the contract and the directory agree. The shared-kernel
- * types named further down are likewise all authored, so the seam described below is an
- * observation of compiled code as well as a contract to be honoured.</p>
+ * <p>Eight compilation units sit in this directory: this charter and the seven types it governs --
+ * {@code CobolEditMask}, {@code ReportBandLayouts}, {@code ReportingDtoMapper},
+ * {@code StatementBandLayouts}, {@code StatementHtmlMapper}, {@code StatementTextMapper} and
+ * {@code TransactionReportMapper}. Every type name, band inventory and count below is a measurement
+ * of that directory and of those files, so the seam described here is an observation of compiled
+ * code and not only a contract to be honoured. The shared-kernel types named further down are
+ * likewise all authored.</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this paragraph recorded that the directory
- * held this charter and nothing else, and that a type named below with no file was planned
- * rather than missing. That was accurate while it stood and is replaced rather than softened
- * now that all seven exist, because a planned marker that outlives the files it describes reads
- * as measured and would tell a reader auditing this package that a landed type was absent.</p>
- *
- * <p>Alternatives Considered: withholding this charter until the seven types it governs exist.
- * Rejected, because a package-level Javadoc is what the authors of those types work from --
- * which regime belongs in which file, which declared length governs which artifact, and where
- * masking may legally appear -- so writing it last would leave the package with no stated
- * contract across exactly the interval in which one is needed. There is also a mechanical
- * reason. The {@code JavadocPackage} check at line 245 of
- * {@code config/checkstyle/checkstyle.xml} is a file-set check that reports a missing
+ * <p>Assumptions: this charter has to exist for the directory to build at all, which is why it is
+ * maintained rather than treated as commentary. The {@code JavadocPackage} check at line 245 of
+ * {@code config/checkstyle/checkstyle.xml} is a file-set check reporting a missing
  * {@code package-info.java} for any directory holding a processed {@code .java} file, and
- * {@code services/pom.xml} binds the gate to the {@code validate} phase, so the first sibling
- * authored here without this charter already in place would fail the build before the compiler
- * ran at all. The accepted cost is that the inventory above reads as present tense unless the
- * distinction is declared, which is what this section declares.</p>
+ * {@code services/pom.xml} binds the gate to the {@code validate} phase, so a sibling authored here
+ * without this charter in place fails the build before the compiler runs.</p>
  *
  * <h2>What this package is for</h2>
  *
@@ -195,8 +185,8 @@
  *
  * <p>Assumptions: the descriptor registry does not contain either band family, which is the
  * whole reason this package declares its own. The registry holds <b>fourteen</b> layouts in two
- * labelled populations, and the count is stated as fourteen rather than eleven because eleven is
- * the answer to a different question and an earlier revision of this file gave it to this one.
+ * labelled populations, and the distinction between fourteen and eleven is load-bearing because
+ * eleven is the answer to a different question about the same registry.
  * The eleven BASE MASTERS, each transcribed from a copybook that defines a persistent data set,
  * are {@code ACCOUNT}, {@code CARD}, {@code CUSTOMER}, {@code XREF}, {@code DALYTRAN},
  * {@code TRAN}, {@code DISGROUP}, {@code TCATBAL}, {@code SECUSER}, {@code TRANCAT} and
@@ -222,10 +212,10 @@
  *
  * <p>Assumptions: the {@code sensitive} component of {@code FieldSpec} is a marker and nothing
  * more. It records that a field carries data whose exposure is narrowed somewhere; it does not
- * narrow it. Masking and suppression live in this package instead, because a codec that masked
- * on encode could no longer round-trip -- a decode followed by an encode would return masked
- * bytes where the original stood, and the byte comparison that the parity oracle performs
- * would fail on the codec's own output rather than on a mapper's.</p>
+ * narrow it. Masking and suppression live in this package instead, because a codec that masked on
+ * encode cannot round-trip -- a decode followed by an encode would return masked bytes where the
+ * original stood, and the byte comparison that the parity oracle performs would fail on the codec's
+ * own output rather than on a mapper's.</p>
  *
  * <h2>Two padding obligations, opposite by construction</h2>
  *
@@ -376,74 +366,33 @@
  *
  * <h2>Documentation contract</h2>
  *
- * <p>This file exists because user-specified Rule 1 (Explainability) requires a docstring on
- * every module entry point at its line 15, and in Java a package declaration is one;
- * {@code package-info.java} is the only construct able to carry it. Rule 1 fixes the format as
- * Javadoc at line 22, and the element that binds to a package declaration is Purpose at line
- * 18 -- the parameter, return-value and exception elements at lines 19 to 21 have nothing to
- * bind to here, because a package declares neither a method nor a type.</p>
- *
- * <p>Assumptions: the gate on this file has two halves and both must be satisfied.
- * {@code JavadocPackage}, at line 245 of {@code config/checkstyle/checkstyle.xml}, asserts
- * only that this file exists; {@code MissingJavadocPackage}, at line 378 of the same file,
- * asserts that it carries Javadoc. Either one alone leaves the rule half-enforced -- the first
- * would pass a file holding an ordinary block comment, and the second has nothing to inspect
- * without the first. Both are error-severity, and the plugin is bound to {@code validate} with
- * failure on violation, so neither is advisory.</p>
- *
- * <p>Alternatives Considered: writing the four justification categories in the singular,
- * parenthesised form that the repository's shell and Markdown prose favours, as in the
- * {@code WHY (Trade-off)} idiom used throughout {@code scripts/test_env.sh}. Rejected in
- * favour of the un-parenthesised plural spelling taken from Rule 1 itself at lines 31 to 34,
- * on the ground that the rule is the authority its own validation gate is read against, and a
- * label that has been reworded is no longer greppable against the rule that requires it. The
- * house Markdown carries a further hazard that makes copying from it unwise: the mandatory
- * explainability note at lines 544 to 549 of {@code tests/README.md} renders the same four
- * labels parenthesised, comma-separated and with a non-breaking hyphen inside one of them, so
- * a label lifted from there would differ from the rule in three ways at once while looking
- * correct. Every label in this file is typed from the rule text, and the hyphen in
- * {@code Trade-offs} is the plain ASCII character.</p>
- *
  * <p>The band descriptors are declared once, in {@code ReportBandLayouts} and
- * {@code StatementBandLayouts}, rather than restated at each call site. That follows the house
- * convention the repository already applies to itself: lines 540 to 542 of
- * {@code tests/README.md} resolve record layouts through a single include path and require
- * that a layout is never duplicated but kept single-sourced. A duplicated layout is not merely
- * untidy, it is the failure mode where two copies of one geometry disagree and the artifact
+ * {@code StatementBandLayouts}, rather than restated at each call site, following the house
+ * convention that a layout is never duplicated but kept single-sourced. A duplicated layout is not
+ * merely untidy: it is the failure mode where two copies of one geometry disagree and the artifact
  * they build shifts by a character.</p>
  *
- * <p>The documentation convention this package follows originates in section 12 of
- * {@code tests/README.md}, whose heading stands at line 516 and whose mandatory note at lines
- * 544 to 549 closes "This is a hard review gate." Rule 1 extends that same obligation to the
- * polyglot tree, and the written standard for it is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}. Where two sources appear to disagree the order
- * of precedence is Rule 1 first, then {@code config/checkstyle/checkstyle.xml}, then
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, and prose last.</p>
+ * <p>Trade-offs: the mapping in this package is written by hand, and the compromise accepted is
+ * verbosity in exchange for a justification carried at each mapping site. A generated mapper would
+ * be shorter, and it was rejected because the decisions made here are not mechanical -- which
+ * {@code FILLER} is content and which is padding, which of the seven regimes a column takes, which
+ * artifact pads and which must not, and which field has its exposure narrowed -- and a generated
+ * member has nowhere to record why. The cost is real: more lines to read, and a mapping that has to
+ * be updated by hand when a layout changes. The compensating property is that every one of those
+ * decisions is auditable at the point where it takes effect.</p>
  *
- * <p>Trade-offs: the mapping in this package is written by hand, and the compromise accepted
- * is verbosity in exchange for a justification carried at each mapping site. A generated
- * mapper would be shorter, and it was rejected because the decisions made here are not
- * mechanical -- which {@code FILLER} is content and which is padding, which of the seven
- * regimes a column takes, which artifact pads and which must not, and which field has its
- * exposure narrowed -- and a generated member has nowhere to record why. The cost is real:
- * more lines to read, and a mapping that has to be updated by hand when a layout changes. The
- * compensating property is that every one of those decisions is auditable at the point where
- * it takes effect, which is what Rule 1's validation gate at line 43 is read against.</p>
- *
- * <p>Assumptions: suppression is not available in this package and must not be introduced. The
- * companion file {@code config/checkstyle/suppressions.xml} is scoped to generated sources and
- * test fixtures, and it names a mapper package as something never to suppress, on the ground
- * that a mapper is among the highest-value documentation targets in the repository. The rule
- * set also enables none of the three in-code suppression filters, so a suppression comment or
- * annotation has no effect here even where one is written. A violation in this package is
- * resolved by documenting the code, and not by narrowing the gate.</p>
+ * <p>Assumptions: suppression is not available in this package and must not be introduced.
+ * {@code config/checkstyle/suppressions.xml} is scoped to generated sources and test fixtures and
+ * names a mapper package as something never to suppress, and the rule set enables none of the three
+ * in-code suppression filters, so a suppression comment or annotation has no effect here even where
+ * one is written. A violation in this package is resolved by documenting the code, not by narrowing
+ * the gate. The written convention itself is {@code docs/CODE_DOCUMENTATION_STANDARD.md}.</p>
  *
  * <h2>Baseline framing</h2>
  *
  * <p>Everything under {@code app/} is reference material and remains byte-identical; no
- * statement in this file describes an edit to it. Two framings are used and no third: the
- * baseline does one thing, this module does another, and the difference is registered; or this
- * module encodes a stated rule. Where a difference exists it is entered in
+ * statement in this file describes an edit to it. Where this module's behaviour differs from the
+ * baseline's, the difference is entered in
  * {@code docs/architecture/cobol-to-service-traceability.md}, which owns that register. This
  * package defines exactly one entry there, {@code D-STMT-HTML-ESCAPING}, and cites the
  * rest. No baseline field is renamed in this package, and every emitted column is named from
@@ -451,8 +400,8 @@
  *
  * <h2>Assumptions: the two statement artifacts treat a markup character differently, on purpose</h2>
  *
- * <p>The one entry this package defines is the reason its two statement mappers are no longer
- * symmetric. {@code StatementHtmlMapper} routes every value it embeds through
+ * <p>The one entry this package defines is the reason its two statement mappers are deliberately
+ * asymmetric. {@code StatementHtmlMapper} routes every value it embeds through
  * {@code com.carddemo.common.security.HtmlTextEncoder}, because that artifact is opened by a browser
  * where a value carrying a tag opens a tag; {@code StatementTextMapper} routes nothing through it,
  * because that artifact is not markup and is the side a byte comparison against the recorded golden

@@ -251,8 +251,8 @@ public class UserMapper {
         //   authenticated caller is. No byte position is cited for it because the record declares
         //   none; its value originates with the identity provider rather than with the dataset.
         // Alternatives Considered: taking the subject from the request instead of as this second
-        //   parameter, which is how an earlier shape of com.carddemo.auth.dto.CreateUserRequest
-        //   carried it. Rejected, and the record itself now declares only four components. A caller
+        //   parameter, so that com.carddemo.auth.dto.CreateUserRequest carried it. Rejected, which is why
+        //   that record declares only four components. A caller
         //   able to nominate the subject is a caller able to decide which pool identity a new row
         //   authenticates as, including one belonging to another person or one whose pool group
         //   contradicts the submitted type, and because a well-formed UUID is the only shape such a
@@ -289,53 +289,39 @@ public class UserMapper {
     }
 
     /**
-     * Applies an accepted update request to a row already loaded, mutating the two descriptive values in
-     * place and refusing any request that would move the row's authority.
+     * Applies an accepted update request to a row already loaded, mutating its three submitted values in
+     * place.
      *
-     * <p>This method returns nothing and constructs nothing. It assigns the two descriptive values onto
-     * the {@code User} it is given, which the caller obtained inside the current transaction, so the
-     * persistence provider observes the change against its own loaded snapshot and issues a statement
-     * only for what actually differs. The identifier is not among them: it locates the row rather than
-     * describing it, and {@code User} exposes no way to change it. Neither is the reference type,
-     * although the request carries one -- see below.</p>
+     * <p>This method returns nothing and constructs nothing. It assigns the request's first name, last
+     * name and reference type onto the {@code User} it is given, which the caller obtained inside the
+     * current transaction, so the persistence provider observes the change against its own loaded
+     * snapshot and issues a statement only for what actually differs. The identifier is not among them:
+     * it locates the row rather than describing it, and {@code User} exposes no way to change it.</p>
      *
-     * <p>Refactoring Rationale: this method previously assigned all three values, including the
-     * reference type, and that assignment was wrong in a way that was invisible from here. The column it
-     * wrote, {@code auth.users.user_type}, NAMES an authority and confers none: every authority a
-     * request is matched against comes from the signed {@code cognito:groups} claim by way of
-     * {@code com.carddemo.common.security.JwtRoleConverter}, and the membership behind that claim is
-     * held by the identity provider. So an update moving a user from {@code "U"} to {@code "A"}
-     * committed a row saying the user was an administrator while every administrative route continued to
-     * refuse them, and an update moving an administrator to {@code "U"} committed a row saying the
-     * authority had been withdrawn while it had not been. The second direction is the one that matters:
-     * an operator revoking administrative access was told it was done.</p>
+     * <p>Assumptions: {@code auth.users.user_type} NAMES an authority and confers none, which is what
+     * makes assigning it here safe. Every authority a request is matched against comes from the signed
+     * {@code cognito:groups} claim by way of {@code com.carddemo.common.security.JwtRoleConverter}, and
+     * the membership behind that claim is held by the identity provider, so this column is a projection
+     * of that membership rather than the thing enforced.</p>
      *
-     * <p>Refactoring Rationale: that analysis stands and the remedy has moved. This method briefly
-     * REFUSED a submitted type change outright, to force the caller through a provider-first path. The
-     * refusal is withdrawn because it made the only published route for the change unusable:
+     * <p>Alternatives Considered: refusing a submitted type change outright, to force the caller through
+     * a provider-first path. Rejected because it makes the only published route for the change unusable:
      * {@code UpdateUserRequest} declares {@code userType} REQUIRED
-     * ({@code src/main/resources/openapi/auth-api.yaml}), and that property's own description states
-     * that changing it "grants or removes that user's carddemo-admin authority at their next sign-on",
-     * so {@code PUT /api/v1/auth/users/{userId}} is the operation the contract publishes for it and no
-     * second route exists. A mapper that threw on the required field of the only route turned the
-     * documented capability into a permanent server error.</p>
+     * ({@code src/main/resources/openapi/auth-api.yaml}), and that property's own description states that
+     * changing it "grants or removes that user's carddemo-admin authority at their next sign-on", so
+     * {@code PUT /api/v1/auth/users/{userId}} is the operation the contract publishes for it and no second
+     * route exists. A mapper that threw on the required field of the only route would turn a documented
+     * capability into a permanent server error.</p>
      *
-     * <p>Assumptions: the guarantee the refusal was protecting is preserved, and it is preserved where
-     * it can actually be honoured rather than where it can only be blocked. The sole caller,
+     * <p>Assumptions: the projection is kept honest by the caller rather than by this method. The sole caller,
      * {@code com.carddemo.auth.service.UserService#update}, commits this row together with a ledger entry
-     * in {@code auth.identity_sync_task} naming both the previously stored type and the newly requested
-     * one, and then applies that entry through {@code CognitoUserProvisioningService#synchronise} after
-     * the commit. The membership therefore moves for every committed change to this column, and an entry
-     * whose application does not succeed stays owed until the reconciliation pass applies it.</p>
-     *
-     * <p>Refactoring Rationale: that paragraph previously claimed something stronger and untrue -- that
-     * the provider call ran inside this row's transaction, so "a provider failure propagates and rolls
-     * the row back" and the column could never name an authority the provider does not confer. The
-     * provider is not a transaction participant: it does not roll back, so a group change that SUCCEEDED
-     * and was followed by a failed commit left the membership moved and this column unchanged, with the
-     * claimed invariant broken in exactly the direction that matters -- a revocation the operator was
-     * told had happened. The invariant is now stated as what it actually is: EVENTUAL, bounded by the
-     * ledger, and always recorded when it is not yet met.</p>
+     * in {@code auth.identity_sync_task} naming both the stored type and the requested one, and applies
+     * that entry through {@code CognitoUserProvisioningService#synchronise} after the commit. The
+     * membership therefore moves for every committed change to this column, and an entry whose
+     * application does not succeed stays owed until the reconciliation pass applies it. The invariant is
+     * EVENTUAL rather than transactional, because the provider is not a transaction participant: it does
+     * not roll back, so a group change that succeeded ahead of a failed commit would otherwise leave the
+     * membership moved and this column unchanged.</p>
      *
      * <p>Trade-offs: between the commit and the post-commit application -- ordinarily sub-second, bounded
      * by the reconciliation pass otherwise -- this column can name an authority the provider has not yet
@@ -343,13 +329,13 @@ public class UserMapper {
      * request is matched against is read from the signed claim on each request and never from this
      * column, so a stale projection can only delay a change, never anticipate one.</p>
      *
-     * <p>Alternatives Considered: keeping the refusal and routing the service through
-     * {@code com.carddemo.auth.service.UserAuthorityService}, which moves the membership first and
+     * <p>Alternatives Considered: routing the service through
+     * {@code com.carddemo.auth.service.UserService}, whose update path records the move in the durable
+     * task ledger in the same transaction as the row change and whose applier moves the membership after
      * registers a rollback compensation. Rejected for this route: an in-memory compensation registered
      * against a transaction synchronisation is lost with the process that holds it, so it closes the
-     * window only while that process survives -- which is precisely the case the ledger does not need to
-     * assume. That class remains the provider-first primitive for a caller that has no transaction at
-     * all.</p>
+     * window only while that process survives -- an assumption the ledger does not need to make. That
+     * class remains the provider-first primitive for a caller that has no transaction at all.</p>
      *
      * @param request the validated {@code UpdateUserRequest} whose three components have already
      *     satisfied their declared constraints, so none is re-checked here
@@ -390,19 +376,18 @@ public class UserMapper {
         //   values, not stored images, because each baseline arm compares a space-padded screen field
         //   against a space-padded record field whereas the two values assigned here are ordinary
         //   strings against VARCHAR(20). Delegating the comparison removes that hazard from this path
-        //   entirely rather than solving it. The one comparison this method DOES make, the reference-type
-        //   refusal below, is exempt from the hazard for the reason recorded beside it: CHAR(1) over a
-        //   two-character domain has no padding to normalise.
+        //   entirely rather than solving it. The reference type would be exempt from the hazard in any
+        //   case: CHAR(1) over a two-character domain has no padding to normalise.
         // Assumptions: three assignments rather than the baseline's four arms, and the one absence is
         //   the credential. The credential arm at L227 to L229 compares a submitted credential against
         //   the stored one and marks the row modified when they differ; with no credential on this
         //   boundary a request that changed only that value cannot be expressed, so it is absent from
         //   the shape rather than handled and discarded, which follows from the omission recorded on the
         //   creation path above. The reference-type arm at L231 to L233 IS expressible here and IS
-        //   applied, and the block above this method records why applying it is safe: in the baseline
-        //   that byte WAS the authority, in the target it only names one, and the sole caller moves the
-        //   provider membership in the same transaction so the two cannot part company. The baseline
-        //   tests four values and this method carries three; that divergence is documented.
+        //   applied, and the Javadoc above records why applying it is safe: in the baseline that byte WAS
+        //   the authority, in the target it only names one, and the sole caller commits a ledger entry
+        //   with the row and applies it to the provider after the commit. The baseline tests four values
+        //   and this method carries three; that divergence is registered in the traceability document.
         // Trade-offs: two concurrent updates to one row resolve last-writer-wins inside the
         //   database's row lock, because auth.users declares no version column and this method
         //   therefore carries no conflict token to refuse one of them with. That is the baseline's

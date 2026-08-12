@@ -1,23 +1,35 @@
 /**
  * Anti-corruption layer for the card bounded context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every inventory, file name, class name and count in this charter describes the
- * package's <b>target contract</b> as the migration plan assigns it, not the set of files present
- * beside this one today. The migration lands its artifacts in plan order and this charter is
- * authored first, so at the checkpoint that authored it this directory holds this charter and
- * nothing else. A type or test named below that has no file yet is therefore <b>planned</b>, not
- * missing, and a count below is a target total rather than a measurement of the directory.</p>
+ * <p>Two compilation units sit in this directory and no third: this charter, and
+ * {@code CardMapper}, which holds the whole of the translation described below.
+ * Every inventory, file name, class name and count stated here is a measurement
+ * of that directory, and the marker line below is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * which counts the {@code .java} files beside this charter and holds the figures
+ * to them. A count published this way cannot drift unnoticed, because drifting is
+ * what fails the build:</p>
  *
- * <p>Alternatives Considered: withholding this charter until every class it governs
- * exists. Rejected, because the charter is what the authors of those classes work
- * from -- which type belongs here, which may not, what the closed set is -- so
- * writing it last would leave the package with no stated contract during exactly
- * the interval in which one is needed. The cost of authoring it first is that its
- * inventory reads as present tense unless the distinction is declared, which is
- * what this section is for; the sentence above is the single place a reader has to
- * look to tell a target from a measurement.</p>
+ * <pre>
+ * this directory: 2 java files = 1 classes + 1 charter
+ * </pre>
+ *
+ * <p>Assumptions: the marker's wording is the check's and not this charter's, which
+ * is why it reads "1 classes" rather than the English singular. The pattern the
+ * check matches fixes every token of that line, so rewording it to read naturally
+ * would stop it matching, and a marker that no longer matches is not a wrong count
+ * -- it is a count nobody measures. The awkward plural is the visible cost of
+ * having the figure enforced rather than merely asserted.</p>
+ *
+ * <p>Assumptions: the roster is closed rather than nominally closed, so a second
+ * mapper added beside {@code CardMapper} without amending this charter would be
+ * an ungoverned exception to it. Keeping the set closed is what lets the
+ * paragraphs below say that these concerns appear here and nowhere else in the
+ * module and mean it literally: a mapping written outside this package would
+ * move a masking or suppression decision away from the one charter that accounts
+ * for it, and the decision would then be enforced by nothing but habit.</p>
  *
  * <p>Purpose: this package translates between the shape of the baseline card
  * record and the shape the rest of card-service works with, and it is the only

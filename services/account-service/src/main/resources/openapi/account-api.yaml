@@ -380,7 +380,7 @@ paths:
     post:
       tags: [internal, card-cross-reference]
       operationId: lookupCardCrossReferenceByAccount
-      summary: Resolve an account to the account and customer its lowest card names.
+      summary: Resolve an account to the cross-reference row its lowest card holds.
       description: >-
         This is the CXACAIX access path as a single keyed read. The baseline
         surfaces the alternate index to the online region under the literal
@@ -421,13 +421,37 @@ paths:
       responses:
         '200':
           description: >-
-            The account is cross-referenced. The body carries the account and the
-            customer and does not echo any card number, so no primary account
-            number reaches a further response body.
+            The account is cross-referenced. The body carries the account, the
+            customer AND the selected card number in full.
+
+
+            Refactoring Rationale: this response previously carried CardXrefView,
+            the same two-identifier shape the card-keyed lookup answers with, and
+            said that it "does not echo any card number". That was the wrong shape
+            for this operation and the sentence described the defect rather than a
+            protection: a card-keyed caller supplied the card and needs the account
+            and customer, while an ACCOUNT-keyed caller supplied the account and the
+            value it asked for is the card. The consuming context transcribes
+            READ-CXACAIX-FILE at lines 576 to 604 of app/cbl/COTRN02C.cbl and the
+            same read at line 414 of app/cbl/COBIL00C.cbl, both of which take
+            XREF-CARD-NUM from the record and write the row they produce under it,
+            so neither could produce a row at all from the narrower shape.
+
+
+            Trade-offs: the card number is NOT masked here, where the paged walk
+            below masks the same column to its last four digits. The two contracts
+            serve different audiences: that one is an end-user page where a whole
+            primary account number has no reader, while this one answers a machine
+            operation whose consumer writes the value into a ledger row as a KEY, so
+            a masked value would be a different key and the transaction would be
+            written against a card that does not exist. What limits the exposure is
+            reachability instead -- this prefix requires a machine token, the public
+            gateway publishes no route to it, and the load balancer forwards it only
+            from inside the network.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CardXrefView'
+                $ref: '#/components/schemas/CardXrefByAccountView'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -624,8 +648,8 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/v1/accounts/{accountId}:
-    put:
+  /api/v1/accounts/update:
+    post:
       tags: [end-user, account]
       operationId: updateAccount
       summary: Apply an edited account and customer under a revision precondition.
@@ -654,6 +678,34 @@ paths:
         spirit and would leave the sentence nowhere to go. The trade-off is
         recorded rather than hidden: a client written to HTTP semantics alone
         will not expect 409 here, which is why it is declared explicitly below.
+
+
+        Refactoring Rationale: this operation was PUT /api/v1/accounts/{accountId} and
+        the identifier travelled in the path. It is now a POST at a fixed address with
+        the identifier in the body, for the reason the account lookup above gives: a
+        load balancer composes its access record from the request line, inside the
+        process terminating the connection and before any application code runs, so a
+        path segment reaches a durable store no masker, filter or exception handler
+        inside a service can reach -- and this migration's sensitive-data contract names
+        account identifiers among the values a durable diagnostic may not hold. The keyed
+        form is REMOVED rather than kept as an alias, because an alias would leave the
+        disclosure reachable by anyone who addressed the older shape.
+
+
+        Assumptions: the move added NO property to the request. The submitted record
+        already carried the account identifier as its first member -- screen field
+        ACCTSIDI at app/cpy-bms/COACTUP.CPY L60, which the reference user types into the
+        map -- so the path variable was a second spelling of a value the body already
+        held, and the body's is the one the reference has. One consequence is an
+        improvement rather than a cost: the operation now has ONE key where it had two,
+        so a submitted identifier that disagreed with the addressed one is no longer
+        expressible.
+
+
+        Trade-offs: POST rather than PUT gives up idempotence by method semantics, and
+        costs this operation nothing because it was never idempotent in effect -- it is
+        conditional on If-Match, so a repeated submission of the same body is refused
+        with 409 by the precondition rather than applied twice.
       servers:
         - url: /
           description: >-
@@ -664,16 +716,15 @@ paths:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
       parameters:
-        - $ref: '#/components/parameters/AccountIdEndUserPath'
         - $ref: '#/components/parameters/IfMatchHeader'
       requestBody:
         description: >-
           The complete submitted state of the account edit -- all forty-three screen
-          values, every one a string. Absent and unchanged are not distinguished
-          here: the reference normalises a blank or asterisk to low-values before
-          validating, so a value the caller leaves empty arrives empty rather than
-          missing. The revision the edit is conditional on travels in the If-Match
-          header and not in this body.
+          values, every one a string, the FIRST of which names the account to update.
+          Absent and unchanged are not distinguished here: the reference normalises a
+          blank or asterisk to low-values before validating, so a value the caller
+          leaves empty arrives empty rather than missing. The revision the edit is
+          conditional on travels in the If-Match header and not in this body.
         required: true
         content:
           application/json:
@@ -698,8 +749,10 @@ paths:
             The request was refused before anything was written. Five causes
             produce this status and each names its offending request property in
             the fieldErrors array: the If-Match header was absent; the body could
-            not be read; the account identifier in the path would not convert to
-            a number; a submitted value was absent where the reference requires
+            not be read; the submitted account identifier was absent, was not
+            digits, was wider than eleven of them or was all zeroes, which the
+            reference's own key edit refuses under accountId with the sentence it
+            composes; a submitted value was absent where the reference requires
             one, was wider than the field it is stored in, held a character its
             numeric picture cannot carry, or was one part of a telephone number
             or date of birth whose other parts were not supplied; or a submitted
@@ -768,7 +821,7 @@ paths:
                 subsystem: RELATIONAL
                 status: 409
                 correlationId: '00000000-0000-4000-8000-000000000000'
-                path: /api/v1/accounts/12345678901
+                path: /api/v1/accounts/update
                 timestamp: '2024-01-15 09:30:00.000000'
                 fieldErrors:
                   - field: version
@@ -781,8 +834,8 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
-  /api/v1/accounts/{accountId}/view:
-    get:
+  /api/v1/accounts/view:
+    post:
       tags: [end-user, account]
       operationId: readAccountView
       summary: Read one account and its customer for the account-view screen.
@@ -809,6 +862,28 @@ paths:
         the same 404 as a missing account: the distinction is real but is not
         actionable by the caller, and naming which would disclose the shape of
         the data.
+
+
+        Refactoring Rationale: this operation was GET /api/v1/accounts/{accountId}/view
+        and the identifier travelled in the path. It is now a POST at a fixed address
+        with the identifier in the body, for the reason the account lookup above gives:
+        the load balancer's access record is composed from the request line before any
+        application code runs, and this migration's sensitive-data contract names account
+        identifiers among the values a durable diagnostic may not hold. The keyed form is
+        REMOVED rather than kept as an alias.
+
+
+        Trade-offs: as a POST this read is no longer cacheable by method semantics. That
+        costs nothing here and would have been unsafe to rely on in any case: the answer
+        carries the ETag the update requires back as If-Match, so a caller that served a
+        cached body would submit a revision the store had already moved past and receive
+        409 for a conflict that did not exist. Alternatives Considered: keeping the GET
+        and sealing the identifier into an opaque selector, which is how the card contract
+        addresses one card. Rejected because a selector has to be MINTED by the service
+        and handed to the caller, and this operation is the ENTRY point -- the user types
+        the identifier into a filter field, so there is no prior response for a token to
+        come from and a selector scheme would still need a body-carrying operation here to
+        issue one.
       servers:
         - url: /
           description: >-
@@ -818,8 +893,27 @@ paths:
       security:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
-      parameters:
-        - $ref: '#/components/parameters/AccountIdEndUserPath'
+      requestBody:
+        description: >-
+          The account to read, as the sole input. It is carried in the body rather than
+          in the request line for the reason recorded above, and the schema is the one
+          the internal context read uses: both operations take an account identifier and
+          nothing else, so a second identical schema would be two places for one shape to
+          be wrong.
+
+
+          Assumptions: the declared floor is ZERO although this operation refuses an
+          all-zeroes key. The refusal is the reference's own -- app/cbl/COACTVWC.cbl
+          tests the key at L666 with L667 before it reads any file -- and it is answered
+          with the sentence that program moves into the message channel at L672, reported
+          under accountId. Declaring a floor of one here would move the refusal to the
+          binding layer, where the wording would be a framework default and not the
+          reference's, so the wider floor is what keeps the screen saying what it says.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountLookupRequest'
       responses:
         '200':
           description: >-
@@ -851,8 +945,8 @@ paths:
         #       together on the strength of describing one condition.
         '400':
           description: >-
-            The account identifier in the path would not convert to a number, or
-            converted to zero. The fieldErrors array names accountId.
+            The submitted account identifier was absent, would not convert to a
+            number, or converted to zero. The fieldErrors array names accountId.
           content:
             application/problem+json:
               schema:
@@ -863,7 +957,11 @@ paths:
               #       severity and the APPLICATION subsystem. APPLICATION rather than
               #       RELATIONAL because nothing reached the store: the identifier is refused
               #       at the binding stage, which is the same point app/cbl/COACTVWC.cbl
-              #       refuses it at L666 with L667 before any file read. The abend member is
+              #       refuses it at L666 with L667 before any file read. The path member below is
+              #       the operation's own fixed address and no longer the resolved one it used to
+              #       show: the identifier left the request line, so a rendered path can no
+              #       longer demonstrate which key was refused, and the fieldErrors entry is
+              #       where a caller reads that instead. The abend member is
               #       null because the ApiError schema reserves it for a 500, and its
               #       presence is what distinguishes a service fault from a refusal the
               #       caller can correct.
@@ -875,7 +973,7 @@ paths:
                 subsystem: APPLICATION
                 status: 400
                 correlationId: '00000000-0000-4000-8000-000000000000'
-                path: /api/v1/accounts/00000000000/view
+                path: /api/v1/accounts/view
                 timestamp: '2024-01-15 09:30:00.000000'
                 fieldErrors:
                   - field: accountId
@@ -899,8 +997,8 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/v1/accounts/{accountId}/card-cross-references:
-    get:
+  /api/v1/accounts/card-cross-references/search:
+    post:
       tags: [end-user, card-cross-reference]
       operationId: listAccountCardCrossReferences
       summary: List an account's card cross-reference rows in card-number order.
@@ -942,6 +1040,31 @@ paths:
         as it stands when each page is fetched, so a row inserted or removed
         between two fetches shifts the window and the caller skips a row or
         receives one twice.
+
+
+        Refactoring Rationale: this operation was
+        GET /api/v1/accounts/{accountId}/card-cross-references and the account travelled
+        in the path. It is now a POST with the account in the body, for the reason the
+        account lookup above gives: the load balancer's access record is composed from
+        the request line before any application code runs, and this migration's
+        sensitive-data contract names account identifiers among the values a durable
+        diagnostic may not hold. The keyed form is REMOVED rather than kept as an alias.
+
+
+        Assumptions: the cursor and the direction STAY in the query string, and the split
+        is deliberate. A query string is part of the request line and is persisted exactly
+        as a path segment is, so the test is not where a value sits but whether the
+        contract prohibits it -- and a sealed cursor is confidential by construction while
+        a direction is one of two published words. Neither is an account identifier, so
+        neither has to move, and moving them would have made the two boundaries the
+        response returns awkward to echo back.
+
+
+        Assumptions: the address keeps the collection segment and gains /search rather
+        than becoming a POST on the collection itself. This document spells a bounded POST
+        read that way wherever it has one -- /api/v1/card-xrefs/search-by-account is this
+        very walk on the internal surface -- and a POST on a collection address would read
+        as a create, which this context publishes for no cross-reference row at all.
       servers:
         - url: /
           description: >-
@@ -951,8 +1074,20 @@ paths:
       security:
         - bearerAuth: []
       x-required-authorities: [carddemo-admin, carddemo-user]
+      requestBody:
+        description: >-
+          The account whose cross-reference rows are wanted, as the sole body input. The
+          schema is the one the internal reads use, and its floor of zero is correct for
+          this operation on its own merits rather than by reuse: this walk serves the
+          migrated CXACAIX access path, which the reference reaches from a stored row
+          rather than from a typed field, so refusing an all-zeroes value would turn a
+          data condition into a validation failure the caller cannot act on.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountLookupRequest'
       parameters:
-        - $ref: '#/components/parameters/AccountIdPath'
         - name: cursor
           in: query
           required: false
@@ -964,7 +1099,7 @@ paths:
 
 
             Assumptions: the token is sealed against the query, the authenticated
-            caller, the ACCOUNT in the path and the direction together, so a page
+            caller, the ACCOUNT in the body and the direction together, so a page
             issued to one caller walking one account cannot reposition another
             caller or another account. The account is part of the seal because the
             value the token carries is a card number, and the same card number
@@ -1002,11 +1137,11 @@ paths:
                 $ref: '#/components/schemas/CardXrefPage'
         '400':
           description: >-
-            The account identifier in the path would not convert to a number, the
-            direction is not one of the two admitted words, or the cursor could not
-            be opened -- altered, expired, or issued for another query, caller,
-            account or direction. The fieldErrors array names accountId, direction
-            or cursor accordingly.
+            The submitted account identifier was absent or would not convert to a
+            number, the direction is not one of the two admitted words, or the cursor
+            could not be opened -- altered, expired, or issued for another query,
+            caller, account or direction. The fieldErrors array names accountId,
+            direction or cursor accordingly.
           content:
             application/problem+json:
               schema:
@@ -1184,6 +1319,101 @@ paths:
           description: >-
             The customer master holds no such row. There is no body on this answer
             either, so both outcomes of the check have one shape.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/customers/display:
+
+    # WHY : Refactoring Rationale: this address is NEW, and the gap it closes is a
+    #       screen whose fields were absent on every request while nothing failed.
+    #       The pending-authorization detail screen renders a cardholder's name, two
+    #       address lines and a telephone number; its client obtained them by
+    #       deserialising the response of the existence check above, which answers
+    #       204 or 404 with NO body by contract. A bodiless 204 deserialises to
+    #       nothing rather than to an error, so the display fields rendered as absent
+    #       silently. The client's own seam record additionally declared a composed
+    #       name member that this contract does not publish and no column exists for.
+    # WHY : Alternatives Considered: pointing that consumer at /api/v1/customers/record
+    #       below, which needs no new address at all. Rejected on least privilege:
+    #       that operation answers with the WHOLE record and is therefore gated on
+    #       internal:customer-master.read, a scope this system mints for no context
+    #       because it reads a national identifier, a government-issued identifier
+    #       and a credit score for any customer. Serving nine fields under it would be
+    #       the escalation that scope split was introduced to prevent.
+    # WHY : Trade-offs: this contract now carries a field list that belongs to another
+    #       context's screen, so widening that screen later requires a change here.
+    #       That coupling is accepted because the alternative left the consumer
+    #       choosing between no fields and every field, and because the exposure is
+    #       now a decision the context that owns the customer master takes and can
+    #       refuse.
+    post:
+      tags: [internal, customer]
+      operationId: readCustomerDisplay
+      x-carddemo-required-scope: internal:account-context.customer.read
+      summary: Read the nine customer fields a neighbouring screen renders.
+      description: >-
+        The name, address and telephone fields the pending-authorization detail
+        screen renders beside the authorization it is showing. All nine come from
+        the customer record this context owns: CUST-FIRST-NAME PIC X(25) at L6 of
+        app/cpy/CVCUS01Y.cpy, CUST-MIDDLE-NAME at L7, CUST-LAST-NAME at L8, the three
+        address lines at L9, L10 and L11, CUST-ADDR-STATE-CD at L12,
+        CUST-ADDR-ZIP at L14, and CUST-PHONE-NUM-1 at L15 with L16 at its
+        stored width of fifteen characters.
+
+
+        Assumptions: the NAME arrives as its three stored components and is not
+        composed here. The record declares no composed name, so composing one would
+        publish a value no column holds and would fix the separator -- and the
+        collapse of an absent middle name -- inside this context on behalf of a
+        screen it cannot see.
+
+
+        Assumptions: no protected value appears in the response at all, so nothing
+        is masked. The two encrypted identifiers at L17 and L18 and the credit score
+        are ABSENT rather than masked, because a masked member is still a member a
+        future consumer would begin reading.
+
+
+        Requires internal:account-context.customer.read -- the decision-read scope
+        the consumer already holds -- and NOT internal:customer-master.read, which
+        the whole-record read below requires.
+      security:
+        - internalServiceToken: []
+      requestBody:
+        description: >-
+          The nine-digit customer identifier whose display fields are wanted, as the
+          sole input. It is carried in the body rather than in a path segment so the
+          key reaches no access record, for the reason the two lookups beside it
+          record.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomerLookupRequest'
+      responses:
+        '200':
+          description: >-
+            The customer exists. The body carries exactly nine fields and no
+            protected value of any kind.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CustomerDisplayView'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: >-
+            The customer master holds no such row. The consumer reads this status as
+            its own absent-customer outcome and renders the screen with the display
+            fields unpopulated.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1406,72 +1636,28 @@ components:
         minLength: 1
       example: 'W/"7:3"'
 
-    AccountIdPath:
-      name: accountId
-      in: path
-      required: true
-      description: >-
-        The account identifier. The reference layout at app/cpy/CVACT01Y.cpy
-        declares it as an eleven-digit unsigned display field, which is why it
-        is an integer here rather than a string: it is a numeric key in the
-        baseline as well as in the target, and no leading zero is significant.
-
-
-        The floor is zero because the operation that carries this parameter
-        applies NO screen key edit: the by-account cross-reference listing serves
-        the migrated CXACAIX access path, and the reference reaches that path
-        from a stored row rather than from a typed field, so refusing an
-        all-zeroes value here would turn a data condition into a validation
-        failure the caller cannot act on. The two operations that DO apply the
-        reference's own key edit carry AccountIdEndUserPath instead.
-      schema:
-        type: integer
-        format: int64
-        minimum: 0
-        maximum: 99999999999
-      example: 12345678901
-
-    # WHY : Assumptions: this parameter exists ONLY to carry a floor of one, and the
-    #       floor is the reference's own key edit rather than a tightening this
-    #       migration invented. app/cbl/COACTVWC.cbl refuses the key at L666 with L667
-    #       -- IF CC-ACCT-ID IS NOT NUMERIC OR CC-ACCT-ID EQUAL ZEROES -- before it
-    #       reads any file, and the sentence it moves into the message channel at L672
-    #       names the condition as requiring a non-zero eleven-digit number. An
-    #       all-zeroes key is therefore a REFUSAL on these two operations, where on the
-    #       by-account listing above it is an ordinary data condition.
-    # WHY : Trade-offs: two components describe one identifier, which is duplication
-    #       accepted deliberately. Collapsing them onto the wider floor would let an
-    #       all-zeroes key reach the account read and be answered 404 instead of 400,
-    #       and collapsing them onto the narrower floor would make the cross-reference
-    #       listing refuse a value the reference reaches from a stored row. Neither
-    #       collapse preserves both behaviours, so the split is the cheaper compromise.
-    AccountIdEndUserPath:
-      name: accountId
-      in: path
-      required: true
-      description: >-
-        The account identifier on the two operations that apply the reference's own
-        key edit -- the account view and the account update. It is identical to
-        AccountIdPath except that its floor is ONE rather than zero, because
-        app/cbl/COACTVWC.cbl treats an all-zeroes key as a refusal at L666 with L667
-        rather than as a key that simply matches nothing. A value outside the range
-        is answered 400 with the reference's own wording and never 404.
-      schema:
-        type: integer
-        format: int64
-        minimum: 1
-        maximum: 99999999999
-      example: 12345678901
-
-  # WHY : Refactoring Rationale: there is no CustomerIdPath parameter. One was
-  #       declared here and referenced by the three customer operations while each
-  #       carried its key in the request line. All three moved -- two into a request
-  #       body and one to a cursor -- so the component became unreferenced, and an
-  #       unreferenced path parameter for an identifier this document has decided not
-  #       to put in a path is an invitation to reintroduce the disclosure. It is
-  #       removed rather than retained. AccountIdPath above is NOT removed: three
-  #       end-user account operations still key on the path, which is a deliberate
-  #       difference recorded on the observability document rather than an oversight.
+  # WHY : Refactoring Rationale: there is no CustomerIdPath, AccountIdPath or
+  #       AccountIdEndUserPath parameter. All three were declared here and referenced by
+  #       operations that carried an identifier in the request line -- the customer one
+  #       by three operations, and the two account ones by the account view, the account
+  #       update and the by-account cross-reference walk. Every one of those operations
+  #       moved its identifier into a request body or onto a cursor, so all three
+  #       components became unreferenced, and an unreferenced path parameter for an
+  #       identifier this document has decided not to put in a path is an invitation to
+  #       reintroduce the disclosure. They are removed rather than retained.
+  # WHY : Assumptions: the pair of account components did not survive the move in any
+  #       form, and the distinction they existed for did not need to. Their only
+  #       difference was a floor -- one carried a floor of ONE for the two operations
+  #       that apply the reference's own key edit at app/cbl/COACTVWC.cbl L666 with L667,
+  #       the other a floor of ZERO for the by-account walk, which the reference reaches
+  #       from a stored row rather than from a typed field. In a body both operations
+  #       take AccountLookupRequest, whose floor is zero, and the all-zeroes refusal is
+  #       made by the key edit itself under accountId with that program's own sentence
+  #       from L672. Trade-offs: the DECLARED floor is therefore wider than the accepted
+  #       domain on two of the three operations, and each says so in its own request-body
+  #       description; what that buys is that the refusal keeps the reference's wording
+  #       instead of a framework default, which a narrower declared floor would have
+  #       substituted.
 
   responses:
     BadRequest:
@@ -1547,7 +1733,7 @@ components:
         The request could not be completed. The body carries an abend block whose
         four members are the target form of the reference's own ABEND-CODE,
         ABEND-CULPRIT, ABEND-REASON and ABEND-MSG fields at app/cpy/CSMSG02Y.cpy
-        L45 to L53, and its message never carries a value the caller sent: the
+        L21 to L29, and its message never carries a value the caller sent: the
         advice logs a reduced representation of the failure that keeps the type
         chain and the frames and drops every message, so a driver or parser
         sentence quoting a record cannot reach either destination.
@@ -1607,6 +1793,61 @@ components:
           format: int64
           description: The customer the card belongs to.
           example: 987654321
+
+    # WHY : Refactoring Rationale: this schema exists because the ACCOUNT-keyed lookup
+    #       answered with CardXrefView above, whose whole point is that it withholds the
+    #       card number. Withholding it is right for a caller that supplied the card and
+    #       wrong for a caller that supplied the account, so the two operations now have
+    #       one schema each and each declares exactly what its own consumer reads. The
+    #       name matches the Java record for the reason recorded further down this
+    #       document: AccountContextContractTest reflects over each record's components
+    #       and requires the schema of the same name to declare exactly those properties,
+    #       so a component added to one without the other following fails the build.
+    # WHY : Trade-offs: three schemas now describe one stored row -- this one, CardXrefView
+    #       above and CardXrefResponse below -- which is duplication accepted on purpose.
+    #       Each drops or transforms something the others keep: CardXrefView drops the card
+    #       number, CardXrefResponse masks it and renders both identifiers as strings for a
+    #       browser, and this one carries all three columns unmasked for a machine. Collapsing
+    #       them onto the widest shape would publish an unmasked primary account number to the
+    #       end-user surface, and collapsing them onto the narrowest would leave the ledger
+    #       with no key to write.
+    CardXrefByAccountView:
+      type: object
+      additionalProperties: false
+      required: [accountId, customerId, cardNumber]
+      description: >-
+        The cross-reference row an account resolves to, carrying the selected card
+        number in full. All three members are declared required because the
+        reference record declares all three -- XREF-CARD-NUM PIC X(16) at L5 of
+        app/cpy/CVACT03Y.cpy, XREF-CUST-ID PIC 9(09) at L6 and XREF-ACCT-ID
+        PIC 9(11) at L7 -- and a row missing any of them is a data defect rather
+        than a representable state. The calling context refuses such a response
+        rather than proceeding on part of it.
+      properties:
+        accountId:
+          type: integer
+          format: int64
+          description: The account the row is keyed by, from XREF-ACCT-ID PIC 9(11).
+          example: 12345678901
+        customerId:
+          type: integer
+          format: int64
+          description: The customer the card belongs to, from XREF-CUST-ID PIC 9(09).
+          example: 987654321
+        cardNumber:
+          type: string
+          minLength: 16
+          maxLength: 16
+          pattern: '^[0-9]{16}$'
+          description: >-
+            The selected card number in full, from XREF-CARD-NUM PIC X(16). It is a
+            string of digit characters rather than an integer because the reference
+            declares it as CHARACTERS, a leading zero is significant in it, and
+            sixteen digits exceed what a 32-bit integer can hold. It is the value
+            the consuming context writes its ledger row under, so it is carried
+            unmasked; the reachability limits that make that acceptable are recorded
+            on the operation's own 200 response.
+          example: '4111111111111111'
 
     AccountContextView:
       type: object
@@ -2274,6 +2515,118 @@ components:
           description: XREF-ACCT-ID PIC 9(11), as digits.
           example: '12345678901'
 
+    # WHY : Refactoring Rationale: this schema is the narrow counterpart of CustomerResponse
+    #       below and exists for the reason recorded on /api/v1/customers/display: the two
+    #       shapes available to a neighbouring screen were an empty body and the whole
+    #       record, and neither is a screen's field list. It is named for the Java record it
+    #       describes, which is the convention this document follows throughout --
+    #       AccountContextContractTest reflects over each record's components and requires
+    #       the schema of the same name to declare exactly those properties, so a component
+    #       added to one without the other following fails the build.
+    # WHY : Assumptions: two members are nullable and four are not, and the split is the
+    #       reference's. app/cbl/COACTUPC.cbl edits the FIRST address line for presence at
+    #       L1824 and requires nothing of the second, and a middle name is an ordinary
+    #       fixed-width field a screen may leave blank; the remaining four are values every
+    #       stored row carries.
+    CustomerDisplayView:
+      type: object
+      additionalProperties: false
+      required: [firstName, lastName, addressLine1, addressLine3, stateCode,
+                 zipCode, phoneNumber1]
+      description: >-
+        The nine customer fields a neighbouring context's screen renders. No
+        protected value appears here at all: the national identifier at L17 of
+        app/cpy/CVCUS01Y.cpy, the government-issued identifier at L18 and the
+        credit score are ABSENT rather than masked, because a masked member is
+        still a member a future consumer would begin reading.
+
+
+        The ADDRESS is published as five stored components rather than as the two
+        lines the consuming screen shows, and the postal code is published
+        UNNARROWED at its stored ten characters. That screen composes its first
+        line from CUST-ADDR-LINE-1 and CUST-ADDR-LINE-2 at L766 to L770 of
+        app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl, and its SECOND line
+        from CUST-ADDR-LINE-3, CUST-ADDR-STATE-CD and CUST-ADDR-ZIP(1:5) at L771
+        to L777 -- so the join separators and the ten-to-five narrowing are
+        decisions of the display, taken where the display is. Composing here
+        would publish one consumer's presentation as though it were the layout.
+
+
+        The country code at L13 is deliberately absent even though it sits
+        between two published components: no line of that screen reads it, and
+        this projection publishes the field list one screen needs rather than the
+        contiguous span of the record those fields happen to occupy.
+      properties:
+        firstName:
+          type: string
+          maxLength: 25
+          description: The cardholder's given name, from CUST-FIRST-NAME PIC X(25) at L6.
+          example: ADA
+        middleName:
+          type: [string, 'null']
+          maxLength: 25
+          description: >-
+            The cardholder's middle name, from CUST-MIDDLE-NAME PIC X(25) at L7, or
+            null when the stored field is blank. The union type is 3.1's own form and
+            is used rather than the 3.0 nullable keyword, which 3.1 removed.
+          example: M
+        lastName:
+          type: string
+          maxLength: 25
+          description: The cardholder's family name, from CUST-LAST-NAME PIC X(25) at L8.
+          example: LOVELACE
+        addressLine1:
+          type: string
+          maxLength: 50
+          description: The first address line, from CUST-ADDR-LINE-1 PIC X(50) at L9.
+          example: 1 SYNTHETIC WAY
+        addressLine2:
+          type: [string, 'null']
+          maxLength: 50
+          description: >-
+            The second address line, from CUST-ADDR-LINE-2 PIC X(50) at L10, or null
+            when the stored field is blank.
+          example: SUITE 100
+        addressLine3:
+          type: string
+          maxLength: 50
+          description: >-
+            The third address line, which carries the CITY, from
+            CUST-ADDR-LINE-3 PIC X(50) at L11. Required because the schema this
+            context owns declares the column NOT NULL.
+          example: SYNTHETIC CITY
+        stateCode:
+          type: string
+          maxLength: 2
+          description: >-
+            The two-character state code, from CUST-ADDR-STATE-CD PIC X(02) at L12.
+            Not validated against the state lookup table on this READ path: the
+            column already holds a value this context accepted on write, and
+            re-editing a stored value on the way out would turn a reference-data
+            change into a read failure for rows that were valid when written.
+          example: NY
+        zipCode:
+          type: string
+          maxLength: 10
+          description: >-
+            The postal code at its STORED width of ten characters, from
+            CUST-ADDR-ZIP PIC X(10) at L14, UNNARROWED. The consuming screen
+            renders CUST-ADDR-ZIP(1:5) at L775 of COPAUS0C, so narrowing here
+            would adopt that display truncation as though it were the layout and
+            would discard the four-digit extension for every later reader.
+          example: '100010001'
+        phoneNumber1:
+          type: string
+          maxLength: 15
+          description: >-
+            The primary telephone number at its STORED width of fifteen characters,
+            from CUST-PHONE-NUM-1 at L15 with L16 -- not the thirteen the account view
+            screen carries at L204 of app/cpy-bms/COACTVW.CPY. The two differ by
+            exactly the trailing two-character pad app/cbl/COACTUPC.cbl L731 declares,
+            so publishing thirteen would adopt the screen's truncation as though it
+            were the layout.
+          example: (212)5550100
+
     CustomerResponse:
       type: object
       additionalProperties: false
@@ -2434,16 +2787,20 @@ components:
     CustomerPage:
       type: object
       additionalProperties: false
-      required: [items, firstKey, lastKey, hasNext, hasPrevious]
+      required: [items, firstKey, lastKey, hasNext]
       description: >-
         One page of the customer scan in the shared keyset envelope. The envelope
-        has exactly these five members and carries no total count and no page
-        number, because the reference browse state it replaces carries neither: at
-        app/cbl/COCRDLIC.cbl L230 to L244 it holds a trailing key pair, a leading
-        key pair, a screen ordinal, a last-screen flag and a further-rows
-        indicator, and the two members not carried across are the screen ordinal
-        at L237 and the last-screen flag at L239 to L241, so that no page number
-        crosses the wire.
+        has exactly these four members and carries no total count, no page number
+        and no backward availability answer, because the reference browse state it
+        replaces carries neither of the first two and keeps the third on the
+        terminal: at app/cbl/COCRDLIC.cbl L230 to L244 it holds a trailing key
+        pair, a leading key pair, a screen ordinal, a last-screen flag and a
+        further-rows indicator, and the three members not carried across are the
+        screen ordinal at L237, the last-screen flag at L239 to L241 and any claim
+        that an earlier page exists -- which that program answers from the ordinal
+        alone at L902 to L903. No page number crosses the wire, and a client that
+        withholds a backward control on its opening page does so from the ordinal
+        it keeps itself.
       properties:
         items:
           type: array
@@ -2484,26 +2841,14 @@ components:
             app/cbl/COCRDLIC.cbl L242 to L244 is a single flag raised by
             discovering one record beyond what the screen holds. The surplus row
             is trimmed before this page is published and appears nowhere in it.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
     CardXrefPage:
       type: object
       additionalProperties: false
-      required: [items, firstKey, lastKey, hasNext, hasPrevious]
+      required: [items, firstKey, lastKey, hasNext]
       description: >-
         One page of an account's cross-reference walk in the shared keyset
-        envelope. The five members are the shared ones and are described on
+        envelope. The four members are the shared ones and are described on
         CustomerPage; only the row type and the ordering differ.
 
 
@@ -2545,11 +2890,6 @@ components:
             counting -- which is the reference's own method at
             app/cbl/COCRDLIC.cbl L242 to L244. The surplus row is trimmed before
             the page is published and appears nowhere in it.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, for the reason CustomerPage records.
 
     AccountLookupRequest:
       type: object
@@ -2626,9 +2966,25 @@ components:
     ApiError:
       type: object
       additionalProperties: false
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
       required:
         - code
         - secondaryCode
+        - message
         - severity
         - subsystem
         - status
@@ -2636,6 +2992,7 @@ components:
         - path
         - timestamp
         - fieldErrors
+        - abend
       description: >-
         The shared problem document this system returns for every failure. Its
         shape is defined once in common-lib and is identical across every service
@@ -2752,10 +3109,39 @@ components:
     FieldError:
       type: object
       additionalProperties: false
-      required: [field, state, message, error]
+      required: [field, state, message]
+      # WHY : Refactoring Rationale: an earlier revision of this schema declared a fourth `error`
+      #       boolean here, because the emitted record published its derived `isError()` predicate as a
+      #       property and this schema seals itself against unknown members. The member has been
+      #       withdrawn on the EMITTING side instead: `isError()` in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java now carries
+      #       `@JsonIgnore`, and `ApiErrorWireShapeTest` pins the emitted property set at these three.
+      #       Amending the contract was the wrong half of the pair to change, because the other six
+      #       published contracts declare three members with `additionalProperties: false`, so the
+      #       fourth property made every one of their services send a body its own contract refused --
+      #       and a value that is a pure function of `state`, and unconditionally true because the
+      #       record refuses a valid state, gave a caller a second statement of one fact to reconcile.
       description: >-
         One failing property, keyed by the REQUEST PROPERTY the value arrived in so
         that a form can attach the refusal to the control it submitted.
+        #
+        # Refactoring Rationale: this schema declared a fourth boolean member named
+        #   `error` and required it, on the ground that the emitted record derived
+        #   one and that a sealed schema had to admit it. That ground was correct
+        #   about the emitted record and wrong about the remedy: the six sibling
+        #   contracts in this repository all publish these three members and no
+        #   fourth, so declaring it here made THIS document the outlier and left a
+        #   client that had been generated from any other one unable to validate an
+        #   account refusal. The derived member is now suppressed at the source, on
+        #   ApiError.FieldError, and asserted absent by the emitted-key-set case in
+        #   services/common-lib/src/test/java/com/carddemo/common/error/ApiErrorTest.java,
+        #   so all seven documents and the browser client describe one shape.
+        # Alternatives Considered: adding the member to the other six documents and
+        #   to ui/src/api/types.ts instead. Rejected because the value is a constant
+        #   -- the record's constructor refuses any state that is not an error, so
+        #   the predicate is true for every entry that can exist -- and publishing a
+        #   constant invites a client to branch on something that never varies. The
+        #   `state` member below already carries the distinction a client can act on.
       properties:
         field:
           type: string
@@ -2775,13 +3161,6 @@ components:
             that will not convert, the property is named and the value is not, and
             for a value that is too wide the declared width is reported rather than
             the text.
-        error:
-          type: boolean
-          description: >-
-            Always true. It is a derived member of the emitted record rather than
-            one this contract chose, and it is declared because this schema seals
-            itself against unknown properties -- omitting it would make a strict
-            client validator reject every real response.
 
     FieldValidationState:
       type: string
@@ -2814,24 +3193,59 @@ components:
       type: object
       additionalProperties: false
       required: [abendCode, abendCulprit, abendReason, abendMsg]
+      # WHY : Refactoring Rationale: the citation reads L21 to L29 because that is where the structure
+      #       actually is. app/cpy/CSMSG02Y.cpy is THIRTY-FIVE lines long, so the L45 to L53 an earlier
+      #       revision named resolves to nothing at all -- `01 ABEND-DATA` is at L21, and its four
+      #       subordinate fields are at L22, L24, L26 and L28, each followed by a VALUE SPACES clause.
+      #       A citation that cannot be opened is worse than none, because a reader who follows it
+      #       concludes the field does not exist rather than that the number was wrong.
+      # WHY : Refactoring Rationale: each width is now declared, and each is the PICTURE width of the
+      #       field it mirrors -- ABEND-CODE PIC X(4) at L22, ABEND-CULPRIT PIC X(8) at L24,
+      #       ABEND-REASON PIC X(50) at L26 and ABEND-MSG PIC X(72) at L28. The last of those had been
+      #       declared as 75, which is the width of the AGGREGATE message field CCARD-ERROR-MSG at
+      #       app/cpy/CSMSG01Y.cpy and not of this one; the two are separate fields and a contract that
+      #       admits 75 here would accept three characters the reference field cannot hold. The other
+      #       six published contracts already declare 4, 8, 50 and 72, so this document was the outlier.
       description: >-
         The target form of the reference's own abend fields at
-        app/cpy/CSMSG02Y.cpy L45 to L53. Its four members are fixed text about
+        app/cpy/CSMSG02Y.cpy L21 to L29. Its four members are fixed text about
         where the failure was recognised and never carry anything derived from the
         caught throwable, so a provider's internal wording cannot reach a response
         through them.
+        #
+        # Refactoring Rationale: the citation read L45 to L53 and named nothing --
+        #   that copybook is 35 lines long, so the range addressed no declaration at
+        #   all and a reader checking the widths below against it found an empty
+        #   span. `01 ABEND-DATA` stands at L21 and its four members occupy L22 to
+        #   L29: ABEND-CODE PIC X(4) at L22, ABEND-CULPRIT PIC X(8) at L24,
+        #   ABEND-REASON PIC X(50) at L26 and ABEND-MSG PIC X(72) at L28. The five
+        #   sibling contracts in this repository already cite L21 to L29, so this
+        #   document was the only one pointing past the end of the file.
       properties:
         abendCode:
           type: string
-          description: Which abend condition was recognised.
+          maxLength: 4
+          description: >-
+            Which abend condition was recognised, at most four characters, from
+            ABEND-CODE PIC X(4) at app/cpy/CSMSG02Y.cpy L22.
           example: 'SVCE'
         abendCulprit:
           type: string
-          description: Which component recognised it, or the empty string.
+          maxLength: 8
+          description: >-
+            Which component recognised it, or the empty string, mirroring
+            ABEND-CULPRIT PIC X(8) at app/cpy/CSMSG02Y.cpy L24. The external
+            projection blanks it rather than naming an internal program.
         abendReason:
           type: string
-          description: Why it was recognised, or the empty string.
+          maxLength: 50
+          description: >-
+            Why it was recognised, or the empty string, mirroring ABEND-REASON
+            PIC X(50) at app/cpy/CSMSG02Y.cpy L26. Blanked for the same reason as
+            abendCulprit: its value is a platform diagnostic a client cannot act on.
         abendMsg:
           type: string
-          maxLength: 75
-          description: The operator-facing sentence for the condition.
+          maxLength: 72
+          description: >-
+            The operator-facing sentence for the condition, at most seventy-two
+            characters, from ABEND-MSG PIC X(72) at app/cpy/CSMSG02Y.cpy L28.

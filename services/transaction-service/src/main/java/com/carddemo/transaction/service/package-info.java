@@ -32,14 +32,13 @@
  * </ul>
  *
  * <p>Refactoring Rationale: two further types are here and are named rather than hidden --
- * {@code AccountContextClient}, the outbound seam onto the account-owned cross-reference, account
- * balance and balance change, and {@code RestAccountContextClient}, the one implementation that runs in
- * a deployed environment. They transcribe no program and are not a fifth and sixth screen. They exist
- * because two of the four programs read records this context does not own: {@code READ-CXACAIX-FILE}
- * appears in {@code app/cbl/COTRN02C.cbl} at line 576 and in {@code app/cbl/COBIL00C.cbl} at line 408,
- * and the payment program additionally reads the account master at line 355 and rewrites its balance at
- * line 452. Under schema-per-service those three records belong to the account context, so a seam is
- * the only way to reach them, and an earlier revision of this charter forbade an interface beside an
+ * {@code AccountContextClient}, the outbound seam onto the account-owned card cross-reference, and
+ * {@code RestAccountContextClient}, the one implementation that runs in a deployed environment. They
+ * transcribe no program and are not a fifth and sixth screen. They exist because two of the four
+ * programs read a record this context does not own: {@code READ-CXACAIX-FILE} appears in
+ * {@code app/cbl/COTRN02C.cbl} at line 576 and in {@code app/cbl/COBIL00C.cbl} at line 408. Under
+ * schema-per-service that record belongs to the account context, so a seam is
+ * the only way to reach it, and an earlier revision of this charter forbade an interface beside an
  * implementation on the stated ground that "nothing in this context has a second implementation to swap
  * in". That ground no longer holds: the seam has the REST implementation in production and a stubbed one
  * in every unit test of the two screens that use it, which is what lets those screens' branches be
@@ -435,6 +434,18 @@
  * remember from the superseded external retry library has a different name and resolves nowhere in
  * this build. The mandatory and sufficient posture for the one synchronous hop is the explicit
  * connect and read timeout recorded above.
+ *
+ * <p>Refactoring Rationale: the payment screen's account master READ and its balance CHANGE used to go
+ * through that same seam and no longer do. They are issued by
+ * {@code com.carddemo.transaction.repository.AccountBalanceRepository}, which is in the repository package
+ * because it is data access rather than a cross-context call, and the reason is atomicity: lines 233 and
+ * 235 of {@code app/cbl/COBIL00C.cbl} sit inside one CICS syncpoint, and an HTTP call cannot be enlisted
+ * in this side's transaction, so the previous arrangement left a reduced balance with no payment row
+ * reachable whenever the local commit failed. The address the change was posted to was additionally never
+ * declared by the callee, so the operation had no handler on a deployed stack. What this package still
+ * owns of that boundary is the SENTENCE selection: the gateway reports absence and failure and chooses no
+ * wording, so {@code BillPaymentService} answers each with the reference's own string under
+ * transformation rule T8, exactly as it does for the seam.
  *
  * <p>Assumptions: the following are out of scope for the migration as a whole and none is introduced
  * here -- an annotation processor that generates members, a generated mapper, a resilience library,

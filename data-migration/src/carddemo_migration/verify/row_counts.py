@@ -111,6 +111,7 @@ __all__ = [
     "read_row_count_query",
     "reporting_role",
     "reporting_settings",
+    "require_reporting_session",
     "row_count_query_path",
     "verify_row_count_rows",
     "verify_row_counts",
@@ -1686,13 +1687,120 @@ def open_reporting_connection(settings: AuroraConnectionSettings | None = None) 
     return connect(_require_reporting_role(reporting_settings() if settings is None else settings))
 
 
+def _one_scalar(connection: Any, statement: str) -> object:
+    """Execute one statement and return the single value its one row projects.
+
+    Parameters
+    ----------
+    connection : Any
+        An open database connection, or the in-process double that stands in for one.
+    statement : str
+        The statement to execute, which must project exactly one column of one row.
+
+    Returns
+    -------
+    object
+        The projected value, exactly as the driver returned it.
+
+    Raises
+    ------
+    ResultSetContractError
+        If the statement yields no row, or a row of any arity other than one. Both mean the
+        object supplied is not behaving as a connection, which is reported as such rather than
+        surfaced later as an index error naming nothing.
+    """
+    # WHY : Assumptions: the cursor may or may not be a context manager, so both shapes are
+    #   handled -- the same accommodation fetch_row_count_rows below makes, for the same reason.
+    #   The driver's cursor is one and this package's in-process double returns a plain object.
+    candidate = connection.cursor()
+    cursor = candidate.__enter__() if hasattr(candidate, "__enter__") else candidate
+    try:
+        cursor.execute(statement)
+        row = cursor.fetchone()
+    finally:
+        if hasattr(candidate, "__exit__"):
+            candidate.__exit__(None, None, None)
+    if row is None:
+        raise ResultSetContractError(
+            f"the statement {statement!r} returned no row at all; it projects one by"
+            " construction, so the connection is not behaving as a database connection"
+        )
+    values = tuple(row)
+    if len(values) != 1:
+        raise ResultSetContractError(
+            f"the statement {statement!r} projected {len(values)} columns where it projects one;"
+            " the connection is not behaving as a database connection"
+        )
+    return values[0]
+
+
+def require_reporting_session(connection: Any) -> str:
+    """Confirm the LIVE session on a connection authenticates as the read-only reporting role.
+
+    Purpose
+    -------
+    Ask the server who it thinks the caller is, before any supplied query text is executed on
+    that connection, so that a pass which cannot write is a property of the session rather than a
+    property of the settings some earlier call happened to be handed.
+
+    Parameters
+    ----------
+    connection : Any
+        An open database connection, or the in-process double that stands in for one.
+
+    Returns
+    -------
+    str
+        The session's role name, so a caller may log which role certified the report.
+
+    Raises
+    ------
+    RowCountVerificationError
+        If the session authenticates as any role other than the reporting role. The message names
+        both roles and nothing else about the session, so no host, database or credential reaches
+        it.
+    ResultSetContractError
+        If the connection does not answer the probe as a connection would.
+    """
+    # WHY : Refactoring Rationale: this check is on the SESSION and it is new. The settings check
+    #   beside it, _require_reporting_role, inspects the parameters handed to
+    #   open_reporting_connection -- so it protects only callers who open a connection through
+    #   that function, and every published entry point here also accepts an already-open
+    #   connection so the in-process double can stand in. That acceptance was the hole: the
+    #   command-line verification path opened a schema-owner connection and there was nothing to
+    #   refuse it, so the pass ran with write authority over the very tables it was certifying.
+    #   Asking the server closes it for every caller, including one holding a connection this
+    #   module never opened.
+    #
+    # WHY : Alternatives Considered: trusting the settings alone, and requiring every caller to
+    #   route through open_reporting_connection. The first is what shipped and is what this
+    #   replaces. The second was rejected because it would remove the injection seam the suite
+    #   depends on, and because settings do not determine a session anyway: a connection may be
+    #   pooled, handed on, or have executed SET ROLE between being opened and being used here.
+    #
+    # WHY : Assumptions: `select current_user` is the probe rather than `session_user`, because
+    #   current_user is the identifier privilege decisions are actually made against -- it follows
+    #   a SET ROLE where session_user does not. A session that authenticated as the reporting role
+    #   and then assumed a writable one would pass a session_user check and could still write.
+    expected = reporting_role()
+    observed = _one_scalar(connection, "select current_user")
+    text = observed.strip() if isinstance(observed, str) else str(observed)
+    if text != expected:
+        raise RowCountVerificationError(
+            f"verification pass 1 must run on a session for {expected!r} and this connection's"
+            f" session is {text!r}; a pass that can write cannot certify what it verifies"
+        )
+    return text
+
+
 def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...], ...]:
     """Execute the row-count query exactly as given and return its result set untouched.
 
     Parameters
     ----------
     connection : Any
-        An open database connection, supplied by the caller so a double can stand in.
+        An open database connection, supplied by the caller so a double can stand in. Its live
+        session is confirmed to be the reporting role before the query is executed.
     query : str
         The query text, executed verbatim. Nothing is appended, wrapped or interpolated.
 
@@ -1703,10 +1811,19 @@ def fetch_row_count_rows(connection: Any, query: str) -> tuple[tuple[object, ...
 
     Raises
     ------
+    RowCountVerificationError
+        If the connection's live session is not the reporting role.
     ResultSetContractError
         If the cursor yields no result set at all, which a ``SELECT`` always does and which
         therefore means the object supplied is not behaving as a connection.
     """
+    # WHY : Assumptions: the session check is made HERE, at the one place in this module where a
+    #   supplied query is executed, rather than in verify_row_counts above it. This function is
+    #   published in __all__ and takes arbitrary query text, so a check placed only in the caller
+    #   would leave the more permissive entry point unguarded -- and that entry point is the one a
+    #   future orchestration step is most likely to reach for. One guard at the single execution
+    #   site cannot be bypassed by any published path.
+    require_reporting_session(connection)
     # WHY : Assumptions: the cursor may or may not be a context manager, so both shapes are
     #   handled. The driver's cursor is one and the in-process double used by this package's suite
     #   returns a plain object, and this is the same accommodation both sibling passes make.
@@ -1743,9 +1860,11 @@ def verify_row_counts(
     Parameters
     ----------
     connection : Any
-        An open database connection, which must be a session on the reporting role. Supplied
-        rather than opened here so that one connection can serve all three passes and so that the
-        in-process double can stand in; :func:`open_reporting_connection` opens one.
+        An open database connection, which must be a session on the reporting role. That is
+        CHECKED against the server rather than assumed -- see :func:`require_reporting_session`,
+        which :func:`fetch_row_count_rows` calls before executing anything. Supplied rather than
+        opened here so that one connection can serve all three passes and so that the in-process
+        double can stand in; :func:`open_reporting_connection` opens one.
     query : str | None
         The query text to execute. ``None`` reads it from disk through
         :func:`read_row_count_query`. Supplied text is executed exactly as given.
@@ -1765,7 +1884,8 @@ def verify_row_counts(
     ResultSetContractError
         If the result set breaches the query's published contract.
     RowCountVerificationError
-        If the one legitimately unbaselined target table can no longer be established.
+        If the connection's live session is not the reporting role, or if the one legitimately
+        unbaselined target table can no longer be established.
     """
     # WHY : Assumptions: the query text is read once and executed once. Splitting the read from the
     #   execution is what makes the text injectable, and injectability is not a convenience here:

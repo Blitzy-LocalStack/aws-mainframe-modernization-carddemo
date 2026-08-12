@@ -222,6 +222,13 @@ import com.carddemo.common.money.Money;
  *     there is no message, mirroring that field's low-values sentinel, and the only component here
  *     that may be null
  */
+// WHY : ⚠️ Refactoring Rationale: this record implements TransactionAddOutcome and is now the shape of
+//       the WRITTEN turn only. It previously answered the unconfirmed turn too, with its identifier left
+//       null -- a body the published TransactionAddPreview schema forbids, since that schema declares no
+//       transactionId and closes its object, and one that omitted the `written` member that schema marks
+//       required. TransactionAddPreview now answers that turn, so every component below is
+//       unconditionally present on every body this record produces.
+
 public record TransactionAddResponse(
     // WHY : Assumptions: CVCRD01Y declares every identifier twice over the same bytes, as
     //       characters at line 34 and as a number at line 36, and 30 of the 300 seed records in
@@ -237,5 +244,31 @@ public record TransactionAddResponse(
     //       and line 28's error message carries none, so absence is representable for this one
     //       field and null is what represents it. Spaces are a different state and are not
     //       substituted for it.
-    String returnMessage) {
+    String returnMessage) implements TransactionAddOutcome {
+
+    /**
+     * The value {@link #written()} reports for every instance of this shape.
+     *
+     * <p>Assumptions: declared as a named constant so that the discriminator this record contributes to
+     * the sealed hierarchy is stated once. It is deliberately NOT a record component: the published
+     * {@code TransactionCreated} schema closes its object at three members and declares no
+     * {@code written} property, so adding a component would emit a fourth member that a strict client
+     * rejects. The accessor below satisfies the hierarchy without changing the body.</p>
+     */
+    public static final boolean CAPTURE_WRITTEN = true;
+
+    /**
+     * Reports that a transaction was written, which is unconditionally true of this shape.
+     *
+     * <p>Assumptions: this shape is returned only from the append path, so the value is a property of
+     * the type rather than of an instance. The preview shape carries the opposite value as a real
+     * component because its own schema declares one; the asymmetry is the two published schemas'
+     * asymmetry rather than an inconsistency here.</p>
+     *
+     * @return {@link #CAPTURE_WRITTEN}, always
+     */
+    @Override
+    public boolean written() {
+        return CAPTURE_WRITTEN;
+    }
 }

@@ -43,7 +43,7 @@ Eleven resources that only make sense as a set, in the order they appear in
 4. `aws_vpc_security_group_ingress_rule.alb_from_vpc_link_https` — the matching
    ingress on that group, admitting that one group and nothing else.
 
-   *Refactoring Rationale:* this module used to create a dedicated
+   Refactoring Rationale: this module used to create a dedicated
    `aws_security_group.vpc_link` as well, described here as "created here rather
    than shared with the application tasks". It is withdrawn. With the network
    module's own group for the interface-endpoint ENIs, the delivered topology
@@ -54,7 +54,7 @@ Eleven resources that only make sense as a set, in the order they appear in
    comment was defending — that no link can be pointed at a group whose matching
    destination rule is absent — is preserved, because both halves are still
    declared here and the link is now attached to the very group carrying them.
-   *Trade-offs:* the link's ENIs inherit the ALB group's egress to the
+   Trade-offs: the link's ENIs inherit the ALB group's egress to the
    application tier on the container port. They forward only to the configured
    private integration, so that inherited permission reaches nothing they
    initiate; the compensating control is that both roles of the group are named

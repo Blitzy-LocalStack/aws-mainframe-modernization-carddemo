@@ -22,10 +22,7 @@ import java.util.Objects;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -64,11 +61,18 @@ import org.springframework.web.bind.annotation.RestController;
  * stood behind it: that echoed field WAS the authorization. Here the claim is signed, so no handler
  * accepts a user identifier or user type as a parameter, header or body member at all.</p>
  *
- * <p>Refactoring Rationale: SELECTION CONTEXT becomes path parameters. The reference holds it in the
- * same structure at {@code app/cpy/COCOM01Y.cpy} L33, L38, L39 and L41, where it survives between turns
- * only because the terminal returns it. Carrying it in the request line instead makes every request
- * self-describing, which is what lets the filter chain authorize one request without consulting a
- * previous one.</p>
+ * <p>Refactoring Rationale: SELECTION CONTEXT becomes a REQUEST BODY member, and not a path parameter.
+ * The reference holds it in the same structure at {@code app/cpy/COCOM01Y.cpy} L33, L38, L39 and L41,
+ * where it survives between turns only because the terminal returns it. Carrying it with each request
+ * instead makes every request self-describing, which is what lets the filter chain authorize one request
+ * without consulting a previous one -- and the body is the carrier rather than the path because the
+ * selection context here IS an account identifier. A path segment and a query string are both written
+ * verbatim into the load balancer's access record, composed by the load balancer before any application
+ * code runs, and the migration's sensitive-data contract in
+ * {@code docs/architecture/observability.md} names account identifiers among the values a durable
+ * diagnostic may not hold. Every operation on this controller therefore addresses a fixed segment, and
+ * the module's contract test fails the build if any published path template or declared parameter
+ * regains a place to put one.</p>
  *
  * <p>Refactoring Rationale: NAVIGATION leaves the server entirely. The reference transfers control with
  * {@code EXEC CICS XCTL} at {@code app/cbl/COACTVWC.cbl} L349 and {@code app/cbl/COACTUPC.cbl} L956 to
@@ -215,6 +219,67 @@ public class AccountController {
     public static final String LOOKUP_PATH = "/lookup";
 
     /**
+     * The sub-path of the human account view, beneath {@link #BASE_PATH}.
+     *
+     * <p>Refactoring Rationale: this operation was {@code GET /api/v1/accounts/{accountId}/view} and the
+     * identifier travelled in the path. It is now a {@code POST} at this fixed address with the identifier
+     * in an {@link AccountLookupRequest} body. The reason is the one recorded on that record and enforced
+     * by the contract test beside this class: a load balancer composes its access record from the REQUEST
+     * LINE, inside the process terminating the connection and before any application code runs, so an
+     * identifier in a path segment reaches a durable store that no masker, filter or exception handler in
+     * this service can reach -- and the migration's sensitive-data contract in
+     * {@code docs/architecture/observability.md} names account identifiers among the values a durable
+     * diagnostic may not hold. The keyed form is REMOVED rather than kept as an alias, because an alias
+     * would leave the disclosure reachable by anyone who addressed the older shape.</p>
+     *
+     * <p>Assumptions: exposed as a constant for the reason {@link #LOOKUP_PATH} is -- the contract test
+     * and the dispatcher test address the same value this mapping publishes, so a rename cannot leave one
+     * of them asserting against an address no handler serves.</p>
+     */
+    public static final String VIEW_PATH = "/view";
+
+    /**
+     * The sub-path of the account edit, beneath {@link #BASE_PATH}.
+     *
+     * <p>Refactoring Rationale: this operation was {@code PUT /api/v1/accounts/{accountId}} and is now a
+     * {@code POST} at this fixed address, for the reason recorded on {@link #VIEW_PATH}. Two properties
+     * made the move cost nothing in expressiveness. The submitted record ALREADY carries the account
+     * identifier as its first component -- it is screen field {@code ACCTSIDI} at
+     * {@code app/cpy-bms/COACTUP.CPY} L60, a field the reference user types into the map -- so the path
+     * variable was a second spelling of a value the body already held, and the body's is the one the
+     * reference has. And {@code AccountUpdateService.editAccountKey} already edited the submitted value,
+     * so the key the caller supplies is now the ONLY key: the disagreement between a path key and a body
+     * key that the service's own documentation had to reason about is no longer expressible.</p>
+     *
+     * <p>Trade-offs: {@code POST} rather than {@code PUT} gives up idempotence by method semantics. That
+     * costs this operation nothing, because it was never idempotent in effect: it is conditional on
+     * {@code If-Match} and a repeated submission of the same body is refused with 409 by the precondition
+     * rather than applied twice. A {@code PUT} to a fixed collection address carrying its own target in
+     * the body would have claimed a semantic -- replace the resource at this address -- that is not what
+     * the operation does.</p>
+     */
+    public static final String UPDATE_PATH = "/update";
+
+    /**
+     * The sub-path of the by-account cross-reference walk, beneath {@link #BASE_PATH}.
+     *
+     * <p>Refactoring Rationale: this operation was
+     * {@code GET /api/v1/accounts/{accountId}/card-cross-references} and is now a {@code POST} at this
+     * address with the account in an {@link AccountLookupRequest} body, for the reason recorded on
+     * {@link #VIEW_PATH}. The {@code cursor} and {@code direction} query parameters STAY in the request
+     * line and are unaffected: a sealed cursor is confidential by construction and a direction is one of
+     * two published words, so neither is a value the sensitive-data contract prohibits.</p>
+     *
+     * <p>Assumptions: the address keeps the collection segment and gains {@code /search} rather than
+     * becoming a {@code POST} on the collection itself. This migration spells a bounded {@code POST} read
+     * that way everywhere it has one -- {@code /api/v1/cards/search},
+     * {@code /api/v1/authorizations/search} and the internal twin of this very walk at
+     * {@code /api/v1/card-xrefs/search-by-account} -- and a {@code POST} on a collection address would
+     * read as a create, which this context publishes for no cross-reference row at all.</p>
+     */
+    public static final String CARD_XREF_SEARCH_PATH = "/card-cross-references/search";
+
+    /**
      * The two words the cross-reference walk accepts as a direction.
      *
      * <p>Assumptions: the domain is enforced at the EDGE rather than only inside the service, so a
@@ -338,7 +403,8 @@ public class AccountController {
             + " travels in a request body rather than in a request line the load balancer records."
             + " It is the decision read the authorization and transaction contexts make, so it has to"
             + " keep answering while the batch window is closed. The human update on this same"
-            + " controller is a PUT and is deliberately NOT exempt.")
+            + " controller is also a POST, for the same disclosure reason, and is deliberately NOT"
+            + " exempt: it is the one operation here that writes.")
     @PostMapping(path = LOOKUP_PATH,
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
@@ -374,7 +440,8 @@ public class AccountController {
      * channels are assembled per response. A weak tag asserts semantic equivalence, which is exactly
      * what a revision means here, and is what {@code If-Match} on the update compares.</p>
      *
-     * @param accountId the account to read
+     * @param request the read request carrying the account identifier; must satisfy its declared
+     *     constraints
      * @return the account view with its revision in the {@code ETag} header, never {@code null}
      * @throws ClientInputException if the identifier is not one the reference's own filter edit would
      *     accept, which the shared advice renders as HTTP 400 naming the offending property
@@ -383,14 +450,25 @@ public class AccountController {
      * @throws java.util.NoSuchElementException if the account, its cross-reference or its customer is
      *     absent, which the shared advice renders as HTTP 404
      */
-    @GetMapping(path = "/{accountId}/view", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<AccountViewResponse> readView(@PathVariable long accountId) {
+    @OnlineWriteGateExempt(reason =
+            "A READ of one account and its customer, a POST only so that the eleven-digit account"
+            + " identifier travels in a request body rather than in a request line the load balancer"
+            + " records. The gate classifies by HTTP method because a method is known before a handler"
+            + " runs, so a read expressed as a POST has to say so here or it would be refused while the"
+            + " batch window is closed -- and refusing a read during the window removes a capability the"
+            + " baseline keeps: the quiesce this gate migrates closed the files to WRITERS.")
+    @PostMapping(path = VIEW_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<AccountViewResponse> readView(
+            @Valid @RequestBody AccountLookupRequest request) {
+        long accountId = request.accountId();
         refuseUnacceptableViewFilter(accountId);
 
-        AccountViewResponse view = this.reads.readAccountView(accountId);
+        AccountViewService.RevisionedAccountView composed = this.reads.readAccountView(accountId);
         return ResponseEntity.ok()
-                .header(HttpHeaders.ETAG, weakTag(this.writes.currentRevision(accountId)))
-                .body(view);
+                .header(HttpHeaders.ETAG, weakTag(composed.revision()))
+                .body(composed.view());
     }
 
     /**
@@ -413,6 +491,14 @@ public class AccountController {
      * caller performing consecutive edits does not have to re-read the account between them. Without it
      * every second edit in a sequence would fail its own precondition.</p>
      *
+     * <p>⚠️ Refactoring Rationale: that new revision is read off the write operation's own answer and is
+     * no longer obtained by a second call. This method used to follow the update with a read-only
+     * {@code writes.currentRevision} in a transaction of its own, which could observe a THIRD party's
+     * edit committed after this one -- so a caller was handed a tag naming a state it had never been
+     * shown, and its next edit then succeeded against that unseen state instead of being refused. The
+     * write service now derives the token from the managed rows after its flush, inside the same
+     * transaction that wrote them.</p>
+     *
      * <p>Assumptions: the tag comparison tolerates the {@code W/} prefix and quoting, because an
      * intermediary is permitted to reformat an entity tag and a caller that echoes what it received must
      * not be refused for the formatting. The comparison is on the value inside.</p>
@@ -427,13 +513,14 @@ public class AccountController {
      * on the return-message field declared at L479 and not on the change flag at L168; here the signal is
      * the exception and the text is a member of the error body, and the two travel together.</p>
      *
-     * @param accountId the account to update
      * @param ifMatch the revision the caller was given, from the {@code If-Match} header; required
-     * @param request the submitted edit; must not be {@code null}
+     * @param request the submitted edit, whose own first member names the account to update; must not be
+     *     {@code null}
      * @return the committed state with the new revision in the {@code ETag} header, never {@code null}
-     * @throws ClientInputException if the identifier is not one the reference's own key edit would
-     *     accept, or if any submitted value was refused, which the shared advice renders as HTTP 400
-     *     with one entry per offending property
+     * @throws ClientInputException if the submitted identifier is not one the reference's own key edit
+     *     would accept -- including absent, which a body can express and a path segment could not -- or
+     *     if any submitted value was refused, which the shared advice renders as HTTP 400 with one entry
+     *     per offending property
      * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
      *     extends it and a caller catching the parent catches both
      * @throws java.util.NoSuchElementException if the account or its customer is absent, which the shared
@@ -445,19 +532,19 @@ public class AccountController {
      *     write transaction's read and its flush, which the shared advice renders as the same HTTP 409
      *     because the caller's remedy is identical -- re-read and retry
      */
-    @PutMapping(path = "/{accountId}",
+    @PostMapping(path = UPDATE_PATH,
             consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<AccountUpdateResponse> update(@PathVariable long accountId,
+    public ResponseEntity<AccountUpdateResponse> update(
             @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
             @Valid @RequestBody AccountUpdateRequest request) {
-        refuseUnacceptableUpdateKey(accountId);
+        long accountId = refuseUnacceptableUpdateKey(request.accountId());
 
-        AccountUpdateResponse applied =
+        AccountUpdateService.RevisionedAccountUpdate applied =
                 this.writes.update(accountId, request, bareTag(ifMatch));
         return ResponseEntity.ok()
-                .header(HttpHeaders.ETAG, weakTag(this.writes.currentRevision(accountId)))
-                .body(applied);
+                .header(HttpHeaders.ETAG, weakTag(applied.revision()))
+                .body(applied.response());
     }
 
     /**
@@ -489,22 +576,38 @@ public class AccountController {
      * <p>Assumptions: an account with no cards yields an EMPTY page rather than a not-found outcome,
      * matching an alternate-index browse that ends immediately.</p>
      *
-     * @param accountId the account whose cross-reference rows are required
+     * @param request the read request carrying the account whose cross-reference rows are required; must
+     *     satisfy its declared constraints
      * @param cursor the sealed boundary a previous page issued, or absent to read the first page
      * @param direction {@code previous} to step backward, absent or anything else to step forward;
      *     meaningful only alongside a cursor
      * @param principal the authenticated caller, supplied by the framework; the cursors this operation
-     *     issues are sealed against its name, the account in the path and the direction, so a page issued
+     *     issues are sealed against its name, the account in the BODY and the direction, so a page issued
      *     to one caller walking one account cannot reposition another caller or another account
      * @return one page of at most seven rows in ascending card-number order, with both sealed boundaries
      *     and both availability indicators; never {@code null}
      * @throws CursorToken.InvalidCursorException if the cursor cannot be opened, or was sealed for another
      *     query, subject, account or direction, which the shared advice renders as HTTP 400
      */
-    @GetMapping(path = "/{accountId}/card-cross-references",
+    // WHY : Assumptions: the cursor and the direction stay in the QUERY STRING while the account moves
+    //       into the body, and the split is deliberate rather than an oversight. A query string is part
+    //       of the request line and is persisted by the load balancer exactly as a path segment is, so
+    //       the test is not where a value sits but whether the sensitive-data contract prohibits it: a
+    //       sealed cursor is confidential by construction -- CursorToken authenticates and the account is
+    //       part of its seal -- and a direction is one of two published words. Neither is an account
+    //       identifier, so neither has to move, and moving them would have made the two boundaries the
+    //       response returns awkward to echo back.
+    @OnlineWriteGateExempt(reason =
+            "A READ of one account's cross-reference rows, a POST only so that the eleven-digit account"
+            + " identifier travels in a request body rather than in a request line the load balancer"
+            + " records. Exempt for the reason the account view beside it is: the gate classifies by HTTP"
+            + " method, so a read expressed as a POST has to declare itself one, and the quiesce this"
+            + " gate migrates closed the files to WRITERS rather than to readers.")
+    @PostMapping(path = CARD_XREF_SEARCH_PATH,
+            consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public PageResponse<CardXrefResponse> listCardCrossReferences(
-            @PathVariable long accountId,
+            @Valid @RequestBody AccountLookupRequest request,
             @RequestParam(name = "cursor", required = false)
             @Size(max = CursorToken.MAX_TOKEN_LENGTH)
             String cursor,
@@ -513,7 +616,8 @@ public class AccountController {
             String direction,
             Principal principal) {
 
-        return this.reads.listCardCrossReferences(accountId, cursor, direction, principal.getName());
+        return this.reads.listCardCrossReferences(
+                request.accountId(), cursor, direction, principal.getName());
     }
 
     /**
@@ -541,20 +645,40 @@ public class AccountController {
     }
 
     /**
-     * Refuses an update whose account key the reference's own update edit would not accept.
+     * Refuses an update whose submitted account key the reference's own update edit would not accept, and
+     * returns the accepted key as the number the write path addresses the row by.
      *
      * <p>Assumptions: the write path's edit returns a state paired with the sentence it would have
      * latched and no property name, so the name is supplied from this class's own binding. That is the
      * one place the two edits differ in shape, and it is why the two refusal helpers are separate rather
      * than one helper taking a function.</p>
      *
-     * @param accountId the bound identifier to submit to the reference's update edit
+     * <p>Refactoring Rationale: the value edited here is the one the CALLER SUBMITTED and no longer a
+     * path variable rendered to width. The submitted key is screen field {@code ACCTSIDI} at
+     * {@code app/cpy-bms/COACTUP.CPY} L60 and the reference edits exactly it, so this is the closer
+     * reading as well as the one that keeps the identifier out of the request line. The refusals are a
+     * SUPERSET of what the keyed form could reach and every added one carries the reference's own
+     * wording: an absent or blank key -- which a screen field can be and a path segment cannot -- is
+     * refused with the sentence {@code 1210-EDIT-ACCOUNT} latches at {@code app/cbl/COACTUPC.cbl} L1792,
+     * and a non-numeric key with the sentence composed at L1806 to L1810, where the keyed form would
+     * have failed at the framework's binding layer with wording no reference line produces.</p>
+     *
+     * <p>Assumptions: the accepted key parses without a further guard, and that is a property of the edit
+     * rather than an assumption about callers. {@code editAccountKey} accepts only a value that is
+     * present, trims to at most {@link AccountUpdateService#ACCOUNT_KEY_WIDTH} characters, is entirely
+     * digits and is not entirely zeroes, so every accepted value is a non-negative integer inside the
+     * eleven-digit range. Re-testing that here would be a second, weaker copy of the edit that owns the
+     * wording.</p>
+     *
+     * @param submittedKey the account key as the caller submitted it, which may be padded, short,
+     *     over-wide, blank or {@code null}
+     * @return the submitted key as the number the write path loads the row by
      * @throws ClientInputException if the edit reports the key unacceptable or absent
      */
-    private void refuseUnacceptableUpdateKey(long accountId) {
-        AccountUpdateService.EditOutcome verdict =
-                this.writes.editAccountKey(elevenDigitKey(accountId));
+    private long refuseUnacceptableUpdateKey(String submittedKey) {
+        AccountUpdateService.EditOutcome verdict = this.writes.editAccountKey(submittedKey);
         refuseWhenUnacceptable(ACCOUNT_ID_FIELD, verdict.state(), verdict.message());
+        return Long.parseLong(submittedKey.trim());
     }
 
     /**

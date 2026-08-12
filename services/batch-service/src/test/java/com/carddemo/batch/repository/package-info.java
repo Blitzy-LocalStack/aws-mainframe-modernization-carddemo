@@ -32,7 +32,7 @@
  *
  * <p>Assumptions: the schema arrives from two places and the split is not arbitrary. {@code batch} is
  * this module's own, so its objects come from the production migration on the classpath and from
- * nothing else -- that migration is part of what is under test. The other three schemas belong to
+ * nothing else -- that migration is part of what is under test. The other four schemas belong to
  * transaction-service, account-service and reference-service, and this module may depend on
  * {@code common-lib} and on no other sibling service, so their migrations are unreachable from this
  * test classpath. They are supplied instead by the init script named above, which each class hands to

@@ -194,14 +194,18 @@ public class StatementController {
      * D-STMT-RESPONSE-BOUNDED. An earlier revision of this paragraph attributed the response bound to
      * D-2 and stated that no such bound existed, which described neither destination accurately.
      *
-     * <p>Assumptions: a capped window stays measurable rather than silent, because the heading the
-     * summary operation returns carries the card's true transaction count taken from a database
-     * aggregate over the whole card, so a caller comparing the rows it received against that count
-     * learns whether and by how much the window was capped.
+     * <p>Assumptions: a capped window stays measurable rather than silent, and this operation now says so
+     * in its own body. The response carries the card's true transaction count and a derived truncation
+     * flag beside the rows, both taken from the same composed document, so a caller learns whether and by
+     * how much the window was capped without holding a heading from another operation. Refactoring
+     * Rationale: this paragraph appealed to the heading the SUMMARY operation returns, which is a
+     * different operation with a different body -- so for a caller of this one the bound was silent.
      *
-     * <p>Assumptions: this is not a page and carries no cursor. The set is closed by the statement's
-     * own period, so there is no open-ended sequence to walk, which is the argument recorded on
-     * {@link StatementTransactionCollection}.
+     * <p>Assumptions: this is still not a page and carries no cursor. The set is closed by the
+     * statement's own period, so there is no open-ended sequence to walk, which is the argument recorded
+     * on {@link StatementTransactionCollection}. What the two added members publish is the FACT of a
+     * bound rather than a way to step past it; a caller needing every row of an exceptionally long
+     * history reads the rendered artifact, which carries no bound at all.
      *
      * @param request the card whose statement is wanted, and optionally the account it is expected to
      *     belong to; validated declaratively before this method is entered
@@ -217,7 +221,15 @@ public class StatementController {
         //       statement does not contain, and a caller reconciling the two would have no way to tell
         //       which one was the statement.
         StatementDocument document = statements.compose(request);
-        return protectively(new StatementTransactionCollection(document.transactions()));
+        // WHY : Refactoring Rationale: the card's TRUE transaction count is now published beside the
+        //       rows, and it costs no extra read -- the composed document already carries the heading
+        //       the summary operation returns, and this method was discarding it. Without it this
+        //       operation was the one place the service's response bound was undetectable: the argument
+        //       recorded for that bound is that a caller compares the rows it received against the
+        //       count in the heading, and this operation returns no heading, so a bounded statement and
+        //       a whole one were the same body to a caller of it.
+        return protectively(StatementTransactionCollection.of(
+                document.transactions(), document.statement().transactionCount()));
     }
 
     /**

@@ -169,35 +169,84 @@ The service needs a reachable PostgreSQL instance carrying the `auth` schema and
 a reachable token issuer. Every setting arrives from the environment — see
 [§7](#7-configuration) for the variable names and where they come from.
 
-```bash
-# WHAT: produce the bootable jar for this module, then start it.
-# WHY : (1) Assumptions: `spring-boot-maven-plugin` repackages the jar so it is
-#       self-contained, and no class path is assembled at launch. (2) Assumptions:
-#       eleven variables in §7 have NO fallback in `application.yml`, so an
-#       incomplete environment stops at startup naming the missing key rather
-#       than serving requests bound to nothing — which is the failure mode worth
-#       having. (3) Trade-offs: the variables are supplied from an environment
-#       file that is deliberately not committed, rather than typed on the command
-#       line, because a shell history is a poor place for a credential and
-#       `.gitignore` already excludes `.env`.
-mvn -B -f services/pom.xml -pl auth-service -am package
+Prepare the credentials **out of band**, in a file that cannot be committed:
 
-set -a && . ./auth-service.env && set +a
-java -jar services/auth-service/target/auth-service-1.0.0-SNAPSHOT.jar
+```bash
+# WHAT: create the environment file with owner-only permissions, before any value
+#       is written into it.
+# WHY : Assumptions: the name is `.env.auth-service.local` specifically because
+#       `.gitignore` ignores `.env.*`; run the `git check-ignore` line below and
+#       it prints the rule and its line number. Refactoring Rationale: this
+#       runbook sourced `auth-service.env` while claiming `.gitignore` protected
+#       it. It does not — the repository ignores `.env` and `.env.*`, and
+#       `auth-service.env` matches neither, so a file holding the Cognito client
+#       secret and two database passwords was tracked like ordinary source. The
+#       extension-last spelling is the entire defect: it reads like an env file
+#       to a person and like a committable file to git.
+# WHY : Assumptions: `umask 077` is applied BEFORE the file is created rather
+#       than corrected afterwards with `chmod`. A later `chmod` leaves a window
+#       in which the file was group- and world-readable, and on a shared host
+#       that window is sufficient; the `chmod` below is a second assertion for a
+#       file that may survive from an earlier session, not the primary control.
+umask 077
+touch .env.auth-service.local
+chmod 600 .env.auth-service.local
+git check-ignore -v .env.auth-service.local   # prints the rule that protects it
 ```
 
+Fill it with the eleven variables §7 marks as having no fallback, one
+`KEY=value` per line. Then build and start:
+
 ```bash
-# WHAT: disable the TLS listener for a loopback-only run.
-# WHY : Assumptions: `application.yml` enables TLS and reads its listener
-#       material from a PKCS#12 keystore, because the deployed target group
-#       speaks HTTPS to the task. No keystore exists on a developer machine, so
-#       the process would fail while trying to open one.
+# WHAT: the COMPLETE local launch contract, in the order it has to be performed.
+# WHY : (1) Refactoring Rationale: the TLS disable used to be shown in a SECOND
+#       block AFTER the launch. Order is not presentational here: `application.yml`
+#       enables TLS and opens a PKCS#12 keystore that exists only inside the
+#       deployed image, so a reader who followed the blocks in the order they were
+#       printed watched the process fail on a missing keystore and only then read
+#       why. The three steps are one block for that reason, and the export comes
+#       first.
+#       (2) Assumptions: `spring-boot-maven-plugin` repackages the jar so it is
+#       self-contained, and no class path is assembled at launch.
+#       (3) Assumptions: TWELVE variables in §7 have no fallback, so an incomplete
+#       environment stops the process at startup rather than letting it serve requests
+#       bound to nothing. §7 marks each of the twelve `none`, and the environment file
+#       has to set every one of them. Eleven are `${...}` placeholders in
+#       `application.yml`; the twelfth, CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, is not
+#       written in any profile and reaches the shared kernel through relaxed binding --
+#       see the rationale under §7, because auditing the profiles for placeholders will
+#       not find it.
+#       Trade-offs: the failure names the SYMPTOM rather than the key for the
+#       framework-bound values, which is worth knowing before you read one. Measured
+#       on the sibling transaction service with nothing set, the first failure is
+#       `'url' must start with "jdbc"` -- because Spring Boot's binder leaves an
+#       unresolvable placeholder as its own literal text, so the property is set to
+#       the characters `${SPRING_DATASOURCE_URL}` rather than reported as absent. The
+#       values this module injects with `@Value` do name themselves, because that
+#       path resolves through the environment rather than the binder and additionally
+#       validates blankness. An earlier revision of this note claimed the startup
+#       failure names the missing key in every case; it does not.
+#       (4) Trade-offs: those variables are supplied from an environment file that
+#       is deliberately not committed, rather than typed on the command line,
+#       because a shell history is a poor place for a credential and `.gitignore`
+#       already excludes `.env`. The cost is that this file cannot show you the
+#       file's contents; §7 names every key it must carry.
+#       (5) Assumptions: `SERVER_SSL_ENABLED` is not a `${...}` placeholder in any
+#       profile — it reaches `server.ssl.enabled` through the framework's relaxed
+#       binding of an environment name onto a property. That is why it appears in
+#       §7 with a fallback of `true` rather than `none`: nothing fails when it is
+#       absent, the listener simply stays encrypted and then cannot open its
+#       keystore.
 # WHY : Alternatives Considered: minting a local certificate so a local run also
 #       speaks TLS. Rejected because the certificate would not match the loopback
 #       name for any caller that verified it; disabling the listener states
 #       plainly that a local run does not exercise the deployed transport rather
 #       than appearing to.
+mvn -B -f services/pom.xml -pl auth-service -am package
+
 export SERVER_SSL_ENABLED=false
+set -a && . ./auth-service.env && set +a
+java -jar services/auth-service/target/auth-service-1.0.0-SNAPSHOT.jar
 ```
 
 In deployment the image entry point,
@@ -359,15 +408,40 @@ parameter file.
 | `CARDDEMO_AUTH_COGNITO_CLIENT_ID` | App client used for the sign-on exchange | none |
 | `CARDDEMO_AUTH_COGNITO_CLIENT_SECRET` | Client credential reference for that exchange | none |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore | none |
+| `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Keys the sealed paging cursor the user list issues | none |
+| `CARDDEMO_ONLINE_WRITES_PARAMETER` | Names the SSM flag that closes writes during the batch window | none in effect |
+| `CARDDEMO_VERSION` | Release label on every log record, metric series and span | `unspecified`, which the service module refuses |
 | `CARDDEMO_SERVER_TLS_KEYSTORE` | Keystore location | has a default |
 | `CARDDEMO_SERVER_TLS_KEY_ALIAS` | Listener key alias | has a default |
 | `CARDDEMO_COGNITO_ADMIN_GROUP_NAME` | Group mapped to the administrator authority | `carddemo-admin` |
 | `CARDDEMO_COGNITO_USER_GROUP_NAME` | Group mapped to the ordinary-user authority | `carddemo-user` |
 | `CARDDEMO_DB_SSL_ROOT_CERT` | Trust anchor for the database connection | has a default |
+| `SERVER_SSL_ENABLED` | Whether the listener is encrypted; set `false` for a loopback-only local run | `true`, set in `application.yml` |
 
-The eleven marked `none` have **no fallback on purpose**. A missing one stops
-startup naming the key, rather than letting the service come up bound to a default
-that happens to be wrong.
+The twelve marked `none` have **no fallback on purpose**, rather than letting the
+service come up bound to a default that happens to be wrong. What a missing one looks
+like is set out in the launch note in §4: for the framework-bound values the failure
+names the symptom rather than the key, because the binder leaves an unresolvable
+placeholder as its own literal text.
+
+Refactoring Rationale: three of the rows above were absent from this table, and two of
+them are **required**. `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` and
+`CARDDEMO_ONLINE_WRITES_PARAMETER` are the only inputs this service reads that are *not*
+written as `${...}` placeholders in any profile — Spring's relaxed binding maps them onto
+`carddemo.pagination.cursor.signing-key` and `carddemo.online-writes.parameter`, both
+declared in the shared kernel's auto-configuration rather than here. They were therefore
+invisible to a reader auditing the profiles for placeholders, and to the audit that
+produced this table. The two behave differently when absent, which is why both are named:
+the cursor key **stops startup**, because its bean is `@ConditionalOnProperty` and
+`service/UserService` takes a `CursorToken` as a mandatory constructor argument with no
+`ObjectProvider` wrapper; the write gate **removes itself silently**, because both its
+beans are conditional on the same property and nothing outside the auto-configuration
+injects them — so an absent value leaves user administration accepting writes during the
+nightly batch window with nothing in the log to say so. `infra/modules/ecs-service`
+requires the cursor key by name and makes the gate name biconditional for the seven web
+workloads, so a root that drops either fails at `plan`. `CARDDEMO_VERSION` is the third:
+it has a fallback here and the service module refuses that fallback, because a task
+labelled `unspecified` produces telemetry no release can be attributed to.
 
 **Where the values come from.** Every one arrives from **Terraform outputs by way
 of Parameter Store and Secrets Manager**, injected by the ECS task definition and
@@ -376,14 +450,43 @@ read at startup through the active Spring profile. As the specification puts it:
 parameter store directly — the platform resolves configuration before the process
 starts, and the framework's own environment binding reads it from there.
 
-Three profiles, and they vary only in sizing, log levels and retention — never in
-topology:
+Three documents, and the two overlays vary on exactly **four** axes — never in
+topology, and never in what the service does:
 
 | File | Role |
 |---|---|
 | `src/main/resources/application.yml` | Base configuration; every variable reference and every default lives here |
 | `src/main/resources/application-dev.yml` | Development overlay |
 | `src/main/resources/application-prod.yml` | Production overlay |
+
+| Axis | `dev` | `prod` |
+|---|---|---|
+| Connection-pool sizing | `maximum-pool-size: 5`, `minimum-idle: 0` | `maximum-pool-size: 20`, `minimum-idle: 5` |
+| Log levels | `com.carddemo`, `org.flywaydb` and `org.hibernate.SQL` at `DEBUG` | `root: WARN`, `com.carddemo: INFO` |
+| Actuator exposure | `health,info,metrics,prometheus,env,configprops,flyway` | `health,metrics,prometheus` |
+| Flyway clean protection | not set | `spring.flyway.clean-disabled: true` |
+
+Two of those deserve a word, because they are the two a reader is most likely to
+assume are the same everywhere. The **actuator exposure list is a security axis,
+not a convenience one**: `env` and `configprops` render resolved configuration, so
+exposing them in production would publish the shape of the very settings §7 keeps
+in a secret store, which is why the production list is three endpoints rather than
+seven. And **`clean-disabled` is a one-way guard**: `flyway:clean` drops every
+object in the schema, so the production overlay refuses the command outright
+rather than relying on nobody issuing it.
+
+Refactoring Rationale: this section said the profiles "vary only in sizing, log
+levels and retention". Two of those three were wrong. There is **no
+application-level retention setting in this module at all**, and
+`application.yml` says so itself where it notes that log retention "is governed by
+the log group rather than by this service" — the property belongs to
+`infra/modules/observability`, which parameterises `log_retention_days`. A reader
+looking for a retention profile here would find nothing and reasonably conclude the
+documentation was out of date rather than describing a setting that never existed.
+And
+the list omitted both axes that carry a security consequence, which is precisely
+the pair worth naming. The axes are now tabulated from the overlays themselves so
+the claim can be diffed against them.
 
 ---
 
@@ -428,6 +531,23 @@ It is what the SPA client [`ui/src/api/auth.ts`](../../ui/src/api/auth.ts) is
 written against, so the contract is the coordination point between the two trees
 rather than either implementation.
 
+**One operation in that table answers with a shape carrying material no other
+returns.** `POST /api/v1/auth/users` answers `201` with `CreatedUserResponse`, which
+is the five properties of `UserResponse` plus `credentialSecretName` — the name of the
+managed-secret entry holding the one-time credential the pool account was created
+with. `Refactoring Rationale:` the body carries the entry's **name and not its
+value**, because a credential in a response body is copied into every proxy log and
+browser history on the path. Collect the value from that entry: the account lands in
+the provider's force-change state, so presenting it at `POST /api/v1/auth/signon`
+yields the `NEW_PASSWORD_REQUIRED` challenge that `POST /api/v1/auth/challenge`
+answers, and the pool issues tokens only once a permanent credential has replaced it.
+The name is derived from the identifier, so it is recomputable rather than
+irrecoverable. See
+[D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward) for why the value
+is created here rather than delivered by the provider, and
+`FirstSignOnHandoverTest` for the end-to-end evidence that the value a creation
+returns is the value that account's first sign-on accepts.
+
 ### 8.1 Keyset pagination on the user list
 
 The list operation pages **by key, never by offset**. The page size is **10**,
@@ -437,14 +557,35 @@ next-page indicator can be set by discovering a row that does not fit, which is
 exactly how the COBOL sets it.
 
 Request parameters are `cursor` and `direction`. The response envelope is
-`PageResponse<T>` from `common-lib`:
+`PageResponse<T>` from `common-lib`, and it has **four** components:
 
 | Component | Meaning |
 |---|---|
 | `items` | The page's rows, at most 10 |
-| `firstKey` | Key of the first row, used to page backward |
-| `lastKey` | Key of the last row, used to page forward |
-| `hasNext` | Whether a further row exists beyond this page |
+| `firstKey` | Sealed cursor token naming this page's leading boundary — the position a backward request is issued from |
+| `lastKey` | Sealed cursor token naming this page's trailing boundary — the position a forward request is issued from |
+| `hasNext` | Whether a further page follows, established by reading one row beyond the window |
+
+**Backward availability is not a component**, and `UserService` reports no such
+flag. Forward availability is the surplus row on a forward walk
+and is unconditionally true on a backward one, because a caller that has just
+stepped back came from a page that demonstrably exists. What the envelope owes a
+caller that wants to step back is the **position** to seek from, which is
+`firstKey`, and nothing more: the backward read asks for keys strictly less than
+that token in descending order.
+
+`Refactoring Rationale:` the baseline answers "is there an earlier page" from a
+page ordinal the terminal carried between turns and never from a read of the
+file. `app/cbl/COUSR00C.cbl` declares `CDEMO-CU00-PAGE-NUM` at L70 inside that
+communication area, tests `CDEMO-CU00-PAGE-NUM > 1` at L247, and when it is not
+raises `'You are already at the top of the page...'` at L251 without reading
+anything at all. That ordinal's migrated home is the browser client's own
+navigation state, so the client refuses the backward key while it holds the first
+page and this service is never asked. A fifth component restating it would spend
+a query recomputing what the caller already knows — whether it issued a cursor —
+and would put the wire out of agreement with the four members every consumer of
+the envelope declares. `PageResponseTest` asserts the closed set at four and
+refuses that fifth member by name.
 
 `Alternatives Considered:` offset pagination, which the component library and the
 persistence layer both offer for free. It is rejected because under concurrent
@@ -708,10 +849,28 @@ credential, it **redisplays the stored one to whoever opened the screen**.
 
 Identity moves to a **managed Cognito user pool**. `auth.users` keeps only a
 **`cognito_sub`** reference, and **no password column of any kind exists** —
-neither plaintext nor hashed. No credential is persisted, logged, or returned by
-any operation in [§8](#8-api-surface). Seed users are created at provisioning time
-with generated credentials written to Secrets Manager, so no credential value
-appears in source at any point.
+neither plaintext nor hashed. No credential is persisted and none is logged. Seed
+users are created at provisioning time with generated credentials written to
+Secrets Manager, so no credential value appears in source at any point.
+
+> `Refactoring Rationale:` no credential is persisted, logged, or returned by any
+> operation, and the create operation is the one worth stating explicitly.
+> `POST /api/v1/auth/users` previously created the pool account with delivery
+> suppressed and no supplied credential, so the provider minted one internally and
+> sent it nowhere, and the account was unusable by anyone. The service now generates a
+> policy-compliant one-time value, supplies it to the pool, and publishes it to a
+> per-user Secrets Manager entry encrypted with the customer-managed key; the response
+> carries that entry's `credentialSecretName` and never the value. The pool
+> declares no email or phone attribute over which a reset could be delivered, no
+> reset operation exists in this reactor, and the seed-user bootstrap runs only
+> inside `terraform apply` — so the response was the only place the value could
+> reach its owner. `Assumptions:` the returned value is single-use (the account is
+> in the provider's force-change state, so it buys exactly one sign-on and must be
+> replaced through `POST /api/v1/auth/challenge`), never persisted (there is no
+> column for it) and never logged (`ProvisionedIdentity` and `CreatedUserResponse`
+> both override their generated rendering, and `FirstSignOnHandoverTest` asserts
+> that no line emitted during the whole journey contains it). Those three
+> properties are what make it defensible; its absence was not.
 
 `Refactoring Rationale:` what was wrong with the old approach is not that the
 hashing was weak but that there was none, and that the same field was

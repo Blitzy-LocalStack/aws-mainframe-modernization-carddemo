@@ -976,12 +976,12 @@ def test_a_restricted_decode_reads_only_the_named_fields() -> None:
     ------
     None
     """
-    # WHY (Refactoring Rationale): this entry point exists because the export reader used to decode
+    # Refactoring Rationale: this entry point exists because the export reader used to decode
     #   every branch field and then omit the card verification value from the mapping it built. That
     #   is suppression AFTER materialisation: the value existed as a decoded string reachable from
     #   the payload mapping and from any traceback raised below the decode. Naming what may be
     #   decoded is the only shape that makes the omission a real one.
-    # WHY (Assumptions): the requested names are given in REVERSE declaration order, so the
+    # Assumptions: the requested names are given in REVERSE declaration order, so the
     #   assertion on key order proves the result follows the LAYOUT rather than the request. Two
     #   callers asking for the same set must get identical mappings, or a comparison between two
     #   corpora would depend on how each side happened to enumerate its fields.
@@ -1010,7 +1010,7 @@ def test_a_restricted_decode_of_no_field_reads_nothing() -> None:
     ------
     None
     """
-    # WHY (Assumptions): the empty request is asserted explicitly because the tempting
+    # Assumptions: the empty request is asserted explicitly because the tempting
     #   implementation -- treating an empty collection as "unrestricted", the way a falsy argument
     #   often defaults -- would silently decode everything for the caller that asked for nothing,
     #   which is the exact opposite of what a projection is for. `None` means unrestricted here and
@@ -1033,7 +1033,7 @@ def test_a_restricted_decode_refuses_a_field_the_layout_does_not_declare() -> No
     ------
     None
     """
-    # WHY (Trade-offs): ignoring an unknown name would be the forgiving choice and is the wrong one.
+    # Trade-offs: ignoring an unknown name would be the forgiving choice and is the wrong one.
     #   A caller of this entry point is enumerating what may be decoded, so a misspelling would
     #   narrow the result and produce a row missing a column -- which reads downstream as absent
     #   data rather than as a mistake. The refusal names the offending field and nothing else.
@@ -1065,7 +1065,7 @@ def test_an_export_payload_projection_decodes_only_the_named_payload_fields() ->
     ------
     None
     """
-    # WHY (Assumptions): the envelope is asserted UNCHANGED because it needs no projection: its only
+    # Assumptions: the envelope is asserted UNCHANGED because it needs no projection: its only
     #   sensitive content is the 460-byte payload area, which is declared opaque and comes back as
     #   undecoded bytes. Restricting the envelope as well would have been symmetrical and pointless.
     record = _first_export_record()

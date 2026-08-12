@@ -2,26 +2,41 @@ package com.carddemo.batch.job;
 
 import com.carddemo.batch.config.BatchConfig.LedgerGuardedStep;
 import com.carddemo.batch.domain.Account;
+import com.carddemo.batch.domain.Card;
 import com.carddemo.batch.domain.CardXref;
+import com.carddemo.batch.domain.Customer;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
-import com.carddemo.batch.mapper.ExportRecordMapper;
 import com.carddemo.batch.mapper.ExportRecordMapper.ExportRecord;
+import com.carddemo.batch.mapper.ExportRecordMapper.OpaqueSensitiveValue;
 import com.carddemo.batch.mapper.ExportRecordMapper.Prefix;
 import com.carddemo.batch.mapper.ExportRecordMapper.RecordType;
+import com.carddemo.batch.mapper.ExportRecordMapper;
 import com.carddemo.batch.repository.AccountRepository;
+import com.carddemo.batch.repository.CardRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
+import com.carddemo.batch.repository.CustomerRepository;
 import com.carddemo.batch.repository.TransactionRepository;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.time.TimestampFormatter;
-import java.io.ByteArrayOutputStream;
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.math.BigDecimal;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.job.Job;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.job.parameters.JobParametersValidator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.Step;
 import org.springframework.beans.factory.annotation.Value;
@@ -175,51 +190,51 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * copied here; it reaches the record only inside the mapper's opaque carrier, which is the sole
  * handling a payment-card secret crossing a serialisation boundary is allowed.
  *
- * <h2>OPEN DEPENDENCY: two of the five record types have no data seam in this module</h2>
+ * <h2>All five record types are emitted, and two of them carry a documented redaction</h2>
  *
- * <p><b>This is an unresolved cross-package dependency, not a settled divergence, and it is stated
- * here so that it is acted on rather than inherited.</b> The reference reads all five masters --
+ * <p>Refactoring Rationale: <b>this class used to emit three of the five record types and warn about
+ * the other two on every run.</b> The reference reads all five masters --
  * {@code app/cbl/CBEXPORT.cbl:260} customer, {@code :329} account, {@code :393} cross-reference,
- * {@code :448} transaction and {@code :513} card. This class emits three of the five. The two absent
- * are customer and card, and the reason is neither the encoder nor the database:
+ * {@code :448} transaction and {@code :513} card -- and the customer and card phases here logged a
+ * heading, reported a count of zero and emitted nothing, because {@code com.carddemo.batch.domain}
+ * held no entity for either table. That shortfall was NOT detectable downstream: the five
+ * discriminators share one sequence counter and the import dispatcher at
+ * {@code app/cbl/CBIMPORT.cbl:272-286} accepts a three-type file as structurally complete, so a
+ * dataset missing two whole record types reconciled cleanly and published as though whole. Both seams
+ * now exist -- {@link com.carddemo.batch.domain.Customer} with
+ * {@link com.carddemo.batch.repository.CustomerRepository}, and
+ * {@link com.carddemo.batch.domain.Card} with {@link com.carddemo.batch.repository.CardRepository} --
+ * and all five phases below read a real source. No grant work was needed:
+ * {@code data-migration/sql/V0__schemas_and_roles.sql:1140} already granted the batch role usage on
+ * {@code ledger}, {@code account}, {@code card} and {@code reference}, {@code :1168} {@code SELECT} on
+ * every table in {@code account} and {@code :1206} {@code SELECT} on every table in {@code card}.</p>
  *
- * <ul>
- *   <li>{@link ExportRecordMapper} already encodes all five views, and exposes
- *       {@code ExportRecord.ofCustomer} and {@code ExportRecord.ofCard} as field maps precisely
- *       because nothing in this module models those two rows.</li>
- *   <li>The privilege exists. {@code data-migration/sql/V0__schemas_and_roles.sql:1093} grants the
- *       batch role usage on {@code ledger}, {@code account}, {@code card} and {@code reference};
- *       {@code :1168} grants it select on every table in {@code account}, which includes
- *       {@code account.customers}; and {@code :1206} grants it select on every table in {@code card},
- *       which includes {@code card.cards}. <b>An earlier reading that this module holds no privilege
- *       on the card schema is out of date</b>, and the resolution below is cheaper than that reading
- *       implies.</li>
- *   <li>What is missing is only the Java seam. {@code com.carddemo.batch.domain} closes its roster at
- *       eight entities and {@code com.carddemo.batch.repository} at eight interfaces, and neither
- *       {@code Customer} nor {@code Card} is among them. The domain charter reasons its closure from
- *       the preflight program, which opens six files and reads three; that reasoning is sound for
- *       preflight and does not extend to this program, which reads all five.</li>
- * </ul>
+ * <p>Alternatives Considered: three shortcuts were available for the missing seams and all three were
+ * rejected. A native query or a raw entity-manager call here would put data access in the job layer
+ * and native SQL in a module whose repository charter admits none, and the shared architecture rules
+ * assert that boundary as a test. A synchronous call to each owning service for a bulk read would move
+ * a table-sized transfer onto a request path built for single-row work. Continuing to emit three types
+ * and warn was the worst of the three and is what was replaced. The chosen shape -- a read-only
+ * immutable projection over the narrow {@code Repository} base, exactly as
+ * {@code DisclosureGroupRepository} already does for {@code reference} -- follows the precedent the
+ * migration plan sets at its section 0.4.1.3, where {@code reporting-service} reads four schemas it
+ * does not own under a select-only role.</p>
  *
- * <p>Alternatives Considered: three workarounds were available and all three are rejected. A native
- * query or a raw entity-manager call here would put data access in the job layer and native SQL in a
- * module whose repository charter admits none, and the shared architecture rules assert that boundary
- * as a test. A synchronous call to the owning service for a bulk read would move a table-sized
- * transfer onto a request path built for single-row work. Emitting three types and saying nothing
- * would be the worst of the three: the five discriminators share one sequence counter and the import
- * dispatcher accepts a three-type file as structurally complete, so the loss would be silent in an
- * artefact whose entire purpose is branch migration. This class therefore emits what it can, reports
- * the shortfall in its own summary counters, and warns on every run.
- *
- * <p>The preferred minimal resolution, for whoever owns those two packages: add {@code Customer} and
- * {@code Card} entities to {@code com.carddemo.batch.domain}; add read-only
- * {@code CustomerRepository} and {@code CardRepository} to {@code com.carddemo.batch.repository}
- * shaped like {@code DisclosureGroupRepository}, which extends the narrow {@code Repository} base and
- * so contributes no write surface, since export needs none; then extend the two phases held open
- * below. No grant work is required. Precedent exists in the migration plan, whose section 0.4.1.3
- * gives {@code reporting-service} read-only cross-schema access under a select-only role. The
- * shortfall is registered in {@code docs/architecture/cobol-to-service-traceability.md}, which the
- * plan designates the register of every documented divergence.
+ * <p>⚠️ Assumptions: two fields of the customer view and one of the card view are written as their
+ * empty encodings rather than as the values the baseline wrote, and this is a DELIBERATE, documented
+ * redaction rather than a remaining gap. {@code EXP-CUST-SSN} at {@code app/cpy/CVEXPORT.cpy:36},
+ * {@code EXP-CUST-GOVT-ISSUED-ID} at {@code :37} and {@code EXP-CARD-CVV-CD} at {@code :96} are stored
+ * in the target as enciphered {@code BYTEA} envelopes that only the owning context's cipher can open,
+ * under keys whose decrypt right this module's task role does not hold. Acquiring that right would mean
+ * granting a nightly batch task the ability to decrypt every national identifier and every card
+ * verification value in the institution, and then writing all of them in clear into an object-store
+ * artefact -- which the migration plan's security posture forbids outright for the verification value
+ * and requires to be masked for the identifiers. Trade-offs: a consumer of the dataset therefore
+ * receives complete customer and card records whose three protected fields are blank or zero, which is
+ * a real loss of fidelity against the baseline; it is accepted because the alternative is a
+ * cleartext-secret extract, and because every other field of both views is complete. The three
+ * redactions are registered in {@code docs/architecture/cobol-to-service-traceability.md}, which the
+ * plan designates the register of every documented divergence.</p>
  *
  * @see ExportRecordMapper
  * @see BatchJobName#EXPORT
@@ -229,6 +244,34 @@ public class ExportJob {
 
     /** Diagnostic channel for this job; the reference writes the same lines to its system output. */
     private static final Logger LOG = LoggerFactory.getLogger(ExportJob.class);
+
+    /**
+     * Registered job name and ledger step name, taken from the orchestration vocabulary.
+     *
+     * <p>Assumptions: the token is READ from {@link BatchJobName#EXPORT} and never written as a literal,
+     * because the container resolves a job through the Spring Batch registry by name and never by
+     * importing this class -- so a literal that drifted from the enumeration would fail only at run time
+     * with a token the registry does not hold.</p>
+     *
+     * <p>Refactoring Rationale: this is a named constant rather than the local variable the bean method
+     * used, and the reason is a test rather than a preference.
+     * {@code BatchJobRosterTest.jobNameConstantOf} reads a {@code JOB_NAME} field by reflection in order
+     * to compare what this package registers against what the entry point advertises, and a token held
+     * only in a method body is invisible to it. While it was invisible, the roster's own list of
+     * configurations could omit this class and the roster test still passed -- which is how the package
+     * charter came to describe this job as unlanded long after it had landed. The sibling
+     * {@link ImportJob} declares the pair for the same reason.</p>
+     */
+    public static final String JOB_NAME = BatchJobName.EXPORT.token();
+
+    /**
+     * The ledger step name, identical to the job name because this job has exactly one step.
+     *
+     * <p>Assumptions: the two are one value rather than two, because a single-step job has nothing to
+     * distinguish. The durable ledger keys on the run identifier paired with the STEP name, so a second
+     * spelling would be a second key for one unit of work.</p>
+     */
+    public static final String STEP_NAME = JOB_NAME;
 
     /**
      * Branch identifier stamped on every record when no override is configured, from
@@ -267,6 +310,28 @@ public class ExportJob {
     private static final String EXPORT_MEMBER = "/export.dat";
 
     /**
+     * Name prefix of the temporary file the dataset is assembled in before it is put.
+     *
+     * <p>Assumptions: the prefix names the job rather than the record type, so an operator inspecting a
+     * task's temporary directory can attribute a file to this step. Each sibling staging job in this
+     * package declares its own prefix for the same reason, which is why this is a per-job constant
+     * rather than a shared one.</p>
+     */
+    private static final String STAGING_FILE_PREFIX = "carddemo-export-";
+
+    /**
+     * The value written into a protected DISPLAY NUMERIC span in place of its source value.
+     *
+     * <p>⚠️ Assumptions: zero, and it has to be numeric rather than blank.
+     * {@code app/cpy/CVEXPORT.cpy:36} declares {@code EXP-CUST-SSN} as an unsigned display numeric
+     * field, and the shared codec refuses a non-numeric value for such a field -- so blanking that span
+     * would fail the encode rather than redact it. Zero is a well-formed value of the declared type
+     * that no real national identifier takes, which is the closest a fixed-width numeric span comes to
+     * representing "withheld". The redaction rationale is on this class.</p>
+     */
+    private static final long REDACTED_NUMERIC_SPAN = 0L;
+
+    /**
      * Content type recorded on the written object.
      *
      * <p>Assumptions: binary, because the record carries packed decimal and a four-byte binary
@@ -275,6 +340,54 @@ public class ExportJob {
      * characters.</p>
      */
     private static final String CONTENT_TYPE = "application/octet-stream";
+
+    /**
+     * Filename stem of the staging file the dataset is assembled into before it is published.
+     *
+     * <p>Assumptions: the stem names the job, so that a file surviving a hard task kill is attributable
+     * to this job rather than to the sibling import. The prefix and the unique remainder of the name are
+     * supplied by {@link DatasetPayloadWriter#stage(String)}, which holds the naming and the deletion
+     * rules for every staging file in this package.</p>
+     */
+    private static final String STAGING_STEM = "export";
+
+    /**
+     * Byte capacity of the buffer wrapped around the staging file.
+     *
+     * <p>Assumptions: {@value} is 128 whole 500-byte records rather than a round power of two, so a
+     * flush always carries entire records and a staging file truncated by a task kill ends on a record
+     * boundary. That makes a partial file diagnosable by dividing its length by the record length,
+     * which is exactly the check {@link #requireBytesDescribeCounters(long, long)} performs on the
+     * complete one.</p>
+     *
+     * <p>Trade-offs: a larger buffer would issue fewer writes, and the whole reason this path stages to
+     * a file is to stop holding the dataset in memory -- so the buffer is deliberately small enough
+     * that it is not itself the memory problem. 64 000 bytes is negligible beside a task's memory
+     * allocation while still reducing one write per record to one write per 128.</p>
+     */
+    private static final int STAGING_BUFFER = 64_000;
+
+    /**
+     * Value written into {@code EXP-CUST-SSN} in place of the national identifier.
+     *
+     * <p>⚠️ Assumptions: the span is {@code PIC 9(09)} unsigned display at
+     * {@code app/cpy/CVEXPORT.cpy:36}, so it cannot be left blank -- the shared codec rejects an empty
+     * unsigned value and would fail the whole run. Zero is therefore the redaction, and it is a
+     * {@code long} rather than a decimal because the codec accepts integral wrappers or digit text for
+     * that kind and nothing else. The class note above records why the real value is unavailable here
+     * and why obtaining it is refused rather than merely unimplemented.</p>
+     */
+    private static final long REDACTED_NATIONAL_IDENTIFIER = 0L;
+
+    /**
+     * Value written into every character field whose source column is null or whose value is redacted.
+     *
+     * <p>Assumptions: the empty string, not a run of spaces. The codec blank-pads a short character
+     * value to the declared span, so an empty string and a span-width run of spaces produce identical
+     * bytes -- and writing the empty string keeps the padding rule in one place instead of repeating a
+     * width-sized literal at every field.</p>
+     */
+    private static final String BLANK = "";
 
     /**
      * Start banner, verbatim from {@code app/cbl/CBEXPORT.cbl:163}.
@@ -404,11 +517,16 @@ public class ExportJob {
      *     must not be {@code null}
      * @param steps the shared ledger-guarded step builder supplying idempotency and exit-status
      *     translation; must not be {@code null}
+     * @param customers the customer master, emitted as record type {@code 'C'}; must not be
+     *     {@code null}
+     * @param validator the shared parameter validator every job in this package is built with; must not
+     *     be {@code null}
      * @param accounts the account master, emitted as record type {@code 'A'}; must not be {@code null}
      * @param crossReferences the card cross-reference table, emitted as record type {@code 'X'}; must
      *     not be {@code null}
      * @param transactions the transaction master, emitted as record type {@code 'T'}; must not be
      *     {@code null}
+     * @param cards the card master, emitted as record type {@code 'D'}; must not be {@code null}
      * @param objectStore the object store the dataset is written to; must not be {@code null}
      * @param bucket the dataset bucket name; must not be {@code null} or blank
      * @param branchId the branch identifier to stamp, defaulting to the baseline literal
@@ -426,9 +544,12 @@ public class ExportJob {
             JobRepository jobRepository,
             PlatformTransactionManager transactionManager,
             LedgerGuardedStep steps,
+            CustomerRepository customers,
+            JobParametersValidator validator,
             AccountRepository accounts,
             CardXrefRepository crossReferences,
             TransactionRepository transactions,
+            CardRepository cards,
             S3Client objectStore,
             @Value("${carddemo.dataset.bucket}") String bucket,
             @Value("${carddemo.export.branch-id:" + DEFAULT_BRANCH_ID + "}") String branchId,
@@ -436,9 +557,8 @@ public class ExportJob {
             @Value("${carddemo.export.timestamp:}") String exportTimestamp,
             Clock clock) {
 
-        String name = BatchJobName.EXPORT.token();
+        String name = JOB_NAME;
 
-        // WHAT: the stamp is resolved once, before the step body is built, and captured by it.
         // WHY : Assumptions: resolving it here rather than per record is what makes one dataset carry
         //       one stamp, which is the reference's behaviour -- app/cbl/CBEXPORT.cbl:165 performs
         //       1050-GENERATE-TIMESTAMP once from 1000-INITIALIZE, and all five blocks then move the
@@ -446,11 +566,21 @@ public class ExportJob {
         //       from one run with different instants.
         ExportStamp stamp = ExportStamp.resolve(exportTimestamp, branchId, regionCode, clock);
 
-        Step step = steps.build(name, jobRepository, transactionManager,
-                businessDate -> writeExport(businessDate, stamp, accounts, crossReferences,
-                        transactions, objectStore, bucket));
+        Step step = steps.build(STEP_NAME, BatchJobName.EXPORT, jobRepository, transactionManager,
+                businessDate -> writeExport(businessDate, stamp, customers, accounts,
+                        crossReferences, transactions, cards, objectStore, bucket));
 
-        return new JobBuilder(name, jobRepository).start(step).build();
+        // WHY : Refactoring Rationale: the shared parameter validator is ATTACHED here, and it was
+        //       not before. The module's charter states that all seven jobs share one validator, and
+        //       five of them did while this job and its import counterpart did not -- so a task
+        //       started without --business-date reached the step body, which then failed inside
+        //       businessDateOf with a message about a missing parameter after the ledger row for the
+        //       step had already been claimed. With the validator attached the launch is refused
+        //       before any step runs, which is where a malformed command belongs.
+        // WHY : Assumptions: the bean is injected rather than constructed here, so the required and
+        //       optional key sets are declared once in BatchConfig and cannot drift between the seven
+        //       jobs that enforce them.
+        return new JobBuilder(name, jobRepository).validator(validator).start(step).build();
     }
 
     /**
@@ -477,7 +607,7 @@ public class ExportJob {
      * disagreement is a detectable defect. A derived total cannot disagree with itself, so it would
      * report consistency it never verified.</p>
      *
-     * <p>Alternatives Considered: collapsing the three populated phases into one generic helper
+     * <p>Alternatives Considered: collapsing the five phases into one generic helper
      * parameterised by record type, source supplier and encoder. Rejected, even though the loops are
      * near-identical, because the phase order is part of the output contract and a generic helper hides
      * it: the order would then live in a call list, and the shared counter would have to become a
@@ -503,35 +633,48 @@ public class ExportJob {
      * declared here, and a reader looking for an absent {@code @Transactional} is looking for something
      * that would have nothing to protect.</p>
      *
-     * <p>Trade-offs: the encoded records accumulate in memory before the single object write, rather
-     * than streaming to the store. The database reads do stream -- every source is walked one row at a
-     * time through a cursor and no table is materialised as a list -- but the object-store put needs a
-     * complete payload, and the counterpart import reads the dataset whole for the same reason. The
-     * accepted cost is that peak memory scales with the dataset rather than with one record; the
-     * alternative, a multipart upload, would add a second failure mode and a partially written artefact
-     * to a job whose output is meant to be all-or-nothing.</p>
+     * <p>Refactoring Rationale: the encoded records are STAGED IN A TEMPORARY FILE rather than
+     * accumulated in a heap buffer, and the whole file is then put in one request. The previous shape
+     * held every encoded record in memory until the put, so peak memory scaled with the dataset while
+     * the task's memory is fixed at provisioning time -- one to two gibibytes -- and a large enough
+     * master would have exhausted it. Staging keeps the all-or-nothing property that shape was chosen
+     * for, because nothing is put until every phase has finished and the reconciliation has passed,
+     * while peak memory becomes the buffer size rather than the dataset size. Alternatives Considered:
+     * a multipart upload streamed as the phases run, which needs no temporary file. Rejected because it
+     * publishes parts before the run is known to be complete, so a failure mid-phase would leave a
+     * partially written artefact under the key a downstream consumer reads -- exactly the outcome the
+     * single put exists to prevent. Trade-offs: the cost is local disk for the duration of the run and
+     * an obligation to delete the staged file on every path, which {@link #export} discharges in a
+     * finally block.</p>
      *
      * @param businessDate the injected business date the dataset is partitioned under; must not be
      *     {@code null}
      * @param stamp the resolved prefix values applied to every record of this run; must not be
+     *     {@code null}
+     * @param customers the customer master, emitted as record type {@code 'C'}; must not be
      *     {@code null}
      * @param accounts the account master, emitted as record type {@code 'A'}; must not be {@code null}
      * @param crossReferences the cross-reference table, walked in full and emitted as record type
      *     {@code 'X'}; must not be {@code null}
      * @param transactions the transaction master, emitted as record type {@code 'T'}; must not be
      *     {@code null}
+     * @param cards the card master, walked in full and emitted as record type {@code 'D'}; must not be
+     *     {@code null}
      * @param objectStore the object store the dataset is written to; must not be {@code null}
      * @param bucket the dataset bucket name; must not be {@code null} or blank
      * @return always {@link BatchReturnCode#CLEAN} on completion
      * @throws IllegalStateException if the independently accumulated grand total disagrees with the sum
-     *     of the per-type counters
+     *     of the per-type counters, or if the staged bytes do not describe those counters
+     * @throws UncheckedIOException if the staging file cannot be created, written or read back
      */
     static BatchReturnCode writeExport(
             BusinessDate businessDate,
             ExportStamp stamp,
+            CustomerRepository customers,
             AccountRepository accounts,
             CardXrefRepository crossReferences,
             TransactionRepository transactions,
+            CardRepository cards,
             S3Client objectStore,
             String bucket) {
 
@@ -543,10 +686,21 @@ public class ExportJob {
         //       step that owns them -- see LOG_ABENDING for why the abend primitive itself is not
         //       reproduced.
         try {
-            return export(businessDate, stamp, accounts, crossReferences, transactions, objectStore,
-                    bucket);
+            return export(businessDate, stamp, customers, accounts, crossReferences, transactions,
+                    cards, objectStore, bucket);
         } catch (RuntimeException failure) {
-            LOG.error(LOG_ABENDING, failure);
+            // WHY : Refactoring Rationale: the throwable is rendered through ThrowableDigest rather
+            //       than attached whole. Attaching it put every message in the cause chain into a
+            //       durable log, and the chains this path produces are provider and parser chains: a
+            //       storage client's message can carry an endpoint and a bucket, and a codec's can quote
+            //       the record it refused, which for this dataset is customer and card data. The digest
+            //       carries the type names and the frames -- which is what identifies the fault -- and
+            //       drops every message. The step above still receives the exception itself, so nothing
+            //       is lost from the failure path; only the LOG line is reduced.
+            // WHY : Assumptions: the banner text is preserved verbatim beside the digest, because it is
+            //       what an operator greps for and app/cbl/CBEXPORT.cbl:578-579 writes it before
+            //       abending.
+            LOG.error("{} failure={}", LOG_ABENDING, ThrowableDigest.of(failure));
             throw failure;
         }
     }
@@ -558,23 +712,29 @@ public class ExportJob {
      *     {@code null}
      * @param stamp the resolved prefix values applied to every record of this run; must not be
      *     {@code null}
+     * @param customers the customer master, emitted as record type {@code 'C'}; must not be
+     *     {@code null}
      * @param accounts the account master, emitted as record type {@code 'A'}; must not be {@code null}
      * @param crossReferences the cross-reference table, emitted as record type {@code 'X'}; must not be
      *     {@code null}
      * @param transactions the transaction master, emitted as record type {@code 'T'}; must not be
      *     {@code null}
+     * @param cards the card master, emitted as record type {@code 'D'}; must not be {@code null}
      * @param objectStore the object store the dataset is written to; must not be {@code null}
      * @param bucket the dataset bucket name; must not be {@code null} or blank
      * @return always {@link BatchReturnCode#CLEAN} on completion
      * @throws IllegalStateException if the independently accumulated grand total disagrees with the sum
-     *     of the per-type counters
+     *     of the per-type counters, or if the staged bytes do not describe those counters
+     * @throws UncheckedIOException if the staging file cannot be created, written or read back
      */
     private static BatchReturnCode export(
             BusinessDate businessDate,
             ExportStamp stamp,
+            CustomerRepository customers,
             AccountRepository accounts,
             CardXrefRepository crossReferences,
             TransactionRepository transactions,
+            CardRepository cards,
             S3Client objectStore,
             String bucket) {
 
@@ -582,130 +742,156 @@ public class ExportJob {
         LOG.info("{}{}", LOG_EXPORT_DATE, stamp.exportDate());
         LOG.info("{}{}", LOG_EXPORT_TIME, stamp.exportTime());
 
-        ByteArrayOutputStream payload = new ByteArrayOutputStream();
-
-        // WHAT: one counter for the sequence number, five for the per-type tallies, one for the total.
         // WHY : Assumptions: these are the six counters app/cbl/CBEXPORT.cbl:139-144 declares plus the
         //       sequence counter at :123, kept as seven distinct values rather than folded together.
         //       The sequence number and the total happen to agree in this implementation because every
         //       counted record is also a written record, and they are still kept apart: the sequence
         //       number is data inside the record and the total is a statistic about the run, and a
-        //       future phase that counted a row without emitting it would separate them.
-        long sequence = 0L;
-        long customerRecords = 0L;
-        long accountRecords = 0L;
-        long crossReferenceRecords = 0L;
-        long transactionRecords = 0L;
-        long cardRecords = 0L;
-        long totalRecords = 0L;
+        //       phase that counted a row without emitting it would separate them.
+        // WHY : Assumptions: the counters are held in a mutable holder rather than as seven local
+        //       variables, because the five phases are now five methods and a local cannot be shared
+        //       across them. The holder is created here and never escapes this method, so the single
+        //       shared sequence counter that app/cbl/CBEXPORT.cbl:123 declares once remains one value
+        //       shared by construction rather than by convention.
+        Tally tally = new Tally();
 
-        // ---- Phase 1 of 5: customers, record type 'C' -------------------------------------------
-        // WHAT: the phase is announced and its tally reported even though it emits nothing.
-        // WHY : Assumptions: the open dependency on the class comment is the reason the tally is zero,
-        //       and reporting zero here without saying so would be indistinguishable from an empty
-        //       customer table. The warning below states which of the two it is; the verbatim lines are
-        //       kept so the operator-visible sequence still matches the reference phase for phase.
-        LOG.info(LOG_PROCESSING_CUSTOMERS);
-        LOG.info("{}{}", LOG_CUSTOMERS_PROGRESS, customerRecords);
+        Path staged = DatasetPayloadWriter.stage(STAGING_STEM);
+        try {
+            // WHY : Assumptions: the writer is buffered, so one write per record does not become one
+            //       system call per record. The buffer is the only memory this path holds beyond a
+            //       single encoded record, which is the whole point of staging.
+            try (OutputStream sink = Files.newOutputStream(staged);
+                    OutputStream buffered = new BufferedOutputStream(sink, STAGING_BUFFER)) {
 
-        // ---- Phase 2 of 5: accounts, record type 'A' --------------------------------------------
-        LOG.info(LOG_PROCESSING_ACCOUNTS);
-        try (Stream<Account> rows = accounts.findAllByOrderByAccountIdAsc()) {
-            for (Account row : (Iterable<Account>) rows::iterator) {
-                sequence++;
-                DatasetPayloadWriter.append(payload, ExportRecordMapper.toRecord(
-                        ExportRecord.ofAccount(
-                                prefix(RecordType.ACCOUNT, stamp, sequence), row)));
-                accountRecords++;
-                totalRecords++;
+                // ---- Phase 1 of 5: customers, record type 'C' ---------------------------------
+                LOG.info(LOG_PROCESSING_CUSTOMERS);
+                try (Stream<Customer> rows = customers.findAllByOrderByCustomerIdAsc()) {
+                    for (Customer row : (Iterable<Customer>) rows::iterator) {
+                        DatasetPayloadWriter.append(buffered, ExportRecordMapper.toRecord(
+                                ExportRecord.ofCustomer(
+                                        prefix(RecordType.CUSTOMER, stamp, tally.nextSequence()),
+                                        customerFields(row))));
+                        tally.countCustomer();
+                    }
+                }
+                LOG.info("{}{}", LOG_CUSTOMERS_PROGRESS, tally.customerRecords());
+
+                // ---- Phase 2 of 5: accounts, record type 'A' ----------------------------------
+                LOG.info(LOG_PROCESSING_ACCOUNTS);
+                try (Stream<Account> rows = accounts.findAllByOrderByAccountIdAsc()) {
+                    for (Account row : (Iterable<Account>) rows::iterator) {
+                        DatasetPayloadWriter.append(buffered, ExportRecordMapper.toRecord(
+                                ExportRecord.ofAccount(
+                                        prefix(RecordType.ACCOUNT, stamp, tally.nextSequence()),
+                                        row)));
+                        tally.countAccount();
+                    }
+                }
+                LOG.info("{}{}", LOG_ACCOUNTS_PROGRESS, tally.accountRecords());
+
+                // ---- Phase 3 of 5: card cross-references, record type 'X' ---------------------
+                LOG.info(LOG_PROCESSING_XREFS);
+                try (Stream<CardXref> rows = crossReferences.findAllByOrderByCardNumAsc()) {
+                    for (CardXref row : (Iterable<CardXref>) rows::iterator) {
+                        DatasetPayloadWriter.append(buffered, ExportRecordMapper.toRecord(
+                                ExportRecord.ofCardXref(
+                                        prefix(RecordType.CARD_XREF, stamp, tally.nextSequence()),
+                                        row)));
+                        tally.countCrossReference();
+                    }
+                }
+                LOG.info("{}{}", LOG_XREFS_PROGRESS, tally.crossReferenceRecords());
+
+                // ---- Phase 4 of 5: transactions, record type 'T' ------------------------------
+                LOG.info(LOG_PROCESSING_TRANSACTIONS);
+                try (Stream<Transaction> rows = transactions.findAllByOrderByTransactionIdAsc()) {
+                    for (Transaction row : (Iterable<Transaction>) rows::iterator) {
+                        DatasetPayloadWriter.append(buffered, ExportRecordMapper.toRecord(
+                                ExportRecord.ofTransaction(
+                                        prefix(RecordType.TRANSACTION, stamp, tally.nextSequence()),
+                                        row)));
+                        tally.countTransaction();
+                    }
+                }
+                LOG.info("{}{}", LOG_TRANSACTIONS_PROGRESS, tally.transactionRecords());
+
+                // ---- Phase 5 of 5: cards, record type 'D' -------------------------------------
+                // WHY : ⚠️ Assumptions: the card discriminator is 'D' and NOT 'C'. 'C' is already taken
+                //       by the customer view at app/cbl/CBEXPORT.cbl:274, and the card block sets 'D' at
+                //       app/cbl/CBEXPORT.cbl:527. This is the single easiest error to make in this file
+                //       and the most expensive, because the import dispatcher at
+                //       app/cbl/CBIMPORT.cbl:272-285 routes 'D' to its card branch and sends anything it
+                //       does not recognise to its unknown-type handler -- so a wrong letter yields a file
+                //       that imports as unknown records rather than one that fails loudly. The letter is
+                //       not written here at all: it is taken from RecordType.CARD, which holds it once
+                //       for both jobs.
+                // WHY : Assumptions: the ABSENT opaque carrier is passed, so the verification-value span
+                //       is written as the COMP encoding of zero. The mapper records that ruling for
+                //       exactly this case -- a record assembled for export rather than decoded from one
+                //       legitimately has no verification value -- and the class note above records why
+                //       this module never obtains the cleartext one.
+                LOG.info(LOG_PROCESSING_CARDS);
+                try (Stream<Card> rows = cards.findAllByOrderByCardNumAsc()) {
+                    for (Card row : (Iterable<Card>) rows::iterator) {
+                        DatasetPayloadWriter.append(buffered, ExportRecordMapper.toRecord(
+                                ExportRecord.ofCard(
+                                        prefix(RecordType.CARD, stamp, tally.nextSequence()),
+                                        cardFields(row), OpaqueSensitiveValue.absent())));
+                        tally.countCard();
+                    }
+                }
+                LOG.info("{}{}", LOG_CARDS_PROGRESS, tally.cardRecords());
+            } catch (IOException unwritable) {
+                throw new UncheckedIOException("the export dataset could not be staged at " + staged
+                        + ", so nothing was published", unwritable);
             }
+
+            tally.reconcile();
+            long stagedBytes = DatasetPayloadWriter.stagedLength(staged);
+            requireBytesDescribeCounters(stagedBytes, tally.totalRecords());
+
+            String key = EXPORT_KEY_PREFIX + businessDate.identifierPrefix() + EXPORT_MEMBER;
+            objectStore.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentType(CONTENT_TYPE)
+                            .build(),
+                    RequestBody.fromFile(staged));
+
+            LOG.info(LOG_COMPLETED);
+            LOG.info("{}{}", LOG_CUSTOMERS_SUMMARY, tally.customerRecords());
+            LOG.info("{}{}", LOG_ACCOUNTS_SUMMARY, tally.accountRecords());
+            LOG.info("{}{}", LOG_XREFS_SUMMARY, tally.crossReferenceRecords());
+            LOG.info("{}{}", LOG_TRANSACTIONS_SUMMARY, tally.transactionRecords());
+            LOG.info("{}{}", LOG_CARDS_SUMMARY, tally.cardRecords());
+            LOG.info("{}{}", LOG_TOTAL_SUMMARY, tally.totalRecords());
+
+            LOG.info("event=batch.export.completed key={} bytes={} customers={} accounts={}"
+                            + " crossReferences={} transactions={} cards={} records={}",
+                    key, stagedBytes, tally.customerRecords(), tally.accountRecords(),
+                    tally.crossReferenceRecords(), tally.transactionRecords(), tally.cardRecords(),
+                    tally.totalRecords());
+
+            // WHY : Assumptions: the clean tier is the only success tier this job can report, and the
+            //       soft-warn tier is unreachable from here BY CONSTRUCTION rather than by omission.
+            //       RETURN-CODE appears nowhere in all 582 lines of app/cbl/CBEXPORT.cbl -- the program
+            //       either ends normally or abends through CALL 'CEE3ABD' at
+            //       app/cbl/CBEXPORT.cbl:578-579 -- so its only outcomes are zero and a hard failure.
+            //       The warn tier originates solely at app/cbl/CBTRN02C.cbl:229-230, and BatchRunSummary
+            //       refuses to carry it for any job but posting, so a warn path added here
+            //       speculatively would be rejected downstream as well.
+            return BatchReturnCode.CLEAN;
+        } finally {
+            // WHY : Assumptions: the staged file is discarded on EVERY path, including the failing one
+            //       and including a failure of the put itself. A task container is reused across state
+            //       machine executions, so a file left behind by a failed run occupies the ephemeral
+            //       volume until the task is replaced; and the file holds customer and card data, so
+            //       leaving it is a disclosure as well as a leak. The shared helper logs and swallows a
+            //       failure to delete, because it must not replace the outcome the caller is being told
+            //       about.
+            DatasetPayloadWriter.discard(staged);
         }
-        LOG.info("{}{}", LOG_ACCOUNTS_PROGRESS, accountRecords);
-
-        // ---- Phase 3 of 5: card cross-references, record type 'X' -------------------------------
-        LOG.info(LOG_PROCESSING_XREFS);
-        try (Stream<CardXref> rows = crossReferences.findAllByOrderByCardNumAsc()) {
-            for (CardXref row : (Iterable<CardXref>) rows::iterator) {
-                sequence++;
-                DatasetPayloadWriter.append(payload, ExportRecordMapper.toRecord(
-                        ExportRecord.ofCardXref(
-                                prefix(RecordType.CARD_XREF, stamp, sequence), row)));
-                crossReferenceRecords++;
-                totalRecords++;
-            }
-        }
-        LOG.info("{}{}", LOG_XREFS_PROGRESS, crossReferenceRecords);
-
-        // ---- Phase 4 of 5: transactions, record type 'T' ----------------------------------------
-        LOG.info(LOG_PROCESSING_TRANSACTIONS);
-        try (Stream<Transaction> rows = transactions.findAllByOrderByTransactionIdAsc()) {
-            for (Transaction row : (Iterable<Transaction>) rows::iterator) {
-                sequence++;
-                DatasetPayloadWriter.append(payload, ExportRecordMapper.toRecord(
-                        ExportRecord.ofTransaction(
-                                prefix(RecordType.TRANSACTION, stamp, sequence), row)));
-                transactionRecords++;
-                totalRecords++;
-            }
-        }
-        LOG.info("{}{}", LOG_TRANSACTIONS_PROGRESS, transactionRecords);
-
-        // ---- Phase 5 of 5: cards, record type 'D' -----------------------------------------------
-        // WHAT: held open by the same dependency as phase 1, and announced for the same reason.
-        // WHY : ⚠️ Assumptions: the card discriminator is 'D' and NOT 'C'. 'C' is already taken by the
-        //       customer view at app/cbl/CBEXPORT.cbl:274, and the card block sets 'D' at
-        //       app/cbl/CBEXPORT.cbl:527. This is the single easiest error to make in this file and the
-        //       most expensive, because the import dispatcher at app/cbl/CBIMPORT.cbl:272-285 routes
-        //       'D' to its card branch and sends anything it does not recognise to its unknown-type
-        //       handler -- so a wrong letter yields a file that imports as unknown records rather than
-        //       one that fails loudly. The letter is not written here at all: it is taken from
-        //       RecordType.CARD, which holds it once for both jobs.
-        LOG.info(LOG_PROCESSING_CARDS);
-        LOG.info("{}{}", LOG_CARDS_PROGRESS, cardRecords);
-
-        warnOnUnexportedTypes();
-
-        reconcile(totalRecords, customerRecords, accountRecords, crossReferenceRecords,
-                transactionRecords, cardRecords);
-
-        String key = EXPORT_KEY_PREFIX + businessDate.identifierPrefix() + EXPORT_MEMBER;
-        objectStore.putObject(
-                PutObjectRequest.builder()
-                        .bucket(bucket)
-                        .key(key)
-                        .contentType(CONTENT_TYPE)
-                        .build(),
-                RequestBody.fromBytes(payload.toByteArray()));
-
-        LOG.info(LOG_COMPLETED);
-        LOG.info("{}{}", LOG_CUSTOMERS_SUMMARY, customerRecords);
-        LOG.info("{}{}", LOG_ACCOUNTS_SUMMARY, accountRecords);
-        LOG.info("{}{}", LOG_XREFS_SUMMARY, crossReferenceRecords);
-        LOG.info("{}{}", LOG_TRANSACTIONS_SUMMARY, transactionRecords);
-        LOG.info("{}{}", LOG_CARDS_SUMMARY, cardRecords);
-        LOG.info("{}{}", LOG_TOTAL_SUMMARY, totalRecords);
-
-        LOG.info("event=batch.export.completed key={} bytes={} customers={} accounts={}"
-                        + " crossReferences={} transactions={} cards={} records={}",
-                key, payload.size(), customerRecords, accountRecords, crossReferenceRecords,
-                transactionRecords, cardRecords, totalRecords);
-
-        // WHY : Assumptions: the clean tier is the only success tier this job can report, and the
-        //       soft-warn tier is unreachable from here BY CONSTRUCTION rather than by omission.
-        //       RETURN-CODE appears nowhere in all 582 lines of app/cbl/CBEXPORT.cbl -- the program
-        //       either ends normally or abends through CALL 'CEE3ABD' at app/cbl/CBEXPORT.cbl:578-579 --
-        //       so its only outcomes are zero and a hard failure. The warn tier originates solely at
-        //       app/cbl/CBTRN02C.cbl:229-230, and BatchRunSummary refuses to carry it for any job but
-        //       posting, so a warn path added here speculatively would be rejected downstream as well.
-        // WHY : Alternatives Considered: building a BatchRunSummary here to carry the six counters as
-        //       its per-type breakdown. Rejected on cost against benefit. The summary requires a run
-        //       identifier and a step name, neither of which the StepBody contract passes to a step
-        //       body, so both would have to be threaded through this method for a value nothing
-        //       persists -- BatchStepLedger records the return code alone. The counter check that type
-        //       would have contributed is performed directly by reconcile() above, with an error
-        //       message naming the reference's paired counters, and the tier rule it enforces is relied
-        //       on rather than duplicated: the note above cites it as the downstream guarantee.
-        return BatchReturnCode.CLEAN;
     }
 
     /**
@@ -720,29 +906,35 @@ public class ExportJob {
      *
      * @param businessDate the injected business date the dataset is partitioned under; must not be
      *     {@code null}
+     * @param customers the customer master, emitted as record type {@code 'C'}; must not be
+     *     {@code null}
      * @param accounts the account master, emitted as record type {@code 'A'}; must not be {@code null}
      * @param crossReferences the cross-reference table, emitted as record type {@code 'X'}; must not be
      *     {@code null}
      * @param transactions the transaction master, emitted as record type {@code 'T'}; must not be
      *     {@code null}
+     * @param cards the card master, emitted as record type {@code 'D'}; must not be {@code null}
      * @param objectStore the object store the dataset is written to; must not be {@code null}
      * @param bucket the dataset bucket name; must not be {@code null} or blank
      * @param clock the time source the stamp is taken from; must not be {@code null}
      * @return always {@link BatchReturnCode#CLEAN} on completion
      * @throws IllegalStateException if the independently accumulated grand total disagrees with the sum
-     *     of the per-type counters
+     *     of the per-type counters, or if the staged bytes do not describe those counters
+     * @throws UncheckedIOException if the staging file cannot be created, written or read back
      */
     static BatchReturnCode writeExport(
             BusinessDate businessDate,
+            CustomerRepository customers,
             AccountRepository accounts,
             CardXrefRepository crossReferences,
             TransactionRepository transactions,
+            CardRepository cards,
             S3Client objectStore,
             String bucket,
             Clock clock) {
 
-        return writeExport(businessDate, ExportStamp.baseline(clock), accounts, crossReferences,
-                transactions, objectStore, bucket);
+        return writeExport(businessDate, ExportStamp.baseline(clock), customers, accounts,
+                crossReferences, transactions, cards, objectStore, bucket);
     }
 
     /**
@@ -801,30 +993,292 @@ public class ExportJob {
     }
 
     /**
-     * Reports, on every run, the two record types this module cannot yet read.
+     * Verifies that the staged bytes describe exactly the records the counters claim.
      *
-     * <p>Alternatives Considered: omitting this and relying on the class comment. Rejected because the
-     * shortfall has to be visible to an operator holding the dataset, not only to a reader holding the
-     * source. The import dispatcher accepts a three-type file as structurally complete, so nothing
-     * downstream can raise the question; this line is the only place a run says which types it did not
-     * contain and why. It is deliberately emitted even when the export is otherwise entirely
-     * successful, and it will be deleted -- not downgraded -- when the two seams named in the class
-     * comment exist.</p>
+     * <p>Refactoring Rationale: this check is new, and it closes the gap the counter reconciliation
+     * alone cannot. {@link #reconcile(long, long, long, long, long, long)} compares two tallies with
+     * each other, so it agrees whenever the increments agree -- including when a phase incremented
+     * nothing at all, which is precisely how the previous three-of-five export reconciled cleanly. This
+     * check compares the tally against the ARTEFACT: the records are fixed length, so a complete
+     * dataset's length is the record count times the record length, and any other length means records
+     * were lost, duplicated or truncated between the encode and the file. Together the two checks
+     * establish that the counters agree with each other and that the bytes agree with the counters.</p>
      *
-     * <p>Trade-offs: this reports rather than throws. Refusing to export at all until the two seams
-     * exist was considered and rejected: three of the five types are complete and correct, and a
-     * consumer who needs those three is better served by a dataset that names its own gap than by no
-     * dataset at all. The cost is that a caller who ignores this line gets a partial artefact, which is
-     * why the shortfall is also carried in the summary counters.</p>
+     * <p>Alternatives Considered: trusting the write path, since every append writes a full record and
+     * the stream is closed before the size is read. Rejected because "closed" is the weakest of the
+     * three links -- a buffered stream that fails to flush on close, a full filesystem, or a container
+     * whose ephemeral volume quota is exhausted all produce a short file from a write path that raised
+     * nothing the caller could see. The check costs one file interrogation per run.</p>
+     *
+     * @param stagedBytes the measured length of the staging file
+     * @param records the grand total of records the phases counted
+     * @throws IllegalStateException if the length is not the record count times the record length
      */
-    private static void warnOnUnexportedTypes() {
-        LOG.warn("event=batch.export.record-types-unavailable missing={},{} reason=no entity or"
-                        + " repository exists in com.carddemo.batch for account.customers or"
-                        + " card.cards; the SELECT grants already exist"
-                        + " (data-migration/sql/V0__schemas_and_roles.sql:1168,1206) so only the"
-                        + " Java seam is outstanding. Registered in"
-                        + " docs/architecture/cobol-to-service-traceability.md",
-                RecordType.CUSTOMER.discriminator(), RecordType.CARD.discriminator());
+    private static void requireBytesDescribeCounters(long stagedBytes, long records) {
+        int reclen = ExportRecordMapper.recordLayout().reclen();
+        long expected = records * reclen;
+        if (stagedBytes != expected) {
+            throw new IllegalStateException("the staged export dataset is " + stagedBytes
+                    + " bytes but the " + records + " records counted require exactly " + expected
+                    + " (" + reclen + " bytes each); records were lost, duplicated or truncated"
+                    + " between the encode and the staging file, so nothing was published");
+        }
+    }
+
+    /**
+     * Projects one customer row into the ordered field map the customer view encodes from.
+     *
+     * <p>Assumptions: insertion order follows the copybook declaration order of
+     * {@code app/cpy/CVEXPORT.cpy:23-41}, matching the convention the sibling entity-backed field maps
+     * in {@code ExportRecordMapper} already follow. The shared codec keys by name and does not require
+     * the order, but a map that reads in copybook order can be compared against the copybook by eye,
+     * which is the only review a field map of eighteen entries usefully gets.</p>
+     *
+     * <p>⚠️ Assumptions: two of the eighteen fields are redactions rather than values --
+     * {@code EXP-CUST-SSN} and {@code EXP-CUST-GOVT-ISSUED-ID}. The class note records why, and the
+     * reason is recorded again at each of the two put calls below so that a reader editing one line
+     * sees it without having to hold the class note in mind.</p>
+     *
+     * @param customer the row to project; must not be {@code null}
+     * @return an insertion-ordered map naming all eighteen customer fields and not the trailing pad
+     */
+    private static Map<String, Object> customerFields(Customer customer) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        // WHY : Assumptions: the identifier is handed over as an exact decimal because the span is
+        //       PIC 9(09) COMP at app/cpy/CVEXPORT.cpy:24, which the shared codec encodes from a
+        //       decimal, a money value or an integral wrapper. A decimal is passed rather than the
+        //       boxed Long so that the numeric kinds of this map read alike.
+        fields.put("EXP-CUST-ID", BigDecimal.valueOf(customer.getCustomerId()));
+        fields.put("EXP-CUST-FIRST-NAME", orBlank(customer.getFirstName()));
+        fields.put("EXP-CUST-MIDDLE-NAME", orBlank(customer.getMiddleName()));
+        fields.put("EXP-CUST-LAST-NAME", orBlank(customer.getLastName()));
+        fields.put("EXP-CUST-ADDR-LINE(1)", orBlank(customer.getAddrLine1()));
+        fields.put("EXP-CUST-ADDR-LINE(2)", orBlank(customer.getAddrLine2()));
+        fields.put("EXP-CUST-ADDR-LINE(3)", orBlank(customer.getAddrLine3()));
+        fields.put("EXP-CUST-ADDR-STATE-CD", orBlank(customer.getAddrStateCd()));
+        fields.put("EXP-CUST-ADDR-COUNTRY-CD", orBlank(customer.getAddrCountryCd()));
+        fields.put("EXP-CUST-ADDR-ZIP", orBlank(customer.getAddrZip()));
+        fields.put("EXP-CUST-PHONE-NUM(1)", orBlank(customer.getPhoneNum1()));
+        fields.put("EXP-CUST-PHONE-NUM(2)", orBlank(customer.getPhoneNum2()));
+        // WHY : ⚠️ Assumptions: the national identifier is redacted to zero and the government-issued
+        //       identifier to blank. Neither is readable here: both are stored as enciphered BYTEA
+        //       envelopes that only the owning context's cipher opens, and the entity beside this file
+        //       deliberately leaves both columns unmapped so that this module cannot obtain them even
+        //       by accident. Writing them in clear into an object-store artefact is refused rather than
+        //       unimplemented -- see the class note for the full reasoning and the divergence register.
+        fields.put("EXP-CUST-SSN", REDACTED_NATIONAL_IDENTIFIER);
+        fields.put("EXP-CUST-GOVT-ISSUED-ID", BLANK);
+        fields.put("EXP-CUST-DOB-YYYY-MM-DD", isoOrBlank(customer.getDob()));
+        fields.put("EXP-CUST-EFT-ACCOUNT-ID", orBlank(customer.getEftAccountId()));
+        fields.put("EXP-CUST-PRI-CARD-HOLDER-IND", orBlank(customer.getPriCardHolderInd()));
+        // WHY : Assumptions: a null score encodes as zero rather than failing the run. The span is
+        //       PIC 9(03) COMP-3 at app/cpy/CVEXPORT.cpy:41 and packed decimal has no null
+        //       representation, so some value must be written; zero is the value the reference's own
+        //       initialised working storage would have carried for a row with no score.
+        fields.put("EXP-CUST-FICO-CREDIT-SCORE",
+                customer.getFicoCreditScore() == null
+                        ? BigDecimal.ZERO
+                        : BigDecimal.valueOf(customer.getFicoCreditScore()));
+        return fields;
+    }
+
+    /**
+     * Projects one card row into the ordered field map the card view encodes from.
+     *
+     * <p>Assumptions: insertion order follows the copybook declaration order of
+     * {@code app/cpy/CVEXPORT.cpy:93-99}, and the verification value at {@code :96} is absent from this
+     * map ENTIRELY rather than present with a redacted value. That is not this method's choice: the
+     * card view carries its verification value only through the opaque carrier that
+     * {@code ExportRecordMapper.ExportRecord.ofCard} takes as a separate argument, so a map entry for
+     * it would be rejected as an unrecognised field. The absent carrier is what writes the span as an
+     * encoded zero.</p>
+     *
+     * @param card the row to project; must not be {@code null}
+     * @return an insertion-ordered map naming the five encodable card fields, and neither the
+     *     verification value nor the trailing pad
+     */
+    private static Map<String, Object> cardFields(Card card) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("EXP-CARD-NUM", orBlank(card.getCardNum()));
+        fields.put("EXP-CARD-ACCT-ID", BigDecimal.valueOf(card.getAccountId()));
+        fields.put("EXP-CARD-EMBOSSED-NAME", orBlank(card.getEmbossedName()));
+        // WHY : Assumptions: the field name carries the baseline's own misspelling of "expiration".
+        //       Transformation rule T1 permits renaming only the three misspellings the migration plan
+        //       lists, and those three are corrected in DATABASE COLUMN names -- the export record's
+        //       field names are the wire contract of a file the import half reads back, so the
+        //       misspelling at app/cpy/CVEXPORT.cpy:98 is preserved exactly.
+        fields.put("EXP-CARD-EXPIRAION-DATE", isoOrBlank(card.getExpirationDate()));
+        fields.put("EXP-CARD-ACTIVE-STATUS", orBlank(card.getActiveStatus()));
+        return fields;
+    }
+
+    /**
+     * Substitutes the blank encoding for a null character value.
+     *
+     * @param candidate the value read from the row, possibly {@code null}
+     * @return {@code candidate}, or the empty string when it was {@code null}
+     */
+    private static String orBlank(String candidate) {
+        return candidate == null ? BLANK : candidate;
+    }
+
+    /**
+     * Renders a date as the ten-character ISO form the export view declares, or blank when absent.
+     *
+     * <p>Assumptions: {@code LocalDate.toString()} emits {@code YYYY-MM-DD} for every date in the range
+     * these columns hold, which is exactly the ten-character layout of
+     * {@code app/cpy/CVEXPORT.cpy:38} and {@code :98}. No formatter is constructed, because introducing
+     * one would invite a pattern that could drift from the span width the codec enforces.</p>
+     *
+     * @param candidate the date read from the row, possibly {@code null}
+     * @return the ISO rendering, or the empty string when {@code candidate} was {@code null}
+     */
+    private static String isoOrBlank(java.time.LocalDate candidate) {
+        return candidate == null ? BLANK : candidate.toString();
+    }
+
+    /**
+     * The seven counters one export run accumulates, held together so the five phases share them.
+     *
+     * <p>Refactoring Rationale: the phases were seven local variables inside one long method. Splitting
+     * the run into five phases made that impossible -- a local cannot be incremented across method
+     * boundaries -- and the two obvious replacements were both worse. Static fields would make the
+     * counters shared across concurrent executions of the job. Returning a count from each phase and
+     * summing at the end would leave the sequence number, which every phase must both read and advance,
+     * with nowhere to live except a second holder. One short-lived holder created by
+     * {@code export} and never escaping it keeps the reference's single shared sequence counter at
+     * {@code app/cbl/CBEXPORT.cbl:123} one value shared by construction.</p>
+     *
+     * <p>Assumptions: this type is deliberately NOT thread-safe and deliberately not synchronised. It
+     * is created inside one method, incremented only by that method's own sequential phases, and
+     * discarded when the method returns; adding synchronisation would imply a sharing that does not
+     * exist and would invite a future caller to rely on it.</p>
+     */
+    private static final class Tally {
+
+        /** The record sequence number, from {@code app/cbl/CBEXPORT.cbl:123}. */
+        private long sequence;
+
+        /** Customer records emitted, record type {@code 'C'}. */
+        private long customers;
+
+        /** Account records emitted, record type {@code 'A'}. */
+        private long accounts;
+
+        /** Cross-reference records emitted, record type {@code 'X'}. */
+        private long crossReferences;
+
+        /** Transaction records emitted, record type {@code 'T'}. */
+        private long transactions;
+
+        /** Card records emitted, record type {@code 'D'}. */
+        private long cards;
+
+        /** Grand total, accumulated alongside each per-type increment so the two can be compared. */
+        private long total;
+
+        /**
+         * Advances and returns the shared record sequence number.
+         *
+         * @return the one-based sequence number for the record about to be written
+         */
+        private long nextSequence() {
+            return ++this.sequence;
+        }
+
+        /** Records one emitted customer record. */
+        private void countCustomer() {
+            this.customers++;
+            this.total++;
+        }
+
+        /** Records one emitted account record. */
+        private void countAccount() {
+            this.accounts++;
+            this.total++;
+        }
+
+        /** Records one emitted cross-reference record. */
+        private void countCrossReference() {
+            this.crossReferences++;
+            this.total++;
+        }
+
+        /** Records one emitted transaction record. */
+        private void countTransaction() {
+            this.transactions++;
+            this.total++;
+        }
+
+        /** Records one emitted card record. */
+        private void countCard() {
+            this.cards++;
+            this.total++;
+        }
+
+        /**
+         * Returns the customer records emitted.
+         *
+         * @return the customer count
+         */
+        private long customerRecords() {
+            return this.customers;
+        }
+
+        /**
+         * Returns the account records emitted.
+         *
+         * @return the account count
+         */
+        private long accountRecords() {
+            return this.accounts;
+        }
+
+        /**
+         * Returns the cross-reference records emitted.
+         *
+         * @return the cross-reference count
+         */
+        private long crossReferenceRecords() {
+            return this.crossReferences;
+        }
+
+        /**
+         * Returns the transaction records emitted.
+         *
+         * @return the transaction count
+         */
+        private long transactionRecords() {
+            return this.transactions;
+        }
+
+        /**
+         * Returns the card records emitted.
+         *
+         * @return the card count
+         */
+        private long cardRecords() {
+            return this.cards;
+        }
+
+        /**
+         * Returns the grand total accumulated alongside the per-type counters.
+         *
+         * @return the total count
+         */
+        private long totalRecords() {
+            return this.total;
+        }
+
+        /**
+         * Verifies the grand total against the sum of the five per-type counters.
+         *
+         * @throws IllegalStateException if the two disagree
+         */
+        private void reconcile() {
+            ExportJob.reconcile(this.total, this.customers, this.accounts, this.crossReferences,
+                    this.transactions, this.cards);
+        }
     }
 
     /**
@@ -984,7 +1438,6 @@ public class ExportJob {
                 return new ExportStamp(suppliedTimestamp, resolvedBranch, resolvedRegion);
             }
 
-            // WHAT: the only clock read in this class, and it is reported.
             // WHY : Trade-offs: a warn rather than silence, because this is the branch that gives up
             //       the one verification the stream has -- see D-8 on this record. The message names
             //       the property to set, so an operator who wants a reproducible artefact is told how

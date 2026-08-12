@@ -474,7 +474,7 @@ class PendingAuthSummaryMapperTest {
         if (rows.isEmpty()) {
             return PageResponse.empty();
         }
-        return PageResponse.ofRows(rows, sealed("first"), sealed("last"), false, false);
+        return PageResponse.ofRows(rows, sealed("first"), sealed("last"), false);
     }
 
     /**

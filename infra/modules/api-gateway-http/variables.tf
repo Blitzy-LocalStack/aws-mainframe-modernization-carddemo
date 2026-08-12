@@ -127,13 +127,26 @@
 #   resolving to `PROGRAM(COSGN00C)` at L379, the sign-on program, which read
 #   the user's credentials and only then transferred control onward. Every other
 #   transaction was entered from a menu the operator could not reach until that
-#   program had run. `public_route_keys` carries that single pre-identification
-#   entry point forward and nothing else, which is why its default holds one key
-#   and its validations refuse any prefix but `/auth`: the baseline had exactly
-#   one unauthenticated door too, and the migration neither adds a second nor
-#   closes the one that must stay open. The JWT authorizer stands where the menu
-#   gate stood, not where CC00 stood. That file is REFERENCE-ONLY: it is cited
-#   by line here and never modified.
+#   program had run. `public_route_keys` carries that pre-identification entry
+#   point forward and admits nothing beyond the token-issuance surface, which is
+#   why its validations refuse any prefix but `/auth`. Its default holds THREE
+#   keys where the baseline had one door, and the difference is a property of
+#   token-based identity rather than a widening of the surface: CC00 collected
+#   credentials and established the session in a single turn, whereas an access
+#   token has to be issued (`/auth/signon`), can be interrupted by a forced
+#   credential change that must complete before issuance (`/auth/challenge`), and
+#   expires and must be renewed by a caller who by definition holds no usable
+#   access token (`/auth/refresh`). The three are one act of identifying oneself,
+#   split across the turns a token lifecycle requires. The JWT authorizer stands
+#   where the menu gate stood, not where CC00 stood. That file is REFERENCE-ONLY:
+#   it is cited by line here and never modified.
+#   Refactoring Rationale: this paragraph read "its default holds one key" and
+#   "the baseline had exactly one unauthenticated door too, and the migration
+#   neither adds a second nor closes the one that must stay open". The default has
+#   held three keys throughout, so the claim understated the delivered public
+#   surface in the one place a reader comes to learn how wide it is -- and it did
+#   so while sounding like a parity guarantee, which is the worst form for a
+#   wrong count to take.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -844,22 +857,27 @@ variable "route_keys" {
 #       none, and an empty list is the honest way to say so -- unlike a sentinel
 #       value, it creates nothing.
 #       (6) Alternatives Considered: narrowing this default to the single sign-on
-#       key, on the reasoning that auth-api.yaml declares only that one operation
-#       and the other two therefore publish routes nothing describes. Rejected,
-#       and the reason is written down rather than assumed: auth-api.yaml states
-#       at its header item 3 that exactly six operations are contracted there
-#       while the edge additionally publishes the challenge and renewal routes,
-#       that the two are held outside that document deliberately because their
-#       request and reply shapes are a separate contract, and that the omission is
-#       recorded so a reader comparing the file against this route table "sees a
-#       decision rather than an oversight". Trimming the list would delete an
-#       intended part of the pre-token surface to make two artifacts agree on a
-#       count they already explain, and it would do so in the one place where the
-#       cost of being wrong is an operation that cannot answer. What WAS wrong here
-#       was this variable's own description, which claimed the default was "the
-#       single sign-on route" while the default below has always held three keys;
-#       that sentence is corrected rather than deleted, because a reader who saw
-#       it needs to know which statement to trust.
+#       key, on the reasoning that the other two publish routes nothing describes.
+#       Rejected, and now measurable rather than argued: auth-api.yaml contracts
+#       eight operations, and all THREE of these keys are among them, each declaring
+#       an empty `security` requirement and `x-required-authority: none`. The same
+#       three are the `permitAll` list in that service's SecurityConfig, and its
+#       operation census asserts the split is exactly three open and five
+#       administrative. Trimming this list to one would therefore close two
+#       operations the service's own contract publishes as pre-token, in the one
+#       place where the cost of being wrong is an operation that cannot answer at
+#       all -- a caller answering a pool challenge, or renewing an expired access
+#       token, would be refused by the edge before reaching a service that would
+#       have served it.
+#       Refactoring Rationale: this rationale itself formerly argued the opposite
+#       premise -- that auth-api.yaml contracted six operations and that the
+#       challenge and renewal routes were deliberately held outside it. That was
+#       true when it was written and is not true now; both operations were
+#       subsequently contracted in that document. The paragraph is corrected rather
+#       than deleted, because a reader who saw the earlier reasoning needs to know
+#       which statement to trust, and because the earlier version reached the right
+#       CONCLUSION from a premise that has since changed -- exactly the shape of
+#       rationale that survives review while going quietly false.
 #       Assumptions: the three keys are pre-token operations, not a general public
 #       surface. Each is a POST that a caller reaches precisely because it has no
 #       usable access token yet -- to obtain one, to answer a challenge raised
@@ -876,14 +894,16 @@ variable "public_route_keys" {
     "POST /api/v1/auth/refresh",
   ]
 
-  # WHY : Assumptions: the condition names the ONE acceptable value rather than a
-  #       shape, and the asymmetry with var.route_keys is deliberate. There is no
-  #       general category of "routes that may be public" in this architecture --
-  #       there is one path that has to be, for the reason stated above -- so a
-  #       shape check such as "any POST under /auth" would license a set of routes
-  #       nothing asked for. Pinning the exact method and path means adding a
-  #       second public route requires editing this condition, which is a visible,
-  #       reviewable act rather than a value change in a tfvars file.
+  # WHY : Assumptions: the condition enumerates the THREE acceptable values rather
+  #       than checking a shape, and the asymmetry with var.route_keys is
+  #       deliberate. There is no general category of "routes that may be public"
+  #       in this architecture -- there are exactly three that have to be, for the
+  #       reason stated above -- so a shape check such as "any POST under /auth"
+  #       would license a set of routes nothing asked for, and it would keep
+  #       licensing them as auth-service published more operations under that
+  #       prefix. Pinning each exact method and path means adding a fourth public
+  #       route requires editing this condition, which is a visible, reviewable act
+  #       rather than a value change in a tfvars file.
   #       Trade-offs: a root cannot publish a different unauthenticated path
   #       without editing the module. Accepted, and it is the point: the module's
   #       other inputs are open because widening them costs nothing, whereas
@@ -997,12 +1017,13 @@ variable "public_route_throttling_burst_limit" {
   nullable    = false
 
   # WHY : Assumptions: the floor is 1 rather than 0. A burst of 0 rejects every
-  #       request including the first, which would close the sign-on route as
+  #       request including the first, and the override applies to every key in
+  #       `public_route_keys`, so it would close all three pre-token routes as
   #       completely as having no route at all -- the very defect this input's
   #       neighbour was added to fix -- while looking like a tuning value.
   validation {
     condition     = var.public_route_throttling_burst_limit >= 1 && floor(var.public_route_throttling_burst_limit) == var.public_route_throttling_burst_limit
-    error_message = "public_route_throttling_burst_limit must be a whole number of at least 1. A burst of 0 rejects every request to the sign-on route, which closes interactive sign-on exactly as an absent route would."
+    error_message = "public_route_throttling_burst_limit must be a whole number of at least 1. A burst of 0 rejects every request to all three pre-token routes, closing interactive sign-on, forced credential change and token renewal exactly as absent routes would."
   }
 
   validation {

@@ -14,26 +14,25 @@
 #   and this file overrides VALUES on keys whose shapes that file already owns.
 #   Nothing here introduces a key that is absent there.
 #
-#   Activation is by @ActiveProfiles("test") on the test classes themselves.
-#   Neither services/pom.xml nor services/card-service/pom.xml sets
-#   spring.profiles.active, so a test class that omits that annotation does not
-#   read this file at all and meets the base profile's unresolved placeholders
-#   instead. That is worth knowing before debugging a startup failure here: the
-#   first question is whether the profile was active, not what this file sets.
+#   Activation is by @ActiveProfiles("test") on the test class itself, and by
+#   nothing else. Neither services/pom.xml nor services/card-service/pom.xml sets
+#   spring.profiles.active, so a class that omits that annotation does not read
+#   this file at all and meets the base profile's unresolved placeholders instead.
+#   That is worth knowing before debugging a startup failure here: the first
+#   question is whether the profile was active, not what this file sets.
 #
-#   Four consumers, of which two read this file and two do not:
-#     - CardRepositoryIT (com.carddemo.card.repository). A real database started
-#       by Testcontainers, which owns the claim that the generated SQL is right.
-#       Every load-bearing setting below exists for this class.
-#     - CardControllerTest (com.carddemo.card.api). A mock MVC slice owning the
-#       single-card detail route, including the split between an administrative
-#       caller and an ordinary one. It builds no listener and no connection
-#       pool, so the transport and pool settings are inert for it while the
-#       resource-server and logging settings are not.
-#     - CardListServiceTest and CardUpdateServiceTest
-#       (com.carddemo.card.service). Both drive a MOCKED repository, load no
-#       Spring context and read nothing here. They are named so that their
-#       absence from the list above reads as deliberate.
+#   Assumptions: the consumer set is therefore whichever classes carry that
+#   annotation, and it is derived rather than listed -- `grep -rl
+#   'ActiveProfiles("test")' src/test/java` answers it, because a roster written
+#   into a comment is correct on the day it is written and misleading afterwards.
+#   CardRepositoryIT (com.carddemo.card.repository) is the class that carries it:
+#   a real database started by Testcontainers, which owns the claim that the
+#   generated SQL is right, and every load-bearing setting below exists for it.
+#   The module's other test classes either load no Spring context at all -- the
+#   service and mapper tests drive mocked collaborators -- or load one without
+#   this profile, so the settings here are inert for them; that is why a slice
+#   test failing on an unresolved placeholder is a missing annotation rather than
+#   a missing setting.
 #
 #   Five settings are load-bearing rather than tidy: without each one, a context
 #   that reads this file either cannot start or cannot reach the schema it is
@@ -59,7 +58,7 @@
 # Exceptions or errors:
 #   Startup failure modes in the order a context reaches them. The first four
 #   are what the load-bearing settings prevent, so meeting one is evidence that
-#   the setting named beside it was removed or that the profile is not active.
+#   the setting named beside it is absent or that the profile is not active.
 #     1. Unresolved issuer placeholder. The base file leaves the issuer a
 #        placeholder with no fallback, and the resource-server
 #        auto-configuration reads it through the Environment while evaluating a
@@ -118,15 +117,13 @@ server:
     # LOAD-BEARING. Without this line a context that starts a real listener
     # fails at startup because it cannot open a keystore.
     #
-    # Refactoring Rationale: this note used to say the failure is a
-    #   `FileNotFoundException` naming the literal placeholder text
-    #   `${SERVER_SSL_CERTIFICATE}`, because the base file read PEM content from
-    #   two unresolvable placeholders. Both properties are gone. The base file now
-    #   reads a PKCS#12 keystore that the IMAGE ENTRY POINT mints per task
-    #   (config/docker/generate-listener-material.sh), and a test runs no entry
-    #   point, so no keystore exists and `server.ssl.key-store-password` -- which
-    #   deliberately carries no fallback -- resolves to nothing. The override is
-    #   still load-bearing; only the shape of the failure changed.
+    # Assumptions: the shape of that failure is worth stating, because it is not a
+    #   missing-file error. The base file reads a PKCS#12 keystore that the IMAGE
+    #   ENTRY POINT mints per task (config/docker/generate-listener-material.sh),
+    #   and a test runs no entry point, so no keystore exists and
+    #   `server.ssl.key-store-password` -- which deliberately carries no fallback --
+    #   resolves to nothing. A test author meeting that failure is looking for an
+    #   unresolved property, not for a path.
     #
     # Assumptions: the base file enables TLS on purpose and gives its password
     #   placeholder no fallback, so a deployment cannot come up in cleartext by
@@ -487,12 +484,12 @@ spring:
           #   configures a resource server has to supply a mock one. Rejected
           #   because it removes the filter chain from the thing under test: the
           #   chain that maps a group claim onto authorities through
-          #   common-lib's converter would no longer be exercised, and
-          #   CardControllerTest's whole claim is the split between an
-          #   administrative caller and an ordinary one on the card-detail
-          #   route -- the one route that returns an unmasked primary account
-          #   number. An assertion that passes because no chain ran is worse
-          #   than no assertion, because it reads as coverage.
+          #   common-lib's converter would go unexercised, and the whole claim of
+          #   the card-detail slice test is the split between an administrative
+          #   caller and an ordinary one on that route -- the one route that
+          #   returns an unmasked primary account number. An assertion that
+          #   passes because no chain ran is worse than no assertion, because it
+          #   reads as coverage.
           #
           # Alternatives Considered: pointing at a key set instead of an issuer.
           #   Rejected because it names key material this repository must not
@@ -501,18 +498,15 @@ spring:
           #   document. Supplying a local public key was also rejected: it needs
           #   a key file committed beside this one.
           #
-          # Refactoring Rationale: this note previously said the key-set path was
-          #   eager on a "harder ground" than the issuer path, implying the
-          #   issuer path was not. That contrast was wrong, and the correction
-          #   comes from running the process rather than from re-reading the API.
-          #   NimbusJwtDecoder.withIssuerLocation defers nothing: build() calls
-          #   processor(), which calls jwkSource(), which invokes the supplier
-          #   that issues GET <issuer>/.well-known/openid-configuration. A
-          #   context that creates a decoder bean therefore attempts that request
-          #   while it refreshes, and against this issuer it fails with
-          #   UnknownHostException naming the host. That is true of the
-          #   auto-configured decoder and of the explicit one
-          #   config/SecurityConfig.java now declares.
+          # Assumptions: BOTH paths are eager, so neither form of this property
+          #   defers its first request. NimbusJwtDecoder.withIssuerLocation defers
+          #   nothing: build() calls processor(), which calls jwkSource(), which
+          #   invokes the supplier that issues
+          #   GET <issuer>/.well-known/openid-configuration. A context that creates
+          #   a decoder bean therefore attempts that request while it refreshes,
+          #   and against this issuer it fails with UnknownHostException naming the
+          #   host. That holds for the auto-configured decoder and for the explicit
+          #   one config/SecurityConfig.java declares.
           #
           # Trade-offs: the consequence is stated plainly so a test author is not
           #   surprised by it. This value satisfies that class's fallback-free
@@ -589,73 +583,60 @@ logging:
 carddemo:
   security:
     jwt:
-      # WHY : (1) Refactoring Rationale: this block did not exist while the base
-      #       file's three carddemo.security.jwt keys had no reader. They have one
-      #       now: config/SecurityConfig.java declares an explicit JwtDecoder bean
-      #       and takes all three through @Value, so the values are consumed by
-      #       constructor injection rather than by configuration-property binding.
-      #       That difference decides whether this profile needs the block at all.
-      #       Property binding leaves an unresolvable placeholder as literal text
-      #       and does not raise, which is why the base file's datasource
-      #       placeholders can stay unset here; @Value calls
+      # WHY : Assumptions: this block is required because of HOW the three base
+      #       carddemo.security.jwt keys are read. config/SecurityConfig.java declares an explicit
+      #       JwtDecoder bean and takes all three through @Value, so the values arrive by
+      #       constructor injection rather than by configuration-property binding, and that
+      #       difference decides whether this profile needs the block at all. Property binding
+      #       leaves an unresolvable placeholder as literal text and does not raise, which is why
+      #       the base file's datasource placeholders can stay unset here; @Value calls
       #       resolveRequiredPlaceholders, which DOES raise, so the base value
-      #       ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} aborts bean creation on
-      #       any host that does not set that variable - which is every build host.
-      #       Without this block, every context-loading test in this module fails
-      #       before its first assertion.
-      #       (2) Assumptions: on this module the check the value enables is the one
-      #       that matters most in the whole reactor. The administrative
-      #       card-detail route is the single endpoint in the system that returns an
-      #       UNMASKED primary account number, and it is guarded by the
-      #       carddemo-admin authority that common-lib's JwtRoleConverter derives
-      #       from a token's group claim. A Cognito user pool mints an identity token
-      #       and an access token from the same signing key, and both validate
-      #       against the configured issuer, so without the token-use and client
-      #       checks an identity token - the one a browser most readily holds - would
-      #       reach the converter and could carry that group. A test profile that
-      #       omitted this block would not merely fail to start; if a later reader
-      #       "fixed" the failure by defaulting the value to blank, the validator
-      #       would treat the client check as skipped and the suite would then pass
-      #       while proving the opposite of what it asserts.
-      #       (3) Assumptions: this string is NOT a credential and NOT a secret. A
-      #       Cognito app client id is a public identifier carried in every token
-      #       this service accepts; the value below is additionally fabricated and
-      #       visibly non-production, so it identifies nothing that exists. What it
-      #       buys is that CognitoAccessTokenValidator is CONSTRUCTED with a
-      #       non-blank client id, so a test asserting that a token minted for a
-      #       different client of the same pool is rejected has a client to differ
-      #       from.
-      #       (4) Trade-offs: the two adjacent claim values are repeated rather than
-      #       inherited so the complete accepted-token contract is readable in one
-      #       place. The cost is that a deliberate change to either in the base file
-      #       must be mirrored here or the suite stops exercising the deployed
-      #       contract. The two carddemo.security.cognito group names are NOT
-      #       repeated, because the base declares each with the default
-      #       infra/modules/cognito fixes and both therefore resolve with no
-      #       environment at all - and because JwtRoleConverter compares them
-      #       against its own compiled constants and refuses to start on a mismatch,
-      #       so overriding them here would test a vocabulary no deployment uses.
+      #       ${CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID} aborts bean creation on any host that
+      #       does not set that variable - which is every build host. Without this block, every
+      #       context-loading test in this module fails before its first assertion.
+      # WHY : Assumptions: on this module the check the value enables is the one that matters most
+      #       in the whole reactor. The administrative card-detail route is the single endpoint in
+      #       the system that returns an UNMASKED primary account number, and it is guarded by the
+      #       carddemo-admin authority that common-lib's JwtRoleConverter derives from a token's
+      #       group claim. A Cognito user pool mints an identity token and an access token from the
+      #       same signing key, and both validate against the configured issuer, so without the
+      #       token-use and client checks an identity token - the one a browser most readily holds -
+      #       would reach the converter and could carry that group. A test profile that omitted this
+      #       block would not merely fail to start; if a later reader "fixed" the failure by
+      #       defaulting the value to blank, the validator would treat the client check as skipped
+      #       and the suite would then pass while proving the opposite of what it asserts.
+      # WHY : Assumptions: this string is NOT a credential and NOT a secret. A Cognito app client id
+      #       is a public identifier carried in every token this service accepts; the value below is
+      #       additionally fabricated and visibly non-production, so it identifies nothing that
+      #       exists. What it buys is that CognitoAccessTokenValidator is CONSTRUCTED with a
+      #       non-blank client id, so a test asserting that a token minted for a different client of
+      #       the same pool is rejected has a client to differ from.
+      # WHY : Trade-offs: the two adjacent claim values are repeated rather than inherited so the
+      #       complete accepted-token contract is readable in one place. The cost is that a
+      #       deliberate change to either in the base file must be mirrored here or the suite stops
+      #       exercising the deployed contract. The two carddemo.security.cognito group names are
+      #       NOT repeated, because the base declares each with the default infra/modules/cognito
+      #       fixes and both therefore resolve with no environment at all - and because
+      #       JwtRoleConverter compares them against its own compiled constants and refuses to start
+      #       on a mismatch, so overriding them here would test a vocabulary no deployment uses.
       expected-client-id: card-test-app-client
       expected-token-use: access
       required-scope: aws.cognito.signin.user.admin
 
-    # WHY : (1) Assumptions: present here for exactly the reason the block above is.
-    #       com.carddemo.card.service.CardVerificationValueCipher takes this value
-    #       through @Value, which calls resolveRequiredPlaceholders and RAISES on an
-    #       unresolved placeholder - so the base file's
-    #       ${CARDDEMO_SECURITY_CVV_KEY_ID} would abort bean creation on every build
-    #       host, none of which sets that variable. Without this key every
-    #       context-loading test in this module fails before its first assertion.
-    #       (2) Assumptions: this is NOT a credential and NOT a secret. A
-    #       key-management alias is a public name; the value below is additionally
-    #       fabricated and visibly non-production, so it identifies no key that
-    #       exists. What it buys is that the cipher is CONSTRUCTED with a non-blank
-    #       identifier, which is what its own blank-value refusal has to differ from.
-    #       (3) Assumptions: no test reaches a real key through it. The cipher's own
-    #       tests hand it a mocked key-management client, so the identifier travels
-    #       into a request that is captured and asserted rather than sent - which is
-    #       why a fabricated alias is sufficient and a real one would be worse,
-    #       coupling the suite to an account.
+    # WHY : Assumptions: present here for exactly the reason the block above is.
+    #       com.carddemo.card.service.CardVerificationValueCipher takes this value through @Value,
+    #       which calls resolveRequiredPlaceholders and RAISES on an unresolved placeholder - so the
+    #       base file's ${CARDDEMO_SECURITY_CVV_KEY_ID} would abort bean creation on every build
+    #       host, none of which sets that variable. Without this key every context-loading test in
+    #       this module fails before its first assertion.
+    # WHY : Assumptions: this is NOT a credential and NOT a secret. A key-management alias is a
+    #       public name; the value below is additionally fabricated and visibly non-production, so
+    #       it identifies no key that exists. What it buys is that the cipher is CONSTRUCTED with a
+    #       non-blank identifier, which is what its own blank-value refusal has to differ from.
+    # WHY : Assumptions: no test reaches a real key through it. The cipher's own tests hand it a
+    #       mocked key-management client, so the identifier travels into a request that is captured
+    #       and asserted rather than sent - which is why a fabricated alias is sufficient and a real
+    #       one would be worse, coupling the suite to an account.
     cvv:
       key-id: alias/carddemo-card-cvv-test
 

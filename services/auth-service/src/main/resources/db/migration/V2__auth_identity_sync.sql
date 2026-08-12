@@ -12,7 +12,7 @@
 --   commits, so the two stores converge without either one being held open
 --   across a call to the other.
 --
--- WHY (Refactoring Rationale):
+-- Refactoring Rationale:
 --   The three write operations previously called the identity provider from
 --   INSIDE their database transaction and documented that arrangement as though
 --   it made the two stores atomic. It cannot: a provider call that succeeds
@@ -27,7 +27,7 @@
 --   data, so after any crash the intended change is either recorded and
 --   pending, or absent because the data change never happened.
 --
--- WHY (Alternatives Considered):
+-- Alternatives Considered:
 --   (1) Two-phase commit across PostgreSQL and the identity provider. Not
 --       available: the provider exposes no transaction manager and enlists in no
 --       coordinator, so there is nothing to prepare.
@@ -40,7 +40,7 @@
 --       restart during the loop loses the intention entirely, which is the exact
 --       failure this table exists to make impossible.
 --
--- WHY (Trade-offs):
+-- Trade-offs:
 --   The pool converges a moment after the commit rather than at it, so a caller
 --   that creates an administrator and immediately signs in as one could in
 --   principle race the group assignment. That window is bounded by one provider

@@ -316,15 +316,208 @@ class AuthorizationRequestListenerTest {
         //       assertion here would test the mock rather than the repository.
         givenWorkingSummaryWrites();
         // WHY : Refactoring Rationale: the window boundary arrives as a lambda rather than as the
-        //       production container-cycling implementation. The bound is what these tests assert, and the
-        //       mechanism that acts on it needs a listener container registry and a live queue; separating
-        //       the two is what makes the bound assertable at all, and it is why the seam is an interface.
+        //       production container-cycling implementation, because what these cases assert is the BOUND --
+        //       which generation closes, after how many admissions, and with what carried into the next
+        //       window -- and a recording lambda is the only substitute that lets those be read back
+        //       directly. Separating the two is why the seam is an interface.
+        // WHY : Assumptions: the production implementation is asserted separately and in full by
+        //       ContainerCyclingWindowBoundaryTest, which substitutes the registry and the container. The
+        //       rationale here previously claimed that mechanism "needs a listener container registry and a
+        //       live queue"; the first half is true and the second is NOT, since
+        //       io.awspring.cloud.sqs.listener.MessageListenerContainerRegistry and
+        //       io.awspring.cloud.sqs.listener.MessageListenerContainer are both interfaces and neither
+        //       requires a broker. That inaccurate half is recorded here rather than deleted because it is
+        //       what left the enforcement mechanism of a published guarantee untested: a boundary that
+        //       cycles nothing raises nothing, so the gap was invisible from either side.
+        // WHY : Trade-offs: the split means no single case covers admission and cycling together, so a seam
+        //       whose two sides disagreed would be caught by neither. That is accepted because the seam is a
+        //       single-method functional interface with no state -- there is nothing for the two sides to
+        //       disagree about beyond the signature the compiler already checks.
         this.listener = new AuthorizationRequestListener(this.summaries, this.details, this.outbox,
                 new AuthorizationDecisionService(),
                 new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
                 this::recordClosedWindow);
+    }
+
+    /**
+     * A window that has filled admits NOTHING until its container cycle reports it has finished.
+     *
+     * <p>Purpose: this is the property that bounds one PHYSICAL run. The container cannot be stopped from
+     * the thread it is delivering to, so the close is asynchronous; between the admission that fills a window
+     * and the moment intake actually stops, the container has already dispatched further messages -- up to its
+     * configured concurrency. Those messages must not be handled inside the run that has just reached its
+     * allowance.</p>
+     *
+     * <p>Refactoring Rationale: this case fails against the accounting that preceded it. That accounting
+     * advanced the generation and reset the count in the SAME atomic step that fired the boundary, so the next
+     * window was already open while the container was still being stopped and every already-dispatched message
+     * was admitted into it. One physical run could therefore exceed the allowance by the whole of the
+     * container's concurrency, and neither the accounting nor the log recorded that it had.</p>
+     *
+     * <p>Assumptions: the boundary supplied here DEFERS the reopen instead of running it, which is what a real
+     * container cycle does -- it takes time. Every other multi-window case in this class reopens inline,
+     * because those cases are about the admission arithmetic and an interval would make them about its
+     * length.</p>
+     *
+     * <p>Assumptions: the refusal is asserted to be the DEDICATED deferral type and not merely an exception.
+     * The handler refuses several other things and a bare exception assertion would pass for any of them; the
+     * type is what says the request was deferred rather than rejected.</p>
+     *
+     * <p>Assumptions: NO side effect is asserted to have happened on a refused message -- no summary read, no
+     * detail row, no outbox row. The gate is the handler's first statement, so a refused request must leave
+     * nothing behind at all, and a gate placed after any of those would satisfy an exception assertion while
+     * having already done work.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a filled window refuses every further request until its cycle reports it has finished")
+    void aFilledWindowRefusesFurtherRequestsUntilTheCycleFinishes() {
+        List<Runnable> deferredReopens = new ArrayList<>();
+        AuthorizationRequestListener gated = new AuthorizationRequestListener(this.summaries,
+                this.details, this.outbox, new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
+                List.of(ALLOWED_REPLY_QUEUE),
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                (generation, admitted, reopenAdmission) -> {
+                    this.closedGenerations.add(generation);
+                    this.closedWindows.add(admitted);
+                    deferredReopens.add(reopenAdmission);
+                });
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        for (int admission = 1; admission <= WINDOW_ADMISSIONS; admission++) {
+            gated.onRequest(messageFor(requestFor(Money.of("10.00"), transactionIdOf(admission)),
+                    ALLOWED_REPLY_QUEUE));
+        }
+
+        assertThat(this.closedWindows)
+                .as("the window closed exactly once, on the admission that reached the allowance")
+                .containsExactly(WINDOW_ADMISSIONS);
+        assertThat(deferredReopens)
+                .as("the boundary was handed exactly one reopen action to run when its cycle finished")
+                .hasSize(1);
+        verify(this.details, times(WINDOW_ADMISSIONS)).save(any(PendingAuthDetail.class));
+
+        clearInvocationsKeepingStubs();
+        assertThrows(AuthorizationRequestListener.WindowClosedException.class,
+                () -> gated.onRequest(messageFor(
+                        requestFor(Money.of("10.00"), transactionIdOf(WINDOW_ADMISSIONS + 1)),
+                        ALLOWED_REPLY_QUEUE)));
+        // WHY : Assumptions: the absence of EVERY side effect is asserted, not just the absence of a detail
+        //       row. The gate is the handler's first statement, so a refused request must not have read the
+        //       summary either -- and a gate placed after the reads would satisfy the exception assertion
+        //       above while having already spent a round trip on a message it then refused.
+        verify(this.summaries, never()).findByAccountId(anyLong());
+        verify(this.details, never()).save(any(PendingAuthDetail.class));
+        verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+        assertThat(this.closedWindows)
+                .as("a refusal must not fire the boundary a second time for one window")
+                .containsExactly(WINDOW_ADMISSIONS);
+
+        // WHY : Assumptions: the cycle is completed HERE, by running the action the boundary was handed. That
+        //       is the only thing that reopens admission, which is why the boundary contract requires it to
+        //       be run whether the cycle succeeded or failed.
+        deferredReopens.get(0).run();
+        clearInvocationsKeepingStubs();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        gated.onRequest(messageFor(requestFor(Money.of("10.00"),
+                transactionIdOf(WINDOW_ADMISSIONS + 2)), ALLOWED_REPLY_QUEUE));
+
+        verify(this.details, times(1)).save(any(PendingAuthDetail.class));
+        assertThat(this.closedGenerations)
+                .as("the reopened window is the next generation, so its own closure reports one higher")
+                .containsExactly(0L);
+    }
+
+    /**
+     * Under the container's configured concurrency, one physical run admits no more than the allowance.
+     *
+     * <p>Purpose: this is the finding stated as a measurement rather than as an argument. The container is
+     * configured for ten concurrent messages, so when the allowance is reached there are up to nine further
+     * invocations already in flight or about to be dispatched. The quantity that must be bounded is how many
+     * of them the run HANDLES, and it is asserted directly.</p>
+     *
+     * <p>Assumptions: the concurrency is taken to be ten because that is the container's own configured
+     * default -- {@code maxConcurrentMessages} defaults to ten on the listener annotation -- and the case
+     * offers MORE messages than the allowance by exactly that margin. Offering one extra would leave the
+     * measurement dependent on which invocation happened to be first.</p>
+     *
+     * <p>Assumptions: the reopen is DEFERRED for the whole of the run, which is the worst case rather than
+     * the typical one. A real cycle completes in milliseconds and only the messages dispatched inside that
+     * interval are refused; deferring it for the entire run is what makes the bound observable without the
+     * test depending on timing.</p>
+     *
+     * <p>Assumptions: the refusals are COUNTED rather than merely allowed for, and the two counts are
+     * asserted to add up to what was offered. A gate that refused everything would also keep the run under
+     * the allowance, so the accounting has to show that the allowance was actually granted.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("one physical run admits at most the allowance even at the container's full concurrency")
+    void onePhysicalRunAdmitsAtMostTheAllowanceUnderConcurrency() {
+        int containerConcurrency = 10;
+        int offered = WINDOW_ADMISSIONS + containerConcurrency;
+        AuthorizationRequestListener gated = new AuthorizationRequestListener(this.summaries,
+                this.details, this.outbox, new AuthorizationDecisionService(),
+                new AuthorizationMessageMapper(VALIDATOR), this.accounts,
+                List.of(ALLOWED_REPLY_QUEUE),
+                Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
+                (generation, admitted, reopenAdmission) -> {
+                    this.closedGenerations.add(generation);
+                    this.closedWindows.add(admitted);
+                });
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID))
+                .thenReturn(Optional.of(summaryWithRoom()));
+
+        int handled = 0;
+        int deferred = 0;
+        for (int offer = 1; offer <= offered; offer++) {
+            try {
+                gated.onRequest(messageFor(requestFor(Money.of("10.00"), transactionIdOf(offer)),
+                        ALLOWED_REPLY_QUEUE));
+                handled++;
+            } catch (AuthorizationRequestListener.WindowClosedException deferral) {
+                deferred++;
+            }
+        }
+
+        assertThat(handled)
+                .as("one physical run must handle no more than the window's allowance")
+                .isEqualTo(WINDOW_ADMISSIONS);
+        assertThat(deferred)
+                .as("every message beyond the allowance is deferred, not handled and not lost")
+                .isEqualTo(containerConcurrency);
+        assertThat(handled + deferred)
+                .as("nothing offered may be silently absorbed")
+                .isEqualTo(offered);
+        verify(this.details, times(WINDOW_ADMISSIONS)).save(any(PendingAuthDetail.class));
+        assertThat(this.closedWindows)
+                .as("the boundary fires once for the one window that filled, whatever arrived after it")
+                .containsExactly(WINDOW_ADMISSIONS);
+    }
+
+    /**
+     * Builds a distinct transaction identifier for the nth message of a case.
+     *
+     * <p>Assumptions: the identifiers must differ across a case's messages, because the handler answers a
+     * request it has already decided from the recorded decision rather than deciding it again. Reusing one
+     * identifier would make every message after the first a replay, and a case counting admissions would then
+     * be counting replays.</p>
+     *
+     * @param ordinal the one-based position of the message within the case
+     * @return a fifteen-character transaction identifier unique to that position, never {@code null}
+     */
+    private static String transactionIdOf(int ordinal) {
+        return String.format("TXW%012d", ordinal);
     }
 
     /**
@@ -462,7 +655,7 @@ class AuthorizationRequestListenerTest {
         //       advanced the approved total would overstate the credit an account has committed -- which
         //       is exactly the confusion the two separate statements exist to prevent.
         verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
-        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**
@@ -1085,7 +1278,7 @@ class AuthorizationRequestListenerTest {
         //       that reached the approved statement would be invisible to a per-arm assertion made only
         //       once.
         verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"));
-        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**
@@ -1240,6 +1433,18 @@ class AuthorizationRequestListenerTest {
      * The limit refresh is asserted alongside, because the reference program refreshes both limits from
      * the account master on EVERY message at lines 810 and 811, not only when it creates the row.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the limit refresh is asserted as a STATEMENT carrying the account
+     * master's two amounts, and this case additionally asserts that NO instance is saved at all. It
+     * previously captured an instance handed to the inherited {@code save} and read the refreshed limits
+     * off it, which passed while the defect was present: the mapping declares no version member and no
+     * dynamic-update marker, so the provider flushed that instance as a whole-row write carrying the four
+     * accumulators from its load-time snapshot -- and because the additive query on the next line is a
+     * bulk operation, the flush happened BEFORE the contribution was added. A concurrent card's
+     * contribution to the same account was therefore overwritten and then added back once instead of
+     * twice. The negative assertion is the load-bearing half of this case now, because reintroducing the
+     * entity write is the specific regression it exists to catch; the interleaving is proved against a
+     * real engine by {@code PendingAuthSummaryRepositoryIT}, which a mock cannot do.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -1252,14 +1457,111 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries, never()).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
         verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
-        ArgumentCaptor<PendingAuthSummary> refreshed =
-                ArgumentCaptor.forClass(PendingAuthSummary.class);
-        verify(this.summaries).save(refreshed.capture());
-        assertEquals(0,
-                new BigDecimal("5000.00").compareTo(refreshed.getValue().getCreditLimit()));
-        assertEquals(0, new BigDecimal("500.00").compareTo(refreshed.getValue().getCashLimit()));
+        verify(this.summaries).refreshStoredLimits(ACCOUNT_ID, new BigDecimal("5000.00"),
+                new BigDecimal("500.00"));
+        verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * An approval the account's limit no longer admits is SUPERSEDED by a decline, everywhere it is reported.
+     *
+     * <p>Purpose: this is the credit-integrity property the guarded reservation exists for, asserted at the
+     * listener rather than at the repository. The decision service measures the requested amount against the
+     * summary as this transaction read it and proposes an approval; the reservation, qualified on the same
+     * check, reports that it changed no row; and every rendering of the outcome -- the detail row, the outbox
+     * payload and the account's counters -- must then carry the DECLINE and not the proposal.</p>
+     *
+     * <p>Refactoring Rationale: this case exists because the reservation was UNGUARDED and its row count was
+     * read only as "did a row exist". A queue grouped on card number delivers two requests for two DIFFERENT
+     * cards of one account concurrently, so both read the same headroom, both approved, and both contributions
+     * then landed -- leaving a credit balance above the credit limit that no reference program can produce,
+     * because the reference decides one message at a time.</p>
+     *
+     * <p>Assumptions: the concurrent authorization is represented by the reservation REPORTING ZERO rather
+     * than by two threads. The engine's re-evaluation of the guard is what the other transaction's commit
+     * reaches this one through, and that is precisely what a zero row count means here; driving two real
+     * threads would test the engine, which the repository integration case does, and would make this case
+     * about timing rather than about which decision is reported.</p>
+     *
+     * <p>Assumptions: the DECLINED contribution is asserted as well as the refused approval. A superseded
+     * approval is an ordinary decline once it is superseded, so the account's declined count and total must
+     * advance -- which is the row the reference would hold had it decided the two requests in sequence.</p>
+     *
+     * <p>Assumptions: the reason is the insufficient-funds literal and not a new one. The reference has no
+     * code for "your approval was superseded"; the second of two sequential requests simply declines for want
+     * of funds, so publishing anything else would be a literal no requester is written for.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a reservation the limit refuses supersedes the approval in the row, the reply and the counters")
+    void aRefusedReservationSupersedesTheApproval() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+        // WHY : Assumptions: the summary read above has ample room, so the decision service PROPOSES an
+        //       approval. That is what makes this case about the reservation rather than about the decision:
+        //       a fixture without room would decline before the statement ever ran.
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+                .thenReturn(0);
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+
+        ArgumentCaptor<PendingAuthDetail> superseded = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(superseded.capture());
+        assertEquals(AuthorizationDecisionService.RESP_CODE_DECLINED,
+                superseded.getValue().getAuthRespCode());
+        assertEquals(AuthorizationDecisionService.DeclineReason.INSUFFICIENT_FUND.responseReason(),
+                superseded.getValue().getAuthRespReason());
+        assertEquals(0, BigDecimal.ZERO.compareTo(superseded.getValue().getApprovedAmount()),
+                "a superseded approval reserves nothing, so its approved amount is the literal zero of L694");
+
+        // WHY : Assumptions: the OUTBOX payload is asserted too, because the reply is what the requester
+        //       acts on. A row that recorded the decline while the reply carried the approval would let an
+        //       acquirer capture funds the account never reserved, which is the worse half of the defect.
+        ArgumentCaptor<AuthReplyOutbox> answered = ArgumentCaptor.forClass(AuthReplyOutbox.class);
+        verify(this.outbox).save(answered.capture());
+        assertThat(answered.getValue().getPayload())
+                .as("the reply must carry the declined response code the row carries")
+                .contains(AuthorizationDecisionService.RESP_CODE_DECLINED)
+                .contains(AuthorizationDecisionService.DeclineReason.INSUFFICIENT_FUND.responseReason());
+    }
+
+    /**
+     * A refused reservation on an account whose master record is missing reports the NOT-FOUND reason.
+     *
+     * <p>Assumptions: the reason a superseded approval reports is chosen by the SAME selection an ordinary
+     * decline uses, which tests the three not-found conditions FIRST at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L700 to L717. This case is what makes that a
+     * property of the code rather than of the one path the case above happens to take: with the account master
+     * absent the literal is {@code '3100'} and not {@code '4100'}, exactly as it is on the ordinary path.</p>
+     *
+     * <p>Assumptions: the summary is present with room even though the account master is absent, because that
+     * is the state that both proposes an approval and selects the not-found reason. The decision service reads
+     * the SUMMARY's limit when a summary exists and falls back to the account master only when none does, so
+     * a fixture without the summary would decline before the reservation ran.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a refused reservation reports the not-found reason when the account master is absent")
+    void aRefusedReservationUsesTheReferenceReasonSelection() {
+        givenResolvableCard();
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+                .thenReturn(0);
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthDetail> superseded = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(superseded.capture());
+        assertEquals(AuthorizationDecisionService.DeclineReason.NOT_FOUND.responseReason(),
+                superseded.getValue().getAuthRespReason());
     }
 
     /**
@@ -1290,7 +1592,7 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
         verify(this.outbox).save(any(AuthReplyOutbox.class));
     }
 
@@ -1307,6 +1609,17 @@ class AuthorizationRequestListenerTest {
      * only asserted the throw would pass against an implementation that had already written the reply
      * before discovering the disagreement, and the ordering is the property that matters.</p>
      *
+     * <p>Refactoring Rationale: the disagreement is now discovered by the CONTRIBUTION reporting no row
+     * rather than by a re-read returning nothing, and the expected wording changes with it. The re-read
+     * existed only to supply an instance for the additive arm to mutate; the arm no longer takes one, so
+     * the read was removed and its diagnostic moved to the statement that actually addresses the row.
+     * The refusal reached is the same in every respect the case asserts -- the same class, the same
+     * account, no reply row and no detail row -- and it is a stronger check than the read's, because it
+     * fires on any account whose summary is missing at the moment of the write rather than only on one
+     * that vanished between two reads. The stubbing that reaches it is unchanged: the refresh is not
+     * attempted for an absent account master, and here the master resolves, so the refresh is stubbed to
+     * succeed by the shared fixture and the additive statement is the one left reporting zero.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
@@ -1315,28 +1628,59 @@ class AuthorizationRequestListenerTest {
         givenResolvableCard();
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
         when(this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class))).thenReturn(0);
+        // WHY : Assumptions: the ADDITIVE statement is the one stubbed to report zero, and the approval
+        //       statement is left to report zero as well because the reservation is QUALIFIED on the
+        //       account's own limit -- a zero from it means the headroom went and supersedes the approval
+        //       into a decline, which is a decided outcome rather than a fault. The refusal therefore has
+        //       to come from the decline's contribution, which is the statement that addresses the row
+        //       whatever the decision turned out to be.
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+                .thenReturn(0);
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class)))
+                .thenReturn(0);
 
         IllegalStateException refused = assertThrows(IllegalStateException.class,
                 () -> this.listener.onRequest(
                         messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE)));
 
-        assertThat(refused).hasMessageContaining("nowhere to land");
+        assertThat(refused).hasMessageContaining("changed no row");
+        // WHY : Assumptions: the sentence names NO account identifier, and the case asserts that rather
+        //       than asserting one is present. The listener's own rationale for the wording is the
+        //       sensitive-data logging contract: this message reaches durable diagnostics, so the
+        //       correlation identifier ties it back to a request and the account stays out of it.
+        assertThat(refused.getMessage()).doesNotContain(String.valueOf(ACCOUNT_ID));
         verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
         verify(this.details, never()).save(any(PendingAuthDetail.class));
     }
 
     /**
-     * Stubs the three row-count-returning summary operations to report the one row each changed.
+     * Stubs the four row-count-returning summary operations to report the one row each changed.
      *
-     * <p>Assumptions: this exists as a named helper rather than three inline stubs because it is needed in
+     * <p>Assumptions: this exists as a named helper rather than four inline stubs because it is needed in
      * two places -- the shared fixture, and again after any case that resets the summary mock mid-run,
      * since a reset discards stubbing as well as recorded calls. Inlining it twice is what allowed the
      * mid-run reset below to leave the contribution reporting zero rows, which surfaced as the listener's
      * own consistency failure in a case about something else entirely.</p>
+     *
+     * <p>Refactoring Rationale: the limit refresh joined this helper when it became a STATEMENT. It used
+     * to be a field assignment on the loaded summary followed by the inherited {@code save}, which
+     * reported nothing and needed no stub -- and which lost a concurrent contribution, because the
+     * provider flushed that assignment as a whole-row write carrying the four accumulators from the
+     * instance's load-time snapshot. Its row count is now checked on the same terms as the additive
+     * statements', so a mock left at its zero default would refuse every approval and decline in this
+     * class.</p>
      */
     private void givenWorkingSummaryWrites() {
         when(this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class))).thenReturn(1);
-        when(this.summaries.addApprovedAuthorization(anyLong(), any(BigDecimal.class))).thenReturn(1);
+        when(this.summaries.refreshStoredLimits(anyLong(), any(BigDecimal.class),
+                any(BigDecimal.class))).thenReturn(1);
+        // WHY : Assumptions: the approval statement is stubbed to report ONE row, which is the answer it
+        //       gives when the account's limit still admits the amount. It is a GUARDED statement -- the
+        //       engine re-evaluates the credit check against the row as it stands -- so a zero from it is
+        //       not "no such row" but "the headroom went", and the case that drives that answer stubs it
+        //       to zero explicitly rather than relying on this default.
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+                .thenReturn(1);
         when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class))).thenReturn(1);
     }
 
@@ -1370,10 +1714,18 @@ class AuthorizationRequestListenerTest {
      *
      * @param generation the closing window's generation
      * @param admittedInWindow how many requests the closing window admitted
+     * @param reopenAdmission the action that opens the next window, run inline here to stand in for a
+     *     container cycle that completed instantly
      */
-    private void recordClosedWindow(long generation, int admittedInWindow) {
+    private void recordClosedWindow(long generation, int admittedInWindow, Runnable reopenAdmission) {
         this.closedGenerations.add(generation);
         this.closedWindows.add(admittedInWindow);
+        // WHY : Assumptions: the reopen runs INLINE here, which stands in for a container cycle that
+        //       completed instantly. That is what keeps every multi-window case in this class about the
+        //       admission ARITHMETIC rather than about the closed interval: with no interval, no admission is
+        //       ever refused and each window's count is exactly the allowance. The closed interval has its
+        //       own cases, which supply a boundary that defers this action instead of running it.
+        reopenAdmission.run();
     }
 
     /**
@@ -1568,6 +1920,20 @@ class AuthorizationRequestListenerTest {
      * needing account stubs, and the assertions are on counts and identities rather than on timing -- so
      * it is deterministic rather than a race the test hopes to lose.</p>
      *
+     * <p>Refactoring Rationale: the closure count is no longer asserted to be the offered messages divided by
+     * the allowance, and it used to be. A filled window now stays CLOSED until its cycle reports it has
+     * finished, so a thread whose admission lands inside that interval is DEFERRED rather than admitted -- and
+     * an interval exists here however small, because the boundary lambda runs before it reopens. The number of
+     * closures therefore depends on how many deferrals the scheduler happens to produce, which is exactly the
+     * timing dependence this case was written to avoid. What survives, and is what the case was really about,
+     * is asserted instead: every closure reports the full allowance, no generation closes twice, and the
+     * generations form a consecutive run from zero. Those hold whatever the scheduler does.</p>
+     *
+     * <p>Assumptions: the deferrals are CAUGHT and counted in the workers, and the total is asserted against
+     * what was offered. Letting them propagate would kill a worker thread mid-loop and leave the case
+     * measuring how far each thread got; counting them is what shows that nothing offered was silently
+     * absorbed.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      *
      * @throws InterruptedException if the wait for the worker threads is interrupted
@@ -1580,14 +1946,23 @@ class AuthorizationRequestListenerTest {
         int messagesPerThread = WINDOW_ADMISSIONS * windows / threads;
         List<Integer> observed = java.util.Collections.synchronizedList(new ArrayList<>());
         List<Long> generations = java.util.Collections.synchronizedList(new ArrayList<>());
+        java.util.concurrent.atomic.AtomicInteger admittedCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger deferredCount =
+                new java.util.concurrent.atomic.AtomicInteger();
         AuthorizationRequestListener concurrent = new AuthorizationRequestListener(this.summaries,
                 this.details, this.outbox, new AuthorizationDecisionService(),
                 new AuthorizationMessageMapper(VALIDATOR), this.accounts,
                 List.of(ALLOWED_REPLY_QUEUE),
                 Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC), WINDOW_LIMIT,
-                (generation, admitted) -> {
+                (generation, admitted, reopenAdmission) -> {
                     generations.add(generation);
                     observed.add(admitted);
+                    // WHY : Assumptions: reopening inline is what makes this case measure the atomicity of
+                    //       the admission transition under real threads. A deferred reopen would refuse
+                    //       admissions during the closed interval, and the counts this case asserts would
+                    //       then be measuring the interval's length rather than the transition.
+                    reopenAdmission.run();
                 });
 
         java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
@@ -1601,7 +1976,17 @@ class AuthorizationRequestListenerTest {
                     return;
                 }
                 for (int message = 0; message < messagesPerThread; message++) {
-                    concurrent.onRequest(expiredMessage());
+                    try {
+                        concurrent.onRequest(expiredMessage());
+                        admittedCount.incrementAndGet();
+                    } catch (AuthorizationRequestListener.WindowClosedException deferral) {
+                        // WHY : Assumptions: a deferral is a normal outcome under concurrency and is counted
+                        //       rather than propagated. It means this thread's admission landed while a window
+                        //       that had just filled was still closed, which is the behaviour that bounds one
+                        //       physical run; propagating would end the worker's loop and make the case
+                        //       measure thread scheduling instead.
+                        deferredCount.incrementAndGet();
+                    }
                 }
             });
             workers.add(thread);
@@ -1612,17 +1997,22 @@ class AuthorizationRequestListenerTest {
             thread.join();
         }
 
-        assertEquals(windows, observed.size(),
-                "a whole number of allowances must close exactly that many windows");
-        assertThat(observed).containsOnly(WINDOW_ADMISSIONS);
+        assertEquals(WINDOW_ADMISSIONS * windows, admittedCount.get() + deferredCount.get(),
+                "every message offered was either admitted or deferred, and none was absorbed");
+        assertEquals(admittedCount.get() / WINDOW_ADMISSIONS, observed.size(),
+                "one window closed for every whole allowance actually admitted");
+        assertThat(observed)
+                .as("no window may close on anything other than its full allowance")
+                .isNotEmpty()
+                .containsOnly(WINDOW_ADMISSIONS);
         assertThat(generations)
                 .as("each closure must be a distinct window, so no generation may repeat")
                 .doesNotHaveDuplicates()
-                .hasSize(windows);
+                .hasSameSizeAs(observed);
         assertThat(new java.util.TreeSet<>(generations))
-                .as("the generations must be the consecutive run zero through %d", windows - 1)
-                .containsExactlyElementsOf(java.util.stream.LongStream.range(0, windows).boxed()
-                        .toList());
+                .as("the generations must be a consecutive run beginning at zero")
+                .containsExactlyElementsOf(java.util.stream.LongStream.range(0, generations.size())
+                        .boxed().toList());
     }
 
     /**
@@ -2023,7 +2413,7 @@ class AuthorizationRequestListenerTest {
         assertEquals("1000.10", saved.getValue().getTransactionAmount().toPlainString());
 
         ArgumentCaptor<BigDecimal> accumulated = ArgumentCaptor.forClass(BigDecimal.class);
-        verify(this.summaries).addApprovedAuthorization(anyLong(), accumulated.capture());
+        verify(this.summaries).reserveApprovedAuthorization(anyLong(), accumulated.capture());
         assertEquals(Money.SCALE, accumulated.getValue().scale());
         assertEquals("1000.10", accumulated.getValue().toPlainString());
 
@@ -2084,7 +2474,7 @@ class AuthorizationRequestListenerTest {
 
         ArgumentCaptor<PendingAuthDetail> approved = ArgumentCaptor.forClass(PendingAuthDetail.class);
         verify(this.details).save(approved.capture());
-        verify(this.summaries).addApprovedAuthorization(ACCOUNT_ID, approved.getValue()
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, approved.getValue()
                 .getApprovedAmount());
         verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
 
@@ -2105,7 +2495,7 @@ class AuthorizationRequestListenerTest {
         assertThat(new BigDecimal("7000.00"))
                 .as("the amount the declined total accumulates is not the amount the row approved")
                 .isNotEqualByComparingTo(declined.getValue().getApprovedAmount());
-        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**
@@ -2168,7 +2558,7 @@ class AuthorizationRequestListenerTest {
                 messageFor(requestFor(Money.of("200.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"));
-        verify(this.summaries, never()).addApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
     }
 
     /**

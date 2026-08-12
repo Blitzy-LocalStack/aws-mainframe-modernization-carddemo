@@ -65,7 +65,7 @@
 #   holds the data, and 500 for an unexpected failure.
 #
 # WHY (non-obvious design decisions):
-#   - Trade-off: every monetary value is a JSON string and never a JSON number.
+#   - Trade-offs: every monetary value is a JSON string and never a JSON number.
 #     A number costs the client nothing to read, but most clients parse one into
 #     IEEE-754 binary floating point, and app/cpy/CVACT01Y.cpy L7 declares
 #     ACCT-CURR-BAL PIC S9(10)V99 -- twelve significant digits, which leaves
@@ -80,7 +80,7 @@
 #     browse, and only L217 adds one -- so no lock spans read-maximum to
 #     increment to insert, and two concurrent bill payments can compute the same
 #     next identifier. Keyset paging over the same key columns is used instead.
-#   - Assumption: both statement timestamps are opaque twenty-six-character
+#   - Assumptions: both statement timestamps are opaque twenty-six-character
 #     strings and carry no date-time format. Two independent reasons. The sort
 #     step at app/jcl/CREASTMT.JCL L54 reformats with
 #     OUTREC FIELDS=(1:263,16,17:1,262,279:279,50), which yields 328 of the
@@ -91,27 +91,27 @@
 #     strict parse would reject. Separately, common-lib TimestampFormatter fixes
 #     the shape as 'yyyy-MM-dd HH:mm:ss.SSSSSS', a zone-less local value
 #     separated by a SPACE and not by a 'T'.
-#   - Assumption: identifiers are digits-only strings and never integers. The
+#   - Assumptions: identifiers are digits-only strings and never integers. The
 #     baseline itself treats them as characters on the wire and as numbers only
 #     in arithmetic: app/cpy/CVCRD01Y.cpy declares three X-over-9 REDEFINES
 #     pairs, CC-ACCT-ID X(11) at L34 over CC-ACCT-ID-N 9(11) at L36,
 #     CC-CARD-NUM X(16) at L37 over 9(16) at L39, and CC-CUST-ID X(09) at L40
 #     over 9(9) at L42. An integer would additionally discard the leading zeroes
 #     a numeric picture stores.
-#   - Trade-off: each three-part screen date is consolidated into one ISO value.
+#   - Trade-offs: each three-part screen date is consolidated into one ISO value.
 #     The screen collects six components -- SDTMMI, SDTDDI and SDTYYYY at
 #     app/cpy-bms/CORPT00.CPY L78, L84 and L90 and the matching trio at L96,
 #     L102 and L108 -- so a caller can no longer submit a month without a year.
 #     Nothing observable is given up: all twelve per-component messages remain
 #     reachable as fieldErrors entries, and the assembled form is what the
 #     program itself works in.
-#   - Assumption: both statement renderings are always produced, so each is
+#   - Assumptions: both statement renderings are always produced, so each is
 #     published as a location and there is no format selector of any kind. The
 #     generator step at app/jcl/CREASTMT.JCL L79 creates both datasets
 #     unconditionally, the plain text at L87 to L91 and the markup at L92 to
 #     L96. A rerun REPLACES rather than appends -- the delete step at L66
 #     removes both first -- so a location is stable across runs.
-#   - Assumption: this document leads its handlers on wording and they lead it
+#   - Assumptions: this document leads its handlers on wording and they lead it
 #     on shape. Every property name, width and nullability below is the
 #     component list of a record under com.carddemo.reporting.dto, and
 #     ReportingApiContractTest holds the two together: it asserts that this file
@@ -164,9 +164,7 @@ servers:
       balancer -- are not observable from inside it, so naming either one here
       would advertise an address no browser can resolve.
 
-# WHAT: one document-level authorization requirement, inherited by all five
-#       operations.
-# WHY : Assumption: there is no unauthenticated operation in this context and
+# WHY : Assumptions: there is no unauthenticated operation in this context and
 #       none may be added. Declaring the requirement once rather than five times
 #       removes the failure mode where a sixth operation is added and its
 #       per-operation requirement is forgotten, which serialises without
@@ -182,8 +180,6 @@ servers:
 security:
   - bearerAuth: []
 
-# WHAT: the machine-readable field each operation uses to name the authority it
-#       requires, and the two artifacts that enforce and assert it.
 # WHY : Alternatives Considered: conveying the required authority in prose, and
 #       conveying it by tag membership. Both were rejected because neither is
 #       checkable: a restriction expressed either way is indistinguishable to a
@@ -231,10 +227,14 @@ paths:
       summary: Starts an on-demand transaction report execution.
       description: >-
         Replaces the report-request screen and the confirmation gate in front of
-        it. Exactly one of the three type selectors must be marked; marking none
+        it. At least one of the three type selectors must be marked; marking none
         is refused with the verbatim message app/cbl/CORPT00C.cbl raises at
-        L438, 'Select a report type to print report...'. The two range bounds
-        are read only by the custom type.
+        L438, 'Select a report type to print report...'. Marking more than one is
+        NOT refused: the reference selects the FIRST marked type in the order
+        monthly, yearly, custom -- its condition chain at L213, L239 and L256
+        stops at the first matching arm -- and the reportName in the response
+        names which type ran. The two range bounds are read only by the custom
+        type.
 
 
         Generation is ASYNCHRONOUS. A started run answers 201 with a durable
@@ -253,21 +253,36 @@ paths:
 
 
         Three confirmation outcomes are distinguished, and a deliberate
-        cancellation is NOT an error. A blank or unset confirmation re-prompts
-        at 200 with the message the baseline composes at L465 to L469 from
-        'Please confirm to print the ', the report name and ' report...'. A
-        value of 'Y' or 'y' starts the run at 201, whose message the baseline
-        composes at L447 to L454 as the report name followed by
-        ' report submitted for printing ...' -- note the SPACE before those
-        three dots, which the confirmation prompt does not have; the two strings
-        are similar and are never merged. A value of 'N' or 'n' cancels at 200:
-        the branch at L480 to L482 clears the fields and raises the error flag
-        with NO MESSAGE SET AT ALL, so a cancellation carries no error text. Any
-        other value is a validation failure answered 400, whose message the
-        baseline composes at L485 to L489 as the quoted value followed by
-        '" is not a valid value to confirm...'.
+        cancellation is NOT an error. A value of 'Y' or 'y' starts the run at
+        201, whose message the baseline composes at L447 to L454 as the report
+        name followed by ' report submitted for printing ...' -- note the SPACE
+        before those three dots, which the confirmation prompt does not have;
+        the two strings are similar and are never merged. A value of 'N' or 'n'
+        cancels at 200: the branch at L480 to L483 performs
+        INITIALIZE-ALL-FIELDS, raises the error flag and re-sends the screen with
+        NO MESSAGE SET AT ALL, so a cancellation carries no message either --
+        this response's message member is null on that branch and nothing is
+        composed to stand in for it. A blank or unset confirmation is the third
+        outcome and it is REFUSED with 400, carrying the prompt the baseline
+        composes at L465 to L469 from 'Please confirm to print the ', the report
+        name and ' report...' in the shared problem document with a field error
+        on confirm; it is a request that named no answer rather than an outcome
+        of one, and answering it 200 would report a success for a turn that
+        started nothing and declined nothing. Any other value is likewise
+        answered 400, whose message the baseline composes at L485 to L489 as the
+        quoted value followed by '" is not a valid value to confirm...'.
+
+
+        Repeat submissions are the CALLER's decision. Omitting the
+        Idempotency-Key header starts a distinct run every time, so the same
+        report may be produced again over the same range -- after the underlying
+        rows are corrected, for instance. Sending the same key twice makes the
+        second attempt a duplicate the orchestrator refuses, which is how a
+        client retrying a call whose response was lost avoids starting a second
+        run.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
+        - $ref: '#/components/parameters/IdempotencyKeyHeader'
       requestBody:
         description: >-
           The report selection: one marked type, the confirmation answer, and
@@ -280,9 +295,10 @@ paths:
       responses:
         '200':
           description: >-
-            Nothing was started and no error occurred: the caller either
-            declined the confirmation or has not yet answered it. The body's
-            submitted member is false and its submission member is absent.
+            Nothing was started and no error occurred: the caller declined the
+            confirmation. The body's submitted member is false and both its
+            message and its submission member are present and null, because a
+            declined request has nothing to say and no run to describe.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -397,7 +413,7 @@ paths:
         L30; treating them as one would change the bytes this context emits.
 
 
-        Assumption: the roll-up chain is reproduced exactly as the reference
+        Assumptions: the roll-up chain is reproduced exactly as the reference
         computes it, and two properties of it are surprising enough to state.
         app/cbl/CBTRN03C.cbl L287 to L288 adds one transaction to the page and
         the account accumulators, and L297 adds the PAGE accumulator to the
@@ -458,7 +474,7 @@ paths:
         data, and it is not the markup width.
 
 
-        Trade-off: this is a POST although it changes nothing, and the reason is
+        Trade-offs: this is a POST although it changes nothing, and the reason is
         disclosure rather than semantics. The statement is selected by a primary
         account number, and a request line is written into the access log of
         every intermediary and retained in browser history and in a referrer
@@ -527,13 +543,28 @@ paths:
         the identifier at position 1, both ascending.
 
 
-        The set is returned whole rather than as a sequence of windows, because
-        a statement covers one card's posted transactions for one period and
-        that set is bounded by the statement itself, so there is no open-ended
-        sequence for a boundary token to walk.
+        The set is returned as ONE body rather than as a sequence of windows,
+        because a statement covers one card's posted transactions for one period
+        and that set is delimited by the statement itself, so there is no
+        open-ended sequence for a boundary token to walk. It is nonetheless
+        bounded at a row ceiling, and the body says so: transactionCount reports
+        what the statement covers and truncated reports whether the array is
+        short of it.
 
 
-        Trade-off: the reference bound is a table arity rather than a query
+        Refactoring Rationale: this paragraph said the set was "returned whole",
+        and the paragraph below said the service "carries no fixed arity and no
+        configurable cap standing in for any of the three, which is why no
+        maximum item count is declared below". The first was false and the second
+        conflated two different bounds. The service has carried a response
+        ceiling of 1000 rows since the response path was made safe against an
+        allocation sized by a cardholder's history -- registered as divergence
+        D-STMT-RESPONSE-BOUNDED -- while remaining free of any arity standing in
+        for the reference's three table limits. Both statements are corrected
+        together, and the ceiling is now declared as maxItems on the array.
+
+
+        Trade-offs: the reference bound is a table arity rather than a query
         limit, and it is unchecked, so this operation answers where the baseline
         aborts. Three separate numbers describe it and they are never conflated
         into one figure: app/cbl/CBSTM03A.CBL L226 declares WS-CARD-TBL OCCURS
@@ -544,9 +575,14 @@ paths:
         cards times 16 plus 10 times 334 bytes, which is 171,156 bytes, while
         the Nth same-card write lands at 16 plus N minus 1 times 334 and so
         stays inside that area only while N is at most 512. The migrated service
-        carries no fixed arity and no configurable cap standing in for any of
-        the three, which is why no maximum item count is declared below. That is
-        a documented divergence rather than a silent improvement, registered in
+        carries no fixed arity standing in for any of the three and does not
+        abort at any of them: the RENDERED ARTIFACT is unbounded in the same
+        sense the reference intended, which is divergence D-2. What it does carry
+        is a ceiling on this HTTP RESPONSE, declared as maxItems on the array and
+        reported per body by transactionCount and truncated, which is a bound on
+        a surface the baseline does not publish at all and is registered
+        separately as D-STMT-RESPONSE-BOUNDED. Both are documented divergences
+        rather than silent improvements, registered in
         docs/architecture/cobol-to-service-traceability.md.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
@@ -563,7 +599,8 @@ paths:
         '200':
           description: >-
             The transactions the statement was rendered from, ordered by card
-            number and then by transaction identifier.
+            number and then by transaction identifier, together with the count
+            the statement covers and whether the array is short of it.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/CorrelationId'
@@ -612,8 +649,7 @@ components:
 
   parameters:
 
-    # WHAT: the one request header every operation in this system accepts.
-    # WHY : Assumption: the width is twenty-four characters because that is what
+    # WHY : Assumptions: the width is twenty-four characters because that is what
     #       the reference correlation field holds --
     #       app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl L45 declares
     #       WS-SAVE-CORRELID PIC X(24), echoed at L745. The 48-byte fields at its
@@ -633,6 +669,42 @@ components:
         carry a credential, because it is written to logs by design.
       schema:
         $ref: '#/components/schemas/CorrelationId'
+
+    # WHY : Assumptions: the key travels as a header rather than as a member of
+    #       the request body because it describes the submission ATTEMPT and not
+    #       the report being requested, and ReportRequest derives its component
+    #       count arithmetically from the named fields of app/bms/CORPT00.bms --
+    #       so a member for this would be one the screen does not account for.
+    # WHY : Refactoring Rationale: no key existed and the execution name was
+    #       derived from the report type and both bounds alone. That made the
+    #       name unique to the report and the range for the 90 days the
+    #       orchestrator remembers a completed execution, so the first
+    #       submission of a range succeeded and every later one was refused --
+    #       including a rerun after the underlying rows were corrected, which is
+    #       not a duplicate submission at all. Making the key optional moves the
+    #       choice to the caller: retry protection is requested rather than
+    #       imposed.
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        An optional caller-supplied key identifying this submission ATTEMPT.
+        Send the same key again to retry a submission whose response was lost:
+        the second attempt is then recognised as a duplicate and refused rather
+        than starting a second run of the same report. Omit it -- which is
+        normal -- and every submission starts a distinct run, which is what
+        allows the same report to be produced again over the same range. At most
+        forty characters, and only letters, digits, hyphens and underscores,
+        because the value becomes part of the orchestrator's execution name; a
+        key outside that is refused with 400 rather than trimmed, since two
+        different keys must never be shortened into one.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 40
+        pattern: '^[A-Za-z0-9_-]+$'
+        example: monthly-2022-07-retry-1
 
     StartDateQuery:
       name: startDate
@@ -684,8 +756,6 @@ components:
 
   responses:
 
-    # WHAT: the six refusals, declared once here and referenced by every
-    #       operation that can produce them.
     # WHY : Alternatives Considered: declaring each refusal inline on each
     #       operation, which reads more locally and is what a generator emits.
     #       Rejected because it is how one operation ends up publishing a
@@ -753,7 +823,7 @@ components:
         the submission operation declares this refusal.
 
 
-        Assumption: 503 rather than 409 or 403, because the distinction is the one
+        Assumptions: 503 rather than 409 or 403, because the distinction is the one
         a client acts on. The request is well formed and its caller is entitled
         to make it; only the window in which it may be applied is absent. No
         retry hint is sent, because the window is reopened by a state machine
@@ -781,8 +851,7 @@ components:
     # Scalar contracts, referenced by the record schemas below
     # -----------------------------------------------------------------------
 
-    # WHAT: the single money type of this contract.
-    # WHY : Trade-off: money is a STRING and never a JSON number. A number is
+    # WHY : Trade-offs: money is a STRING and never a JSON number. A number is
     #       cheaper for a client to read, but most clients parse one into
     #       IEEE-754 binary floating point, which cannot represent every value
     #       app/cpy/CVACT01Y.cpy L7 admits -- PIC S9(10)V99 is twelve significant
@@ -805,7 +874,6 @@ components:
         reference, at app/cbl/CBTRN03C.cbl L134 to L136 and app/cpy/COSTM01.CPY
         L29 respectively.
 
-    # WHAT: the only rendering of a primary account number any response carries.
     # WHY : Alternatives Considered: constraining this to sixteen characters and
     #       nothing more, which is the obvious reading of the X(16) width that
     #       app/cpy/COSTM01.CPY L22 declares for TRNX-CARD-NUM. Rejected because
@@ -838,28 +906,78 @@ components:
         comparison agree, which is what lets the range predicate compare the
         leading ten characters of a timestamp directly.
 
-    # WHAT: the shape of every timestamp this contract carries.
-    # WHY : Assumption: no date-time format is declared on it, and the two
-    #       external contracts that make one wrong are both cited rather than
-    #       left to the header. app/jcl/CREASTMT.JCL L54 reformats with
-    #       OUTREC FIELDS=(1:263,16,17:1,262,279:279,50), which emits 328 of the
-    #       record's 350 bytes and so carries only 24 of the processing stamp's 26
-    #       characters -- a blank or short value is therefore legitimate. And
+    # WHY : Assumptions: no date-time format is declared on it.
     #       services/common-lib/src/main/java/com/carddemo/common/time/TimestampFormatter.java
     #       fixes the shape as 'yyyy-MM-dd HH:mm:ss.SSSSSS', separated by a SPACE
     #       rather than a 'T' and carrying no zone, which a strict date-time
     #       parse rejects even when the value is perfectly well formed.
+    # WHY : Refactoring Rationale: the width is EXACT -- minLength and maxLength
+    #       are both 26 -- and the pattern is declared. An earlier revision carried
+    #       maxLength alone and told callers a blank or shorter value was
+    #       legitimate here, which admitted the empty string and every truncation
+    #       of a stamp as a conforming value on all five members that reference
+    #       this schema. The emitting side admits neither: opaqueTimestamp in
+    #       services/reporting-service/src/main/java/com/carddemo/reporting/mapper/ReportingDtoMapper.java
+    #       refuses any non-null value whose length is not exactly
+    #       TimestampFormatter.TIMESTAMP_LENGTH, and TimestampFormatter emits
+    #       exactly that width, so the loose declaration described values this
+    #       service cannot produce and cannot accept. transaction-api.yaml declares
+    #       the same scalar strictly, so this document was the outlier.
+    # WHY : Alternatives Considered: keeping one loose scalar so that the single
+    #       short-tolerant member could go on sharing it. Rejected because that
+    #       member's tolerance is a property of ONE field's reformatting artifact,
+    #       not of timestamps in this contract, and one loose scalar spread the
+    #       exception across four members that have no such artifact. The artifact
+    #       is modelled by StatementProcessingTimestamp26 below instead, so the
+    #       exception is declared exactly where it applies and is legible as an
+    #       exception rather than as the general rule.
     Timestamp26:
       type: string
+      minLength: 26
       maxLength: 26
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
       description: >-
-        A timestamp as 'YYYY-MM-DD HH:MM:SS.mmmmmm', at most twenty-six
-        characters, which is the width common-lib TimestampFormatter emits and
-        the width the reference layouts declare. Treat it as OPAQUE text: a
-        blank or shorter value is legitimate and must not be rejected.
+        A twenty-six-character local timestamp of the form
+        'YYYY-MM-DD HH:MM:SS.mmmmmm', space-separated, with microsecond precision
+        and no zone designator. It is the width common-lib TimestampFormatter
+        emits and the width the reference layouts declare. Treat it as OPAQUE
+        text: compare and display it, but do not parse it as a zoned instant.
+      examples:
+        - '2022-07-18 22:10:31.000000'
 
-    # WHAT: a single line of user-visible text on a problem document.
-    # WHY : Assumption: the width is 75 and not 78. app/cpy/CVCRD01Y.cpy L28 and
+    # WHY : Refactoring Rationale: this scalar exists because exactly one member
+    #       carries a baseline artifact the strict form above cannot describe.
+    #       app/jcl/CREASTMT.JCL L54 reformats with
+    #       OUTREC FIELDS=(1:263,16,17:1,262,279:279,50), whose final segment
+    #       copies 50 bytes from one-based 279 -- enough for the origination stamp
+    #       whole and only 24 of TRNX-PROC-TS's 26 characters, so the last two
+    #       positions arrive BLANK. The field is still 26 characters wide, which is
+    #       why the width here is exact and matches what the mapper enforces; it is
+    #       the CONTENT that differs, and the second alternative below is what
+    #       admits it.
+    # WHY : Assumptions: the two alternatives are stated as a closed set rather
+    #       than as a relaxed pattern such as a trailing '.{6}'. A relaxed pattern
+    #       would also admit six arbitrary characters in the fractional position,
+    #       which is neither form the baseline produces, and this contract's job is
+    #       to describe the two it does.
+    StatementProcessingTimestamp26:
+      type: string
+      minLength: 26
+      maxLength: 26
+      anyOf:
+        - pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}$'
+        - pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{4}  $'
+      description: >-
+        A twenty-six-character local timestamp on the same terms as Timestamp26,
+        additionally admitting the form the reference reformatting step produces:
+        twenty-four significant characters followed by two blanks, where the last
+        two digits of the microsecond fraction were not copied. Treat it as OPAQUE
+        text and never substitute a derived instant for it.
+      examples:
+        - '2022-07-18 22:10:31.000000'
+        - '2022-07-18 22:10:31.0000  '
+
+    # WHY : Assumptions: the width is 75 and not 78. app/cpy/CVCRD01Y.cpy L28 and
     #       L29 declare CCARD-ERROR-MSG and CCARD-RETURN-MSG as PIC X(75), which
     #       is the WIRE carrier; the 78 at app/cpy-bms/CORPT00.CPY L120 and L224
     #       is the SCREEN field and so a rendering target rather than a wire
@@ -879,16 +997,38 @@ components:
         of a report submission is the case that produces no message, because the
         baseline branch at app/cbl/CORPT00C.cbl L480 to L482 sets none.
 
+    # Refactoring Rationale: this schema declared maxLength 512 and no pattern, so it
+    #   admitted any string a caller cared to send up to twice the width the runtime
+    #   accepts. com.carddemo.common.web.CursorToken refuses a token longer than 256
+    #   characters and refuses one that is not the three-part v2 shape, so a body this
+    #   contract called valid was refused by the service -- which is the class of
+    #   disagreement a published contract exists to prevent, and it was invisible to a
+    #   compiler because one side was a number in a document. Both facets are now the
+    #   sealer's own, character for character, and they are the same two the five sibling
+    #   contexts publish, so there is one cursor shape across the migration rather than
+    #   this one plus a looser exception.
+    # Assumptions: minLength is dropped rather than kept at 1, because the pattern
+    #   subsumes it -- the shortest string the expression admits is longer than one
+    #   character -- and two facets expressing one floor invite them to disagree.
     CursorToken:
       type: string
-      minLength: 1
-      maxLength: 512
+      maxLength: 256
+      pattern: '^v2\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,200}$'
       description: >-
-        An opaque authenticated position token. Its contents are not part of this
-        contract and a caller must not parse, construct or modify one; a modified
-        token is refused with 400. It is opaque because the reference browse
-        screens use positions of different shapes, so exposing a structure would
-        publish one screen's key layout as the API's own.
+        An opaque, authenticated, enciphered, expiring position in an ordered result
+        set, minted by this service and echoed back by the caller unchanged. Its three
+        period-separated parts are a version marker, a nonce and an enciphered payload
+        carrying its own authentication tag; a caller must not parse, edit, decode or
+        construct one, because base64url-decoding it yields ciphertext and because the
+        tag covers both that ciphertext and a binding naming the query, the subject and
+        the DIRECTION the token was issued for -- so an altered or borrowed token fails
+        to decipher and is refused with 400, and replaying a page's leading position
+        with direction next cannot silently answer with the wrong page. It is opaque
+        because the reference browse screens use positions of different shapes, so
+        exposing a structure would publish one screen's key layout as the API's own.
+        The shape is declared once here and referenced by the cursor parameter and by
+        both cursor members of the page envelope, so none of the three can acquire a
+        different bound. It is a string in every direction and never a number.
 
     PageDirection:
       type: string
@@ -917,8 +1057,7 @@ components:
     # Report submission
     # -----------------------------------------------------------------------
 
-    # WHAT: the request body of the submission operation, at thirteen properties.
-    # WHY : Assumption: thirteen is arithmetic rather than preference.
+    # WHY : Assumptions: thirteen is arithmetic rather than preference.
     #       app/bms/CORPT00.bms declares 42 field definitions and only 17 carry a
     #       name; the other 25 are captions, separators and the function-key
     #       legend, which address no storage and have nothing for a request to
@@ -933,9 +1072,12 @@ components:
       additionalProperties: false
       description: >-
         Selects a transaction report by type and, for a caller-supplied run, by
-        an inclusive range. Exactly one of monthly, yearly and custom must be
+        an inclusive range. At least one of monthly, yearly and custom must be
         marked; marking none is refused with the verbatim message
-        app/cbl/CORPT00C.cbl raises at L438. No property is declared required,
+        app/cbl/CORPT00C.cbl raises at L438. Marking two or three is accepted and
+        the FIRST in the order monthly, yearly, custom is the one that runs,
+        because the reference's condition chain stops at its first matching arm.
+        No property is declared required,
         because none of the thirteen is unconditionally present -- which must be
         supplied depends on the type selected, and that is a rule the service
         applies rather than one a schema can state. A request that breaks it is
@@ -986,7 +1128,9 @@ components:
             MONTHLYI at app/cpy-bms/CORPT00.CPY L60. Any character that is
             neither a space nor a null counts as a mark, which is the test the
             baseline applies. The resolved range is the FULL CALENDAR MONTH, the
-            first through the last day of the current month.
+            first through the last day of the current month. This is the FIRST
+            arm of the reference's chain, at app/cbl/CORPT00C.cbl L213, so a
+            request marking this and another type runs this one.
         yearly:
           type: string
           pattern: '[^\x00 ]'
@@ -994,7 +1138,9 @@ components:
           description: >-
             Marked to select the current-year report, at the X(1) width of
             YEARLYI at app/cpy-bms/CORPT00.CPY L66. The resolved range is the
-            first of January through the thirty-first of December.
+            first of January through the thirty-first of December. This is the
+            SECOND arm of the reference's chain, at app/cbl/CORPT00C.cbl L239, so
+            it runs only when monthly is unmarked.
         custom:
           type: string
           pattern: '[^\x00 ]'
@@ -1004,7 +1150,9 @@ components:
             CUSTOMI at app/cpy-bms/CORPT00.CPY L72. This is the only type for
             which startDate and endDate are read, and the only one whose
             submission is guarded on the validation flag, at
-            app/cbl/CORPT00C.cbl L434 to L436.
+            app/cbl/CORPT00C.cbl L434 to L436. This is the LAST arm of the
+            reference's chain, at L256, so it runs only when neither monthly nor
+            yearly is marked.
         startDate:
           allOf:
             - $ref: '#/components/schemas/IsoDate'
@@ -1040,8 +1188,7 @@ components:
             declares it, and IGNORED on input -- a value a caller places here
             has no effect on the outcome.
 
-    # WHAT: the response body of the submission operation, at BOTH statuses.
-    # WHY : Assumption: one shape serves both outcomes and the execution handle
+    # WHY : Assumptions: one shape serves both outcomes and the execution handle
     #       is what varies, rather than two sibling shapes chosen by status. This
     #       is the component list of
     #       com.carddemo.reporting.dto.ReportSubmissionOutcome name for name, and
@@ -1052,25 +1199,40 @@ components:
     ReportSubmissionOutcome:
       type: object
       additionalProperties: false
+      # WHY : Refactoring Rationale: message and submission are REQUIRED here and
+      #       nullable in their own blocks, where an earlier revision required
+      #       only submitted. The handler returns a record whose three components
+      #       are all serialised, so both members are always PRESENT on the wire
+      #       and null is how each reports that it carries nothing. Declaring
+      #       them optional promised a caller a body in which either key could be
+      #       absent, which this service cannot emit -- the same shape of drift
+      #       the nullable-and-required members of AccountViewResponse and of
+      #       every keyset page in this repository are declared to avoid.
       required:
         - submitted
+        - message
+        - submission
       description: >-
         The outcome of one submission request, discriminating a started run from
         a deliberate cancellation. A cancellation is NOT an error and carries no
         problem document: the baseline branch at app/cbl/CORPT00C.cbl L480 to
-        L482 clears the fields and raises the error flag with no message at all,
-        so at flag level a cancel is indistinguishable from a validation failure
-        and the screen redisplays cleared with no feedback about which occurred.
-        Separating the two across a status and this member preserves the
-        suppression the flag existed for while giving the caller the feedback a
-        single flag could not carry.
+        L483 performs INITIALIZE-ALL-FIELDS, raises the error flag and re-sends
+        the screen with no message at all, so at flag level a cancel is
+        indistinguishable from a validation failure and the screen redisplays
+        cleared with no feedback about which occurred. Separating the two across
+        a status and this member preserves the suppression the flag existed for
+        while giving the caller the feedback a single flag could not carry.
       properties:
         submitted:
           type: boolean
           description: >-
-            Whether a run was accepted for execution. False for a cancellation
-            and for an unanswered confirmation, both of which answer 200; true
-            only alongside 201.
+            Whether a run was accepted for execution. False only for a
+            deliberate cancellation, which answers 200; true only alongside 201.
+            An unanswered confirmation reaches neither state: it is refused with
+            400 and the shared problem document, carrying a field error on
+            confirm, because the baseline answers an absent answer at L464 and an
+            unrecognised one at L484 separately and this service keeps them
+            separate.
         message:
           type:
             - string
@@ -1083,17 +1245,24 @@ components:
             name followed by ' report submitted for printing ...' -- the
             baseline composes it at app/cbl/CORPT00C.cbl L447 to L454 and moves
             the GREEN attribute into the message colour, whereas the error path
-            uses red. On an unanswered confirmation it is the prompt composed at
-            L465 to L469 from 'Please confirm to print the ', the report name
-            and ' report...'. Those two strings differ by the space before the
-            three dots and are never merged. Null on a deliberate cancellation.
+            uses red. Null on a deliberate cancellation, where the baseline
+            writes nothing into the message at L480 to L483 and the turn's
+            opening MOVE SPACES at L169 has already blanked the field the screen
+            is sent from at L560.
+          # WHY : Refactoring Rationale: the paragraph describing this member on an
+          #       unanswered confirmation, and the three prompt examples under it,
+          #       were withdrawn. That state is not reachable on this response:
+          #       ReportExecutionService.isConfirmed refuses an absent answer with
+          #       the shared problem document, so the prompt the baseline composes
+          #       at L465 to L469 is carried by a 400 rather than by this member,
+          #       and describing it here promised a 200 body this service does not
+          #       emit. The two prompt strings still differ from the submitted one
+          #       by the space before the three dots and are still never merged;
+          #       that ruling now lives only where the refusal is raised.
           examples:
             - 'Monthly report submitted for printing ...'
             - 'Yearly report submitted for printing ...'
             - 'Custom report submitted for printing ...'
-            - 'Please confirm to print the Monthly report...'
-            - 'Please confirm to print the Yearly report...'
-            - 'Please confirm to print the Custom report...'
         submission:
           oneOf:
             - $ref: '#/components/schemas/ReportSubmissionResponse'
@@ -1207,8 +1376,7 @@ components:
     # Report content
     # -----------------------------------------------------------------------
 
-    # WHAT: one printed detail band, as the item type inside the window envelope.
-    # WHY : Assumption: three of the eight values are JOIN RESULTS and not columns
+    # WHY : Assumptions: three of the eight values are JOIN RESULTS and not columns
     #       of the transaction master, which matters to anyone reading the widths
     #       against a single copybook and failing to find them. app/cpy/CVTRA05Y.cpy
     #       carries NO account identifier at all -- its thirteen fields at L5 to
@@ -1296,7 +1464,6 @@ components:
             mask from the leading-plus one the total bands use; on the wire it is
             an unformatted exact decimal string and the caller renders it.
 
-    # WHAT: the envelope of one window of detail lines.
     # WHY : Alternatives Considered: a body carrying a total row count so a client
     #       could compute how many windows remain. Rejected because the count
     #       would have to be read as a second query against a moving population,
@@ -1313,13 +1480,14 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       description: >-
-        One bounded keyset window. FIVE members, which is the component list of
+        One bounded keyset window. FOUR members, which is the component list of
         the shared envelope com.carddemo.common.web.PageResponse name for name:
-        the rows, the two sealed boundaries, and the two availability flags the
-        reference PF7 and PF8 keys bind to. Nothing here is addressed by a
-        counted row position.
+        the rows, the two sealed boundaries, and the further-page flag the
+        reference PF8 key binds to. The PF7 key binds to the LEADING boundary
+        instead, because whether a page precedes this one is answered by the page
+        ordinal the reference keeps on the terminal and not by any member of this
+        window. Nothing here is addressed by a counted row position.
       properties:
         items:
           type: array
@@ -1349,19 +1517,8 @@ components:
             Whether a forward request would yield rows. Established by reading one
             row more than the window holds rather than from any total, and bound
             by a client to the control that the reference PF8 key drove.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a window precedes this one, bound by a client to the control
-            the reference PF7 key drove. False on the OPENING window even though
-            that window carries a firstKey, because firstKey answers where a
-            backward request would be issued from while this member answers
-            whether anything waits there. Deriving it from firstKey instead would
-            make the first window advertise an earlier one and then answer a
-            client that followed the advertisement with nothing.
 
-    # WHAT: one subtotal band.
-    # WHY : Trade-off: the verbatim label is carried on the wire even though the
+    # WHY : Trade-offs: the verbatim label is carried on the wire even though the
     #       band member already determines it, so the body is deliberately
     #       redundant. The cost is one derivable field per band; what it buys is
     #       that a consumer renders a band line without holding its own copy of
@@ -1446,15 +1603,14 @@ components:
     # Statements
     # -----------------------------------------------------------------------
 
-    # WHAT: the selector both statement operations take.
-    # WHY : Assumption: there is no date range here and none is missing.
+    # WHY : Assumptions: there is no date range here and none is missing.
     #       app/jcl/CREASTMT.JCL declares no date-parameter data definition at
     #       all, unlike app/jcl/TRANREPT.jcl which injects both bounds at its L43
     #       and L44; the statement generator instead breaks on the card, holding
     #       it in WS-SAVE-CARD PIC X(16) at app/cbl/CBSTM03A.CBL L69. There is
     #       likewise no output-format selector, because both renderings are always
     #       produced.
-    # WHY : Trade-off: each component is bounded on BOTH sides at its declared
+    # WHY : Trade-offs: each component is bounded on BOTH sides at its declared
     #       width rather than given a ceiling alone. TRNX-CARD-NUM is PIC X(16) at
     #       app/cpy/COSTM01.CPY L22 and the account identifier is PIC 9(11), and a
     #       numeric picture is zero-filled on the left, so a shorter value cannot
@@ -1558,8 +1714,11 @@ components:
           description: >-
             How many transactions the statement covers. An exact count of rows
             rather than a monetary value, which is why it is an integer here
-            while every amount is a string. No maximum is declared, for the
-            arity reason recorded on the statement-transaction operation.
+            while every amount is a string. No maximum is declared, because this
+            is a count of what EXISTS rather than of what is returned: the
+            service carries no arity standing in for the reference's three table
+            limits. The row ceiling that does exist bounds the transaction
+            ARRAY of the sibling operation, where it is declared as maxItems.
         plainTextUri:
           type: string
           minLength: 1
@@ -1594,8 +1753,7 @@ components:
             generator step recreates them -- so this value moves while the two
             locations stay stable.
 
-    # WHAT: one posted transaction as a statement carries it.
-    # WHY : Assumption: thirteen properties, matching the THIRTEEN ELEMENTARY
+    # WHY : Assumptions: thirteen properties, matching the THIRTEEN ELEMENTARY
     #       NAMED FIELDS of the 350-byte TRNX-RECORD at app/cpy/COSTM01.CPY L20 to
     #       L36 -- two inside the group TRNX-KEY at L21 and eleven inside the group
     #       TRNX-REST at L24 -- with the FILLER X(20) at L36 dropped as padding. A
@@ -1716,29 +1874,50 @@ components:
             this stamp whole, but see processingTimestamp for the one it does not.
         processingTimestamp:
           allOf:
-            - $ref: '#/components/schemas/Timestamp26'
+            - $ref: '#/components/schemas/StatementProcessingTimestamp26'
           description: >-
             When the transaction was posted, at the X(26) width of TRNX-PROC-TS
-            at app/cpy/COSTM01.CPY L35. This is the member the reformatting step
-            at app/jcl/CREASTMT.JCL L54 leaves SHORT -- its final segment copies
-            50 bytes from one-based 279, which spans the origin stamp whole and
-            only 24 of this one's 26 characters -- so a blank or shorter value is
-            legitimate and must not be rejected.
+            at app/cpy/COSTM01.CPY L35. This is the ONE member the reformatting
+            step at app/jcl/CREASTMT.JCL L54 leaves short -- its final segment
+            copies 50 bytes from one-based 279, which spans the origin stamp whole
+            and only 24 of this one's 26 characters, so the final two positions
+            arrive blank. That is why it names its own scalar rather than
+            Timestamp26: the field is still twenty-six characters wide and the
+            mapper enforces that width, but the two trailing blanks are content
+            the strict form does not describe and must not be rejected.
 
     StatementTransactionCollection:
       type: object
       additionalProperties: false
       required:
         - items
+        - transactionCount
+        - truncated
       description: >-
-        The transactions one statement was rendered from. The component list of
-        com.carddemo.reporting.dto.StatementTransactionCollection. Not a window:
-        the set is bounded by the statement's own period, so there is no
-        open-ended sequence for a boundary token to walk, and no counted row
-        position is accepted anywhere.
+        The transactions one statement was rendered from, with the count the
+        statement covers beside them. The component list of
+        com.carddemo.reporting.dto.StatementTransactionCollection. Not a page:
+        the set is delimited by the statement's own period, so no boundary token
+        is published and no counted row position is accepted anywhere. It IS a
+        bounded window all the same, at the row ceiling maxItems declares below,
+        and the two count members are how a caller tells a bounded body from a
+        whole one.
+
+
+        Refactoring Rationale: this schema declared items alone and described the
+        body as "not a window", which was false in the half that mattered. The
+        service bounds the composed window at 1000 rows -- registered as
+        divergence D-STMT-RESPONSE-BOUNDED in
+        docs/architecture/cobol-to-service-traceability.md -- and the argument
+        recorded for that bound is that truncation stays measurable because the
+        HEADING carries the card's true count. That holds for the statement
+        operation, which returns the heading; it does not hold for this one,
+        which returns this object and nothing else, so a caller here received a
+        silently shortened array with no member to compare it against.
       properties:
         items:
           type: array
+          maxItems: 1000
           items:
             $ref: '#/components/schemas/StatementTransactionResponse'
           description: >-
@@ -1749,19 +1928,57 @@ components:
             no posted transactions.
 
 
+            Refactoring Rationale: maxItems is DECLARED here, where three
+            paragraphs of this document already said it was. The operation
+            description above, the transactionCount member of the sibling schema
+            and the paragraph below this one all state that the row ceiling is
+            declared as maxItems on this array, and none of them was true of the
+            document -- so a generated client bounded nothing while the service
+            bounded at 1000, and a reader auditing the ceiling found only claims
+            that it existed. The value is
+            com.carddemo.reporting.service.StatementService.MAX_RESPONSE_TRANSACTIONS
+            and ReportingApiContractTest reads the two against each other, so the
+            number here cannot drift from the number enforced.
+
+
+            The ceiling is
+            com.carddemo.reporting.service.StatementService.MAX_RESPONSE_TRANSACTIONS,
+            which bounds this RESPONSE and not the rendered artifact -- that is
+            unbounded in the same sense the reference is, which is divergence
+            D-2. A statement whose card carries more than the ceiling is returned
+            short, with truncated true and transactionCount reporting the whole.
+        transactionCount:
+          type: integer
+          format: int32
+          minimum: 0
+          description: >-
+            How many transactions the statement covers in total, from a database
+            aggregate over the whole card rather than from the length of the
+            array above. It equals that length on every statement short of the
+            ceiling and exceeds it on exactly the statements where the difference
+            matters, which is why the array's own length is not published in its
+            place.
+        truncated:
+          type: boolean
+          description: >-
+            Whether the array is short of transactionCount. Derived by the
+            service from the two counts and never accepted from a caller, so the
+            three members cannot disagree. False on every statement whose card
+            carries no more transactions than the ceiling.
+
+
     # -----------------------------------------------------------------------
     # Shared problem shape
     # -----------------------------------------------------------------------
 
-    # WHAT: the one problem document every refusal in this contract carries.
-    # WHY : Assumption: this is the shape
+    # WHY : Assumptions: this is the shape
     #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java
     #       renders, restated here because an OpenAPI document cannot reference a
     #       schema in another file that no build step assembles. It is declared
     #       identically in every sibling contract for the same reason, so a
     #       divergence between any two of them is a defect in whichever diverged
     #       rather than a local choice.
-    # WHY : Assumption: the date-edit diagnostic is a STRUCTURED TRIPLE and not a
+    # WHY : Assumptions: the date-edit diagnostic is a STRUCTURED TRIPLE and not a
     #       boolean, and it is representable here without a schema of its own.
     #       app/cbl/CORPT00C.cbl declares CSUTLDTC-PARM at L129 with an 80-byte
     #       result -- severity X(04) at L133, a FILLER X(11) at L134, a message
@@ -1775,9 +1992,25 @@ components:
     ApiError:
       type: object
       additionalProperties: false
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
       required:
         - code
         - secondaryCode
+        - message
         - severity
         - subsystem
         - status
@@ -1785,6 +2018,7 @@ components:
         - path
         - timestamp
         - fieldErrors
+        - abend
       description: >-
         One problem document, rendered by the shared advice class for every
         refusal this contract declares.
@@ -1882,8 +2116,7 @@ components:
             otherwise. Its presence is what distinguishes an unrecoverable
             platform failure from an ordinary refusal.
 
-    # WHAT: one field-level failure, as the browser renders it.
-    # WHY : Assumption: BLANK is a SUBSET of error rather than a third peer state,
+    # WHY : Assumptions: BLANK is a SUBSET of error rather than a third peer state,
     #       because app/cpy/CSSETATY.cpy L18 to L19 is a SINGLE DISJUNCTIVE test --
     #       not-ok OR blank -- so a blank field is an erroring field that
     #       additionally earns a marker. The marker and the highlight also go to
@@ -1891,7 +2124,7 @@ components:
     #       into the field's COLOUR subfield while L24 to L25 move a literal
     #       asterisk into its OUTPUT subfield, so the marker is kept distinct from
     #       the state value here rather than folded into it.
-    # WHY : Assumption: there is NO re-entry member and none may be added.
+    # WHY : Assumptions: there is NO re-entry member and none may be added.
     #       app/cpy/CSSETATY.cpy L20 gates the highlight on the pseudo-conversational
     #       re-entry condition, whose discriminator is CDEMO-PGM-CONTEXT in
     #       app/cpy/COCOM01Y.cpy. A stateless service has no such flag, so
@@ -2004,8 +2237,7 @@ components:
         cannot itself produce; a reporting refusal will name the application, the
         relational store or the object store.
 
-    # WHAT: the structured equivalent of the reference abend aggregate.
-    # WHY : Assumption: the four widths are read from app/cpy/CSMSG02Y.cpy L21 to
+    # WHY : Assumptions: the four widths are read from app/cpy/CSMSG02Y.cpy L21 to
     #       L29 -- ABEND-DATA at L21, then ABEND-CODE X(4) at L22, ABEND-CULPRIT
     #       X(8) at L24, ABEND-REASON X(50) at L26 and ABEND-MSG X(72) at L28,
     #       totalling 134 bytes with each initialised to spaces. The anchors matter
@@ -2054,4 +2286,3 @@ components:
             app/cpy/CSMSG02Y.cpy L28. This 72 is its own width regime and is
             merged with neither the 75 of the wire message carrier nor the 78 of
             the report screen's message field.
-

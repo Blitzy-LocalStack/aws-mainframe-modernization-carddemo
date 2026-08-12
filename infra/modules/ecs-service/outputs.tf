@@ -16,27 +16,24 @@
 #   rather than this file, and the resulting error names the caller's
 #   expression instead of this line.
 #
-#   Refactoring Rationale: this paragraph said "Sixteen outputs", "eight times"
-#   and "resolves sixteen times", and omitted data-migration from the list of
-#   instantiations -- while the Return values and Exceptions sections below had
-#   already been corrected to seventeen and nine. A file whose own sections
-#   disagree is worse than one that is uniformly stale, because a reader has no
-#   way to tell which section was measured. All three counts are now derived the
-#   same way and are checkable: `grep -c '^output "' outputs.tf` gives seventeen,
-#   the roots' `local.workloads` has nine keys, and the product with two roots is
-#   eighteen.
+#   Assumptions: all three counts in this paragraph are MEASUREMENTS derived the
+#   same way, and each is checkable in one command:
+#   `grep -c '^output "' infra/modules/ecs-service/outputs.tf` gives seventeen,
+#   each root's `local.workloads` has nine keys -- seven from `local.online_services`
+#   plus `batch` and `data-migration` -- and the product with two roots is eighteen.
+#   Trade-offs: three figures in one paragraph is three things to keep true, and
+#   they are stated anyway because every section of this file quotes them; a file
+#   whose sections disagree is worse than one that is uniformly stale, since a
+#   reader then has no way to tell which section was measured.
 #
 # Parameters:
-#   None. An output block accepts no parameters. Every value below is read
-#   from one of exactly three places, all of them inside this module: a
-#   resource declared in the sibling main.tf, a local composed there, or an
-#   input declared in the sibling variables.tf. Holding to those three is a
-#   standing constraint rather than tidiness, because this directory is never
-#   applied directly -- .github/workflows/infra-ci.yml reaches it only
-#   transitively, through `init -backend=false` and `validate` on
-#   infra/bootstrap, infra/envs/dev and infra/envs/prod. A reference here to an
-#   input variables.tf does not declare, or to an attribute main.tf's resources
-#   do not expose, therefore surfaces at the calling root rather than here.
+#   None. An output block accepts no parameters. Every value below is read from
+#   one of exactly three places, all inside this module: a resource declared in
+#   main.tf, a local composed there, or an input declared in variables.tf. That is
+#   a standing constraint rather than tidiness, because this directory is never
+#   applied directly -- CI reaches it only transitively -- so a reference to an
+#   input variables.tf does not declare, or to an attribute main.tf's resources do
+#   not expose, surfaces at the calling root rather than here.
 #
 # Return values:
 #   Seventeen values -- sixteen strings and one number -- grouped below in the
@@ -47,12 +44,10 @@
 #   seventeen are wired into a sibling module by name at a root call site, and
 #   say so where they are declared. Each entry below was verified by reading the
 #   expression that consumes it rather than by recollection:
-#     - target_group_arn        attached to a listener rule by
-#                               infra/modules/alb, through the roots'
-#                               `service_routes` map
-#     - task_definition_arn     started by infra/modules/step-functions-batch,
-#                               for the batch, data-migration and reporting
-#                               instances
+#     - target_group_arn        attached to a listener rule by infra/modules/alb,
+#                               through the roots' `service_routes` map
+#     - task_definition_arn     started by infra/modules/step-functions-batch, for
+#                               the batch, data-migration and reporting instances
 #     - container_name          addressed by name in that module's run-task
 #                               container overrides, same three instances
 #     - target_group_arn_suffix the CloudWatch dimension
@@ -64,14 +59,14 @@
 #                               which become the Resource of one iam:PassRole
 #                               statement
 #
-#   Refactoring Rationale: this list said FIVE and credited log_group_name as
-#   "read by infra/modules/observability". It is not: that module receives
-#   `log_group_names` from the roots' Lambda log-group local and
-#   `vpc_flow_log_group_name` from the network module, and no root expression
-#   reads this module's log_group_name at all. The two role ARNs, which the list
-#   omitted, ARE genuinely wired. A cross-module inventory that over-credits one
-#   output and under-credits two makes a safe rename look dangerous and a
-#   dangerous one look safe, which is the specific harm of leaving it uncorrected.
+#   Assumptions: `log_group_name` is deliberately NOT among the six, even though
+#   infra/modules/observability plainly consumes log groups. That module receives
+#   `log_group_names` from the roots' `local.lambda_log_group_names` and
+#   `vpc_flow_log_group_name` from the network module, and no root expression reads
+#   this module's `log_group_name` at all. Trade-offs: a cross-module inventory is
+#   only worth stating if it is exact -- over-crediting one output makes a safe
+#   rename look dangerous, and under-crediting one makes a dangerous rename look
+#   safe -- which is why each entry above cites the expression that consumes it.
 #
 #   Assumptions: the eleven names not listed above are NOT dead. Each root
 #   re-exports this module's complete output object per workload as its
@@ -93,11 +88,11 @@
 #     tasks rather than as a long-running service, and the ETL is a load step
 #     rather than a service at all, so both are declared not online and the
 #     three resources behind those six values are never created for either.
-#     Refactoring Rationale: this paragraph said "one of the eight", which was
-#     measured before the ETL workload was added; the six values were then null
-#     for one instantiation out of eight rather than two out of nine. Each description
-#     restates its own condition, because a caller reading only this file must
-#     learn the nullability here rather than from a failed plan.
+#     Assumptions: "two of the nine" is measured against each root's
+#     `local.workloads`, whose non-online keys are `batch` and `data-migration`.
+#     Each output's own description restates its nullability condition as well,
+#     because a caller reading only the description it uses must learn the
+#     nullability there rather than from a failed plan.
 #   - A caller that indexes or interpolates one of those six nulls, or passes
 #     one into an argument that requires a value, fails at plan -- and the
 #     error names the caller's expression, not this file. Wiring the batch
@@ -107,11 +102,10 @@
 #     recorded in the closing block of this file.
 #
 # WHY (non-obvious design decisions):
-#   - Refactoring Rationale: the outputs mirror main.tf's own dependency
-#     ordering rather than being alphabetical or ranked by importance, so the
-#     two files can be read side by side in a single order and no output
-#     appears before the resource that produces it. Alphabetical was the
-#     alternative and would have opened the file with
+#   - Alternatives Considered: the outputs mirror main.tf's own dependency
+#     ordering rather than being alphabetical or ranked by importance, so the two
+#     files can be read side by side in one order and no output appears before the
+#     resource that produces it. Alphabetical would have opened the file with
 #     autoscaling_target_resource_id -- the most conditional value in it -- and
 #     split the three target-group outputs away from one another.
 #   - Alternatives Considered: every conditional value is read with one(),
@@ -131,27 +125,27 @@
 # Log destination.
 # -----------------------------------------------------------------------------
 
-# WHY : Refactoring Rationale: this replaces where the baseline's job and
-#       console output went. The JCL wrote it to the JES spool through SYSOUT
-#       and SYSPRINT DD statements, which made it readable only from the system
-#       the job ran on; infra/modules/observability builds its dashboards,
-#       alarms and metric filters on this group instead. Publishing the name is
-#       what stops that module recomposing it from name_prefix, service_name
-#       and environment and owning a second copy of the composition rule.
-#       Assumptions: reading aws_cloudwatch_log_group.this.name rather than
-#       local.log_group_name is deliberate. The local is a plain string that
-#       resolves whether or not the group exists, while the resource attribute
-#       carries a dependency edge, so a consumer creating a metric filter
+# WHY : Assumptions: this group is where the baseline's SYSOUT and SYSPRINT job
+#       output goes, and publishing the NAME is what stops a consumer recomposing
+#       it from name_prefix, service_name and environment and owning a second copy
+#       of the composition rule. Reading aws_cloudwatch_log_group.this.name rather
+#       than local.log_group_name is equally deliberate: the local is a plain
+#       string that resolves whether or not the group exists, while the resource
+#       attribute carries a dependency edge, so a consumer creating a metric filter
 #       against this name cannot be ordered before the group it filters.
 output "log_group_name" {
   description = <<-EOT
     Name string of the CloudWatch Logs group every task in this service writes
     to, in the form /aws/ecs/<name_prefix>-<service_name>-<environment>.
-    Consumed by infra/modules/observability, which attaches metric filters and
-    builds this service's dashboard and alarm set from it, and by an operator
-    tailing one service during the batch window. Never null: the log group is
-    created for all nine instantiations, including the two -- batch and
-    data-migration -- that have a task definition and no service.
+    Reaches the environment's `ecs_workloads` output, which publishes this whole
+    object per workload, and is read from there by an operator tailing one
+    service during the batch window. No sibling MODULE consumes it: both roots
+    build this service's dashboard and alarm set inside
+    infra/modules/observability from the cluster name, the target-group ARN
+    suffix and the metric dimensions, and pass this module no log-group name at
+    all. Never null: the log group is created for all nine instantiations,
+    including the two -- batch and data-migration -- that have a task definition
+    and no service.
   EOT
   value       = aws_cloudwatch_log_group.this.name
 }
@@ -188,26 +182,41 @@ output "log_group_arn" {
 
 # WHY : Assumptions: RACF has no cloud analogue and is not ported. Its role is
 #       filled by one least-privilege task role per service together with
-#       Cognito groups, which makes this ARN the entire mechanism by which a
-#       per-service privilege boundary is expressible at all. main.tf
-#       deliberately attaches no statement of its own to this role, and that is
-#       what makes the grant one-directional: a sibling module names this ARN
-#       in its own resource policy, so a service's reach is enumerated where
-#       the resource is defined rather than assembled inside a module shared by
-#       all nine workloads -- where any grant would necessarily reach all
-#       nine.
+#       Cognito groups, which makes this ARN the mechanism by which a
+#       per-service privilege boundary is expressible at all.
+# WHY : Refactoring Rationale: this note claimed that "main.tf deliberately
+#       attaches no statement of its own to this role" and that what a service
+#       may reach is therefore "exactly what a caller grants to this ARN and
+#       nothing besides". Both statements were false. main.tf attaches FOUR
+#       inline policies to this role -- aws_iam_role_policy.task from the
+#       caller's own document, and the module-composed task_sqs,
+#       task_online_write_gate and task_telemetry -- and the last three exist
+#       precisely so that a caller cannot widen or replace them. The accurate
+#       division is stated in the description below, because a reader deciding
+#       where to grant something has to know that this role already carries
+#       module-owned statements.
+# WHY : Assumptions: the one-directional property the old note was reaching for
+#       is real and is narrower than it claimed: the module writes no BUSINESS
+#       resource access onto this role. Queue actions are bounded to the exact
+#       ARNs a caller passes, the flag read is bounded to one parameter, and the
+#       telemetry statement reaches only this service's own log group and X-Ray
+#       ingestion, so no statement composed here can reach another bounded
+#       context's data.
 output "task_role_arn" {
   description = <<-EOT
     ARN string of the IAM role the APPLICATION assumes at run time, as
     distinct from execution_role_arn below, which ECS assumes in order to
-    start the task. Consumed by every sibling module that must grant this one
-    service access to a resource it owns: infra/modules/sqs in a queue policy,
-    infra/modules/kms in a key policy, infra/modules/secrets in a secret
-    resource policy, infra/modules/s3-datasets in a bucket policy. This ARN is
-    therefore the identity least privilege is expressed against -- main.tf
-    writes no policy onto this role, so what the service may reach is exactly
-    what a caller grants to this ARN and nothing besides. Never null: both
-    roles are created for all nine instantiations.
+    start the task. This ARN is the identity least privilege is expressed
+    against, and both roots read it: infra/modules/step-functions-batch takes
+    the batch, data-migration and reporting values as the Resource of its one
+    iam:PassRole statement, and a resource-owning module names it in a resource
+    policy where a grant belongs with the resource rather than with the
+    workload. The role is not empty when it arrives: main.tf attaches the
+    caller's task_role_policy_json plus three module-composed statements -- the
+    exact-queue actions, the one-parameter write-gate read, and log and X-Ray
+    export scoped to this service's own log group -- so what the service may
+    reach is those four things and nothing besides. Never null: both roles are
+    created for all nine instantiations.
   EOT
   value       = aws_iam_role.task.arn
 }
@@ -359,11 +368,15 @@ output "container_name" {
 output "container_port" {
   description = <<-EOT
     Port number -- a number, not a string -- that the container listens on and
-    that the target group forwards to. Consumed by infra/modules/alb when it
-    aligns a listener rule or its own health-check port with this service.
-    Never null: variables.tf supplies a default and rejects any value outside
-    1024-65535, since a privileged port cannot be bound by the unprivileged
-    container user this module runs as.
+    that the target group this module creates forwards to. Published so the
+    environment's `ecs_workloads` output records the port each workload was
+    registered on; infra/modules/alb does NOT consume it and declares no
+    container-port input, because the target group lives here and the listener
+    rules there forward to the group rather than to a port. Both roots supply
+    the value in the other direction, from infra/modules/network's single
+    app_container_port. Never null: variables.tf supplies a default and rejects
+    any value outside 1024-65535, since a privileged port cannot be bound by the
+    unprivileged container user this module runs as.
   EOT
   value       = var.container_port
 }
@@ -374,23 +387,21 @@ output "container_port" {
 # -----------------------------------------------------------------------------
 
 # WHY : Assumptions: the target group lives in this module rather than in alb
-#       because registering a target needs this module's container name,
-#       container port and health-check path -- three values alb has no other
-#       reason to know. That division is why no aws_lb, aws_lb_listener or
-#       aws_lb_listener_rule appears anywhere in this module, and why this ARN
-#       is published in their place.
-#       Trade-offs: publishing a NULLABLE output was chosen over both
-#       alternatives to it. Omitting the output for the batch shape is not
-#       expressible at all -- an output block is unconditional, so the real
-#       choice is a null value or no output for any of the nine
-#       instantiations. Splitting the module in two was the other option: a
-#       separate ecs-task module carrying only the task definition, the two
-#       roles and the log group. That is rejected because it would duplicate
-#       exactly those four things across two modules -- the duplication this
-#       reusable module exists to prevent -- after which the two copies would
-#       drift on everything except the parts that are meant to differ. The
-#       accepted cost is that a root wiring the batch instantiation must not
-#       pass this value anywhere a value is required.
+#       because registering a target needs this module's container name, container
+#       port and health-check path -- three values alb has no other reason to know.
+#       That division is why no aws_lb, aws_lb_listener or aws_lb_listener_rule
+#       appears anywhere in this module, and why this ARN is published in their
+#       place.
+#       Trade-offs: publishing a NULLABLE output was chosen over both alternatives.
+#       Omitting the output for the batch shape is not expressible at all -- an
+#       output block is unconditional, so the real choice is a null value or no
+#       output for any instantiation. Splitting out a separate ecs-task module
+#       carrying the task definition, the two roles and the log group was the other
+#       option, rejected because it would duplicate exactly those four things
+#       across two modules -- the duplication this reusable module exists to
+#       prevent -- after which the copies would drift on everything except the
+#       parts meant to differ. The accepted cost is that a root wiring the batch
+#       instantiation must not pass this value where a value is required.
 output "target_group_arn" {
   description = <<-EOT
     ARN string of the load-balancer target group this service's tasks register
@@ -463,11 +474,13 @@ output "target_group_arn_suffix" {
 output "service_name" {
   description = <<-EOT
     Name string of the long-running ECS service, or null when
-    var.create_service is false -- the batch instantiation, whose tasks Step
-    Functions starts one at a time rather than a service holding a desired
-    count. Consumed by infra/modules/observability as the ServiceName dimension
-    on the AWS/ECS metrics, and by an operator running a describe-services or
-    update-service command against one service.
+    var.create_service is false -- the batch and data-migration instantiations,
+    whose tasks Step Functions starts one at a time rather than a service
+    holding a desired count. Reaches the environment's `ecs_workloads` output
+    and is read from there by an operator running a describe-services or
+    update-service command against one service. No sibling MODULE consumes it:
+    infra/modules/observability alarms this fleet through the ALB target groups
+    and the cluster-level AWS/ECS metrics and is passed no service name.
   EOT
   value       = one(aws_ecs_service.this[*].name)
 }
@@ -526,41 +539,29 @@ output "autoscaling_target_resource_id" {
 # Two decisions about this surface as a whole.
 # -----------------------------------------------------------------------------
 
-# WHY : Alternatives Considered: marking the ARNs sensitive was evaluated and
-#       rejected on two independent grounds. First, every value here is an ARN,
-#       a name, a port or a composite identifier -- none is a credential and
-#       none can be exchanged for one. Second, .github/workflows/infra-ci.yml
-#       treats `terraform plan` as a reviewable artifact, and sensitive = true
-#       redacts a value from plan output, so marking these would hide the
-#       target-group ARN and both role ARNs from the very review that exists to
-#       check how a service is wired -- a real loss of review coverage bought
-#       for no security gain. The "no secrets committed to the repository"
-#       constraint is met structurally elsewhere and deliberately not here:
-#       every generated credential is produced by infra/modules/secrets at
-#       apply time and written straight into Secrets Manager. Note the
-#       asymmetry that makes this safe rather than merely convenient --
-#       var.secret_sources and var.ssm_parameter_arns carry only ARNs into this
-#       module, never the values behind them, so no secret value is ever in
-#       scope to be published.
+# WHY : Alternatives Considered: marking the ARNs sensitive was rejected on two
+#       independent grounds. Every value here is an ARN, a name, a port or a
+#       composite identifier -- none is a credential and none can be exchanged for
+#       one; and infra-ci.yml treats `terraform plan` as a reviewable artifact,
+#       which `sensitive = true` would redact, hiding the target-group ARN and both
+#       role ARNs from the review that exists to check how a service is wired. What
+#       makes that safe rather than merely convenient is that var.secret_sources
+#       and var.ssm_parameter_arns carry only ARNs into this module, never the
+#       values behind them, so no secret value is ever in scope to be published;
+#       the "no secrets committed" constraint is met structurally in
+#       infra/modules/secrets, which writes every generated credential straight
+#       into Secrets Manager.
 
-# WHY : Assumptions: each is owned by another module, and re-exporting a value
-#       this module either received as an input or does not own would publish a
-#       second apparent source of truth for one fact -- after which a
-#       divergence between the two copies becomes possible and nothing reports
-#       it.
-#       - No load-balancer DNS name, listener ARN or hostname.
-#         infra/modules/alb owns the listener and its rules, and
-#         infra/modules/api-gateway-http owns the edge in front of that. This
-#         module owns the target group and nothing beyond it, which is the
-#         boundary target_group_arn above exists to keep explicit.
-#       - No cluster ARN and no cluster name. Both arrive as inputs from
-#         infra/modules/ecs-cluster, so every caller already holds them;
-#         echoing them back would invite the two copies to be read as
-#         independent values.
-#       - No image URI. It arrives as an input from infra/modules/ecr, and the
-#         task definition consumes it unchanged rather than transforming it
-#         into something a caller does not already have.
-#       - No secret, parameter or KMS key values, and not even their ARNs. Only
-#         ARNs were ever passed in, so returning them would add nothing a root
-#         does not hold while widening this surface for no consumer.
+# WHY : Assumptions: nothing owned by another module is re-exported, because
+#       publishing a value this module either received as an input or does not own
+#       would create a second apparent source of truth for one fact, after which a
+#       divergence between the copies becomes possible and nothing reports it. So
+#       there is no load-balancer DNS name, listener ARN or hostname (alb owns the
+#       listener and its rules, api-gateway-http owns the edge, and this module
+#       owns the target group and nothing beyond it); no cluster ARN or name (both
+#       arrive as inputs, so every caller already holds them); no image URI (it
+#       arrives as an input and the task definition consumes it unchanged); and no
+#       secret, parameter or KMS key values, not even their ARNs, since only ARNs
+#       were ever passed in and returning them would widen this surface for no
+#       consumer.
 # =============================================================================

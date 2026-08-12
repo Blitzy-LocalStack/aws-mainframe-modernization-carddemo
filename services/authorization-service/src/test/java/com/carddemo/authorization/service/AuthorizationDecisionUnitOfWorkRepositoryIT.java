@@ -621,11 +621,14 @@ class AuthorizationDecisionUnitOfWorkRepositoryIT {
          */
         @Bean
         RequestWindowBoundary inertWindowBoundary() {
-            return (generation, admittedInWindow) -> {
-                // WHY : Assumptions: deliberately empty. A window is never filled in this class, so a
-                //       body here could only run if the window arithmetic changed underneath these cases,
-                //       and a boundary that raised in that event would report the change as a failure of
-                //       the unit of work these cases are about.
+            return (generation, admittedInWindow, intakeReopened) -> {
+                // WHY : Assumptions: deliberately empty, INCLUDING the reopen callback. A window is never
+                //       filled in this class, so a body here could only run if the window arithmetic
+                //       changed underneath these cases, and a boundary that raised in that event would
+                //       report the change as a failure of the unit of work these cases are about. Leaving
+                //       the reopen unrun is safe for the same reason it is safe in production: an
+                //       unreopened window keeps admitting and answering requests, recording them as
+                //       overspill, so a case here would still exercise its unit of work.
             };
         }
 

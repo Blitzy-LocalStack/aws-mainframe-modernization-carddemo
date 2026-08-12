@@ -8,6 +8,7 @@ import com.carddemo.batch.domain.BatchRun.BatchRunStatus;
 import jakarta.persistence.EntityManager;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -127,11 +128,12 @@ class BatchRunRepositoryIT {
      * The classpath-relative path of the foreign-schema harness the container runs at start.
      *
      * <p>Assumptions: this class maps only {@code BatchRun}, which lives in the schema Flyway creates,
-     * so it needs none of the harness's seven foreign tables. The script is supplied anyway, and
+     * so it needs none of the harness's nine foreign tables. The script is supplied anyway, and
      * deliberately: the datasource pins {@code search_path} to {@code batch, ledger, account,
-     * reference} on every connection, and this class asserts that the three foreign schemas the other
-     * two integration tests depend on are present -- so a broken script reference is reported HERE, by
-     * a named assertion, rather than as an undefined-table error inside an unrelated test.</p>
+     * reference, card} on every connection, and this class asserts that the four foreign schemas the
+     * other two integration tests depend on are present -- so a broken script reference is reported
+     * HERE, by a named assertion, rather than as an undefined-table error inside an unrelated
+     * test.</p>
      */
     private static final String HARNESS_SCRIPT =
             "db/testharness/test-harness-schemas-and-foreign-tables.sql";
@@ -278,8 +280,9 @@ class BatchRunRepositoryIT {
                         + " WHERE table_schema = 'batch' AND table_name = 'batch_run'",
                 Integer.class);
         assertThat(batchRunColumns)
-                .as("batch_run carries the seven columns V1__batch.sql declares")
-                .isEqualTo(7);
+                .as("batch_run carries the eight columns V1__batch.sql declares, the eighth being the"
+                        + " attempt counter a re-opened row increments")
+                .isEqualTo(8);
 
         Integer jobRepositoryTables = this.jdbc.queryForObject(
                 "SELECT count(*) FROM information_schema.tables"
@@ -299,16 +302,16 @@ class BatchRunRepositoryIT {
      * role as they do in a deployed environment. Nothing about a successful migration reveals which
      * role owns its output, so the ownership is read from the catalog.</p>
      *
-     * <p>Assumptions: the three FOREIGN schemas are asserted to exist and to be owned by someone else
+     * <p>Assumptions: the four FOREIGN schemas are asserted to exist and to be owned by someone else
      * in the same case, because the two halves together state the whole boundary: this module's schema
-     * is created by its own migration under its own role, and the three it merely reads arrive from
+     * is created by its own migration under its own role, and the four it merely reads arrive from
      * the init script as the container's user. A harness path that had been renamed would fail
      * here.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the batch schema is owned by the migration role and the three foreign schemas exist")
+    @DisplayName("the batch schema is owned by the migration role and the four foreign schemas exist")
     void theBatchSchemaIsOwnedByTheMigrationRole() {
         String batchOwner = this.jdbc.queryForObject(
                 "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'batch'",
@@ -322,11 +325,12 @@ class BatchRunRepositoryIT {
 
         List<String> foreignSchemas = this.jdbc.queryForList(
                 "SELECT nspname FROM pg_namespace"
-                        + " WHERE nspname IN ('ledger', 'account', 'reference') ORDER BY nspname",
+                        + " WHERE nspname IN ('ledger', 'account', 'reference', 'card')"
+                        + " ORDER BY nspname",
                 String.class);
         assertThat(foreignSchemas)
-                .as("the init script supplies the three schemas this module only reads")
-                .containsExactly("account", "ledger", "reference");
+                .as("the init script supplies the four schemas this module reads across")
+                .containsExactly("account", "card", "ledger", "reference");
 
         String ledgerOwner = this.jdbc.queryForObject(
                 "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'ledger'",
@@ -485,6 +489,7 @@ class BatchRunRepositoryIT {
                 String.class);
 
         assertThat(names).containsExactly(
+                "ck_batch_run_attempt",
                 "ck_batch_run_finished_after_started",
                 "ck_batch_run_lifecycle",
                 "ck_batch_run_return_code",
@@ -514,6 +519,72 @@ class BatchRunRepositoryIT {
         assertThat(definitionOf("uq_batch_run_run_step"))
                 .as("the idempotency key is the pair, in that order")
                 .contains("UNIQUE (run_id, step_name)");
+
+        assertThat(definitionOf("ck_batch_run_attempt"))
+                .as("an attempt count below one describes a row that exists without anything having"
+                        + " been attempted, and the row is only created when an attempt begins")
+                .contains("attempt >= 1");
+    }
+
+    /**
+     * Confirms the attempt counter is durable across a re-open and defaults to the first attempt.
+     *
+     * <p>Purpose: the counter is the only record that a step was tried more than once. Because
+     * {@code uq_batch_run_run_step} admits one row per run and step, a redrive cannot insert a second
+     * row -- so the recorded row is re-opened in place and the count is what distinguishes a first
+     * attempt from a fourth. A counter that lived only in the entity would be lost on every reload.</p>
+     *
+     * <p>Assumptions: the row is read back through plain SQL after the transaction commits rather than
+     * through the persistence context that wrote it, because a context read can be answered from the
+     * first-level cache and would pass on a column the database never stored. The column, its default
+     * and its constraint are what this case is about.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the attempt counter defaults to one, survives a re-open and refuses a count below one")
+    void theAttemptCounterIsDurableAcrossAReopen() {
+        commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
+
+        assertThat(this.jdbc.queryForObject(
+                "SELECT attempt FROM batch.batch_run WHERE run_id = ? AND step_name = ?",
+                Integer.class, RUN_ID, STEP_NAME))
+                .as("a row created by an opening attempt records the first attempt")
+                .isEqualTo(1);
+
+        this.transactionTemplate.executeWithoutResult(status -> {
+            BatchRun recorded = this.repository.findByRunIdAndStepName(RUN_ID, STEP_NAME)
+                    .orElseThrow();
+            recorded.markFailed(FINISHED_AT, RETURN_CODE_FAIL);
+        });
+        this.transactionTemplate.executeWithoutResult(status -> {
+            BatchRun recorded = this.repository.findByRunIdAndStepName(RUN_ID, STEP_NAME)
+                    .orElseThrow();
+            recorded.reopen(FINISHED_AT.plusMinutes(30));
+        });
+        this.entityManager.clear();
+
+        Map<String, Object> reopened = this.jdbc.queryForMap(
+                "SELECT attempt, status, finished_at, return_code FROM batch.batch_run"
+                        + " WHERE run_id = ? AND step_name = ?", RUN_ID, STEP_NAME);
+        assertThat(reopened.get("attempt"))
+                .as("re-opening the recorded row counts the attempt rather than inserting a second row")
+                .isEqualTo(2);
+        assertThat(reopened.get("status")).isEqualTo(BatchRun.BatchRunStatus.STARTED.name());
+        assertThat(reopened.get("finished_at"))
+                .as("the lifecycle constraint requires a started row to carry no finishing instant, so"
+                        + " re-opening has to clear the one the failed attempt wrote")
+                .isNull();
+        assertThat(reopened.get("return_code"))
+                .as("and to carry no tier, for the same reason")
+                .isNull();
+
+        assertThatThrownBy(() -> commitStatement(
+                "UPDATE batch.batch_run SET attempt = 0 WHERE run_id = ? AND step_name = ?",
+                RUN_ID, STEP_NAME))
+                .as("the database refuses a count below one, so an operator repairing a row by hand"
+                        + " cannot record a row that nothing was ever attempted on")
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     /**

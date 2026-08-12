@@ -513,27 +513,21 @@ variable "app_container_port" {
     #       group can admit it. The whole-number test prevents a fractional
     #       value reaching the provider and failing with a less useful type
     #       conversion diagnostic.
+    #       Refactoring Rationale: a second validation used to refuse 443
+    #       specifically, on the ground that the interface-endpoint ENIs shared
+    #       the application security group and so the task-to-endpoint flow was a
+    #       SELF-referencing rule at 443 that a 443 container port would silently
+    #       turn into a task-to-task allowance. The ENIs now carry their own
+    #       group and that flow names two distinct groups, so the premise no
+    #       longer holds; and 443 is below 1024, so the condition here already
+    #       refuses the value. The separate check is withdrawn rather than
+    #       re-justified, because a constraint kept with a manufactured reason is
+    #       worse than no constraint - the next reader cannot tell which of the
+    #       two is load-bearing.
     condition     = var.app_container_port == floor(var.app_container_port) && var.app_container_port >= 1024 && var.app_container_port <= 65535
     error_message = "app_container_port must be a whole number from 1024 to 65535; every service container runs as a non-root user."
   }
 
-  validation {
-    # WHY : Assumptions: 443 is refused specifically, and the reason is a
-    #       property of another rule rather than of this port. The interface
-    #       endpoint ENIs share the application security group, so the
-    #       task-to-endpoint flow is a SELF-referencing rule on that group at
-    #       443. While no task listens on 443 that rule reaches no application
-    #       listener; set this input to 443 and the same rule would silently
-    #       become a task-to-task allowance, which is the widening the isolated
-    #       tiers exist to prevent. Refusing the value here makes that bound
-    #       enforced rather than merely true today.
-    #       Alternatives Considered: allowing 443 and narrowing the self
-    #       reference to the endpoint ENIs' addresses. Rejected because an
-    #       endpoint ENI's address is assigned at creation and is not knowable
-    #       when the rule is planned, so the narrowing cannot be expressed.
-    condition     = var.app_container_port != 443
-    error_message = "app_container_port must not be 443; the application security group self-references 443 for the interface endpoint ENIs, so a 443 container port would turn that rule into a task-to-task allowance."
-  }
 }
 
 # WHY : Refactoring Rationale: this input was removed even though 5432 appears

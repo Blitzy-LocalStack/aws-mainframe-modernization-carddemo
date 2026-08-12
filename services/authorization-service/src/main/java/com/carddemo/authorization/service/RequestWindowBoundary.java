@@ -16,12 +16,21 @@ package com.carddemo.authorization.service;
  * This interface is that boundary, expressed once so the admission logic and the mechanism that acts on
  * it are separable.
  *
- * <p>Alternatives Considered: refusing the request past the allowance inside the handler instead.
- * Rejected because
- * neither available outcome is correct -- throwing sends a legitimate request toward the dead-letter
- * queue on a bound that has nothing to do with the request, and returning without handling deletes a
- * request nobody answered. Only closing intake before the receive keeps the bound and the message both
- * intact, which is exactly what the reference program's test-before-next-read achieves.
+ * <p>Alternatives Considered: refusing every request past the allowance inside the handler instead of
+ * stopping the container. Rejected as the PRIMARY mechanism because neither available outcome is correct
+ * for a sustained overflow -- throwing sends a legitimate request toward the dead-letter queue on a bound
+ * that has nothing to do with the request, and returning without handling deletes a request nobody
+ * answered. Closing intake before the receive keeps the bound and the message both intact, which is what
+ * the reference program's test-before-next-read achieves.
+ *
+ * <p>Trade-offs: refusal IS nevertheless used, for the one interval in which stopping cannot yet have
+ * taken effect. Admission is closed the instant the allowance is reached and stays closed until the reopen
+ * action runs, so the messages the container had already dispatched -- at most its configured concurrency,
+ * and only for the duration of one stop-and-start -- are refused and redelivered rather than handled
+ * inside a run that was supposed to have ended. Each of those costs one receive against the queue's
+ * redrive count. Alternatives Considered: BLOCKING those threads until the cycle completed, which costs no
+ * receive at all. Rejected because it deadlocks: stopping a container waits for its in-flight invocations,
+ * and those invocations would be waiting for the stop.
  *
  * <p>Alternatives Considered: leaving the bound unimplemented and documenting the container's
  * concurrency and poll settings as its replacement. Rejected because those settings bound work IN
@@ -42,7 +51,18 @@ public interface RequestWindowBoundary {
      *
      * <p>Assumptions: an implementation that cannot close the window is required to leave intake OPEN and
      * report the failure, never to leave it closed. A window that fails to reopen halts every
-     * authorization in the system, which is a strictly worse outcome than a window that ran long.</p>
+     * authorization in the system, which is a strictly worse outcome than a window that ran long. That
+     * obligation is now enforced by the SHAPE of this method rather than left to each implementation: the
+     * reopen action is a parameter, so an implementation that runs the close asynchronously has somewhere
+     * definite to run it from and can run it in a {@code finally}.</p>
+     *
+     * <p>Refactoring Rationale: the reopen action is a NEW parameter and the admission accounting used to
+     * reopen the next window ITSELF, synchronously, in the same atomic step that fired this call. That made
+     * one physical container run able to exceed the allowance: the next generation was already open while
+     * the container was still being stopped, so every message the container had already dispatched -- up to
+     * its configured concurrency -- was admitted into the new window and handled inside the run that was
+     * supposed to have ended. Handing the reopen to the implementation is what lets the window stay CLOSED
+     * for the whole of the cycle, which is the only interval in which an over-admission can happen.</p>
      *
      * <p>Refactoring Rationale: the generation is passed as well as the count, and it was not. The count
      * alone cannot distinguish one closure from another, so nothing at this seam could tell a second
@@ -55,6 +75,9 @@ public interface RequestWindowBoundary {
      *     two calls carrying one generation are a defect rather than a repetition
      * @param admittedInWindow how many requests the closing window admitted, which is the configured
      *     allowance whenever the window closed normally
+     * @param reopenAdmission the action that opens the next window; must be run exactly once, and must be
+     *     run whether the close succeeded or failed, because admission is CLOSED from the moment this call
+     *     is made and a window that is never reopened halts every authorization in the system
      */
-    void onWindowComplete(long generation, int admittedInWindow);
+    void onWindowComplete(long generation, int admittedInWindow, Runnable reopenAdmission);
 }

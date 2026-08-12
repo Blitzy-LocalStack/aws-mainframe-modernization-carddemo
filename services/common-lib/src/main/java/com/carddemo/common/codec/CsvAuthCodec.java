@@ -323,16 +323,13 @@ public final class CsvAuthCodec {
     /**
      * Deprecated alias of {@link #CORRELATION_COMPOSITE_LENGTH}, retained for source compatibility.
      *
-     * <p>Refactoring Rationale: an earlier revision of this class DELETED this name outright when
-     * the correctly named constant was introduced, on the reasoning that a hard compile failure makes
-     * every consumer re-decide which quantity it meant. That reasoning is right about the goal and
-     * wrong about the mechanism available here: common-lib publishes no major-version boundary at
-     * which a source-incompatible removal is announced, and every one of the eight service modules
-     * resolves it as {@code 1.0.0-SNAPSHOT}, so the deletion broke compilation for consumers of the
-     * prior API with no declared break to point at. A deprecated alias achieves the same
-     * re-decision -- the compiler emits a warning naming the replacement at every use site -- without
-     * making the module's own version history dishonest. Removal belongs in a declared major-version
-     * break, and this alias is the thing that break will remove.</p>
+     * <p>Alternatives Considered: deleting this name outright, so that a hard compile failure makes
+     * every consumer re-decide which quantity it meant. Rejected on the mechanism rather than the goal:
+     * common-lib publishes no major-version boundary at which a source-incompatible removal is
+     * announced, and every one of the eight service modules resolves it as {@code 1.0.0-SNAPSHOT}, so a
+     * deletion breaks compilation with no declared break to point at. A deprecated alias forces the same
+     * re-decision -- the compiler emits a warning naming the replacement at every use site -- and
+     * removal belongs in a declared major-version break, which is what will take this alias.</p>
      *
      * <p>Assumptions: the alias carries the SAME value as its replacement and is initialised from it
      * rather than restating 31, so the two cannot drift apart. That is the whole safety property of
@@ -399,27 +396,26 @@ public final class CsvAuthCodec {
     /**
      * The purpose string a per-card keyed derivation is scoped by.
      *
-     * <p>Refactoring Rationale: this purpose scoped the value published as the queue's
-     * {@code MessageGroupId}, and no longer does. Specification &sect;0.4.1.8 fixes that identity as the
-     * card number itself, and the derivation was withdrawn because a group identity orders one card's
-     * messages only while EVERY producer on the queue computes the same value for that card -- a value
-     * keyed from one consumer's secret is one only that consumer can compute. What the purpose still
-     * scopes is a stable, non-reversible per-card value for uses that are a single service's own to
-     * choose, such as a metric dimension or a diagnostic key; no publisher in this repository derives a
-     * queue identity through it.</p>
+     * <p>Assumptions: this purpose does NOT scope the queue's {@code MessageGroupId}. Specification
+     * &sect;0.4.1.8 fixes that identity as the card number itself, and a keyed derivation cannot serve
+     * it: a group identity orders one card's messages only while EVERY producer on the queue computes
+     * the same value for that card, and a value keyed from one consumer's secret is one only that
+     * consumer can compute. What this purpose scopes is a stable, non-reversible per-card value for uses
+     * that are a single service's own to choose, such as a metric dimension or a diagnostic key; no
+     * publisher in this repository derives a queue identity through it.</p>
      */
     public static final String GROUP_PURPOSE = "carddemo/pauth/order-group";
 
     /**
      * The purpose string a per-authorization keyed derivation is scoped by.
      *
-     * <p>Refactoring Rationale: this purpose scoped the value published as the queue's
-     * {@code MessageDeduplicationId}, and no longer does. Specification &sect;0.4.1.8 fixes that identity
-     * as the transaction identifier itself, and the derivation was withdrawn because suppression compares
-     * an identity the REQUESTER may resend, so it has to be a value the requester can predict. What the
-     * purpose still scopes is a stable value over the card-and-transaction pair, separate from
-     * {@link #CORRELATION_PURPOSE} so that two derivations of one pair cannot be joined to each other; no
-     * publisher in this repository derives a queue identity through it.</p>
+     * <p>Assumptions: this purpose does NOT scope the queue's {@code MessageDeduplicationId}.
+     * Specification &sect;0.4.1.8 fixes that identity as the transaction identifier itself, and a keyed
+     * derivation cannot serve it: suppression compares an identity the REQUESTER may resend, so it has
+     * to be a value the requester can predict. What this purpose scopes is a stable value over the
+     * card-and-transaction pair, separate from {@link #CORRELATION_PURPOSE} so that two derivations of
+     * one pair cannot be joined to each other; no publisher in this repository derives a queue identity
+     * through it.</p>
      */
     public static final String DEDUPLICATION_PURPOSE = "carddemo/pauth/deduplication";
 
@@ -429,9 +425,10 @@ public final class CsvAuthCodec {
      * <p>Assumptions: fourteen positions -- one sign, nine zero-suppressed digit positions, one
      * forced digit position, the literal point and two fractional digits -- as declared at line 66
      * of {@code COPAUA0C.cbl} for {@code WS-APPROVED-AMT-DIS}. It coincides with the fourteen
-     * {@code CCPAURLY.cpy} line 24 declares for {@code PA-RL-APPROVED-AMT PIC +9(10).99}, and the
-     * coincidence is why an earlier revision could emit the wrong CHARACTERS at the right WIDTH: the
-     * two pictures differ in what they put in each position, not in how many there are.</p>
+     * {@code CCPAURLY.cpy} line 24 declares for {@code PA-RL-APPROVED-AMT PIC +9(10).99}. The
+     * coincidence is a hazard worth naming: the two pictures differ in what they put in each position,
+     * not in how many there are, so a width check alone cannot tell a correct rendering from a wrong
+     * one.</p>
      */
     public static final int MONEY_EDITED_WIDTH = 14;
 
@@ -602,7 +599,8 @@ public final class CsvAuthCodec {
      * The character the reply mask's leading {@code -} position emits for a non-negative amount.
      *
      * <p>Assumptions: a fixed sign-control position in a COBOL edited picture emits a space, not a
-     * plus, when the value is not negative. This is the byte an earlier revision got wrong.</p>
+     * plus, when the value is not negative -- one byte that a reading of the picture as "+ or -" gets
+     * wrong at the right width.</p>
      */
     private static final char MONEY_SIGN_BLANK = ' ';
 
@@ -683,12 +681,13 @@ public final class CsvAuthCodec {
      *
      * <p>Assumptions: a format violation on this wire is a caller-side defect rather than a
      * recoverable condition, which is why this extends {@link ClientInputException} -- itself an
-     * unchecked {@code IllegalArgumentException} -- rather than a checked type. Refactoring Rationale:
-     * the supertype was the bare {@code IllegalArgumentException} and is now the narrower one, because
-     * the shared advice no longer claims the whole family: that family also carries every internal
-     * invariant in the migration, so claiming it reported a service defect to a caller as a request to
-     * correct. This type satisfies the narrower supertype's redaction obligation already, through the
-     * per-field sensitivity gate every message in this codec is composed by. Nothing downstream can retry its way out of a payload carrying the wrong field
+     * unchecked {@code IllegalArgumentException} -- rather than a checked type. Assumptions: the
+     * supertype is the narrow {@code ClientInputException} rather than the bare
+     * {@code IllegalArgumentException}, because the shared advice must not claim the whole family: that
+     * family also carries every internal invariant in the migration, so claiming it would report a
+     * service defect to a caller as a request to correct. This type satisfies the narrower supertype's
+     * redaction obligation through the per-field sensitivity gate every message in this codec is
+     * composed by. Nothing downstream can retry its way out of a payload carrying the wrong field
      * count or a money token with no decimal point; the message has to be rejected and reported, and
      * the consumer's dead-letter queue is where a rejected message goes.</p>
      *
@@ -937,15 +936,15 @@ public final class CsvAuthCodec {
         /**
          * Returns a keyed, opaque per-card derivation of this request's card number.
          *
-         * <p>Refactoring Rationale: this was the value a producer published as the request queue's
-         * {@code MessageGroupId}, and it is no longer used for that. Specification &sect;0.4.1.8 states
-         * the identity literally -- {@code MessageGroupId = card_num} -- and the derivation was withdrawn
+         * <p>Assumptions: this derivation is NOT the value a producer publishes as the request queue's
+         * {@code MessageGroupId}. Specification &sect;0.4.1.8 states
+         * the identity literally -- {@code MessageGroupId = card_num} -- and a keyed derivation cannot serve it,
          * because grouping is only an ordering guarantee while EVERY producer on the queue computes the
          * same value for one card, which a value keyed from one consumer's secret cannot be. The
          * exposure that decision accepts, a primary account number in queue metadata, is registered as
          * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in the divergence register.</p>
          *
-         * <p>Assumptions: what remains is a derivation any single service may use where it needs a
+         * <p>Assumptions: the derivation itself is available to any single service that needs it where it needs a
          * stable per-card value that discloses nothing -- a metric dimension or a diagnostic key, where
          * only that service compares two values. No publisher in this repository calls it.</p>
          *
@@ -1124,7 +1123,7 @@ public final class CsvAuthCodec {
          * fact, so a derivation over the card alone is the only one both can compute.</p>
          *
          * <p>Refactoring Rationale: this was the value the reply publisher put in the queue's
-         * {@code MessageGroupId}, and it is no longer used for that. Specification &sect;0.4.1.8 fixes
+         * {@code MessageGroupId}. Specification &sect;0.4.1.8 fixes
          * that identity as {@code card_num}, and a derived group identity is equal for equal cards only
          * WITHIN one producer, so a second producer built to the specification would have split one
          * card's messages across two groups and lost the ordering guarantee. The metadata exposure the
@@ -1154,8 +1153,8 @@ public final class CsvAuthCodec {
          * stable for one authorization and independent of the payload's bytes.</p>
          *
          * <p>Refactoring Rationale: this was the value the reply publisher put in the queue's
-         * {@code MessageDeduplicationId}, and it is no longer used for that. Specification &sect;0.4.1.8
-         * fixes that identity as {@code transaction_id}, and the derivation was withdrawn because
+         * {@code MessageDeduplicationId}. Specification &sect;0.4.1.8
+         * fixes that identity as {@code transaction_id}, and a keyed derivation cannot serve it because
          * suppression compares an identity the REQUESTER may resend: a value keyed from this consumer's
          * secret is unpredictable to the requester, so an honest resend arriving by another path would be
          * accepted as a second answer to one request -- the precise failure the derivation was meant to
@@ -1198,9 +1197,8 @@ public final class CsvAuthCodec {
          * are retained in full. The decision fields are the whole reason to look at a reply, they are
          * the values a parity comparison checks, and none of them says anything about the cardholder.</p>
          *
-         * <p>Refactoring Rationale: the approved amount and the transaction identifier are BOTH
-         * withheld, the identifier having been retained in full by an earlier revision. Both appear in
-         * this class's sensitivity table -- {@code PA-RL-APPROVED-AMT} and
+         * <p>Assumptions: the approved amount and the transaction identifier are BOTH withheld. Both
+         * appear in this class's sensitivity table -- {@code PA-RL-APPROVED-AMT} and
          * {@code PA-RL-TRANSACTION-ID} -- and the two carriers are kept symmetrical deliberately:
          * withholding an identifier on the request while quoting the same identifier on the reply
          * would leave the value in the log by whichever of the two happened to be rendered, and a
@@ -1479,9 +1477,9 @@ public final class CsvAuthCodec {
      * moved into at line 720 and joined into the reply buffer at line 727. It is <em>not</em>
      * {@code PA-RL-APPROVED-AMT PIC +9(10).99} from line 24 of {@code CCPAURLY.cpy}: that field
      * holds the value, the mask emits it, and only the mask reaches a consumer. The two agree on the
-     * width, fourteen, and disagree on every position's content -- which is why an earlier revision
-     * emitting a {@code +} and zero padding produced a correctly-sized payload that no COBOL program
-     * would ever have produced. The fourteen breaks down as one sign-control position, nine
+     * width, fourteen, and disagree on every position's content -- so emitting a {@code +} and zero
+     * padding would produce a correctly-sized payload that no COBOL program would ever have produced.
+     * The fourteen breaks down as one sign-control position, nine
      * zero-suppressed digit positions, one forced digit position, the literal point, and two
      * fractional digits; the implied decimal position that {@code V} denotes in the zoned and packed
      * pictures occupies no byte at all.</p>
@@ -1786,9 +1784,9 @@ public final class CsvAuthCodec {
         //       cbl/COPAUA0C.cbl line 66 and moved into the put buffer at its line 720, whose sign
         //       occupies a FIXED leading position while the zero-suppression characters blank every
         //       leading integer position the magnitude does not reach -- so -100.99 renders as a minus,
-        //       seven blanks and then 100.99. Stripping only the two ENDS of the token, which is what an
-        //       earlier revision did, left those interior blanks in the integer digit run and the parser
-        //       then rejected a token this same class had just emitted. The pad is removed only where the
+        //       seven blanks and then 100.99. Stripping only the two ENDS of the token would leave those
+        //       interior blanks in the integer digit run, and the parser would then reject a token this
+        //       same class had just emitted. The pad is removed only where the
         //       mask can produce it, immediately after the sign; a blank appearing anywhere else still
         //       reaches the digit check below and is still refused, so a token such as '1 0.99' remains
         //       an error rather than becoming 10.99.
@@ -2006,17 +2004,17 @@ public final class CsvAuthCodec {
     /**
      * Establishes that every character token reached the width its copybook line declares.
      *
-     * <p>Refactoring Rationale: width was previously checked as an upper bound alone, in
-     * {@link #characterField(String, String, int)}, and an upper bound is only half of a fixed-width
-     * contract. A payload one byte short of its declared length split into the right number of fields,
-     * every token fitted, and the LAST token silently lost its final character -- on a request that
-     * token is {@code PA-RQ-TRANSACTION-ID}, the value the migrated messaging design uses as the
-     * deduplication identifier and as half of the correlation identity. The consequences compounded
-     * rather than announcing themselves: the shortened value re-emitted at the full declared width, so
-     * the corruption became indistinguishable from a well-formed payload; the correlation token
-     * changed, so a reply carrying the original identifier no longer matched; and two identifiers
-     * differing only in their last character collapsed onto one, so a genuinely distinct authorization
-     * could be discarded as a duplicate. This method supplies the missing half.</p>
+     * <p>Assumptions: an upper bound is only half of a fixed-width contract, so the lower bound is
+     * asserted here while {@link #characterField(String, String, int)} keeps the upper one. Without this
+     * half, a payload one byte short of its declared length splits into the right number of fields, every
+     * token fits, and the LAST token silently loses its final character -- on a request that token is
+     * {@code PA-RQ-TRANSACTION-ID}, the value the migrated messaging design uses as the deduplication
+     * identifier and as half of the correlation identity. The consequences compound rather than
+     * announcing themselves: the shortened value is re-emitted at the full declared width, so the
+     * corruption is indistinguishable from a well-formed payload; the correlation token changes, so a
+     * reply carrying the original identifier does not match; and two identifiers differing only in their
+     * last character collapse onto one, so a genuinely distinct authorization can be discarded as a
+     * duplicate.</p>
      *
      * <p>Assumptions: only the SHORT direction is reported here, and the long direction stays where it
      * was. Rejecting both here would duplicate a check that already exists and would replace its

@@ -813,11 +813,11 @@ contract.
   **443**, application back to the load balancer on **443** (this is how one
   service resolves an account context from another), application to the S3
   gateway endpoint on **443** by prefix list, and the single wide **443** egress
-  rule that reaches Cognito and X-Ray. WHY (Refactoring Rationale): the three
-  flows this list named before omitted the last three, which the network module
-  did not declare either — so service-to-service calls, object-store access and
-  every Cognito and X-Ray call would have been dropped by the application group
-  at run time, with no build failure and a hung request as the first symptom.
+  rule that reaches Cognito and X-Ray. Assumptions: this list is the complete
+  set the network module declares. A flow present here but absent from the module
+  — or absent from both — is dropped by the application security group at run
+  time, with no build failure and a hung request as the first symptom, so the
+  list is maintained against `infra/modules/network/main.tf` rather than summarised.
 - **At the edge:** an API Gateway HTTP API with a Cognito JWT authorizer fronts the
   internal ALB through a VPC Link; CloudFront with an origin access control fronts
   the single-page-application bucket.

@@ -336,15 +336,22 @@ public class InterestCalculationService {
         Optional<CardXref> crossReference =
                 this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId);
         if (crossReference.isEmpty()) {
-            // WHAT: the absent cross-reference ends the step rather than producing a blank card.
             // WHY : Alternatives Considered: defaulting the card number to blanks and carrying on was
             //       evaluated and rejected. The reference abends at :408 rather than defaulting, and a
             //       blank card number would be written into TRAN-CARD-NUM PIC X(16) as a syntactically
             //       valid row, so the run would report success while emitting interest attributed to no
-            //       card. A refusal that names the account is recoverable; a plausible wrong row is not.
-            throw new IllegalStateException("the account " + accountId + " has no card"
-                    + " cross-reference row, so no card number can be stamped on its generated"
-                    + " interest transaction; app/cbl/CBACT04C.cbl:408 abends on this condition");
+            //       card. A refusal is recoverable; a plausible wrong row is not.
+            // WHY : Refactoring Rationale: the message used to interpolate the account identifier. An
+            //       exception message reaches a retained log through whatever boundary handles it, and
+            //       docs/architecture/observability.md names the account identifier among the values such
+            //       a line may not hold, requiring omission rather than abbreviation. The condition is
+            //       still locatable: the interest step reads the category-balance rows in one
+            //       deterministic order and its own warn line carries the row ordinal, and the step
+            //       ledger records the run this failure belongs to.
+            throw new IllegalStateException("an account in this run has no card cross-reference row,"
+                    + " so no card number can be stamped on its generated interest transaction;"
+                    + " app/cbl/CBACT04C.cbl:408 abends on this condition. The account identifier is"
+                    + " deliberately omitted from this message because it reaches a retained log");
         }
 
         return crossReference.get().getCardNum();
@@ -388,7 +395,6 @@ public class InterestCalculationService {
             return InterestRateLookup.ofDirectHit(requested, direct.get().getInterestRate());
         }
 
-        // WHAT: the first read found nothing, which is the file status '23' arm of :422.
         // WHY : Assumptions: the two-step retry is control flow the goldens observe, so it is
         //       performed here rather than hidden behind a repository convenience that answered both
         //       keys in one call. tests/golden/interest/default_fallback exists precisely to
@@ -602,6 +608,24 @@ public class InterestCalculationService {
                     + " first generated identifier of a run carries 000001 and never 000000");
         }
 
+        // WHY : ⚠️ Assumptions: the prefix is the token AS SUPPLIED and is deliberately NOT
+        //       normalised. app/cbl/CBACT04C.cbl:476-480 concatenates PARM-DATE DELIMITED BY SIZE, so
+        //       whatever ten characters the operator passed become the first ten of TRAN-ID -- and the
+        //       parity oracle pins that: tests/golden/interest/happy_path/transact.expected opens with
+        //       the sixteen characters 2024-01-15000001, hyphens included, because the harness passes
+        //       PARM-DATE=2024-01-15. Normalising to the compact layout would render the same day as
+        //       2024011500 and change every generated identifier in the run, which the golden compares
+        //       byte for byte.
+        // WHY : Alternatives Considered: routing this through BusinessDate.identifierPrefix(), which
+        //       normalises a separated token to the compact numeric layout. Rejected HERE and used for
+        //       the dataset partition prefix instead. It was reached for because a date-prefixed
+        //       identifier is not a number, and the two interactive writers used to derive their next
+        //       key by parsing the stored maximum -- so one night's interest run made the next add and
+        //       the next payment fail on a numeric parse. That was a defect in the DERIVATION, not in
+        //       this identifier: both writers now allocate from ledger.transaction_id_seq and parse
+        //       nothing, so the reference's identifier shape costs nothing and normalising it would cost
+        //       golden-master parity. Fixing the reader rather than the writer is what keeps the
+        //       baseline's bytes.
         Transaction generated = new Transaction(
                 businessDate.token() + zeroPadded(identifierSuffix, IDENTIFIER_SUFFIX_DIGITS));
 

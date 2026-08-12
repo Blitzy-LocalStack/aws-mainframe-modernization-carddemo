@@ -3,6 +3,7 @@ package com.carddemo.account.mapper;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.dto.AccountViewResponse;
+import com.carddemo.account.dto.CustomerDisplayView;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
@@ -466,6 +467,56 @@ public class CustomerMapper {
                 exactWidth(row.getPrimaryCardHolderIndicator(), PRIMARY_CARD_HOLDER_INDICATOR_WIDTH,
                         "pri_card_holder_ind", true),
                 creditScoreDigits(row.getFicoCreditScore()));
+    }
+
+    /**
+     * Projects a customer row onto the nine fields a neighbouring context renders on a screen.
+     *
+     * <p>Refactoring Rationale: this projection exists because the pending-authorization detail screen had no
+     * operation to read those fields from. Its client read them from the response of the customer EXISTENCE
+     * check, which carries no body at all by contract, so every display field on that screen rendered absent
+     * and nothing failed while it did. The fields had to cross the boundary somehow, and the only other
+     * available shape was {@link #toCustomerResponse(Customer)} -- the whole record, gated on the authority
+     * that reads a national identifier, a government-issued identifier and a credit score for any customer.
+     * A narrow projection is what lets the fields cross without that authority being minted for a screen.</p>
+     *
+     * <p>Assumptions: NOTHING here needs masking, and that is a property of the field list rather than of this
+     * method. The two encrypted identifiers and the credit score are absent rather than masked, so this is the
+     * one customer projection in this class that consults no protection boundary at all -- there is nothing
+     * for it to consult. A masked member would still be a member a future consumer would start reading.</p>
+     *
+     * <p>Assumptions: the three name components are carried SEPARATELY and are not joined. The record declares
+     * no composed name -- {@code CUST-FIRST-NAME PIC X(25)} at L6 of {@code app/cpy/CVCUS01Y.cpy},
+     * {@code CUST-MIDDLE-NAME PIC X(25)} at L7 and {@code CUST-LAST-NAME PIC X(25)} at L8 -- so joining them
+     * here would publish a value no column holds and would fix the separator, and the collapse of an absent
+     * middle name, inside this context on behalf of a screen it cannot see.</p>
+     *
+     * <p>Assumptions: the ADDRESS is carried as five components for the same reason, and the postal code is
+     * carried UNNARROWED. The consuming screen composes two lines from them --
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} joins the first two lines at L766 through L770
+     * and joins the third line, the state code and {@code CUST-ADDR-ZIP(1:5)} at L771 through L777 -- so the
+     * narrowing from ten characters to five is a decision of the display, taken at the point of display. Taking
+     * it here would publish that truncation as though it were the layout and would discard the four-digit
+     * extension for every later reader. The country code at L13 of {@code app/cpy/CVCUS01Y.cpy} is absent
+     * although it sits between two published components, because neither composition reads it.</p>
+     *
+     * @param row the stored customer row; must not be {@code null}
+     * @return the nine-field display projection, never {@code null}
+     * @throws NullPointerException if {@code row} is {@code null}, because an absent row is a not-found answer
+     *     the caller decides on rather than a value to project
+     */
+    public CustomerDisplayView toCustomerDisplayView(Customer row) {
+        Objects.requireNonNull(row, "row must not be null");
+        return new CustomerDisplayView(
+                row.getFirstName(),
+                row.getMiddleName(),
+                row.getLastName(),
+                row.getAddressLine1(),
+                row.getAddressLine2(),
+                row.getAddressLine3(),
+                row.getAddressStateCode(),
+                row.getAddressZip(),
+                row.getPhoneNumber1());
     }
 
     /**

@@ -23,18 +23,21 @@
  *       {@code RecordConflictException}, {@code FieldOrdering}.</li>
  *   <li><b>{@code web}</b> -- correlation-id propagation, the keyset pagination
  *       envelope and the sealed token that carries a paging position between two
- *       requests. Three production classes: {@code CorrelationIdFilter},
- *       {@code PageResponse}, {@code CursorToken}.</li>
+ *       requests, and the bound on how large a request body a service will read.
+ *       Four production classes: {@code CorrelationIdFilter},
+ *       {@code PageResponse}, {@code CursorToken}, {@code RequestBodySizeFilter}.</li>
  *   <li><b>{@code security}</b> -- conversion of the identity provider's group
  *       claim into Spring Security authorities, the access-token checks the
  *       issuer's decoder does not perform, the renderings that keep an identifier
  *       out of an operational record or a markup document, the sealed selector a
  *       URL may carry in place of a protected identifier, and the short-lived
- *       bearer token one bounded context presents to another. Eight production
- *       classes: {@code JwtRoleConverter}, {@code CognitoAccessTokenValidator},
- *       {@code CardNumberMasker}, {@code MaskedCardNumber},
- *       {@code OpaqueIdentifier}, {@code SealedSelector},
- *       {@code HtmlTextEncoder}, {@code InternalServiceToken}.</li>
+ *       bearer token one bounded context presents to another, and the check that
+ *       refuses a configured browser origin the deployment did not publish. Nine
+ *       production classes: {@code JwtRoleConverter},
+ *       {@code CognitoAccessTokenValidator}, {@code CardNumberMasker},
+ *       {@code MaskedCardNumber}, {@code OpaqueIdentifier}, {@code SealedSelector},
+ *       {@code HtmlTextEncoder}, {@code InternalServiceToken},
+ *       {@code ApprovedOriginPolicy}.</li>
  *   <li><b>{@code messaging}</b> -- the message-expiry attribute every queue
  *       consumer honours, the canonical encoding a correlation identity must
  *       satisfy to travel as queue metadata, and the rule that every bound on a
@@ -117,11 +120,14 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>40 production classes</b> in a root and ten
- * subpackages, each carrying one charter file, for <b>51</b> compilation units. The
+ * <p>The module holds <b>43 production classes</b> in a root and ten
+ * subpackages, each carrying one charter file, for <b>54</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
  * of these eleven rows, and a proposed addition that fits none of them does not belong
- * in the shared kernel at all.
+ * in the shared kernel at all. The set is deliberately FLAT: there is no nested
+ * subpackage, and {@code SharedKernelInventoryTest} re-derives this table one level
+ * deep, so a nested package would be reported as drift rather than folded silently
+ * into its parent's row.
  *
  * <pre>
  * package               production classes   charter   compilation units
@@ -129,9 +135,9 @@
  * common.money                           2         1                   3
  * common.codec                           6         1                   7
  * common.error                           7         1                   8
- * common.messaging                       3         1                   4
- * common.web                             3         1                   4
- * common.security                        8         1                   9
+ * common.messaging                       4         1                   5
+ * common.web                             4         1                   5
+ * common.security                        9         1                  10
  * common.observability                   3         1                   4
  * common.time                            1         1                   2
  * common.validation                      2         1                   3
@@ -139,20 +145,20 @@
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 6 + 7 + 3 + 3 + 8 + 3 + 1 + 2 + 4 = 40, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 7 + 8 + 4 + 4 + 9 + 4 + 2 + 3 + 5 = 51. Both totals agree,
+ * 1 + 2 + 6 + 7 + 4 + 4 + 9 + 3 + 1 + 2 + 4 = 43, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 7 + 8 + 5 + 5 + 10 + 4 + 2 + 3 + 5 = 54. Both totals agree,
  * and this file is one of the eleven charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>40 production classes
- * across 10 subpackages and the root, in 51 compilation units, of which 11 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>43 production classes
+ * across 10 subpackages and the root, in 54 compilation units, of which 11 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 40 fails both sums and is wrong.
+ * other than 43 fails both sums and is wrong.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -175,8 +181,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>40</b>. The
- * difference is 23 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>43</b>. The
+ * difference is 26 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -208,10 +214,24 @@
  *       paging is the plan's own choice at its section 0.4.3, and the token that
  *       carries a position between two requests is a wire contract every browse
  *       endpoint shares.</li>
+ *   <li>{@code web.RequestBodySizeFilter} -- the one ceiling on how many bytes a
+ *       request body may carry. The servlet container's own post-size setting
+ *       bounds form data only, which none of these services accepts, so without
+ *       this filter a JSON body reached the deserialiser at whatever length the
+ *       caller chose. A per-service copy could disagree with another service's on
+ *       how large the same shape of request may be, with nothing failing on either
+ *       side, which is the test every entry in this list has to pass.</li>
  *   <li>{@code security.CardNumberMasker} -- the one implementation of the
  *       last-four rendering the plan requires at its section 0.4.1.9. Two
  *       implementations that disagreed on how many digits survive would each look
  *       correct in isolation.</li>
+ *   <li>{@code security.ApprovedOriginPolicy} -- the one check that refuses a configured
+ *       service-to-service base address which is not an approved absolute HTTPS origin. Three
+ *       internal clients attach a credential to every request they send; two of them held a
+ *       structurally identical private copy of this check and the third had none at all. A check
+ *       duplicated per service is one that gets strengthened in a single copy, and the client that
+ *       was missing it would have sent a minted internal token, and a primary account number, to
+ *       whatever address a parameter file named.</li>
  *   <li>{@code security.CognitoAccessTokenValidator} -- the access-token checks the
  *       issuer's own decoder does not perform. It sits beside
  *       {@code JwtRoleConverter}, which the plan does name, because both take effect
@@ -262,6 +282,15 @@
  *       one bounded context presents to another. Two contexts calling each other
  *       must agree on the token's shape and lifetime exactly, which is the defining
  *       property of a shared-kernel contract.</li>
+ *   <li>{@code messaging.RethrowingDigestErrorHandler} -- decides what a failed queue
+ *       delivery puts in a log record and what it rethrows. Three contexts consume a
+ *       queue and all three need the same answer: the record must not carry exception
+ *       message text, because that text is written by a driver, a codec or a validation
+ *       library and can quote a request value verbatim; and the failure must be
+ *       rethrown, because the starter installs its error-handler stage as a recovery
+ *       step, so a handler that returned normally would have the message deleted
+ *       instead of redelivered. Three copies of a control whose correctness turns on
+ *       rethrowing is three chances for one of them to be edited into swallowing.</li>
  *   <li>{@code control.OnlineWriteGate} -- decides whether the environment is
  *       currently accepting mutating work, and refuses when it cannot establish that
  *       it is. Seven services must agree on that decision and on its fail-closed

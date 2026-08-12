@@ -1,5 +1,6 @@
 /**
- * Tests for the reporting-service request shapes, covering diagnostic rendering.
+ * Tests for the reporting-service request and response shapes, covering diagnostic rendering and the
+ * construction rules a published body has to satisfy.
  *
  * <p>{@link com.carddemo.reporting.dto.StatementRequest} carries the two alternative selectors of a
  * statement run, and both are protected values: a primary account number and an account identifier. A
@@ -18,6 +19,13 @@
  * because those cases assert on values a mapper PREPARES, while this one asserts on a value a client
  * SUPPLIES, and the two regress for different reasons -- a mapper rendering changes when the emitter is
  * edited, a request rendering changes when the record's components are.</p>
+ *
+ * <p>{@link com.carddemo.reporting.dto.ReportSubmissionOutcome} is covered for a different reason: its
+ * construction guard is what decides whether the body its published schema declares is reachable. The
+ * document declares its message required and nullable, and an earlier revision refused a null message
+ * outright, so the one state the document singled out for a cancellation was the one state the service
+ * could not produce. A controller test cannot surface that, because a controller can only pass what the
+ * record accepts.</p>
  *
  * <p>Assumptions: the parameter, return and exception elements of the project Explainability rule's
  * docstring specification describe callable code, and are omitted from this descriptor deliberately

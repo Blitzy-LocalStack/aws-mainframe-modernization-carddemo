@@ -1885,8 +1885,15 @@ class PurgeJobTest {
             order.verify(PurgeJobTest.this.details).delete(any());
             verify(PurgeJobTest.this.summaries, never())
                     .findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any());
-            verify(PurgeJobTest.this.details, never())
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any());
+            // WHY : Refactoring Rationale: this assertion named an UNPAGED overload of the child read,
+            //       which no longer exists -- it was removed once the last production caller that took
+            //       every child of an account in one unbounded answer had been converted to chunks. Its
+            //       purpose was to state that the sweep does not ALSO read the children unpaged, and
+            //       that is now guaranteed by the interface itself rather than by an assertion, so what
+            //       is asserted here instead is the property that is still falsifiable: exactly one
+            //       chunk was requested for this one account, so the sweep did not walk further.
+            verify(PurgeJobTest.this.details, times(1))
+                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(eq(accountId), any());
         }
 
         /**

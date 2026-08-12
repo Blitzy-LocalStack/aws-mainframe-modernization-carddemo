@@ -2,38 +2,50 @@
  * Spring Batch job definitions for the CardDemo nightly batch chain, migrated
  * from z/OS JCL.
  *
- * <h2>What is landed, and what is not</h2>
+ * <h2>What is landed, measured against this directory</h2>
  *
- * <p>Assumptions: five of the seven jobs the roster below describes are LANDED and two are not.
+ * <p>Assumptions: all seven jobs the roster below describes are LANDED.
  * {@code PreflightDailyTransactionsJob}, {@code PostTransactionsJob}, {@code CalculateInterestJob},
- * {@code BackupTransactionsJob} and {@code CombineTransactionsJob} each have a file in this directory,
- * register a job bean under their token, and are reached by
- * {@code services/batch-service/src/test/java/com/carddemo/batch/job/BatchJobRosterTest.java}.
- * {@code ExportJob} and {@code ImportJob} have no file. That is a measurement of this directory rather
- * than a target, and the roster test asserts it in BOTH directions -- so neither a token advertised with
- * nothing behind it nor a job that has landed while still being described as absent can pass.</p>
+ * {@code BackupTransactionsJob}, {@code CombineTransactionsJob}, {@code ExportJob} and
+ * {@code ImportJob} each have a file in this directory, each declares exactly one job bean, and each
+ * registers under its own token. Two tests keep that statement true and they measure different things:
+ * {@code services/batch-service/src/test/java/com/carddemo/batch/job/BatchJobRosterTest.java} compares
+ * the tokens the seven classes register under against the orchestration vocabulary for set equality, and
+ * {@code .../job/JobRegistrationCensusTest.java} assembles a context over all seven and asserts
+ * bidirectionally that every declared token resolves to a job bean of that name and that no bean carries
+ * a name outside the vocabulary.</p>
  *
- * <p>Refactoring Rationale: this section previously declared that every inventory in this charter was a
- * target rather than a measurement, and that anything named without a file was planned rather than
- * missing. That device is withdrawn here, because it makes the charter unfalsifiable: a reader cannot tell
- * an intended class from a forgotten one, and no test can either. It is replaced by a measured statement
- * plus a test that keeps the statement true.</p>
+ * <pre>
+ * this directory: 9 java files = 8 classes + 1 charter
+ * </pre>
  *
- * <p>Assumptions: the two unlanded jobs are unlanded for a stated reason rather than by sequencing. Both
- * re-express programs that read the customer and card masters -- {@code app/jcl/CBEXPORT.jcl:49-57} names
- * five input data definitions, two of them those masters -- and this module holds no customer entity and
- * no card entity, because the account and card contexts own them. Landing the pair means widening this
- * module's domain and repository sets for a job that stands outside the nightly chain. There is also no
- * oracle to verify a migration of them against: {@code tests/README.md:53-69} records that
+ * <p>Refactoring Rationale: this section has been corrected twice, and the marker line above is what
+ * stops a third correction. It first declared every inventory in this charter a target rather than a
+ * measurement, which made the charter unfalsifiable -- a reader could not tell an intended class from a
+ * forgotten one, and no test could either. It was then replaced by a measured statement that five of
+ * seven jobs had landed and that {@code ExportJob} and {@code ImportJob} had no file. Both files then
+ * landed, and the statement outlived them: it told a reader that two capabilities were absent while they
+ * sat in this directory. The marker line is the form {@code common-lib}'s
+ * {@code PackageCharterInventoryTest} re-measures against this directory on every build, so the figure
+ * and the enumerated membership are now checked rather than asserted.</p>
+ *
+ * <p>Assumptions: the eight classes are the seven jobs plus {@code DatasetPayloadWriter}, which is not a
+ * job and registers no bean. It is the shared writer the generation-staging jobs use to put a dataset
+ * payload into the object store under the S3 generation convention, and it sits here rather than in
+ * {@code com.carddemo.batch.service} because it is a mechanism of writing a job's output rather than a
+ * transcribed business rule.</p>
+ *
+ * <p>Assumptions: the export and import pair carries a constraint the other five do not, and it is
+ * recorded because it bounds what their tests can prove rather than whether they exist. Both re-express
+ * programs that read the customer and card masters -- {@code app/jcl/CBEXPORT.jcl:49-57} names five input
+ * data definitions, two of them those masters -- and this module holds no customer entity and no card
+ * entity, because the account and card contexts own them; the migrated pair therefore reads what this
+ * module does own and is verified against the record layout rather than against a golden master. There is
+ * no golden master to verify either against: {@code tests/README.md:53-69} records that
  * {@code CBEXPORT} and {@code CBIMPORT} do not compile under the open-source compiler at all, because
- * both declare a record key on a field that exists only in working storage, so no golden master exists for
- * either.</p>
- *
- * <p>Assumptions: the two tokens are NOT removed from {@code BatchJobName} to close the gap. That
- * enumeration is an external contract -- the state machine names its states by those tokens -- so removing
- * one would change a contract outside this repository's Java sources to make an inventory tidy. The entry
- * point's own registry lookup reports an unregistered token by name and lists what is registered, which is
- * the honest behaviour for a token that is real and not yet served.</p>
+ * both declare a record key on a field that exists only in working storage, so the reference suite skips
+ * their integration test. That defect is NOT reproduced here -- the divergence is registered in
+ * {@code docs/architecture/cobol-to-service-traceability.md} -- and the baseline stays byte-identical.</p>
  *
  * <p>Every type in this package is a job definition and nothing more: it wires
  * readers, processors, writers and step ordering, and it delegates every

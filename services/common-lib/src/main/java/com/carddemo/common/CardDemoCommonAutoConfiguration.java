@@ -7,6 +7,7 @@ import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.observability.MetricsConfig;
 import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.CursorToken;
+import com.carddemo.common.web.RequestBodySizeFilter;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Base64;
@@ -90,6 +91,40 @@ public class CardDemoCommonAutoConfiguration {
      * something ahead of it still can.</p>
      */
     public static final int CORRELATION_FILTER_ORDER = Ordered.HIGHEST_PRECEDENCE + 1;
+
+    /**
+     * The order the request-body bound is placed at in the servlet filter chain.
+     *
+     * <p>Assumptions: immediately after the correlation filter and therefore still ahead of the security
+     * chain, and both halves of that placement are load-bearing. After the correlation filter, because
+     * the bound's refusal carries the correlation identity in its body and its log record, and that
+     * identity does not exist until the filter ahead of it has published one. Ahead of the security
+     * chain, because the whole purpose of the bound is to refuse an over-large body before work is done
+     * on it, and authenticating a request is work -- a token signature is verified and a claim set is
+     * parsed -- that a caller should not be able to cause by sending bytes nobody will accept.</p>
+     *
+     * <p>Alternatives Considered: placing it after the security chain so that only an authenticated
+     * caller could reach it, on the reasoning that an unauthenticated flood is the edge's problem.
+     * Rejected because it inverts the ordering the bound exists for: the refusal would then happen after
+     * the most expensive per-request work in the chain rather than before it.</p>
+     */
+    public static final int BODY_SIZE_FILTER_ORDER = CORRELATION_FILTER_ORDER + 1;
+
+    /**
+     * The property naming the greatest number of bytes one request body may carry.
+     *
+     * <p>Assumptions: named in bytes rather than as a data-size string such as {@code 64KB}. A data-size
+     * binding depends on a conversion service being installed on the bean factory, which is true in a
+     * Boot application and not in a plain context test, so an explicit byte count keeps the bean method
+     * behaving identically in both -- the same reasoning {@link #carddemoCursorToken} records for taking
+     * its lifetime as text.</p>
+     *
+     * <p>Assumptions: one property for every service rather than one per bounded context. The bound is a
+     * platform property, and a per-service bound would let two services that publish the same shape of
+     * request disagree about how large it may be, with nothing failing on either side.</p>
+     */
+    public static final String MAX_REQUEST_BODY_BYTES_PROPERTY =
+            "carddemo.web.max-request-body-bytes";
 
     /**
      * The property naming the base64-encoded key material every sealed keyset cursor is
@@ -475,6 +510,49 @@ public class CardDemoCommonAutoConfiguration {
             //       an operator reads while a task is being taken out of rotation.
             registration.addUrlPatterns("/*");
             registration.setName("carddemoCorrelationIdFilter");
+            return registration;
+        }
+
+        /**
+         * Registers the request-body bound for every request path, just behind the correlation filter.
+         *
+         * <p>Assumptions: the bound is read as a property with a default rather than being made
+         * conditional on a deployment naming one, which is the opposite of the decision
+         * {@link CardDemoCommonAutoConfiguration#carddemoCursorToken} records for its signing key. The
+         * two are opposite for a reason: an absent signing key must leave the sealer unbuilt, because a
+         * default key would be a secret committed to source, whereas an absent bound must NOT leave the
+         * filter unregistered, because the unbounded state is precisely the exposure this filter exists
+         * to close. A default is safe here in the way a default key is not -- a bound is not a secret,
+         * and a wrong one fails visibly with a message naming it.</p>
+         *
+         * <p>Assumptions: every path, including the management endpoints, for the same reason the
+         * correlation filter covers them. An actuator request body is smaller than any business one, so
+         * the bound refuses none of them, and excluding those paths would leave one route family
+         * unbounded for no gain.</p>
+         *
+         * @param maxBodyBytes the ceiling on one request's body in bytes, named by
+         *     {@value #MAX_REQUEST_BODY_BYTES_PROPERTY} and defaulting to
+         *     {@link RequestBodySizeFilter#DEFAULT_MAX_BODY_BYTES}; must be positive
+         * @param clock the clock the filter's refusal body reads its failure instant from, resolved from
+         *     the context for the same reason the correlation filter's is
+         * @return the registration placing one shared {@link RequestBodySizeFilter} instance at
+         *     {@link CardDemoCommonAutoConfiguration#BODY_SIZE_FILTER_ORDER} across all request paths,
+         *     never {@code null}
+         * @throws IllegalArgumentException if the configured bound is not positive, failing the context
+         *     at assembly rather than the first request carrying a body
+         */
+        @Bean
+        @ConditionalOnMissingBean(name = "carddemoRequestBodySizeFilterRegistration")
+        public FilterRegistrationBean<RequestBodySizeFilter>
+                carddemoRequestBodySizeFilterRegistration(
+                @Value("${" + MAX_REQUEST_BODY_BYTES_PROPERTY + ":"
+                        + RequestBodySizeFilter.DEFAULT_MAX_BODY_BYTES + "}") long maxBodyBytes,
+                Clock clock) {
+            FilterRegistrationBean<RequestBodySizeFilter> registration =
+                    new FilterRegistrationBean<>(new RequestBodySizeFilter(maxBodyBytes, clock));
+            registration.setOrder(BODY_SIZE_FILTER_ORDER);
+            registration.addUrlPatterns("/*");
+            registration.setName("carddemoRequestBodySizeFilter");
             return registration;
         }
     }

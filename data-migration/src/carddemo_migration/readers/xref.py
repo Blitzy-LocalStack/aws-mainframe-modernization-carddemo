@@ -25,10 +25,10 @@ Returns
 -------
 None
     Importing binds names only: :data:`LOADED_FIELDS` and :data:`DROPPED_FIELD_NAMES` are derived
-    from the record descriptor, and the data-region width is taken from the last published field,
-    and nothing else is computed. No dataset is opened, no database connection is made, no
-    environment variable is read and no network is reached at import time, so importing this
-    module is safe on a bare checkout with no credential configured.
+    from the record descriptor, and the data-region width is taken from the last published field.
+    No dataset is opened, no database connection is made, no environment variable is read and no
+    network is reached at import time, so importing this module is safe on a bare checkout with no
+    credential configured.
 
 Raises
 ------
@@ -44,109 +44,83 @@ LayoutError
 
 What this module reads
 ---------------------
-The record is ``CARD-XREF-RECORD`` as declared in ``app/cpy/CVACT03Y.cpy``, and its byte geometry is
-resolved exclusively through ``XREF_LAYOUT`` in ``carddemo_migration.copybook.layouts``.
-The two shipped corpora are ``app/data/ASCII/cardxref.txt`` and
-``app/data/EBCDIC/AWS.M2.CARDDEMO.CARDXREF.PS``, fifty records each. They differ in
-PHYSICAL width and that difference is load-bearing: the ASCII rows are thirty-six
-characters on disk because the seed conversion dropped the trailing pad, while the
-EBCDIC dataset is 2500 bytes at the full declared fifty. The shared text iterator
-right-pads the short rows, so both forms decode to the same fields at the same offsets
--- reading the ASCII seed at its OBSERVED width instead would put every field after
-the first at the wrong offset. Both are REFERENCE-only inputs, opened read-only.
+The record is ``CARD-XREF-RECORD`` as declared in ``app/cpy/CVACT03Y.cpy``, and its byte geometry
+is resolved exclusively through ``XREF_LAYOUT`` in ``carddemo_migration.copybook.layouts``. The two
+shipped corpora are ``app/data/ASCII/cardxref.txt`` and
+``app/data/EBCDIC/AWS.M2.CARDDEMO.CARDXREF.PS``, fifty records each, and they differ in PHYSICAL
+width in a way that is load-bearing: the ASCII rows are thirty-six characters on disk because the
+seed conversion dropped the trailing pad, while the EBCDIC dataset is 2500 bytes at the full
+declared fifty. The shared text iterator right-pads the short rows so both forms decode to the
+same fields at the same offsets; reading the ASCII seed at its OBSERVED width instead would put
+every field after the first at the wrong offset. Both are REFERENCE-only inputs, opened read-only.
+
+This record is also the ``CXACAIX`` alternate access path: its account identifier at offset 25 is
+the alternate key CICS surfaced as a file, and the target replaces that with a non-unique secondary
+index on the same column. The descriptor carries the alternate key, so a caller needing the
+by-account path reads it from there rather than from a width written here.
 
 The short-row contract, stated once
 -----------------------------------
-This is the only reader in the subpackage that must accept a short physical row, so its
-tolerance is published rather than left as an implementation detail. A row is padded on
-the right with spaces to the declared length and decoded when it is short by no more than
-the trailing pad; it is REJECTED with a record-length error when it is longer than the
-declared length, and equally when it is short enough for the pad to reach a field that
-carries data. The middle case is the seed and costs nothing, because the characters added
-are exactly the pad the projection discards. The two rejected cases are the ones where
-padding or trimming would change a published value rather than restore a discarded one:
-one would invent an identifier, the other would discard real bytes. The boundary between
-them is derived from the published field tuple -- the end offset of the last field that carries
+This is the only reader in the subpackage that must accept a short physical row, so its tolerance
+is published rather than left as an implementation detail. A row is padded on the right with spaces
+to the declared length and decoded when it is short by no more than the trailing pad; it is
+REJECTED with a record-length error when it is longer than the declared length, and equally when it
+is short enough for the pad to reach a field that carries data. The middle case is the seed and
+costs nothing, because the characters added are exactly the pad the projection discards. The two
+rejected cases are the ones where padding or trimming would change a published value rather than
+restore a discarded one: one would invent an identifier, the other would discard real bytes. The
+boundary is derived from the published field tuple -- the end offset of the last field that carries
 data -- and is never written here as a number; see :data:`_DATA_REGION_WIDTH`. It is enforced by
-the shared text-record iterator, which compares it against the SOURCE line before padding,
-because that is the only place the comparison is exact for every record in the corpus.
-
-This record is also the ``CXACAIX`` alternate access path: its account identifier at
-offset 25 is the alternate key CICS surfaced as a file, and the target replaces that
-with a non-unique secondary index on the same column. The descriptor carries the
-alternate key, so a caller needing the by-account path reads it from there rather than
-from a width written here.
+the shared text-record iterator, which compares it against the SOURCE line before padding, because
+that is the only place the comparison is exact for every record in the corpus.
 
 Decoded shape
 -------------
 A decoded record is a ``dict`` keyed by the field name exactly as the copybook spells it, in
 declaration order, which is the record's byte order. A character field maps to its characters at
-full declared width, untrimmed. An unsigned display field maps to its characters too,
-once they are proven to be the digits its picture clause requires, so the leading zeroes
-in the nine-digit customer identifier and the eleven-digit account identifier survive.
-The trailing pad is absent; see :data:`DROPPED_FIELD_NAMES`.
-
-That shape is deliberately the one ``carddemo_migration.copybook.ebcdic_codec.decode_record``
-publishes, minus the pad, which is what makes the two encodings comparable rather than merely
-similar.
+full declared width, untrimmed; an unsigned display field maps to its characters too, once they are
+proven to be the digits its picture clause requires, so the leading zeroes in the nine-digit
+customer identifier and the eleven-digit account identifier survive. The trailing pad is absent;
+see :data:`DROPPED_FIELD_NAMES`. That shape is deliberately the one
+``carddemo_migration.copybook.ebcdic_codec.decode_record`` publishes, minus the pad, which is what
+makes the two encodings comparable rather than merely similar.
 
 Cross-reference exposure control
 --------------------------------
-All three of this record's data fields are marked sensitive by the descriptor: the
-primary account number, the customer identifier and the account identifier. This record
-exists solely to join those three together, so there is nothing in it that is not an
-identifier -- which is why a whole-record rendering of it discloses nothing but the pad.
-All three are **emitted** in the decoded mapping, because the cross-reference table
-stores exactly those three columns, and all three are **redacted** in every diagnostic
-this module produces, with the account number revealing at most its trailing four
-digits. Diagnostics never echo record content of any kind.
+All three of this record's data fields are marked sensitive by the descriptor: the primary account
+number, the customer identifier and the account identifier. This record exists solely to join those
+three together, so there is nothing in it that is not an identifier -- which is why a whole-record
+rendering of it discloses nothing but the pad. All three are **emitted** in the decoded mapping,
+because the cross-reference table stores exactly those three columns, and all three are **redacted**
+in every diagnostic this module produces, with the account number revealing at most its trailing
+four digits. Diagnostics never echo record content of any kind.
 
 Design decisions (WHY)
 ----------------------
 Assumptions:
-    **Every offset, length, storage regime and record length is imported, never declared.**
-    This module states no byte position of its own, and in particular states no key width: the
-    16-byte key is read from the descriptor's own ``key_offset`` and ``key_length``. That is
-    the Python analogue of compiling every COBOL program against a single ``cobc -I app/cpy``
-    include path. The consequence of breaking it is specific and undetectable -- a re-declared
-    offset lets this reader and a sibling reading the same bytes drift apart, and a record read
-    one byte out of alignment still decodes to plausible characters, so nothing raises and no
-    test fails.
+    **Every offset, length, storage regime and record length is imported, never declared.** This
+    module states no byte position of its own, and in particular no key width: the 16-byte key is
+    read from the descriptor's own ``key_offset`` and ``key_length``. That is the Python analogue of
+    compiling every COBOL program against a single ``cobc -I app/cpy`` include path, and the
+    consequence of breaking it is undetectable -- a re-declared offset lets this reader and a
+    sibling reading the same bytes drift apart, and a record read one byte out of alignment still
+    decodes to plausible characters, so nothing raises and no test fails.
 Trade-offs:
     **Records are streamed, never materialised.** Both entry points are generators, so memory is
-    constant in the record count. The accepted cost is a single forward pass; what it buys is
-    that this reader behaves identically on the committed seed and on a production extract many
-    orders larger, so the one proven against the seed is the one that runs.
+    constant in the record count. The accepted cost is a single forward pass; what it buys is that
+    this reader behaves identically on the committed seed and on a production extract many orders
+    larger, so the one proven against the seed is the one that runs.
 Assumptions:
-    **There is no binary floating-point value anywhere in this module.** This record declares no
-    signed display field, so the prohibition costs nothing to honour here, but it is stated rather
-    than left implicit: the identifiers this record carries exceed the range a binary float
-    represents exactly, so routing one through a float would corrupt the very identifier the
-    target table joins on. Identifiers stay character strings end to end.
+    **No binary floating-point value anywhere.** This record declares no signed display field, so
+    the prohibition costs nothing to honour here, but it is stated rather than left implicit: the
+    identifiers this record carries exceed the range a binary float represents exactly, so routing
+    one through a float would corrupt the very identifier the target table joins on. Identifiers
+    stay character strings end to end.
 Trade-offs:
-    **Standard library plus ``carddemo_migration.copybook``, and nothing else.** No database
-    driver, no AWS SDK and no character-set package is imported here, so this reader imports and
-    runs on a bare checkout with no credential configured. Choosing a dataset, opening a
-    connection and writing rows belong to a loader.
-
-Parameters
-----------
-None.
-    The module is imported for the reader API documented above and performs no
-    caller-supplied work at import time.
-
-Returns
--------
-None.
-    Importing the module binds the record descriptor, the derived pad bound and the reader
-    functions; it produces no value.
-
-Raises
-------
-None.
-    Import-time work is limited to reading the descriptor and deriving a width from it, so
-    nothing here inspects record data and nothing here can fail on it. Every error this
-    module reports is raised from one of the reader functions, and each documents its own.
+    **Standard library plus ``carddemo_migration.copybook``, and nothing else.** No database driver,
+    no AWS SDK and no character-set package is imported here, so this reader imports and runs on a
+    bare checkout with no credential configured. Choosing a dataset, opening a connection and
+    writing rows belong to a loader.
 """
 
 from __future__ import annotations
@@ -239,15 +213,13 @@ def _is_padding_field(field: FieldSpec) -> bool:
     return field.name == _PAD_FIELD_NAME or field.name.endswith(_PAD_NAME_SUFFIX)
 
 
-# WHY : Assumptions: the pad is DROPPED from every decoded record because its trailing bytes
-#   exist only to fill the record out to its declared length and carry no data. That is also the
-#   fact which makes this record's two shipped corpora reconcilable at all: the ASCII seed omits
-#   those bytes entirely and loses nothing by doing so, because nothing published ever depended
-#   on them. The EBCDIC record decoder deliberately returns the pad, stating that dropping it is
-#   a projection decision belonging to the reader that maps a record onto a table, so this is
-#   that decision and this is where it is taken. Both names below are published rather than kept
-#   private so the drop is a fact a caller and a verification pass can assert, instead of a
-#   silent omission that would make a decoded record a partial description of its own bytes.
+# WHY : Assumptions: the pad is DROPPED from every decoded record because its trailing bytes only
+#   fill the record out to its declared length, which is also what makes the two shipped corpora
+#   reconcilable: the ASCII seed omits those bytes and loses nothing, because nothing published
+#   depended on them. The EBCDIC record decoder returns the pad and leaves the drop to the reader
+#   that maps a record onto a table, so this is where that decision is taken. Both names below are
+#   published rather than private so a caller and a verification pass can assert the drop instead
+#   of inferring it.
 LOADED_FIELDS: Final[tuple[FieldSpec, ...]] = tuple(
     field for field in XREF_LAYOUT.fields if not _is_padding_field(field)
 )
@@ -255,26 +227,20 @@ DROPPED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
     field.name for field in XREF_LAYOUT.fields if _is_padding_field(field)
 )
 
-# WHY : Assumptions: this is the boundary the short-row tolerance stops at, and it is DERIVED
-#   from the descriptor -- the end offset of the last field that carries data -- rather than
-#   written as a number. Writing the number would be a second declaration of this record's
-#   geometry sitting in the one module whose whole discipline is to declare none, and it would
-#   go stale INVISIBLY: a descriptor edit that widened a field would move the real boundary
-#   while a literal here kept pointing at the old one, so this reader would begin accepting
-#   rows that are genuinely short and padding real data into existence, with nothing raising.
-#   Deriving it means the boundary cannot disagree with the layout it is a property of.
-# WHY : Trade-offs: the last DATA field's end is the right boundary rather than the record
-#   length, and that asymmetry is the entire point. Bytes at or beyond this offset belong to
-#   the trailing pad, which is dropped anyway, so supplying them by padding restores exactly
-#   what the seed conversion discarded and changes no published value. Bytes BEFORE it belong
-#   to a published identifier, so supplying those by padding would not restore anything -- it
-#   would invent an identifier the source never carried and hand a loader a row to key on.
-# WHY : Refactoring Rationale: the width is derived by the shared helper rather than by indexing
-#   the published tuple's last element here. The two agree for THIS record, whose published fields
-#   are contiguous, and they do not agree in general -- a reader that publishes fields on both
-#   sides of a span it suppresses has a last element that is not its furthest offset -- so the
-#   package needs one derivation and this is it. It is computed from the published field tuple and
-#   never written as a number, so the bound and the published shape cannot disagree.
+# WHY : Assumptions: this is the boundary the short-row tolerance stops at, and it is DERIVED by
+#   the shared helper from the published field tuple rather than written as a number. A literal
+#   here would be a second declaration of this record's geometry in the one module whose whole
+#   discipline is to declare none, and it would go stale INVISIBLY: a descriptor edit that widened
+#   a field would move the real boundary while the literal kept pointing at the old one, so this
+#   reader would start accepting genuinely short rows and padding real data into existence with
+#   nothing raising. The helper is used rather than the tuple's last element because the two agree
+#   only for a record whose published fields are contiguous, as this one's are.
+# WHY : Trade-offs: the last DATA field's end is the boundary rather than the record length, and
+#   the asymmetry is the entire point. Bytes at or beyond this offset belong to the trailing pad,
+#   which is dropped anyway, so supplying them by padding restores exactly what the seed
+#   conversion discarded and changes no published value; bytes BEFORE it belong to a published
+#   identifier, so supplying those would invent an identifier the source never carried and hand a
+#   loader a row to key on.
 _DATA_REGION_WIDTH: Final[int] = data_region_width(LOADED_FIELDS)
 
 
@@ -339,16 +305,12 @@ def _require_single_byte_record(record: str, number: int) -> str:
     """
     # WHY : Assumptions: a multi-byte character satisfies a CHARACTER-count check while occupying
     #   more than one byte, so it passes the shared iterator's declared-length test and then
-    #   desynchronises every offset after it -- and because a record read one byte out of
-    #   alignment still decodes to plausible characters, nothing later would raise. On THIS record
-    #   it does a second kind of damage that the sibling readers do not have to worry about: a
-    #   multi-byte character inflates a row's character count past its byte count, so a source
-    #   line that is genuinely short can present as full width and slip past the pad bound below.
-    #   Proving the two counts equal is what keeps that bound meaningful. This check,
-    #   and every other validation in this module, is enforced by an explicit `raise` and never by
-    #   an `assert`: running the interpreter with `-O` strips assert statements outright, so an
-    #   assertion is a validation that disappears in exactly the deployment where a misaligned
-    #   record costs something.
+    #   desynchronises every offset after it -- and a record read one byte out of alignment still
+    #   decodes to plausible characters, so nothing later raises. On THIS record it does a second
+    #   kind of damage the siblings need not worry about: the inflated character count lets a
+    #   genuinely short source line present as full width and slip past the pad bound. Proving the
+    #   two counts equal is what keeps that bound meaningful. Like every validation here it is an
+    #   explicit `raise` and never an `assert`, because `-O` strips assertions outright.
     if record.isascii():
         return record
 
@@ -402,27 +364,24 @@ def _decode_text_field_value(record: str, field: FieldSpec) -> str:
         If the field declares a storage regime that cannot occur in a character record, which is
         any computational or mixed-regime area.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     if field.kind is Kind.TEXT:
         return record[field.start : field.end]
 
     if field.kind is Kind.UINT:
         # WHY : Trade-offs: the decimal this returns is DISCARDED and the characters are returned
-        #   instead, which costs one parse whose result is thrown away. What it buys is the content
-        #   check the picture clause states -- an unsigned display field holding a letter is
-        #   refused rather than passed through -- while keeping the value a digit string of
-        #   declared width. An integer would drop a leading zero, and a leading zero is
-        #   significant in every identifier this corpus declares as `PIC 9`.
-        # WHY : Assumptions: this check runs on BOTH paths of this reader. The EBCDIC path gets it
-        #   as a by-product of having to decode a code page at all; performing it here keeps the
-        #   two entry points enforcing ONE contract, so the same defective record cannot decode
-        #   differently depending on which corpus it arrived in.
+        #   instead, at the cost of one parse whose result is thrown away. What it buys is the
+        #   content check the picture clause states -- an unsigned display field holding a letter is
+        #   refused rather than passed through -- while keeping the value a digit string of declared
+        #   width, where an integer would drop a leading zero that is significant in every
+        #   identifier this corpus declares as `PIC 9`. It runs on BOTH paths of this reader, so the
+        #   same defective record cannot decode differently depending on which corpus it arrived
+        #   in.
         decode_zoned_field(record, field)
         return record[field.start : field.end]
 
@@ -530,13 +489,11 @@ def record_key(record: str) -> str:
     #   never by a literal. Writing the width here would be a second statement of it, and a key
     #   sliced one character short still looks like a key -- it collides with a sibling record
     #   instead of raising, which a loader would resolve as an upsert onto the wrong row.
-    # WHY : Refactoring Rationale: the width test is DELEGATED to the shared guard and is
-    #   now EXACT. This function used to accept any record at least the declared width,
-    #   which its own docstring and every decoder in this module contradict, and the
-    #   over-long case is the more dangerous of the two: the key sliced from it comes from
-    #   the right offsets of the WRONG record -- two rows concatenated, most plausibly --
-    #   so it looks entirely well formed and a loader upserts on it. Delegating also means
-    #   the eight flat readers cannot drift apart on a test they all have to make.
+    # WHY : Trade-offs: the width test is DELEGATED to the shared guard and is EXACT in both
+    #   directions. An over-long record is the more dangerous case: the key sliced from it comes
+    #   from the right offsets of the WRONG record -- two rows concatenated, most plausibly -- so it
+    #   looks entirely well formed and a loader upserts on it. Delegating also keeps the eight flat
+    #   readers from drifting apart on a test they all have to make.
     require_exact_record_width(record, XREF_LAYOUT)
     start = XREF_LAYOUT.key_offset
     return record[start : start + XREF_LAYOUT.key_length]
@@ -577,12 +534,11 @@ def decode_ascii_card_xref(
     LayoutError
         If a declared field's storage regime cannot be decoded from a character record.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     # WHY : Trade-offs: a record of the WRONG width is rejected here rather than padded or cut to
     #   fit. Truncation would silently discard real data and padding would invent it, and either
@@ -598,16 +554,13 @@ def decode_ascii_card_xref(
 
     checked = _require_single_byte_record(record, number)
 
-    # WHY : Refactoring Rationale: this reader no longer makes a data-region check of its own.
-    #   It had one -- the bound was written here first, for the one record whose shipped seed
-    #   actually engages the padding tolerance -- and it inspected the PADDED row for a trailing
-    #   space. That is exact for THIS record, whose two trailing data fields are display fields
-    #   that cannot hold a blank, and it does not generalise: the daily transaction's last
-    #   published field is a processing timestamp that is legitimately blank on all 300 shipped
-    #   records, so the same rule would refuse every one of them. The bound now lives where the
-    #   SOURCE line's length is visible -- `iter_ascii_text_records`, through `min_data_width` --
-    #   which is exact for both cases and is one implementation for all eleven readers rather
-    #   than one here and none elsewhere.
+    # WHY : Assumptions: the data-region check belongs to `iter_ascii_text_records`, through
+    #   `min_data_width`, and not here, because only there is the SOURCE line's length still
+    #   visible. Inspecting the PADDED row for a trailing space would be exact for THIS record,
+    #   whose two trailing data fields are display fields that cannot hold a blank, and would not
+    #   generalise -- the daily transaction's last published field is a processing timestamp that is
+    #   legitimately blank on all 300 shipped records, so the same rule would refuse every one of
+    #   them.
     # WHY : Trade-offs: a record handed DIRECTLY to this single-record entry point is checked only
     #   against its declared length, because a caller passing one record has already decided where
     #   it starts and ends -- there is no source line to measure. A fabricated blank in a trailing
@@ -656,80 +609,38 @@ def iter_ascii_card_xrefs(
         while the bytes it omits are pad, so a truncation that removes part of the cross-reference
         key or of either identifier is rejected rather than decoded from a padded copy.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
-    # WHY : Assumptions: the record cut is DELEGATED and not written again here. That iterator
-    #   owns one statement of the text-mode contract for the whole package: it splits on the
-    #   separator, removes at most one trailing carriage return and separator per row so trailing
-    #   blanks stay data, drops the single phantom empty piece a text ending in a separator
-    #   produces, right-pads a short line, and REJECTS an over-long one. A second implementation
-    #   here is exactly the drift this dependency edge exists to prevent, and it would be
-    #   invisible: two readers stripping terminators slightly differently both return well-formed
-    #   records.
-    # WHY : Assumptions: that the terminator is removed PER ROW, and at most one per row, is what
-    #   makes this reader's width reasoning well defined -- the terminator has to be off before a
-    #   width means anything, and on this record a width is what the pad bound turns on. A
-    #   whole-file newline mode would not do: `cardxref.txt` is uniformly bare-separator, but
-    #   sibling seeds in the same directory are not. `tcatbal.txt` and `trantype.txt` carry a
-    #   carriage return on every line EXCEPT their last, so a mode fixed for the file would
-    #   mis-handle that final row, and a reader that had learned the whole-file habit here would
-    #   carry it to a corpus where it silently leaves a stray byte inside the record.
-    # WHY : Trade-offs: an over-long line is REJECTED rather than truncated, and the asymmetry
-    #   with the short-line tolerance above is deliberate rather than an oversight. A short line
-    #   has an innocent explanation this corpus documents -- the conversion dropped the trailing
-    #   pad -- and padding restores bytes nothing published depends on. A long line has no such
-    #   explanation: it carries bytes the layout does not account for, so trimming it would
-    #   silently discard real data and leave every field after the cut misaligned while still
-    #   decoding to plausible characters. One direction is recoverable and one is a defect, so
-    #   they get different answers.
-    # WHY : Trade-offs: that iterator's tolerance for a SHORT line -- right-padding it with
-    #   blanks -- is not merely inherited here but REQUIRED. This dataset's ASCII rows are
-    #   thirty-six characters against a declared fifty, so every row engages the tolerance
-    #   and the characters it adds are exactly the pad the conversion dropped. Overriding it
-    #   would reject the whole seed. What this reader accepts in exchange is one specific class
-    #   of malformed input -- a row short by no more than the trailing pad -- and the exchange
-    #   is a good one precisely because those are the bytes the projection discards anyway, so
-    #   no published value depends on them. The risk is bounded on the other side too, by the
-    #   `min_data_width` the streaming entry point passes to the shared iterator, which still
-    #   refuses a row short enough for the pad to reach an identifier.
-    # WHY : Alternatives Considered: strict rejection of every short row was evaluated first and
-    #   rejected FOR THIS RECORD ONLY. It is what the reference suite's own record helper does,
-    #   and it is the behaviour a data-integrity review deliberately chose there after an earlier
-    #   helper had padded short rows and truncated long ones -- on a whole-corpus check that
-    #   covered the FIXTURES, every one of which is full width. The shipped seed is not: all
-    #   fifty rows of `app/data/ASCII/cardxref.txt` carry thirty-six data characters against a
-    #   declared fifty, so strict rejection here would make the seed the repository ships
-    #   unloadable, which is not a defensible outcome for a migration whose job is to load it.
-    #   Also evaluated and rejected: declaring a second, narrower layout matching the seed's
-    #   observed width. That would put a rival set of offsets in this module, which is the one
-    #   thing the single-sourcing discipline forbids, and the two declarations would then be free
-    #   to drift -- at which point the ASCII and EBCDIC paths would decode the same record
-    #   differently while both looked correct.
-    # WHY : Refactoring Rationale: the record cut is bounded by `_DATA_REGION_WIDTH`, and the bound
-    #   closes a data-integrity defect rather than tightening a nicety. The shared iterator
-    #   right-pads a short line -- which is what lets a seed whose trailing pad the conversion
-    #   dropped be read at all -- and it padded a line of ANY length, so a line that stopped
-    #   part-way through a field this reader PUBLISHES was completed with manufactured blanks and
-    #   returned as a well-formed record. Nothing raised: the invented characters are
-    #   indistinguishable from real ones. The bound is the end of the last published field, derived
-    #   from `LOADED_FIELDS` rather than written here, and it is compared against the SOURCE line
-    #   before any padding, which is the only place the comparison is exact.
-    # WHY : Assumptions: the descriptor is passed for DIAGNOSTICS only, so a refusal can name the
-    #   record and the field the line stopped inside. It cannot change which lines are accepted.
+    # WHY : Assumptions: the record cut is DELEGATED and not written again here. That iterator owns
+    #   one statement of the text-mode contract for the whole package -- split on the separator,
+    #   remove at most one carriage return and separator PER ROW so trailing blanks stay data, drop
+    #   the phantom empty piece a text ending in a separator produces, right-pad a short line and
+    #   reject an over-long one -- and a second implementation here is exactly the drift this
+    #   dependency edge exists to prevent, because two readers stripping terminators slightly
+    #   differently both return well-formed records.
+    # WHY : Trade-offs: the short-line tolerance is not merely inherited but REQUIRED, while an
+    #   over-long line is rejected rather than truncated, and the asymmetry is deliberate. Every
+    #   ASCII row of this dataset is thirty-six characters against a declared fifty, so every row
+    #   engages the tolerance and the characters it adds are exactly the pad the conversion dropped;
+    #   a long line instead carries bytes the layout does not account for, so trimming it would
+    #   discard real data and misalign every field after the cut while still decoding to plausible
+    #   characters. One direction is recoverable and one is a defect. `min_data_width` bounds the
+    #   tolerance at the last published field's end, compared against the SOURCE line before any
+    #   padding, so a row short enough for the pad to reach an identifier is still refused.
+    # WHY : Alternatives Considered: strict rejection of every short row, which is what the
+    #   reference suite's record helper does, would make the seed this repository ships unloadable
+    #   -- not a defensible outcome for a migration whose job is to load it. Declaring a second,
+    #   narrower layout matching the seed's observed width was also rejected: it would put a rival
+    #   set of offsets in this module, free to drift, at which point the ASCII and EBCDIC paths
+    #   would decode the same record differently while both looked correct.
     records = iter_ascii_text_records(
         source, XREF_LAYOUT.reclen, min_data_width=_DATA_REGION_WIDTH, layout=XREF_LAYOUT
     )
 
-    # WHY : Trade-offs: records are YIELDED one at a time rather than collected, so memory is
-    #   constant in the record count. The cost is a single forward pass -- a caller wanting a
-    #   second reading must re-open the source -- and what it buys is that this reader behaves
-    #   identically on the committed seed and on a production extract many orders larger, so the
-    #   one proven against the seed is the one that runs.
     for number, record in enumerate(records, start=1):
         yield decode_ascii_card_xref(record, number=number)
 
@@ -768,12 +679,11 @@ def read_ascii_card_xrefs(path: pathlib.Path) -> Iterator[DecodedCardXref]:
         while the bytes it omits are pad, so a truncation that removes part of the cross-reference
         key or of either identifier is rejected rather than decoded from a padded copy.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     # WHY : Assumptions: the caller supplies an EXPLICIT file and this function never globs a
     #   directory to find one. The seed directories make that concrete: they hold a zero-byte
@@ -781,22 +691,16 @@ def read_ascii_card_xrefs(path: pathlib.Path) -> Iterator[DecodedCardXref]:
     #   match would either sweep the placeholder in or load a dataset twice -- and a doubled image
     #   still divides by the record length with remainder zero, so nothing downstream would catch
     #   it and every money total would come out doubled.
-    # WHY : Refactoring Rationale: the open is DELEGATED to `readers.source.iter_seed_lines` and
-    #   is no longer a `Path.open` here, which closes two faults this reader shared with its seven
-    #   siblings. `Path.open` is a BLOCKING open, so a named pipe or a character device named where
-    #   a seed file was expected did not fail -- it waited, indefinitely and with no diagnostic, in
-    #   a step an operator is watching for a load to finish. And iterating a text handle reads to
-    #   the next separator with NO bound at all, so a file whose first separator lies far past the
-    #   record length was materialised in full before any width check could refuse it: the check
-    #   that would have rejected it ran after the allocation that made it a problem. The shared
-    #   reader opens with O_NONBLOCK, proves the descriptor is a regular file with fstat before a
-    #   byte is read, and bounds each line by the declared width plus its terminators.
-    # WHY : Trade-offs: the code page and the terminator policy move WITH the open, so this module
-    #   no longer names either. That is the point -- eight modules each naming them is eight
-    #   chances to disagree, and a disagreement would be invisible, because a reader that validated
-    #   a file slightly differently from its siblings still returns well-formed records for every
-    #   ordinary input. The accepted cost is one more module to read to see how a file is opened;
-    #   `readers.source` records the full reasoning for both decisions in one place.
+    # WHY : Trade-offs: the open is DELEGATED to `readers.source.iter_seed_lines`, which opens with
+    #   O_NONBLOCK, proves the descriptor is a regular file with fstat before a byte is read, and
+    #   bounds each line by the declared width plus its terminators. A plain `Path.open` blocks, so
+    #   a named pipe named where a seed file was expected would wait indefinitely and with no
+    #   diagnostic in a step an operator is watching; and iterating a text handle reads to the next
+    #   separator unbounded, so a file whose first separator lies far past the record length is
+    #   materialised in full before any width check can refuse it. The code page and the terminator
+    #   policy move with the open, so this module names neither -- eight modules each naming them
+    #   is eight chances to disagree invisibly. The accepted cost is one more module to read to see
+    #   how a file is opened.
     yield from iter_ascii_card_xrefs(iter_seed_lines(path, XREF_LAYOUT.reclen))
 
 
@@ -838,12 +742,11 @@ def decode_ebcdic_card_xref(
         If a published field decoded to raw bytes, which means the descriptor has acquired a
         computational or mixed-regime area.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     # WHY : Assumptions: the conversion is DELEGATED per field and never performed on the record
     #   as a whole. That codec decodes each declared span on its own, dispatching on the
@@ -891,12 +794,11 @@ def iter_ebcdic_card_xrefs(
         If the source is neither a byte image nor readable nor iterable, produces a piece that is
         not a byte object, or a published field decoded to raw bytes.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     # WHY : Assumptions: the dataset is cut on the declared record length ALONE, and no line
     #   terminator is looked for, honoured, stripped or padded on this path. A fixed-length
@@ -907,19 +809,13 @@ def iter_ebcdic_card_xrefs(
     #   with no remainder, which the delegated iterator checks before it yields the first record.
     #   For the committed extract that division is exact -- its 2500 bytes are fifty records of
     #   the declared fifty -- so this corpus needs no tolerance of any kind.
-    # WHY : Assumptions: the text form's tolerances must never reach here, and a reader looking
-    #   for the pad bound on this path is looking in the wrong place: it is deliberately an
-    #   ASCII-path concern only. The EBCDIC extract already carries the trailing pad, so there is
-    #   nothing to restore, and right-padding a short piece or stripping a trailing byte would
-    #   instead turn a genuine length failure into a plausible record. That is why this path
-    #   reaches a different entry point of the layouts module and shares no code with the text
+    # WHY : Assumptions: the text form's tolerances must never reach here -- the pad bound is
+    #   deliberately an ASCII-path concern only. The EBCDIC extract already carries the trailing
+    #   pad, so there is nothing to restore, and right-padding a short piece or stripping a
+    #   trailing byte would turn a genuine length failure into a plausible record. That is why this
+    #   path reaches a different entry point of the layouts module and shares no code with the text
     #   one.
     for record in iter_ebcdic_records(source, XREF_LAYOUT):
-        # WHY : Trade-offs: records are yielded one at a time for the same reason the text path
-        #   streams -- constant memory in the record count, at the cost of one forward pass -- so
-        #   a caller can compare the two corpora record by record without either side holding a
-        #   whole dataset in memory. That comparison is this record's sharpest correctness check,
-        #   because it is what proves the pad the text path adds changes no published value.
         yield decode_ebcdic_card_xref(record)
 
 
@@ -954,12 +850,11 @@ def read_ebcdic_card_xrefs(path: pathlib.Path) -> Iterator[DecodedCardXref]:
     LayoutError
         If a published field decoded to raw bytes.
     ZonedSpanWidthError
-        If an unsigned display field's declared span is not available, or the descriptor's display
-        geometry is internally inconsistent. Raised by the display codec.
+        From the display codec, if an unsigned display field's declared span is not available or the
+        descriptor's display geometry is internally inconsistent.
     ZonedDecimalError
-        If a display span violates its contract: a non-digit in the body of either display regime,
-        or a low-order byte that is not a valid sign overpunch in a signed one. Raised by the
-        display codec.
+        From the display codec, if a display span holds a non-digit in its body or, in a signed
+        regime, a low-order byte that is not a valid sign overpunch.
     """
     # WHY : Alternatives Considered: the path is handed to the codec rather than opened here and
     #   passed as a stream. The codec validates the file size against the declared record length
@@ -999,19 +894,17 @@ def render_masked_card_xref_record(record: str) -> str:
         If a field slice comes out the wrong width, which the descriptor's own geometry
         validation makes unreachable.
     """
-    # WHY : Assumptions: the redaction is delegated to the shared helper rather than applied here,
-    #   so marking a field sensitive in the layout remains the ONLY change ever needed to redact
-    #   it in this rendering. Every data field of this record is protected, so the rendering is
-    #   entirely tags plus the pad -- which still answers the only question a cross-reference diff
-    #   needs to ask, namely which of the three joins differs.
-    # WHY : Trade-offs: the primary account number is rendered with its trailing four digits and
-    #   nothing else, which is enough to locate a record in a diff and not enough to reconstruct a
-    #   payment instrument. The mask being SAME-WIDTH and DETERMINISTIC is what keeps this
-    #   diagnostically useful rather than merely safe: offsets stay countable across the rendering,
-    #   and equal stored characters always render equally, so a masked diff still shows WHICH field
-    #   changed and whether two masked records are equal. A random mask would satisfy the privacy
-    #   requirement and destroy both properties, leaving an operator a rendering that proves
-    #   nothing. The accepted cost is that identical values are identifiable as identical.
+    # WHY : Assumptions: the redaction is delegated to the shared helper, so marking a field
+    #   sensitive in the layout remains the ONLY change ever needed to redact it here. Every data
+    #   field of this record is protected, so the rendering is entirely tags plus the pad -- which
+    #   still answers the one question a cross-reference diff asks, namely which of the three joins
+    #   differs.
+    # WHY : Trade-offs: the mask is SAME-WIDTH and DETERMINISTIC, and the account number keeps its
+    #   trailing four digits -- enough to locate a record in a diff, not enough to reconstruct a
+    #   payment instrument. Those two properties are what keep the rendering diagnostically useful:
+    #   offsets stay countable and equal stored characters always render equally, so a masked diff
+    #   still shows WHICH field changed. A random mask would satisfy the privacy requirement and
+    #   destroy both. The accepted cost is that identical values are identifiable as identical.
     return mask_record(record, XREF_LAYOUT)
 
 

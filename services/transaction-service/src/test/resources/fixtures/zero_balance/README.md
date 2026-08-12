@@ -170,11 +170,11 @@ satisfied by an update no matter what balance results.
 
 `504.77` is an exact decimal value at every hop and is never an approximate
 binary one. `V1__ledger.sql` declares
-`ledger.transaction_category_balances.balance` as `NUMERIC(11,2)` at its line
-726, and the transaction amount that feeds it as `NUMERIC(11,2)` on both
-`ledger.transactions` and `ledger.daily_transactions`. That migration's own
-reasoning at its lines 720-725 records why the two operands must carry the same
-precision and scale: the baseline adds one to the other at line 508 on the create
+`ledger.transaction_category_balances.balance` as `NUMERIC(11,2)`, and the
+transaction amount that feeds it as `NUMERIC(11,2)` on both `ledger.transactions`
+and `ledger.daily_transactions`. That migration's own reasoning at the `balance`
+declaration records why the two operands must carry the same precision and
+scale: the baseline adds one to the other at line 508 on the create
 path and at line 527 on the update path, so no approximate type may appear
 between them. On the wire the value travels as a string, so that no client parses
 it into a binary floating-point number and loses the cent.
@@ -192,19 +192,36 @@ so that nothing not yet authored is described as though it existed.
   category-balance key test at lines 239-241 deliberately omits this scenario,
   which is correct: there is no row here to carry a key.
 
-  Refactoring Rationale: this entry was authored as `[planned]` on the premise
-  that the module held no consumer of these bytes, and that premise was measured
-  false before it was written down. The annotation exists to stop a document
-  claiming a future artifact already exists; claiming a present one is merely
-  planned is the same error pointed the other way, and it is worse here because
-  it would tell a maintainer that the zero-byte file has no executable guard when
-  in fact one asserts it directly. The folder index's own section 5 anticipated
-  this, recording that a test loading a record file is the single change that
-  would need to update it.
-- A behavioural test that runs the category-balance fork and asserts that the row
-  was created rather than updated -- **[planned]**. The present consumer holds the
-  fixture's bytes to what this document states about them; it does not execute the
-  posting logic, so the arm itself is not yet asserted by anything.
+  Assumptions: this `[present]` annotation is a measurement, not a default. The
+  convention exists to stop a document claiming a future artifact already
+  exists, and claiming a present one is merely planned is the same error
+  pointed the other way -- worse here, because it would tell a maintainer that
+  the zero-byte file has no executable guard when in fact one asserts it
+  directly. Trade-offs: an annotation that is a measurement has to be
+  re-measured whenever a class starts or stops loading a record file, which is
+  the price of it being falsifiable; the folder index names the same class as a
+  present consumer in its section 5, so the two documents agree rather than
+  needing to be reconciled.
+- [`TransactionCategoryBalanceRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionCategoryBalanceRepositoryIT.java)
+  -- **[present]**, and it runs the category-balance fork this folder exists to
+  distinguish. Its case
+  `theTwoArmsProduceDifferentBalancesAndDifferentRowCountDeltasFromOneAmount` at line
+  1112 drives one amount over two keys and asserts that the create arm and the update
+  arm differ in **both** the resulting balance and the row-count delta, and its own
+  rationale at lines 1092 to 1098 names this folder's zero-byte `tcatbal.txt` against
+  `happy_path`'s single row as the one variable that decides which arm runs. The arms
+  are also asserted apart, in `insertingAnAbsentKeyStoresTheAmountAndAddsExactlyOneRow`
+  at line 1017 and `updatingAPresentKeyStoresTheSumAndLeavesTheRowCountUnchanged` at
+  line 1066, and `aCreateCarryingAZeroAmountStillAddsARowWhoseBalanceIsZero` at line
+  1160 holds the distinction this folder's name turns on: an absent row is not a row
+  carrying zero.
+
+  Assumptions: this consumer takes its values and its arrangement from these bytes and
+  then builds its rows in code; it does not read the file, which is what the
+  fixture-contract test above does. The two together are what make the coverage claim
+  complete -- one holds the bytes to what this document says about them, the other runs
+  the fork those bytes describe -- so neither on its own should be read as covering the
+  folder.
 - [`application-test.yml`](../../application-test.yml) -- **[present]**, the test
   profile two directories up. It supplies the schema resolution and the migration
   pointer that make an assertion on these rows reproducible. Note that it sets no
@@ -285,8 +302,8 @@ true. An assertion written as a byte-range comparison over the field is therefor
 correct, while one counting 26 changed bytes is not.
 
 Assumptions: it has to carry a real value, because `ledger.transactions.proc_ts`
-is declared `NOT NULL` at line 247 of `V1__ledger.sql` while
-`ledger.daily_transactions.proc_ts` is nullable at line 463. That asymmetry
+is declared `NOT NULL` in `V1__ledger.sql` while
+`ledger.daily_transactions.proc_ts` is nullable there. That asymmetry
 between two records whose copybooks declare the field at the identical `PIC
 X(26)` width is the reason these are two files rather than one, and the folder
 index's section 3.2 is where the decision is recorded. The instant itself is
@@ -494,8 +511,10 @@ being written here.
   `tests/golden/posting/zero_balance/tcatbal.expected` and
   `tests/fixtures/posting/**` byte measurements.
 - **Target schema:**
-  [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql)
-  lines 247, 463, 720-726.
+  [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql) --
+  the `proc_ts` declarations on `ledger.transactions` and
+  `ledger.daily_transactions`, and the `balance` declaration on
+  `ledger.transaction_category_balances`.
 
 **Scope.** Everything under `app/**` and `tests/**` is reference-only and is
 never modified, per specification sections 0.2.2 and 0.9.2. This document reads

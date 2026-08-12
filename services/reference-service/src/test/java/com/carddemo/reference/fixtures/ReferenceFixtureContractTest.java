@@ -166,7 +166,16 @@ class ReferenceFixtureContractTest {
                 Arguments.of("disclosure_group/happy_path/discgrp.txt", DISCGRP_RECLEN, 1),
                 Arguments.of("disclosure_group/default_fallback/discgrp.txt", DISCGRP_RECLEN, 34),
                 Arguments.of("batch_reference_update/add_record/trtype-update.txt", BATCH_RECLEN, 2),
-                Arguments.of("batch_reference_update/invalid_type_soft_reject/trtype-update.txt",
+
+                // WHY : Assumptions: these three scenario paths were absent from this list while their
+                //       fixtures sat committed, so the bytes of each were established by their scenario
+                //       README and by nothing executable -- which each of those documents said outright.
+                //       Enrolling them is what turns those declared contracts into asserted ones, and the
+                //       sweep in ReferenceFixtureTest now refuses any further omission of the same kind.
+                Arguments.of("batch_reference_update/commented_line/trtype-update.txt", BATCH_RECLEN, 2),
+                Arguments.of("batch_reference_update/delete_record/trtype-update.txt", BATCH_RECLEN, 2),
+                Arguments.of("batch_reference_update/update_record/trtype-update.txt", BATCH_RECLEN, 1),
+                Arguments.of("batch_reference_update/invalid_type_abend/trtype-update.txt",
                         BATCH_RECLEN, 2),
                 Arguments.of("date_conversion/happy_path/date-request.txt", REQUEST_RECLEN, 1),
                 Arguments.of("date_conversion/invalid_date_rejected/date-request.txt",
@@ -490,7 +499,7 @@ class ReferenceFixtureContractTest {
         List<byte[]> valid = records(bytes("batch_reference_update/add_record/trtype-update.txt"),
                 BATCH_RECLEN);
         List<byte[]> invalid = records(
-                bytes("batch_reference_update/invalid_type_soft_reject/trtype-update.txt"), BATCH_RECLEN);
+                bytes("batch_reference_update/invalid_type_abend/trtype-update.txt"), BATCH_RECLEN);
 
         // WHY : Assumptions: this record is NOT in the layout registry -- it is the 53-byte
         //       WS-INPUT-REC of COBTUPDT, a one-byte action plus a two-byte code plus a

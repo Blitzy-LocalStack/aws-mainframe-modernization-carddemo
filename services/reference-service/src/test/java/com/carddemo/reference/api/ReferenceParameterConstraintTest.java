@@ -3,7 +3,9 @@ package com.carddemo.reference.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -18,14 +20,20 @@ import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.reference.dto.DisclosureGroupRateResponse;
 import com.carddemo.reference.dto.LookupPageRequest;
+import com.carddemo.reference.dto.PageDirection;
 import com.carddemo.reference.dto.TransactionCategoryListRequest;
 import com.carddemo.reference.dto.TransactionCategoryResponse;
 import com.carddemo.reference.dto.TransactionTypeListRequest;
 import com.carddemo.reference.dto.TransactionTypeResponse;
+import com.carddemo.reference.mapper.UsPhoneAreaCodeMapper;
+import com.carddemo.reference.mapper.UsStateMapper;
+import com.carddemo.reference.mapper.UsStateZipPrefixMapper;
 import com.carddemo.reference.repository.UsPhoneAreaCodeRepository;
 import com.carddemo.reference.repository.UsStateRepository;
 import com.carddemo.reference.repository.UsStateZipPrefixRepository;
+import com.carddemo.reference.service.AddressLookupService;
 import com.carddemo.reference.service.DisclosureGroupService;
+import com.carddemo.reference.service.ReferencePaging;
 import com.carddemo.reference.service.TransactionCategoryService;
 import com.carddemo.reference.service.TransactionTypeService;
 import java.math.BigDecimal;
@@ -39,6 +47,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.Limit;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
@@ -111,6 +120,12 @@ class ReferenceParameterConstraintTest {
     /** The query parameter carrying an opaque paging position, on all five list routes. */
     private static final String PARAM_CURSOR = "cursor";
 
+    // WHY : Assumptions: the parameter name is read from the enumeration that owns it rather than written
+    //       as a literal here, because the same constant is what a refusal names as the field at fault --
+    //       so a case sending one spelling and asserting another could not drift apart silently.
+    /** The query parameter carrying the paging direction, on all five list routes. */
+    private static final String PARAM_DIRECTION = PageDirection.PARAMETER_NAME;
+
     /** The query parameter carrying the area-code classification filter. */
     private static final String PARAM_CODE_CLASS = "codeClass";
 
@@ -127,6 +142,13 @@ class ReferenceParameterConstraintTest {
     /** A position that is not of the sealed shape at all, so the parameter constraint refuses it. */
     private static final String MALFORMED_CURSOR = "01";
 
+    // WHY : Assumptions: this value satisfies the SHAPE expression and nothing more. It is sent only on
+    //       the two routes whose service is mocked, so nothing ever opens it; its purpose is to get past
+    //       the parameter constraint so that the direction beside it is the only thing under test.
+    /** A position of the sealed shape, for the two routes whose mocked service never opens one. */
+    private static final String SHAPED_CURSOR =
+            CursorToken.VERSION + ".YWJjZGVmZ2hpamts.0123456789012345678901234567890123456789012";
+
     /** The dispatcher under test, carrying all four reference controllers. */
     private MockMvc mockMvc;
 
@@ -138,6 +160,14 @@ class ReferenceParameterConstraintTest {
 
     /** The rate resolver, mocked so the accepted disclosure-group case has a rate to render. */
     private DisclosureGroupService rates;
+
+    // WHY : Assumptions: the sealer is held as a FIELD rather than as a local of the builder because the
+    //       direction cases below mint a real position with it and then send that position back. Minting
+    //       with the same instance the dispatcher opens with is what makes those cases assert the whole
+    //       path -- the lower-case direction converting, the position opening under the scope that
+    //       direction implies, and a query being reached -- rather than only the conversion.
+    /** The real seal the dispatcher opens positions with, and the direction cases mint positions with. */
+    private CursorToken sealer;
 
     /**
      * Builds one dispatcher over all four reference controllers with the shared advice registered.
@@ -168,16 +198,26 @@ class ReferenceParameterConstraintTest {
         when(this.categories.list(any(TransactionCategoryListRequest.class), any(CursorToken.class),
                 anyString())).thenReturn(PageResponse.empty());
 
-        CursorToken sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
+        this.sealer = new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
 
         JacksonJsonHttpMessageConverter converter = new JacksonJsonHttpMessageConverter(
                 JsonMapper.builder().addModule(new MoneyModule()).build());
 
         this.mockMvc = MockMvcBuilders
                 .standaloneSetup(
-                        new AddressLookupController(areaCodes, states, zipPrefixes, sealer),
-                        new TransactionTypeController(this.types, sealer),
-                        new TransactionCategoryController(this.categories, sealer),
+                        // WHY : ⚠️ Refactoring Rationale: the address-lookup controller is now assembled
+                        //       over its SERVICE rather than over three repositories and the sealer. The
+                        //       three repositories and the sealer are still constructed here because the
+                        //       service holds them, and this class asserts what the DISPATCHER refuses
+                        //       before a handler runs -- so the stack below the handler still has to be
+                        //       real enough that a request which passes every constraint reaches a read
+                        //       rather than a null.
+                        new AddressLookupController(new AddressLookupService(
+                                areaCodes, states, zipPrefixes, this.sealer,
+                                new UsPhoneAreaCodeMapper(), new UsStateMapper(),
+                                new UsStateZipPrefixMapper())),
+                        new TransactionTypeController(this.types, this.sealer),
+                        new TransactionCategoryController(this.categories, this.sealer),
                         new DisclosureGroupController(this.rates))
                 // WHY : Assumptions: an authenticated caller is supplied on EVERY request by default rather
                 //       than case by case. Each browse seals its paging position against the caller's name,
@@ -833,7 +873,257 @@ class ReferenceParameterConstraintTest {
                     .perform(get(AddressLookupController.AREA_CODE_PATH + "/{areaCd}", "201"))
                     .andExpect(status().isNotFound())
                     .andExpect(jsonPath("$.message")
-                            .value(AddressLookupController.MESSAGE_AREA_CODE_NOT_FOUND));
+                            .value(AddressLookupService.MESSAGE_AREA_CODE_NOT_FOUND));
+        }
+    }
+
+    /**
+     * The paging direction, on every one of the five routes that publishes it.
+     *
+     * <p>⚠️ Purpose and Refactoring Rationale: review found that every one of these five routes declared
+     * its {@code direction} query parameter as {@link PageDirection} itself, which the framework binds
+     * through {@code StringToEnumConverterFactory} and therefore through {@code Enum.valueOf} against the
+     * CONSTANT NAME. The published contract declares two lower-case values, {@code next} and
+     * {@code previous}, and {@code ui/src/api/reference.ts} sends exactly those -- so the only two values
+     * a caller is told to send were the two the binding refused, while {@code NEXT} and {@code PREVIOUS},
+     * which appear in no contract, were accepted. Every backward page on every browse in this module was
+     * unreachable. The nested cases below send the two published spellings on all five routes and assert
+     * they are honoured, and then send an unadmitted value and assert the refusal names the parameter.</p>
+     *
+     * <p>Assumptions: all five routes are asserted rather than one standing for the rest. The defect was
+     * five independent declarations of the same wrong type, so a single representative case would have
+     * passed against a tree in which four of the five were still wrong -- which is the failure mode this
+     * whole class exists to detect.</p>
+     *
+     * <p>Assumptions: the three address routes are driven with a position this class MINTS with the real
+     * seal, and the two filtered browses are driven with a position of the sealed shape that their mocked
+     * service never opens. The asymmetry follows the class's existing rule: the address service is real
+     * here, so its position has to be genuine for the request to reach a query; the type and category
+     * services are mocked, so what reaches them is the converted direction and nothing else.</p>
+     */
+    @Nested
+    @DisplayName("on the paging direction")
+    class OnThePagingDirection {
+
+        /**
+         * Mints a position of the area-code browse for this class's caller, under one direction.
+         *
+         * @param backward whether to mint the leading boundary a backward request moves from
+         * @param codeClass the classification the walk was performed under, or {@code null} when none
+         * @return a sealed position the dispatcher will open for that direction
+         */
+        private String areaCodePosition(boolean backward, String codeClass) {
+            return ReferenceParameterConstraintTest.this.sealer.seal(
+                    ReferencePaging.binding(AddressLookupService.AREA_CODE_BINDING, CALLER.getName(),
+                            backward, codeClass),
+                    "201");
+        }
+
+        /**
+         * The forward spelling the contract publishes is honoured on the area-code browse.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the published forward spelling is accepted on the area-code browse")
+        void theForwardSpellingIsAcceptedOnAreaCodes() throws Exception {
+            ReferenceParameterConstraintTest.this.mockMvc
+                    .perform(get(AddressLookupController.AREA_CODE_PATH)
+                            .param(PARAM_CURSOR, areaCodePosition(false, null))
+                            .param(PARAM_DIRECTION, PageDirection.NEXT.wireValue()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.items").isArray());
+        }
+
+        /**
+         * The backward spelling the contract publishes is honoured on the area-code browse.
+         *
+         * <p>Assumptions: the position is minted under the BACKWARD binding, because a position presented
+         * with that direction is the leading boundary of the page the caller is on. Minting it forward and
+         * sending it backward is a refusal by design, so this case would fail for the wrong reason.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the published backward spelling is accepted on the area-code browse")
+        void theBackwardSpellingIsAcceptedOnAreaCodes() throws Exception {
+            ReferenceParameterConstraintTest.this.mockMvc
+                    .perform(get(AddressLookupController.AREA_CODE_PATH)
+                            .param(PARAM_CURSOR, areaCodePosition(true, null))
+                            .param(PARAM_DIRECTION, PageDirection.PREVIOUS.wireValue()))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.items").isArray());
+        }
+
+        /**
+         * Both published spellings are honoured on the state browse.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("both published spellings are accepted on the state browse")
+        void bothSpellingsAreAcceptedOnStates() throws Exception {
+            for (PageDirection direction : PageDirection.values()) {
+                String position = ReferenceParameterConstraintTest.this.sealer.seal(
+                        ReferencePaging.binding(AddressLookupService.STATE_BINDING, CALLER.getName(),
+                                direction == PageDirection.PREVIOUS),
+                        "NY");
+                ReferenceParameterConstraintTest.this.mockMvc
+                        .perform(get(AddressLookupController.STATE_PATH)
+                                .param(PARAM_CURSOR, position)
+                                .param(PARAM_DIRECTION, direction.wireValue()))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.items").isArray());
+            }
+        }
+
+        /**
+         * Both published spellings are honoured on the state-and-prefix browse.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("both published spellings are accepted on the prefix browse")
+        void bothSpellingsAreAcceptedOnZipPrefixes() throws Exception {
+            for (PageDirection direction : PageDirection.values()) {
+                String position = ReferenceParameterConstraintTest.this.sealer.seal(
+                        ReferencePaging.binding(AddressLookupService.ZIP_PREFIX_BINDING,
+                                CALLER.getName(), direction == PageDirection.PREVIOUS),
+                        "NY10");
+                ReferenceParameterConstraintTest.this.mockMvc
+                        .perform(get(AddressLookupController.ZIP_PREFIX_PATH)
+                                .param(PARAM_CURSOR, position)
+                                .param(PARAM_DIRECTION, direction.wireValue()))
+                        .andExpect(status().isOk())
+                        .andExpect(jsonPath("$.items").isArray());
+            }
+        }
+
+        /**
+         * Both published spellings reach the transaction-type browse and arrive as the matching constant.
+         *
+         * <p>Assumptions: this case asserts the CONVERTED value that reached the service and not merely
+         * the status, because that browse's service is mocked and would answer 200 for any direction at
+         * all -- including a null one, which is what a silently-discarded parameter would look like.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("both published spellings reach the type browse as the matching constant")
+        void bothSpellingsReachTheTypeBrowse() throws Exception {
+            for (PageDirection direction : PageDirection.values()) {
+                ReferenceParameterConstraintTest.this.mockMvc
+                        .perform(get(TransactionTypeController.BASE_PATH)
+                                .param(PARAM_CURSOR, SHAPED_CURSOR)
+                                .param(PARAM_DIRECTION, direction.wireValue()))
+                        .andExpect(status().isOk());
+
+                ArgumentCaptor<TransactionTypeListRequest> received =
+                        ArgumentCaptor.forClass(TransactionTypeListRequest.class);
+                verify(ReferenceParameterConstraintTest.this.types, atLeastOnce())
+                        .list(received.capture(), any(CursorToken.class), anyString());
+                assertThat(received.getAllValues())
+                        .as("the direction the handler passed on for wire value %s",
+                                direction.wireValue())
+                        .anyMatch(request -> request.direction() == direction);
+            }
+        }
+
+        /**
+         * Both published spellings reach the transaction-category browse as the matching constant.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("both published spellings reach the category browse as the matching constant")
+        void bothSpellingsReachTheCategoryBrowse() throws Exception {
+            for (PageDirection direction : PageDirection.values()) {
+                ReferenceParameterConstraintTest.this.mockMvc
+                        .perform(get(TransactionCategoryController.BASE_PATH)
+                                .param(PARAM_CURSOR, SHAPED_CURSOR)
+                                .param(PARAM_DIRECTION, direction.wireValue()))
+                        .andExpect(status().isOk());
+
+                ArgumentCaptor<TransactionCategoryListRequest> received =
+                        ArgumentCaptor.forClass(TransactionCategoryListRequest.class);
+                verify(ReferenceParameterConstraintTest.this.categories, atLeastOnce())
+                        .list(received.capture(), any(CursorToken.class), anyString());
+                assertThat(received.getAllValues())
+                        .as("the direction the handler passed on for wire value %s",
+                                direction.wireValue())
+                        .anyMatch(request -> request.direction() == direction);
+            }
+        }
+
+        /**
+         * A value outside the published domain is refused 400 naming the direction parameter.
+         *
+         * <p>Assumptions: the FIELD is asserted and not only the status. The framework's own refusal of an
+         * unconvertible enumeration arrives as a type mismatch carrying no field at all, so a caller was
+         * told something was wrong without being told which parameter to correct; naming it is the second
+         * improvement the conversion member was written for, and a case asserting only the status would
+         * pass against a tree that had lost it.</p>
+         *
+         * <p>Assumptions: the constant NAME is the value sent, because that is the spelling the broken
+         * binding accepted. A case sending arbitrary text would be refused by a tree in which the old
+         * binding was still in place, so it would not distinguish the two.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the constant name the old binding accepted is now refused 400 naming direction")
+        void theConstantNameIsRefusedNamingTheParameter() throws Exception {
+            ReferenceParameterConstraintTest.this.mockMvc
+                    .perform(get(AddressLookupController.AREA_CODE_PATH)
+                            .param(PARAM_CURSOR, areaCodePosition(false, null))
+                            .param(PARAM_DIRECTION, PageDirection.NEXT.name()))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.fieldErrors[0].field")
+                            .value(PageDirection.PARAMETER_NAME))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value(PageDirection.MESSAGE_UNADMITTED_DIRECTION));
+        }
+
+        /**
+         * An unrecognised value is refused on each of the other four routes as well.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an unrecognised direction is refused 400 on all five routes")
+        void anUnrecognisedDirectionIsRefusedEverywhere() throws Exception {
+            String[] routes = {
+                AddressLookupController.AREA_CODE_PATH,
+                AddressLookupController.STATE_PATH,
+                AddressLookupController.ZIP_PREFIX_PATH,
+                TransactionTypeController.BASE_PATH,
+                TransactionCategoryController.BASE_PATH,
+            };
+            for (String route : routes) {
+                ReferenceParameterConstraintTest.this.mockMvc
+                        .perform(get(route)
+                                .param(PARAM_CURSOR, SHAPED_CURSOR)
+                                .param(PARAM_DIRECTION, "sideways"))
+                        .andExpect(status().isBadRequest())
+                        .andExpect(jsonPath("$.fieldErrors[0].field")
+                                .value(PageDirection.PARAMETER_NAME));
+            }
+        }
+
+        /**
+         * Pins the two wire spellings these cases send against the ones the type declares.
+         *
+         * <p>Assumptions: the spellings are read from the enumeration rather than written as literals, so
+         * a change to either published value fails here instead of leaving the cases above asserting
+         * against a contract that no longer says what they assume.</p>
+         */
+        @Test
+        @DisplayName("the two wire spellings these cases send are the ones the contract publishes")
+        void theWireSpellingsAreThePublishedOnes() {
+            assertThat(PageDirection.NEXT.wireValue()).isEqualTo("next");
+            assertThat(PageDirection.PREVIOUS.wireValue()).isEqualTo("previous");
+            assertThat(PageDirection.NEXT.name()).isNotEqualTo(PageDirection.NEXT.wireValue());
         }
     }
 

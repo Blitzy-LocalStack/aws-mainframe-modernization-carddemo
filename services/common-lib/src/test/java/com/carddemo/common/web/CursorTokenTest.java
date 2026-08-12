@@ -268,12 +268,12 @@ class CursorTokenTest {
         //   envelope settles its row-count invariant -- a page carrying rows must name both of its ends
         //   -- before it inspects either token's shape. Supplying one raw component and one sealed one
         //   is what makes the refusal under test the reachable one rather than the invariant above it.
-        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, false, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, RAW_CURSOR, sealed, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, false, false))
+        assertThatThrownBy(() -> new PageResponse<>(rows, sealed, RAW_CURSOR, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
@@ -283,12 +283,12 @@ class CursorTokenTest {
         //   carries five members and has none of its own for them -- so a raw key handed to either
         //   parameter of that factory has to be refused by the same check, naming the component it
         //   landed in rather than the parameter it arrived through.
-        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(RAW_CURSOR, null, false))
+        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(RAW_CURSOR, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lastKey")
                 .hasMessageNotContaining(RAW_CURSOR);
 
-        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(null, RAW_CURSOR, false))
+        assertThatThrownBy(() -> PageResponse.<String>ofFilteredEmpty(null, RAW_CURSOR))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("firstKey")
                 .hasMessageNotContaining(RAW_CURSOR);
@@ -306,7 +306,7 @@ class CursorTokenTest {
         String first = sealer.seal(BINDING, RAW_CURSOR);
         String last = sealer.seal(BINDING, "411111111111111200000000012");
 
-        PageResponse<String> page = new PageResponse<>(List.of("row"), first, last, true, true);
+        PageResponse<String> page = new PageResponse<>(List.of("row"), first, last, true);
 
         assertThat(page.firstKey()).isEqualTo(first);
         assertThat(page.lastKey()).isEqualTo(last);
@@ -317,7 +317,7 @@ class CursorTokenTest {
         //   lands in lastKey and its backward one in firstKey, and a further page is reported from the
         //   presence of the forward position alone, so a caller honouring the indicator always holds
         //   the token to send back.
-        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(last, first, true);
+        PageResponse<String> filtered = PageResponse.ofFilteredEmpty(last, first);
 
         assertThat(filtered.items()).isEmpty();
         assertThat(filtered.lastKey()).isEqualTo(last);

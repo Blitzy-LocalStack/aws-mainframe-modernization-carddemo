@@ -1,5 +1,7 @@
 package com.carddemo.reference.dto;
 
+import com.carddemo.common.error.ApiError;
+import com.carddemo.common.error.ClientInputException;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 
@@ -99,6 +101,61 @@ public enum PageDirection {
         //       can reach a response body.
         // WHY : Assumptions: the admitted domain is closed and has two members, so naming it tells a
         //       caller everything the echo did without putting the caller's own bytes in a log line.
-        throw new IllegalArgumentException("direction must be one of next or previous");
+        throw new IllegalArgumentException(MESSAGE_UNADMITTED_DIRECTION);
+    }
+
+    /** The sentence a value outside the two-member domain is refused with, on either entry point. */
+    public static final String MESSAGE_UNADMITTED_DIRECTION =
+            "direction must be one of next or previous";
+
+    /** The published name of the query parameter this type is bound from, and the field a refusal names. */
+    public static final String PARAMETER_NAME = "direction";
+
+    /**
+     * Reads the query-parameter spelling of a direction, refusing an unadmitted value as caller input.
+     *
+     * <p>⚠️ Purpose and Refactoring Rationale: this member exists because the framework's own
+     * string-to-enumeration conversion could not read the values this contract publishes. A handler
+     * parameter declared as this type is bound by {@code StringToEnumConverterFactory}, which resolves
+     * through {@code Enum.valueOf} against the CONSTANT NAME -- so {@code NEXT} and {@code PREVIOUS} were
+     * accepted and {@code next} and {@code previous}, the only two values the contract declares and the
+     * only two {@code ui/src/api/reference.ts} sends, were refused. The {@link JsonCreator} above did not
+     * help, because it is consulted for a request BODY and a direction arrives as a query parameter. Every
+     * paging route that took a direction was therefore unreachable to its own published clients. The five
+     * handlers now bind a {@code String} and convert here, which is correct with no framework
+     * registration at all and is provable by driving a real request at each route.</p>
+     *
+     * <p>Alternatives Considered: registering a {@code Converter<String, PageDirection>} through a
+     * {@code WebMvcConfigurer}, which is the tidier one-line change and is why it was considered first.
+     * Rejected because its correctness would then depend on wiring the module's test dispatchers cannot
+     * see: this module's HTTP cases are assembled with {@code standaloneSetup}, which registers no
+     * application context, so each would have to install the converter itself -- and a test that installs
+     * the mechanism it is verifying proves the converter works while proving nothing about whether the
+     * running service registers it. Converting at the boundary needs no registration to be right.</p>
+     *
+     * <p>Assumptions: an unadmitted value is refused as CALLER INPUT and not as a conversion fault, which
+     * is a second improvement rather than an incidental one. Under the framework's conversion the refusal
+     * arrived as a type mismatch carrying no field, so a client was told the request was malformed without
+     * being told which parameter to correct; this names {@value #PARAMETER_NAME} as the field. The sentence
+     * is shared with the body path above, so the two entry points cannot come to disagree about the
+     * domain.</p>
+     *
+     * <p>Assumptions: a {@code null} input yields {@code null} rather than the forward default, exactly as
+     * the body path does, because an omitted direction is meaningful only alongside a position and the
+     * pairing rule is checked by the service. Defaulting here would make an omitted direction
+     * indistinguishable from an explicit forward one at the point that check is made.</p>
+     *
+     * @param parameterValue the value the caller sent on the query string, possibly {@code null}
+     * @return the matching constant, or {@code null} when no direction was supplied
+     * @throws ClientInputException when the value is neither of the two the contract publishes, carrying
+     *     the shared sentence and naming {@value #PARAMETER_NAME} as the field at fault
+     */
+    public static PageDirection fromRequestParameter(String parameterValue) {
+        try {
+            return fromWireValue(parameterValue);
+        } catch (IllegalArgumentException unadmitted) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, PARAMETER_NAME,
+                    MESSAGE_UNADMITTED_DIRECTION);
+        }
     }
 }

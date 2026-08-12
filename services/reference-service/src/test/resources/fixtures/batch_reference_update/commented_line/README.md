@@ -101,7 +101,7 @@ Both are named because this scenario's non-effect is only meaningful against the
   with no `STOP RUN` and no language-environment abend call on that path. It is a
   warn-tier soft reject that returns through `1003-TREAT-RECORD` to the read loop, not a
   termination. That arm belongs to the sibling
-  [`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md).
+  [`../invalid_type_abend`](../invalid_type_abend/README.md).
 
 The gap between L120 and L122 is one line of source and two opposite outcomes, which is
 why section 3.2 draws the line against that sibling explicitly rather than trusting a
@@ -156,7 +156,7 @@ something this input cannot cause. For row 1 the stronger statement holds - it t
 
 ### 3.2 The contrast that gives this scenario its meaning
 
-The sibling [`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md) is the
+The sibling [`../invalid_type_abend`](../invalid_type_abend/README.md) is the
 nearest neighbour in the whole dispatch and the single most confusable pair in this
 directory. Set side by side, on a fixture whose byte 0 is the only difference that
 matters:
@@ -170,13 +170,13 @@ matters:
 | Run-level classification | applied, `RecordAction.COMMENT` | refused, `RecordAction.INVALID` |
 | Run continues to the next record | yes | yes |
 
-The last row is the one both scenarios agree on, and it is why the sibling is named for a
-soft reject rather than for a halt: `9999-ABEND` ends a paragraph, not a run. That
-sibling directory carried the name **`invalid_type_abend`** before it was named for its
-behaviour instead of for the label of the paragraph it reaches; its own section 8 and
-section 10 of [`../../README.md`](../../README.md) both record why the name changed. A
-reader arriving from the former name is looking for that directory, not for this one -
-the two scenarios are opposites, and the former name never described this one.
+The last row is the one both scenarios agree on, and it is why the sibling's name is not
+a claim that the run stops: `9999-ABEND` ends a paragraph, not a run. That sibling is
+[`../invalid_type_abend`](../invalid_type_abend/README.md), named for the paragraph its
+invalid byte performs; its own section 8 and section 10 of
+[`../../README.md`](../../README.md) both record why the name is read that way. The
+two scenarios are opposites, so a reader looking for the refused-type case wants that
+directory and not this one.
 
 ### 3.3 Consumers, with availability stated rather than implied
 
@@ -193,21 +193,31 @@ the two scenarios are opposites, and the former name never described this one.
   There is no batch job, no step, no job repository and no run ledger on this path, and
   none is to be described as though there were: the baseline behind it is a single
   sequential read loop at L93 to L96.
-- **No consumer resolves this scenario's path on this branch.** The tree's executable
-  consumers are `ReferenceFixtureContractTest` and `ReferenceFixtureTest` in
-  `com.carddemo.reference.fixtures`, which resolve fixtures from the test classpath as
-  `fixtures/<domain>/<scenario>/<file>.txt` and raise rather than skip on an absent name.
-  Neither enrols `fixtures/batch_reference_update/commented_line/trtype-update.txt`, and
-  no test class is named for it here, because naming an artifact this branch does not
-  carry would assert something a reader cannot check. The consequence is worth stating
-  plainly rather than leaving to inference: a record file that nothing loads by its own
-  path can be edited into something wrong with every test still passing, so **this
-  document, and not a test, is what establishes that these 108 bytes are right.** That
-  is the same reasoning the contract test records for the paths it does enrol.
-- **The `'*'` behaviour itself is covered independently of these bytes.** The service's
-  own unit test exercises the commentary branch through records it builds in-test and
-  pins the display text against the baseline literal. So the branch is asserted; what is
-  unasserted is *this file*.
+- **Three consumers now resolve this scenario's path.** `ReferenceFixtureContractTest`
+  and `ReferenceFixtureTest` in `com.carddemo.reference.fixtures` resolve fixtures from
+  the test classpath as `fixtures/<domain>/<scenario>/<file>.txt` and raise rather than
+  skip on an absent name; both now enrol
+  `fixtures/batch_reference_update/commented_line/trtype-update.txt`, so its 108 bytes,
+  its two 53-byte records, its LF-only terminators and its single trailing newline are
+  asserted rather than declared. `ReferenceBatchUpdateServiceTest`, in its
+  `on the stored scenario fixtures` group, feeds these exact bytes through
+  `BatchUpdateService.apply` and asserts the ordered pair of outcomes section 3.1
+  tabulates: `COMMENT` on type `03` carrying `IGNORING COMMENTED LINE`, then `UPDATE` on
+  type `01` carrying `RECORD UPDATED SUCCESSFULLY`, with nothing refused and the clean
+  return code. It also asserts row 1's non-effect as an ABSENCE of any persistence
+  interaction, which is the one form in which "touches no table at all" is checkable.
+- **This section previously recorded the opposite, and the reason is worth keeping.** It
+  read "no consumer resolves this scenario's path" and concluded that **this document, and
+  not a test, is what establishes that these 108 bytes are right** - which was accurate
+  when written and was the correct thing to state. A record file that nothing loads by its
+  own path can be edited into something wrong with every test still passing, and that is
+  exactly what a review found here. What changed is not the reasoning but the fact: the
+  bytes are now load-bearing, and `ReferenceFixtureTest` additionally sweeps the packaged
+  tree so no fixture can fall out of the enrolment again.
+- **The `'*'` behaviour is also covered independently of these bytes.** The service's own
+  unit test exercises the commentary branch through records it builds in-test and pins the
+  display text against the baseline literal. So the branch is asserted twice over: once
+  from composed records and once from this file.
 
 **The bytes are the contract.** A consumer's expected value is whatever these 108 bytes
 decode to, so a fixture that is wrong does not fail - it produces a passing assertion
@@ -396,7 +406,7 @@ So `'*'` is a member of the declared action domain that happens to have no actio
 every other byte outside that domain is a reported refusal. A fixture author who
 generalises from this row to "unrecognised bytes are ignored" has described L120 and
 attributed it to L122, and the sibling
-[`../invalid_type_soft_reject`](../invalid_type_soft_reject/README.md) is the scenario that
+[`../invalid_type_abend`](../invalid_type_abend/README.md) is the scenario that
 contradicts them.
 
 ---

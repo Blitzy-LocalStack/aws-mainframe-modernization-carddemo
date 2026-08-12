@@ -131,6 +131,18 @@ class AccountAddressValidationTest {
         /** The service under test, wired exactly as the container wires it. */
         private final AccountUpdateService service;
 
+        /**
+         * The stored account row, retained so a precondition can be derived from it.
+         *
+         * <p>Assumptions: this was a local in the constructor until the precondition had to be built
+         * from it. It is retained rather than re-read from the mock because the mock answers with this
+         * very instance, so a re-read would return the same object by a longer route.</p>
+         */
+        private final Account account;
+
+        /** The stored customer row, retained for the same reason as the account row. */
+        private final Customer customer;
+
         /** Builds the fixture over rows the reference would accept. */
         Fixture() {
             Account account = new Account(ACCOUNT_ID, "Y", new BigDecimal("100.00"),
@@ -154,6 +166,9 @@ class AccountAddressValidationTest {
                     .thenAnswer(call -> call.getArgument(0));
             when(this.accounts.saveAndFlush(any(Account.class)))
                     .thenAnswer(call -> call.getArgument(0));
+
+            this.account = account;
+            this.customer = customer;
 
             // WHY : Refactoring Rationale: the ACCOUNT mapper is supplied where the narrower context
             //       mapper used to be, because the service now applies the account half of a submission
@@ -185,7 +200,13 @@ class AccountAddressValidationTest {
          * @param request the submitted edit; must not be {@code null}
          */
         void update(AccountUpdateRequest request) {
-            this.service.update(ACCOUNT_ID, request, this.service.currentRevision(ACCOUNT_ID));
+            // WHY : Assumptions: the precondition is derived from the fixture's own stored rows through
+            //       AccountRevision, which owns the format the write path compares. It was previously
+            //       read back from the object under test through a currentRevision operation that has
+            //       since been removed, because the adapter used it as a second transaction and could
+            //       therefore publish an entity tag describing a different state from the body beside it.
+            this.service.update(ACCOUNT_ID, request,
+                    AccountRevision.of(this.account, this.customer));
         }
 
         /**

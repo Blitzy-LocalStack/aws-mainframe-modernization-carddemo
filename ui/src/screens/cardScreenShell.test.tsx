@@ -102,7 +102,6 @@ const ONE_ROW_PAGE: PageResponse<CardSummary> = {
   firstKey: null,
   lastKey: null,
   hasNext: false,
-  hasPrevious: false,
 };
 
 /** One card detail, whose masked rendering is what a non-administrative read returns. */
@@ -572,6 +571,87 @@ async function updateRendersTheExactFieldRefusal(): Promise<void> {
 }
 
 /**
+ * Asserts the browse permits a backward step only after a forward one, from its own screen ordinal.
+ *
+ * Assumptions: this is the substance of the four-member page envelope. Neither page below carries any
+ * backward-availability member -- there is none to carry -- so the only thing that can distinguish the
+ * refusal on the opening page from the accepted step on the second is the ordinal this screen holds,
+ * which is the reference's own `WS-CA-SCREEN-NUM` at `app/cbl/COCRDLIC.cbl` L237. Both mocked pages
+ * deliberately name a leading cursor, so a screen that gated on `firstKey` being present instead would
+ * accept the backward step on the opening page and fail the first expectation here.
+ *
+ * Assumptions: the backward request is asserted to carry the LEADING cursor under direction
+ * `previous`, because the position is what the envelope publishes for that purpose and the service
+ * seals the direction into the token -- replaying it forward would be refused with HTTP 400.
+ * @returns {Promise<void>} Resolves once the refusal, the forward step and the backward step have all
+ *   been observed.
+ */
+async function listPagesBackwardOnlyAfterPagingForward(): Promise<void> {
+  const openingPage: PageResponse<CardSummary> = {
+    items: [ROW],
+    firstKey: 'opening-leading-cursor',
+    lastKey: 'opening-trailing-cursor',
+    hasNext: true,
+  };
+  const secondPage: PageResponse<CardSummary> = {
+    items: [ROW],
+    firstKey: 'second-leading-cursor',
+    lastKey: 'second-trailing-cursor',
+    hasNext: false,
+  };
+  vi.mocked(listCards)
+    .mockResolvedValueOnce(openingPage)
+    .mockResolvedValueOnce(secondPage)
+    .mockResolvedValue(openingPage);
+
+  const user = userEvent.setup();
+  renderAt('/cards', '/cards', <CardListScreen />);
+  await screen.findByRole('table');
+
+  await user.click(screen.getByRole('button', { name: 'F7=Backward' }));
+  expect(
+    await screen.findByText(collapse(PROGRAM_MESSAGES.COCRDLIC.NO_PREVIOUS_PAGES_TO_DISPLAY)),
+  ).toBeInTheDocument();
+  expect(vi.mocked(listCards)).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole('button', { name: 'F8=Forward' }));
+  await waitFor(
+    /**
+     * Waits for the forward step to have reached the transport.
+     * @returns {void} Nothing; throws until the second read has been issued.
+     */
+    () => {
+      expect(vi.mocked(listCards)).toHaveBeenCalledTimes(2);
+    },
+  );
+  expect(vi.mocked(listCards)).toHaveBeenLastCalledWith({
+    cursor: 'opening-trailing-cursor',
+    direction: 'next',
+  });
+
+  await user.click(screen.getByRole('button', { name: 'F7=Backward' }));
+  await waitFor(
+    /**
+     * Waits for the backward step to have reached the transport.
+     * @returns {void} Nothing; throws until the third read has been issued.
+     */
+    () => {
+      expect(vi.mocked(listCards)).toHaveBeenCalledTimes(3);
+    },
+  );
+  expect(vi.mocked(listCards)).toHaveBeenLastCalledWith({
+    cursor: 'second-leading-cursor',
+    direction: 'previous',
+  });
+
+  await user.click(screen.getByRole('button', { name: 'F7=Backward' }));
+  expect(
+    await screen.findByText(collapse(PROGRAM_MESSAGES.COCRDLIC.NO_PREVIOUS_PAGES_TO_DISPLAY)),
+  ).toBeInTheDocument();
+  expect(vi.mocked(listCards)).toHaveBeenCalledTimes(3);
+}
+
+/**
  * Registers every shell and text case.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
@@ -593,6 +673,10 @@ function cardScreenShellCases(): void {
   it(
     'reports both source paging refusals rather than disabling the keys',
     listReportsThePagingRefusals,
+  );
+  it(
+    'steps backward only after stepping forward, from the screen ordinal it holds',
+    listPagesBackwardOnlyAfterPagingForward,
   );
   it(
     'refuses a partial browse entry with the list screen own sentence',

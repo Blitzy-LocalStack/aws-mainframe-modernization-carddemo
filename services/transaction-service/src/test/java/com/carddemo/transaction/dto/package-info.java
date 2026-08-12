@@ -17,10 +17,18 @@
  *
  * <p>Alternatives Considered: generating these records from the contract, which would make the
  * disagreement impossible rather than detectable. Rejected because the mapping is not mechanical - it
- * truncates padding, masks the primary account number, narrows one edit mask and renames misspelled
- * baseline fields, each needing a justification at the point of decision that a generator cannot carry -
- * and because the migration plan states the mapping layer is hand-written for that reason. Asserting the
- * agreement keeps the annotated records and their rationale while making drift fail a build.</p>
+ * truncates padding, masks the primary account number, withholds a verification value and renames
+ * misspelled baseline fields, each needing a justification at the point of decision that a generator
+ * cannot carry - and because the migration plan states the mapping layer is hand-written for that
+ * reason. Asserting the agreement keeps the annotated records and their rationale while making drift
+ * fail a build.</p>
+ *
+ * <p>Refactoring Rationale: that list named "narrows one edit mask" until a later review measured the
+ * narrowing. The service tested the eight-digit SCREEN picture while this contract and the request record
+ * both admitted the record's nine, so nothing was narrowed at the boundary and a nine-digit amount was
+ * instead refused after binding. The narrowing is gone rather than relocated -- divergence
+ * D-AMOUNT-RECORD-WIDTH settles the field at the record's width on all three sides -- and a case in this
+ * package now reads the service's own constant so a third authority cannot dissent again unnoticed.</p>
  *
  * <p>Trade-offs: the contract is parsed as untyped nested maps rather than through an OpenAPI object
  * model, and the constraints are read by reflection rather than by running a validator. A model plus a

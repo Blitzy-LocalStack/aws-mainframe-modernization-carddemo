@@ -3,10 +3,9 @@
  * per record the context owns.
  *
  * <p>Every path by which the reference system reaches an account, a customer or a card
- * cross-reference arrives here as a typed method on an interface, and no other kind of member is
- * declared. The four rulings below are stated once in this descriptor so that a member interface can
- * cite them rather than re-argue them, which is why two of the three interfaces declare no method of
- * their own at all beyond what they inherit.</p>
+ * cross-reference arrives here as a typed method on an interface. The four rulings below are stated once
+ * in this descriptor so that a member interface can cite them rather than re-argue them, which is why two
+ * of the three interfaces declare no method of their own at all beyond what they inherit.</p>
  *
  * <h2>The three interfaces</h2>
  *
@@ -16,6 +15,30 @@
  * declared here rather than in {@code com.carddemo.account.dto} because it carries ENTITIES and is never
  * serialised to a caller; a transfer record carrying entities would put persistence types on the published
  * boundary, which is exactly what the mapper seam exists to prevent.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this package also declares ONE CLASS, {@code InquiryReplyLedger}, and it is
+ * the single documented exception to "one repository interface per record". This descriptor previously
+ * stated that no other kind of member is declared here, and that sentence is withdrawn rather than
+ * stretched. The exception exists because its central statement cannot be expressed as a Spring Data
+ * method: it must insert a row if and only if no row holds that key and report which of the two happened,
+ * in ONE round trip, which is {@code INSERT ... ON CONFLICT DO NOTHING} and has no JPQL form. Expressing
+ * the same intent as a read followed by a conditional insert would leave the decision to the gap between
+ * two statements, which is exactly where two concurrent deliveries of one message would both decide they
+ * were first. Alternatives Considered: mapping {@code account.inquiry_reply_ledger} as a fourth entity so
+ * a fourth interface could be declared over it. Rejected because a mapped entity would let any member of
+ * this module read or write the ledger through the persistence context -- including flushing a stale copy
+ * over a row a concurrent delivery had already advanced -- where three named statements over one table
+ * offer nothing else. Assumptions: the precedent does not generalise. It is admissible here because the
+ * statement is not expressible otherwise, not because a class is a convenient shape.</p>
+ *
+ * <p>Assumptions: what that ledger is FOR belongs to the exchange rather than to this package, and the
+ * argument is recorded in full on the class and on
+ * {@code services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql}.
+ * In outline: the asynchronous inquiry consumer sends its reply and then returns, and the queue
+ * acknowledges the request only on that return, so a task killed between the two leaves the request
+ * visible again and the next delivery would send a second reply bearing the same correlation identifier as
+ * the first. The ledger records the answer under the requester's own identity before it is sent, so a
+ * redelivery can tell that it was already produced.</p>
  *
  * <ul>
  *   <li>{@code AccountRepository}, over {@code com.carddemo.account.domain.Account}. The entity
@@ -85,12 +108,20 @@
  *
  * <p>The shared envelope those ordered results feed is
  * {@code com.carddemo.common.web.PageResponse} in {@code common-lib}, whose four components are
- * {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext}. Reading forward asks for keys
- * strictly greater than {@code lastKey} in ascending order and reading backward for keys strictly less
- * than {@code firstKey} in descending order, which is what makes the backward direction the exact
- * counterpart of the reference read-previous rather than a re-scan from the top. The envelope is
+ * {@code items}, {@code firstKey}, {@code lastKey} and {@code hasNext}. Reading
+ * forward asks for keys strictly greater than {@code lastKey} in ascending order and reading backward
+ * for keys strictly less than {@code firstKey} in descending order, which is what makes the backward
+ * direction the exact counterpart of the reference read-previous rather than a re-scan from the top.
+ * Assumptions: backward availability is NOT a component of the envelope; it is the presence of
+ * {@code firstKey}, which is the position a backward request is issued from, and the envelope
+ * therefore states forward availability only. What the reference answers with a separate flag it
+ * answers from the screen ordinal it declares at L237 and L238 rather than from any read of the
+ * file -- it refuses the backward step on the opening page at L902 and L903 on exactly that
+ * condition -- and that ordinal's migrated home is the browser client's own navigation state, so the
+ * client refuses the backward step without asking a repository here anything. The envelope is
  * assembled ABOVE this package: a repository here yields entities and ordered collections of entities,
- * and the service layer seals the boundary keys and settles the further-rows question. That division is
+ * and the service layer seals the boundary keys and settles the forward direction question. That
+ * division is
  * recorded on the by-account finder's own descriptor, and it is what lets the same interface serve both
  * a screen that browses a screenful and a batch caller that wants every row for one account without
  * either of them asking for the other's shape.</p>

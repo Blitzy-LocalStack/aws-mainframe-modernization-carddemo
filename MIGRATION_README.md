@@ -105,11 +105,23 @@ and run the verification passes.
 
 The fixed-width readers, the Aurora bulk loader and the three verification passes
 are implemented and are reachable as the `load-dataset`, `verify-row-counts`,
-`verify-checksum` and `verify-money-parity` subcommands. `load-dataset` serves all
+`verify-checksum`, `verify-money-parity` and `verify-row-count-report` subcommands --
+the last of which runs the whole-migration row-count report on a session it proves is
+the read-only reporting role, and reduces it to a process exit status a batch step can
+branch on. `load-dataset` serves all
 **ten** loadable records, covering every seeded table across the eight schemas; the
 three columns that hold ciphertext are sealed by the loader under the same key and
 in the same envelope framing the owning service reads, so nothing is written in the
 clear and nothing is left for a service to backfill.
+
+**One step sits between the last load and enabling writes: `reconcile-sequences`.**
+`ledger.transaction_id_seq` — the allocator the interactive transaction-add and
+bill-payment paths draw from — has its starting position derived by its own Flyway
+migration from the rows `ledger.transactions` held when that migration ran, which on
+a cutover is none. Once the extract is loaded the allocator points into an occupied
+range, so the first interactive write would fail on the primary key. The command
+advances it past every loaded identifier, only ever forward, and is a no-op on a
+deployment whose ledger was never loaded. The runbook states it as its own step.
 
 Two conditions still gate a cutover, and the runbook's cutover-gate section states
 both: the load must have resolved the keys of the environment the application will

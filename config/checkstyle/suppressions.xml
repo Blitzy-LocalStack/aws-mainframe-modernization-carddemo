@@ -133,9 +133,15 @@ Scope and how to add an entry:
         as a whole, so it cannot reach a hand-authored tree even if build output
         is ever redirected, and it names all ten DOCUMENTATION checks because a
         generated file would trip the presence and completeness checks alike. It
-        names NEITHER import check, so a generated file carrying a duplicate or
-        unreferenced import still fails; that half of the ruleset is not
-        relaxed here, for the reason recorded in the Scope section above.
+        names those ten and nothing further, which is the WHOLE audited set: the
+        ruleset enables no import or other non-documentation check, so there is no
+        unrelaxed remainder to describe here. Refactoring Rationale: this sentence
+        read that the entry "names NEITHER import check, so a generated file
+        carrying a duplicate or unreferenced import still fails". That was true
+        while RedundantImport and UnusedImports were configured and became false
+        when they were withdrawn, and it is corrected rather than deleted because a
+        reader meeting the ten-name list needs to know whether anything is left
+        outside it. Nothing is.
       Trade-offs: this entry is a GUARD and is not currently load-bearing, which
         is stated rather than glossed. The gate is bound to the validate phase,
         which runs before generate-sources, so no generator has added output to
@@ -162,8 +168,8 @@ Scope and how to add an entry:
         record length, rather than in a docstring attached to it; asking for a
         purpose, parameters and a return value from a 300-byte account image has
         no answer to give. It names all ten DOCUMENTATION checks for the same
-        reason as the entry above, and neither import check for the same reason
-        either.
+        reason as the entry above, and those ten are again the whole audited set,
+        so this entry likewise leaves no check unrelaxed.
       Trade-offs: this entry is DEFENSIVE and may never fire. checkstyle.xml
         sets fileExtensions to java, so the fixed-width fixture files under
         resources/ are already outside the audit set; what remains is the narrow

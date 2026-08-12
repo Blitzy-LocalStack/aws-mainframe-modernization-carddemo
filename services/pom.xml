@@ -85,21 +85,12 @@
         - Failsafe has `*IT` classes in common-lib and in five service modules, so
           the integration configuration beside it likewise runs rather than
           no-ops.
-      Refactoring Rationale: this block has been corrected three times, and it is
-      now written so that a fourth correction is not needed. It first said every
-      named class was PLANNED; then that no `*IT` and no LayeringRulesTest class
-      existed anywhere, so both plugin configurations passed trivially; then that
-      common-lib held seventeen test classes running six hundred and six methods,
-      that LayeringRulesTest contributed exactly `Tests run: 5`, and that precisely
-      two `*IT` classes existed. Every one of those figures is now wrong - the
-      class count, the method total, the per-module rule count and the `*IT`
-      inventory have all grown - and a wrong figure in the file that CONFIGURES the
-      gate is worse than a wrong figure in prose, because a reader reconciling it
-      against a build log cannot tell whether the gate or the comment is at fault.
-      The figures are therefore dropped in favour of the two signals above, which
-      distinguish an executing gate from a skipped one without naming a number.
-      `mvn -f services/pom.xml verify` remains the authority, and it cannot go
-      stale.
+      Assumptions: this block deliberately names NO test-class count, method total
+      or per-module rule count. The two signals above distinguish an executing gate
+      from a skipped one without a figure, and a figure in the file that CONFIGURES
+      the gate is worse than one in prose: a reader reconciling it against a build
+      log cannot tell whether the gate or the comment is at fault.
+      `mvn -f services/pom.xml verify` is the authority, and it cannot go stale.
       Alternatives Considered: configuring the test plugins only once the tests
       exist. Rejected because the plugin split, the include patterns and the report
       locations are exactly the decisions a test author needs settled BEFORE the
@@ -1100,18 +1091,17 @@
 
       <!--
         WHY :
-          Refactoring Rationale: this build previously described those rules as
-            inherited by every module, and Maven cannot do that. Dependency
-            resolution hands a module's MAIN classes to its consumers and never
-            its test classes, so a rule class sitting in the shared kernel's test
-            tree was compiled once, evaluated against the shared kernel alone and
-            never saw a single service class. Each service POM carried the
-            ArchUnit engine, which supplies an assertion API and no rules at all,
-            so a cross-service domain import, an AWS SDK type inside a domain
-            package or a binary floating point amount in the money path could all
-            enter a service while the reactor stayed green. This execution closes
-            that gap by scanning the artifact the shared kernel now publishes for
-            precisely that purpose.
+          Assumptions: the layering rules are NOT inherited by a module merely
+            because the shared kernel declares them, and this execution is what
+            makes them run. Dependency resolution hands a module's MAIN classes to
+            its consumers and never its test classes, so a rule class sitting in
+            the shared kernel's test tree would be compiled once, evaluated against
+            the shared kernel alone and never see a single service class. A service
+            POM carrying only the ArchUnit engine, which supplies an assertion API
+            and no rules at all, would then let a cross-service domain import, an
+            AWS SDK type inside a domain package or a binary floating-point amount
+            in the money path enter that service with the reactor still green. This execution scans the artifact the shared
+            kernel publishes for precisely that purpose.
           Assumptions: dependenciesToScan makes Surefire collect test classes
             from a resolved dependency IN ADDITION to the module's own test
             output, and run them on the module's test classpath. That last part is

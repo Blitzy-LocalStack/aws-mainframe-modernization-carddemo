@@ -3,12 +3,20 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The complete input surface of the reusable `ecr` Terraform module, which
-#   provisions the ten Amazon ECR container repositories that replace the one
+#   provisions the ELEVEN Amazon ECR container repositories that replace the one
 #   shared z/OS CICS load library the whole CardDemo application executed
 #   from -- `DSNAME01(AWS.M2.CARDDEMO.LOADLIB)`, reached through two separate
 #   library handles at app/csd/CARDDEMO.CSD:L491 and :L496. Every value the
 #   module reads is declared here and nowhere else, so this file is the
 #   module's published contract with its callers.
+#
+#   Refactoring Rationale: this sentence said TEN repositories while the default
+#   below, the validation that pins it and the return-surface note further down
+#   all said eleven. Ten is the count of images this repository BUILDS; the
+#   eleventh is the mirrored telemetry collector, which the deployment pushes but
+#   does not build. The distinction is now made wherever a count appears, because
+#   a reader reconciling "ten" here against an eleven-member default has no way to
+#   tell which one is the defect.
 #
 #   Like every directory under infra/modules/, this one is never applied on
 #   its own. It is consumed as `source = "../../modules/ecr"` by the
@@ -57,7 +65,10 @@
 #     enables `terraform_unused_declarations` (L304) under `force = false`
 #     (L97), so an input nothing consumes fails the gating lint step outright.
 #     A speculative "might be useful" knob is therefore a build break, which
-#     is why the set below is exactly ten and no wider.
+#     is why this file declares exactly TEN variables and no more. Ten is the
+#     variable count and eleven is the repository count; the two numbers are
+#     unrelated and are both stated here because they sit six lines apart and
+#     have been read as one before.
 #   - Trade-offs: the defaults carry application knowledge -- the ten
 #     repository names, the prefix, the retention bounds -- into a module that
 #     is nominally generic. Requiring every input from each root was the
@@ -91,11 +102,19 @@
 #       list below is deliberate, not an oversight: its subtree is a POM plus
 #       Java sources with no Dockerfile of its own, because it is a
 #       compile-time dependency resolved inside each service's Maven build
-#       stage rather than a deployable artifact. Adding it would create an
-#       eleventh repository that no pipeline ever pushes an image to. The ten
-#       entries are exactly the ten Dockerfiles this migration authors: eight
-#       at services/<service>/Dockerfile, plus ui/Dockerfile and
-#       data-migration/Dockerfile.
+#       stage rather than a deployable artifact.
+#       Refactoring Rationale: that reasoning stands and its arithmetic did not.
+#       This note said adding common-lib "would create an eleventh repository that
+#       no pipeline ever pushes an image to", and that the list held "the ten
+#       Dockerfiles this migration authors" -- while the default below already held
+#       ELEVEN entries and its validation already required eleven. The eleventh is
+#       not a hypothetical common-lib repository; it is `aws-otel-collector`, which
+#       .github/workflows/deploy.yml genuinely does push to. Adding common-lib would
+#       therefore create a TWELFTH repository that nothing pushes to, which is the
+#       claim this note was reaching for. The count breaks down as ten built plus
+#       one mirrored: eight at services/<service>/Dockerfile, plus ui/Dockerfile and
+#       data-migration/Dockerfile, plus the third-party sidecar image whose separate
+#       nature is argued at the validation below.
 #       Alternatives Considered: a `list(string)` instead of a set. Rejected
 #       because main.tf drives `for_each` from this collection, and `for_each`
 #       over a set keys each instance by its own element value, so a
@@ -443,7 +462,7 @@ variable "image_tag_mutability" {
 #       alternative, but it would hide the invariant from the public contract;
 #       the validation below keeps that visibility while refusing `false`.
 variable "scan_on_push" {
-  description = "Whether the registry scans each image for vulnerabilities server-side as it is pushed, with findings read from the registry rather than gated in the pushing pipeline."
+  description = "Whether the registry scans each image for vulnerabilities server-side as it is pushed. The findings are the input to the deployment workflow's vulnerability gate, which reads them after every push and before the apply and refuses a deployment carrying a CRITICAL or HIGH finding, so disabling this removes that gate's evidence rather than only a scan."
   type        = bool
 
   # WHY : Assumptions: the infrastructure pipeline's policy scan asserts that

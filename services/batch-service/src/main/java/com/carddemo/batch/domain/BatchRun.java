@@ -44,6 +44,9 @@ public class BatchRun {
     private static final int STEP_NAME_MAX_LENGTH = 100;
     private static final int STATUS_MAX_LENGTH = 20;
 
+    /** The attempt number a freshly opened row carries, matching the column's own DEFAULT. */
+    private static final int FIRST_ATTEMPT = 1;
+
     private static final short RETURN_CODE_CLEAN = 0;
     private static final short RETURN_CODE_SOFT_WARNING = 4;
     private static final short RETURN_CODE_HARD_FAILURE_MINIMUM = 8;
@@ -163,6 +166,27 @@ public class BatchRun {
     @Column(name = "return_code")
     private Short returnCode;
 
+    /**
+     * How many times this step of this run has been attempted, counting the current attempt.
+     *
+     * <p>A first attempt carries {@code 1}. Each re-open through {@link #reopen(LocalDateTime)}
+     * increments it, so the value is also the number of terminal outcomes this row has published
+     * plus one.</p>
+     */
+    // WHY : Refactoring Rationale: this column is what makes a redrive of a FAILED step possible at
+    //       all. uq_batch_run_run_step admits exactly one row per (run, step), and the previous
+    //       design re-ran a failed step by INSERTING a second row -- documented as depending on a
+    //       caller deleting the first, which no caller does and none can, because a redrive is an
+    //       orchestrator action and not a SQL statement. So the second insert violated the
+    //       constraint and a failed step could never be retried. Re-opening this row and counting
+    //       the attempt keeps the constraint, keeps the no-op decision a single-row read, and
+    //       records the retry count an operator reading a recovered night needs.
+    // WHY : Assumptions: primitive int rather than Integer. The column is NOT NULL with a default
+    //       of one, so absence is not representable and a boxed type would add a null state the
+    //       schema forbids.
+    @Column(name = "attempt", nullable = false)
+    private int attempt;
+
     // WHY : Assumptions: The ledger records immutable identity and start facts, so id, runId,
     //       stepName and startedAt expose no setters; rewriting any of them would destroy the
     //       audit meaning of the row.
@@ -214,6 +238,43 @@ public class BatchRun {
         this.stepName = checkedStepName;
         this.status = BatchRunStatus.STARTED;
         this.startedAt = checkedStartedAt;
+        // WHY : Assumptions: a row exists only once an attempt has begun, so the first attempt is
+        //       one and never zero. The column's own DEFAULT says the same thing for a row inserted
+        //       by anything other than the provider; both are stated so neither is the only place
+        //       the base value lives.
+        this.attempt = FIRST_ATTEMPT;
+    }
+
+    /**
+     * Re-opens a terminal or abandoned row for another attempt, counting it.
+     *
+     * @param startedAt the non-null LocalDateTime at which the new attempt begins
+     * @throws NullPointerException if startedAt is null
+     * @throws IllegalStateException if this row is already COMPLETED, because a completed step is a
+     *     redrive no-op and re-opening it would let its writes be applied twice
+     */
+    // WHY : Refactoring Rationale: this transition exists so that a redrive rewrites the attempt in
+    //       place rather than inserting a second row the uniqueness constraint refuses. It clears
+    //       BOTH nullable outcome columns, because ck_batch_run_lifecycle admits a STARTED row only
+    //       with a null end time AND a null exit status -- clearing one and not the other stores
+    //       nothing and fails the constraint at flush, which is a failure inside the recovery path.
+    // WHY : Assumptions: a COMPLETED row is refused rather than re-opened, and that asymmetry is the
+    //       whole idempotency guarantee. A completed step's writes are committed, so re-running it
+    //       would double them -- for the posting step that means posting twice. A FAILED row's
+    //       writes rolled back with it, and a STARTED row belongs to an attempt whose container died
+    //       without publishing an outcome; re-running either is exactly what a redrive is for.
+    public void reopen(LocalDateTime startedAt) {
+        LocalDateTime checkedStartedAt =
+                Objects.requireNonNull(startedAt, "startedAt must not be null");
+        if (status == BatchRunStatus.COMPLETED) {
+            throw new IllegalStateException("A completed row must not be re-opened");
+        }
+
+        this.status = BatchRunStatus.STARTED;
+        this.startedAt = checkedStartedAt;
+        this.finishedAt = null;
+        this.returnCode = null;
+        this.attempt = this.attempt + 1;
     }
 
     /**
@@ -280,6 +341,15 @@ public class BatchRun {
         this.finishedAt = checkedFinishedAt;
         this.returnCode = returnCode;
         this.status = BatchRunStatus.FAILED;
+    }
+
+    /**
+     * Returns how many times this step of this run has been attempted.
+     *
+     * @return the primitive int attempt count, at least 1
+     */
+    public int getAttempt() {
+        return attempt;
     }
 
     /**
@@ -397,6 +467,7 @@ public class BatchRun {
                 + ", stepName='" + stepName + '\''
                 + ", status=" + status
                 + ", returnCode=" + returnCode
+                + ", attempt=" + attempt
                 + '}';
     }
 }

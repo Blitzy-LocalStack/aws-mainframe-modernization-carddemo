@@ -285,6 +285,61 @@ above; it does not own the verification rule or a stored verifier.
 > recorded here for exactly that reason: it is the class of assumption that is
 > invisible in a schema diff.
 
+### Identities created at run time, and the one-time credential they carry
+
+Seed identities are one of two populations. The other is created while the system is
+running, by `POST /api/v1/auth/users`, and its credential handover is a different
+mechanism that has to be stated separately — because for that population there is no
+`terraform apply` in progress and no Secrets Manager entry being written.
+
+`CognitoUserProvisioningService.provision` generates a policy-compliant one-time
+credential, supplies it to the pool as the created account's temporary password, and
+publishes it to a per-user Secrets Manager entry encrypted with the customer-managed
+key. The response names that entry in the `credentialSecretName` property of
+`CreatedUserResponse` and never carries the credential itself, so the value reaches its
+owner through a store that already has an audit trail and a rotation story. The account lands in the provider's force-change state, so the
+credential buys one sign-on and no more: presenting it yields the
+`NEW_PASSWORD_REQUIRED` challenge that `POST /api/v1/auth/challenge` answers, and the
+pool issues tokens only once a permanent credential has replaced it. The whole
+journey — create, present, be challenged, answer, receive tokens — is asserted end to
+end by `FirstSignOnHandoverTest`, over one substituted pool shared by both halves.
+
+Three properties, and not the absence of a credential, are what make this defensible.
+It is **single-use**, by the force-change state above. It is **never persisted**:
+there is no password column in the `auth` schema to persist it into, which is the same
+fact the delegation argument below rests on. And it is **never logged**: both
+`ProvisionedIdentity` and `CreatedUserResponse` override their generated `toString`
+so that a record rendered into a diagnostic line cannot carry it, and
+`FirstSignOnHandoverTest` asserts that no line emitted anywhere during the journey
+contains it — an assertion verified to fail when a leak is deliberately introduced.
+
+> ⚠️ Refactoring Rationale: an earlier revision created these accounts with delivery
+> suppressed, **no supplied temporary password**, and answered with the read
+> projection — so the pool minted a credential internally, sent it nowhere, and the
+> operation returned nothing carrying it. The reasoning recorded at the time was that
+> the credential would reach its owner through the provider's own administrative
+> reset, whose generated values the infrastructure writes to Secrets Manager. That
+> premise holds only for the seed population: `seed_user_bootstrap.py` runs inside
+> `terraform apply` and reaches only the identities the `seed_users` input names, the
+> pool declares no email or phone attribute over which a reset message could be
+> delivered, and no reset operation exists anywhere in the reactor. The consequence
+> was that creating a user produced an account nobody could ever sign on to. The
+> credential is now created here and handed back once, which is why this subsection
+> exists at all.
+
+> Alternatives Considered: writing each runtime credential to Secrets Manager, as the
+> seed path does, and having the administrator read it from there. Rejected on two
+> grounds. An administrator using this contract holds a browser session, not a grant
+> on a secrets store, so the handover would cross an authorization boundary the
+> operation does not have — and granting the service write access to a secrets path
+> would give a compromised service the ability to author credentials the operator
+> trusts. Second, the number of secrets would grow with the number of users, each
+> needing its own deletion, where the seed population is fixed and small.
+> Trade-offs: the credential travels in a response body, which a client may hold
+> in memory for as long as the calling view lives, and a caller that discards it
+> strands the account — nothing stores it, so the account must be provisioned again.
+> That is the accepted cost of the three properties above.
+
 ### A note on the anonymised clone
 
 [`app/cpy/UNUSED1Y.cpy`](../../app/cpy/UNUSED1Y.cpy) declares `01 UNUSED-DATA` with
@@ -449,7 +504,7 @@ The seam is therefore authenticated by a credential that identifies the **worklo
 | Minting | `InternalIdentityConfig` in `authorization-service` supplies its minter with subject `carddemo-authorization-service`, and `InternalIdentityConfig` in `transaction-service` supplies its own with subject `carddemo-transaction-service`; each signs with ITS OWN key. Both services' `RestAccountContextClient` mints a FRESH token per request rather than reusing one, so a token is never presented near its expiry, and each selects the scope from the request path so a token carries only the family the call needs. Refactoring Rationale: this row named only `authorization-service` while `transaction-service` was minting through an identically-shaped config of its own — reading the row alone, an operator rotating key material would have found one holder and missed the other |
 | Checking | `InternalApiSecurityConfig` in `account-service`. It holds BOTH callers' keys as a `JWKSet` of two `OctetSequenceKey`s, each labelled with its caller's subject as `kid`, and decodes through a `DefaultJWTProcessor` whose `JWSVerificationKeySelector` picks the key the `kid` names — so a signature is only ever checked against the key belonging to the subject the token claims. Validators then run in one delegating chain: the framework default set, issuer pinned to `InternalServiceToken.ISSUER`, `InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT` required among the audiences, `InternalServiceToken::isKnownSubject`, `subjectMatchesSigningKey()` and `scopePermittedForSubject()`. Refactoring Rationale: this row described `NimbusJwtDecoder.withSecretKey` and ONE key. That shape could not validate a subject in any meaningful sense — with one shared key either caller could sign a token bearing the other's subject, so a subject check would only have confirmed a string the caller chose |
 | Authority granted | one authority PER OPERATION FAMILY, each its scope under the framework's `SCOPE_` prefix: `CARD_XREF_READ_AUTHORITY` = `SCOPE_internal:account-context.card-xref.read`, `ACCOUNT_READ_AUTHORITY` = `SCOPE_internal:account-context.account.read`, and `CUSTOMER_READ_AUTHORITY` = `SCOPE_internal:account-context.customer.read`. None is either group authority, so no user token reaches an internal path and no machine token reaches a business route; and because each matcher group requires its own, a token scoped to one family is refused on the others rather than admitted by a single blanket rule. The chain ends `.anyRequest().denyAll()`, so an address added to the matcher without an authorization rule is refused rather than defaulted open. Refactoring Rationale: this row named a single `INTERNAL_READ_AUTHORITY` of `SCOPE_internal:account-context.read`, which the chain required on `anyRequest()`. That granted every holder every internal address, including the customer records carrying a national identifier and a government-issued identifier that neither caller reads today |
-| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names EXACT method-and-path pairs — **eight** matcher calls over six addresses, composed in three groups by `InternalApiSecurityConfig.cardXrefPaths()`, `accountPaths()` and `customerPaths()` and unioned by `internalPaths()`. Cross-reference (3): `POST /api/v1/card-xrefs/lookup`, `POST /api/v1/card-xrefs/lookup-by-account`, `POST /api/v1/card-xrefs/search-by-account`. Account (1): `GET /api/v1/accounts/{accountId}`. Customer (4): `GET /api/v1/customers`, `GET /api/v1/customers/{customerId}/record`, `GET /api/v1/customers/{customerId}`, `HEAD /api/v1/customers/{customerId}`. The surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads. Refactoring Rationale: this row named three endpoints as an exact set, then six pairs enumerated by one method. Both were short, and the second was short by two because the cross-reference group carries three POST addresses rather than one. The row now states the count, the grouping and every pair, and names the three methods that enumerate them — grouped, because the grouping IS the authorization boundary rather than a presentational convenience |
+| Paths | a separately-ordered chain at `@Order(10)` whose `securityMatcher` names EXACT method-and-path pairs — **seven** matcher calls over seven addresses, composed in four groups by `InternalApiSecurityConfig.cardXrefPaths()`, `accountPaths()`, `customerPaths()` and `customerMasterPaths()`, the first three unioned by `decisionReadPaths()` and that in turn unioned with the fourth by `internalPaths()` — a two-level union because the fourth group demands a different authority from the other three. Cross-reference (3): `POST /api/v1/card-xrefs/lookup`, `POST /api/v1/card-xrefs/lookup-by-account`, `POST /api/v1/card-xrefs/search-by-account`. Account (1): `POST /api/v1/accounts/lookup`. Customer decision (1): `POST /api/v1/customers/lookup`. Customer master (2): `GET /api/v1/customers`, `POST /api/v1/customers/record`. The surface is isolated without the chain capturing the whole `/api/v1/accounts/**` subtree a person also reads. Refactoring Rationale: this row has been corrected twice and the second correction is the substantive one. It first named three endpoints as an exact set and then six pairs enumerated by one method, both short. It then named eight pairs over six addresses of which **four were keyed addresses this context no longer publishes** — `GET /api/v1/accounts/{accountId}`, `GET /api/v1/customers/{customerId}/record`, and the customer probe counted twice for its `GET` and its `HEAD`. All four moved their identifier into a request body, the probe's two methods collapsing into one `POST`, which is what takes the count from eight matcher calls to seven and splits the customer group in two: a decision address the authorization context may reach and two whole-record addresses gated behind an authority nothing currently mints. The row states the count, the grouping and every pair — grouped, because the grouping IS the authorization boundary rather than a presentational convenience |
 | Callers admitted | exactly two — `authorization-service` and `transaction-service` — and the admission is enforced three ways rather than one: `InternalServiceToken` refuses to construct a minter for a subject outside its closed two-entry table, the verifier holds a key for each of those two subjects and no others, and `isKnownSubject` refuses a token whose subject is not one of them. Their entitlements DIFFER: authorization-service may carry all three scopes, transaction-service the cross-reference and account scopes only — it never reads a customer record, so it cannot ask for one. `InternalServiceToken`'s permitted-scope table holds that split and `mint()` refuses a scope the subject may not carry, so an over-scoped token cannot be produced rather than merely being rejected on arrival. Refactoring Rationale: this row read "exactly one" caller, was corrected to two, and was still incomplete — it described the two as interchangeable holders of one key, which is precisely the property that let either impersonate the other |
 | Lifetime | 60 seconds from `InternalIdentityConfig.DEFAULT_LIFETIME`, bounded absolutely at 5 minutes by `InternalServiceToken.MAX_LIFETIME`; a longer lifetime is refused at minting rather than truncated |
 | Key material | **two** Secrets Manager entries created by each environment root, `<name-prefix>/<env>/internal-identity/authorization-signing-key` and `.../transaction-signing-key`, independently generated and each at least `InternalServiceToken.MIN_KEY_LENGTH` bytes. Each is injected into exactly TWO task definitions — its one minting caller and the verifying callee: `CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY` into `authorization` and `account`, and `CARDDEMO_INTERNAL_IDENTITY_TRANSACTION_SIGNING_KEY` into `transaction` and `account`. `account-service` therefore holds both and neither caller holds the other's. `infra/modules/ecs-service` asserts each membership as its own biconditional, so a third workload receiving either key and a listed workload missing it both fail the plan. Refactoring Rationale: this row described ONE entry injected into three task definitions. That is what made the two callers mutually impersonating, and it is what this correction records: with shared bytes, splitting scopes or checking subjects buys nothing, because the holder of the key writes both |
@@ -700,31 +755,79 @@ things differ from the coarse description, all in the narrower direction.
 > the missing variable is a better outcome than migrating as the wrong identity and
 > succeeding.
 
-**The batch tier's cross-schema write surface is one named table, not a schema.**
-`batch-service` is the one deliberate departure from database-per-service ownership,
-because transaction posting commits three writes as a single unit of work across two
-schemas; [`service-catalog.md`](service-catalog.md#the-exception-batch-service-cross-schema-write-grants)
-holds that decision and its rejected saga alternative, and
+**Two tiers write outside their own schema, and each surface is one named table rather
+than a schema.** `batch-service` and `transaction-service` are the two deliberate
+departures from database-per-service ownership: nightly posting commits three writes as
+a single unit of work across two schemas, and the bill-payment screen commits two.
+[`service-catalog.md`](service-catalog.md#the-exception-cross-schema-write-grants) holds
+both decisions and their rejected saga alternative, and
 [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) holds the
-tables. What belongs here is the **actual privilege**, which is narrower than
-"`ledger.*` and `account.*`":
+tables. What belongs here is the **actual privilege**, which in both cases is narrower
+than a schema:
 
 | Schema | Privilege held by the batch role | Line |
 |---|---|---|
-| `ledger` | `SELECT`, `INSERT`, `UPDATE` on all tables, plus sequence usage | L1064–L1065 |
-| `account` | `SELECT` on all tables; `UPDATE` **revoked** schema-wide, then re-granted on **`account.accounts` alone** | L1115, L1117, L1128 |
-| `card` | `SELECT` only | L1155 |
-| `reference` | `SELECT` only | L1164 |
+| `ledger` | `SELECT`, `INSERT`, `UPDATE` on all tables, plus sequence usage | L1115–L1116 |
+| `account` | `SELECT` on all tables; `UPDATE` **revoked** schema-wide, then re-granted on **`account.accounts` alone** | L1168, L1166, L1179 |
+| `card` | `SELECT` only | L1206 |
+| `reference` | `SELECT` only | L1215 |
 
-> Assumptions: **the revoke-then-narrow sequence is the mechanism, and reading it
-> as redundant would be a mistake.** The script revokes `UPDATE` across the whole
-> `account` schema at L1115 *before* granting it on one table at L1128, and the second
+> Refactoring Rationale: **every line reference in the table above was corrected.** The
+> four rows previously cited L1064–L1065, L1115/L1117/L1128, L1155 and L1164, and each of
+> those pointed at a *comment* rather than at the statement it claimed — the offsets had
+> drifted as the file's reasoning grew. A citation that resolves to the wrong line is worse
+> than none, because a reader who follows it and finds prose concludes the statement is
+> absent. They are re-read from the file rather than adjusted by an offset.
+
+| Schema | Privilege held by the ledger role | Line |
+|---|---|---|
+| `account` | `USAGE` on the schema, and `SELECT` plus `UPDATE` on **`account.accounts` alone** — no `INSERT`, no `DELETE`, no `TRUNCATE`, and no default privilege of any kind | L1288, L1318 |
+
+> Assumptions: **the ledger role's grant needs no revoke-then-narrow pair, and its
+> absence is deliberate.** Section 4b declares no `ALTER DEFAULT PRIVILEGES` for this role
+> at all, so nothing broad was ever conveyed and nothing has to be withdrawn. A default
+> privilege cannot name a table, so the only available form would have granted `SELECT`
+> and `UPDATE` on every table the account owner creates — including `account.customers`,
+> which carries the encrypted national identifier, the encrypted government-issued
+> identifier and the address. The batch role's block had to be repaired from exactly that
+> shape; this one is authored narrow from the outset.
+>
+> Assumptions: **the reduction also advances the row's version column**, and that is a
+> security property rather than a convenience. `account.accounts.version` is mapped
+> `@Version` by the owning context, so a balance changed without advancing it would be
+> invisible to that context's concurrency check, and an account-update submission holding
+> the pre-payment image would commit over the payment and report success.
+
+> Assumptions: **the revoke-then-narrow sequence is the mechanism for the batch role, and
+> reading it as redundant would be a mistake.** The script revokes `UPDATE` across the whole
+> `account` schema at L1166 *before* granting it on one table at L1179, and the second
 > statement is guarded so it applies only once that table exists. The reason the
 > revoke is there at all is that a default-privilege entry or an earlier schema-wide
 > grant is **not** superseded by a narrower later grant — the two are additive — so
 > the broad form has to be withdrawn explicitly for the narrow one to be the whole
 > privilege. A reader auditing least privilege needs to see both statements to
 > conclude anything about the resulting surface; either one alone is misleading.
+
+**The ledger tier reaches one column of one table in the `account` schema.** A second,
+smaller cross-schema write surface exists, and it is the bill-payment unit of work:
+`carddemo_ledger` holds `USAGE` on `account` plus `SELECT` and `UPDATE` on
+`account.accounts` and nothing else, from §4b of
+[`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql). The
+decision and its rejected alternatives are in
+[`service-catalog.md`](service-catalog.md#the-second-exception-transaction-service-on-accountaccounts).
+
+| Schema | Privilege held by the ledger role | Note |
+|---|---|---|
+| `ledger` | full ownership, as the schema it owns | — |
+| `account` | `USAGE` on the schema; `SELECT`, `UPDATE` on **`account.accounts` alone** | guarded so it applies only once the table exists; no `INSERT`, no `DELETE`, no other table |
+
+> Assumptions: **this grant is smaller than the batch one and must not be read as the
+> same privilege.** The batch role reaches every table in `account` for `SELECT`; the
+> ledger role reaches one. Neither can `INSERT` or `DELETE` there. What the ledger role's
+> `UPDATE` is used for is a single relative statement that reduces `curr_bal` and advances
+> `version` in the same row, so a concurrent edit through `account-service` fails its own
+> optimistic check rather than losing the payment — the privilege and the concurrency
+> control are the same statement.
 
 **The reporting tier's owner reaches four other schemas, and the service's own role
 cannot reach a base table.** The description "a `SELECT`-only role over read-only
@@ -733,8 +836,8 @@ carries the isolation:
 
 | Role | Holds | Line |
 |---|---|---|
-| `carddemo_reporting_owner` — no login, owns the views | `USAGE` and `SELECT` on `ledger`, `account`, `card`, `reference` | L1214–L1234 |
-| `carddemo_reporting` — the role the service actually connects as | `USAGE` and `SELECT` on the `reporting` schema **only**; explicitly **revoked ALL** on `ledger`, `account`, `card` and `reference`; **revoked `CREATE`** on its own schema | L1291, L1293, L1303, L1315 |
+| `carddemo_reporting_owner` — no login, owns the views | `USAGE` and `SELECT` on `ledger`, `account`, `card`, `reference` | L1385–L1405 |
+| `carddemo_reporting` — the role the service actually connects as | `USAGE` and `SELECT` on the `reporting` schema **only**; explicitly **revoked ALL** on `ledger`, `account`, `card` and `reference`; **revoked `CREATE`** on its own schema | L1464, L1486, L1462, L1474 |
 
 > Refactoring Rationale: **splitting owner from consumer, rather than letting the
 > reporting service hold the base-table grants directly.** This is the same split the
@@ -1029,12 +1132,30 @@ as "provisioned".
 | Browser → content delivery network / HTTP API edge | Edge-managed TLS; plaintext viewer requests redirect to HTTPS | `cloudfront-spa` sets `viewer_protocol_policy = "redirect-to-https"`; the HTTP API carries a Cognito `jwt_configuration`. Both roots instantiate both modules |
 | Edge → internal load balancer over the private link | API integration `tls_config` verifies the server name; ALB exposes one HTTPS listener with an ACM certificate | `api-gateway-http` declares `aws_apigatewayv2_vpc_link` plus `tls_config.server_name_to_verify`; `alb` declares one HTTPS listener with `certificate_arn` and `ssl_policy`. Each root passes `alb_listener_arn` and `integration_tls_server_name` across the boundary |
 | Load balancer → online service task | Target group and health check use HTTPS; the task terminates TLS on port `8080` | `ecs-service` fixes `target_protocol = "HTTPS"` for both the target group and its health check; task-side `server.ssl` is configured in all seven HTTP services. `batch-service` has none by design — it publishes no HTTP listener |
-| Service task → relational cluster | Aurora refuses plaintext; every JDBC client uses `sslmode=verify-full` and an explicit trust root | The Aurora cluster parameter group sets `rds.force_ssl = "1"`; all **eight** service configurations set `sslmode: verify-full` together with `sslrootcert` as Hikari data-source properties |
+| Service task → relational cluster | Aurora refuses plaintext; every JDBC client uses `sslmode=verify-full` and an explicit trust root that the image actually carries | The Aurora cluster parameter group sets `rds.force_ssl = "1"`; all **eight** service configurations set `sslmode: verify-full` together with `sslrootcert` as Hikari data-source properties, and each of the eight images installs the anchor those properties name — `config/docker/install-rds-trust-anchor.sh` fetches the AWS-published bundle in the build stage against a pinned SHA-256 and the runtime stage copies it to `/etc/ssl/certs/carddemo-rds-ca-bundle.pem` |
 | Service task → managed AWS API | HTTPS through an interface or gateway endpoint inside the VPC | `network` declares `aws_vpc_endpoint.interface` for the interface set and `aws_vpc_endpoint.s3` for the gateway endpoint, and both roots instantiate the module |
 
 The load-balancer-to-task row is fail-closed by construction: because the target group
 and its health check both speak HTTPS, a task serving cleartext would never become
 healthy, so the two halves cannot be enabled independently.
+
+**Refactoring Rationale: the database row's "Measured wiring" column measured only the
+client half, and the other half was missing.** All eight configurations did name an
+explicit `sslrootcert`, both environment roots did pass the same literal, and
+`ecs-service` did refuse to render a task definition without it — while no image created
+the file. The gap was invisible to every gate the repository had, because each one
+measured a different layer and each layer was internally correct: the reactor compiled,
+the eight images built, `terraform plan` succeeded, and the first observer of the defect
+would have been a task in a deployed environment failing to open a path. Two gates in
+`.github/workflows/services-ci.yml` now close it from both directions — one asserts that
+the eight `application.yml` files, the eight Dockerfiles and both roots name the SAME
+path and that the two pinned bundle digests in the repository agree, and the other runs
+each built image and asserts the file is present, is a PEM bundle, matches the pinned
+digest, and is readable by the image's own unprivileged user. Assumptions: the ETL image
+pins the bundle separately at `/etc/ssl/certs/aws-rds-global-bundle.pem`, because it is
+built with `data-migration/` as its context and cannot reach the shared installer; the
+digest-agreement assertion is what keeps one rotation from producing two different
+anchors in one commit.
 
 **The listener material is minted by each task, and this paragraph previously described
 the opposite.** It stated that the delivery path was composed across three files — each
@@ -1094,8 +1215,8 @@ hop provides; the peer's identity is established instead by the security group, 
 admits traffic to the application container port from the load-balancer group and from
 no other source. Assumptions: "and from no other source" is the precise claim, and it is
 narrower than the one this sentence used to make. The application group admits nothing
-else **on the container port**; it does carry five further flows, all of them egress
-except the self-referencing endpoint pair, enumerated in
+else **on the container port**; it does carry five further flows, every one of them
+egress, enumerated in
 [Target security groups](#target-security-groups). Stating it as "on `8080` and nothing
 else" read as though the group had a single rule, which would make the flow table below
 look like a contradiction rather than a completion.
@@ -1218,6 +1339,25 @@ update rather than a visible configuration error. Both environment roots now car
 complete: the policy document feeds `local.task_role_policy_json["account"]`, which
 `ecs-service` attaches as `aws_iam_role_policy.task` to `aws_iam_role.task`, which the
 task definition names as its `task_role_arn`.
+
+The **migration task is the third holder of that grant**, and it was the last to get
+one. [`protected_columns.py`](../../data-migration/src/carddemo_migration/loaders/protected_columns.py)
+seals all three columns for the initial load, under the same two encryption contexts
+and the same envelope framing the two services read — so the ETL is the component that
+writes the ciphertext the services later open. Both environment roots carry an
+`EnvelopeEncryptMigratedProtectedColumns` statement on the migration task role,
+conditioned on `carddemo:purpose` matching **both** `card-cvv` and
+`customer-identifier`, because that one task legitimately writes both projections. It
+holds `kms:GenerateDataKey*` and deliberately **not** `kms:Decrypt`, which is the one
+place this grant is narrower than the two service grants above: that module publishes
+no decipher member at all — a migration writes protected columns and never reads them
+back — so a decrypt grant would widen what a compromised migration task can do with
+nothing using it. The agreement between the module's encryption context and the
+policy's condition is asserted rather than assumed:
+[`test_config_name_contract.py`](../../data-migration/tests/test_config_name_contract.py)
+reads both roots and compares the condition's value set against the module's own
+published purpose constants, so a rename on either side fails a test instead of
+producing an access denial on the first sealed record.
 
 Refactoring Rationale: this paragraph asserted the columns had "**no** writer yet" and
 supported it by enumerating the JPA attribute converters in the tree. The enumeration
@@ -1514,17 +1654,21 @@ observed property, rather than a declared one, only after an apply.
 
 ### Target security groups
 
-The target contract calls for **three groups** — `alb`, `app` and `data` — and the
-count is frozen (AAP section 0.5.1.12). Nothing outside the network module may create
-a fourth: the eight interface-endpoint ENIs carry the `app` group and the API Gateway
-VPC Link carries the `alb` group. Those three groups admit **six** flows, each one a
-separately named rule resource so a plan diff shows which single flow changed:
+The target contract calls for **three PUBLISHED groups** — `alb`, `app` and `data` —
+and that count is frozen (AAP section 0.5.1.12): they are the three a sibling module
+may attach to. The network module creates one more for its own use, `vpc_endpoints`,
+which it attaches to the ten interface-endpoint ENIs and deliberately does not
+publish, as [Network isolation](#network-isolation) and
+[`infra/modules/network/README.md`](../../infra/modules/network/README.md) both record.
+Nothing outside the module creates a group at all — the API Gateway VPC Link carries
+the published `alb` group. The groups admit **six** flows, each one a separately named
+rule resource so a plan diff shows which single flow changed:
 
 | # | Direction | Port | Destination form |
 |---|---|---|---|
 | 1 | Load balancer → application task | the application container port, `8080` | group reference |
 | 2 | Application task → relational cluster | the database port, `5432` | group reference |
-| 3 | Application task → interface endpoint ENI | `443` | **self** reference on `app` |
+| 3 | Application task → interface endpoint ENI | `443` | group reference to `vpc_endpoints` |
 | 4 | Application task → S3 gateway endpoint | `443` | the endpoint's own prefix list |
 | 5 | Application task → identity-provider key set | `443` | CIDR list, the one unbounded destination |
 | 6 | Application task → internal load balancer listener | `443` | group reference |
@@ -1546,13 +1690,28 @@ publishes `alb_security_group_id` to it, and referencing back would close a cycl
 > every cross-context read failed to connect, because both the authorization and
 > transaction contexts address the account context at `https://<internal-domain>` —
 > this listener. All three presented as an unavailable dependency, the least
-> informative symptom available. The groups were folded to three and the three missing
-> flows declared, so the count and the flow list now describe the same artifact.
+> informative symptom available. The three missing flows were declared and the group
+> inventory restated as what it is — four created here, three of them published — so
+> the count and the flow list now describe the same artifact.
 >
-> Trade-offs: flow 3 is a self reference, so it also permits task-to-task `443`. No
-> task listens on `443` — every task's listener and target-group port is
-> `app_container_port` — and `infra/modules/network/variables.tf` now **refuses** 443
-> for that input, so the bound is enforced rather than merely true today. Flow 5 is the
+> Refactoring Rationale: this paragraph's own conclusion once read "the groups were
+> folded to three", and no fold ever happened: `vpc_endpoints` is a fourth group and it
+> carries the endpoint ENIs. Its companion claim of a fifth group in
+> `api-gateway-http` overstated matters as well — that module adds a self-referencing
+> rule to the published `alb` group rather than a group of its own, exactly as the
+> paragraph directly above this one states.
+>
+> Trade-offs: flow 3 costs one more group to reason about than the alternative would,
+> and that is the trade worth making. Reusing the application group for the endpoint
+> ENIs turns flow 3 into a **self** reference, which permits task-to-task `443` as a
+> side effect of permitting task-to-endpoint `443`; naming `vpc_endpoints` as the peer
+> permits exactly the one direction the callers need and nothing beside it.
+> Refactoring Rationale: this paragraph previously described flow 3 *as* that self
+> reference and cited a `variables.tf` validation refusing `443` for
+> `app_container_port` as the bound that made it safe. Both are withdrawn: the ENIs now
+> carry their own group, so there is no self reference to bound, and the 443-specific
+> validation went with the premise it rested on — the surviving validation already
+> refuses every port below 1024. Flow 5 is the
 > one unbounded egress at its default; it is a separate, named rule with a single
 > documented reason and a per-environment variable that narrows it, rather than a
 > blanket `443` allowance that would carry every future dependency silently.
@@ -1596,6 +1755,39 @@ caller reach the server-side Cognito exchange before a usable token exists.
 > cannot make an anonymous route more permissive than the protected surface. Per-route
 > detailed metrics are forced on for them regardless of the environment's own metric
 > setting, because a spike in anonymous sign-on attempts has no other per-route signal.
+
+> Refactoring Rationale: **a token bucket bounds how OFTEN a caller may call, not how
+> many bytes one call may carry, and for a while nothing bounded the second.** The
+> review found no body-size control anywhere — not at the edge, not in a container
+> setting, and not as a field constraint — while two documents asserted that an
+> oversized body was refused by "the transport's own request-size limit". No such limit
+> existed: the servlet container's post-size setting bounds
+> `application/x-www-form-urlencoded` data, which no service in this system accepts, so
+> a JSON body reached the deserialiser at whatever length the caller chose. The exposure
+> was worst on exactly the three routes above, because they are the ones reachable
+> without an identity.
+>
+> There are now **two ordered controls**, and each answers a different question.
+> `com.carddemo.common.web.RequestBodySizeFilter` is contributed by the shared kernel's
+> auto-configuration to **every path in every service**, ahead of the security filter
+> chain: it refuses a body above its configured ceiling — **65 536 bytes** by default,
+> an order of magnitude above the largest published request body, the 128-field account
+> update — with **413** and the same problem shape every other refusal carries, before
+> the body is parsed and before a token signature is verified. A request that declares
+> no length is counted rather than trusted, and never buffered beyond the ceiling plus
+> one byte. Beneath it, individual fields carry their own maxima where a field can be
+> large: the renewal token declared none at all and now declares **8 192** characters,
+> deliberately several times the largest token the pool has been observed to issue,
+> because refusing a legitimately issued one locks a caller out until it signs on again
+> with a credential it may no longer hold.
+>
+> Trade-offs: **the ceiling is a filter rather than a container or edge setting**, which
+> looks like the less platform-native choice. It is the only one available: no servlet
+> container knob bounds a JSON body, and the HTTP API's own payload maximum is a fixed
+> 10 MB that cannot be lowered — three orders of magnitude above anything this system
+> publishes, so it bounds nothing useful. Expressing the ceiling once in the shared
+> kernel also means a service cannot be deployed without it, whereas a per-service
+> configuration value is one a service can omit.
 
 The single-page application is served from an **object-store origin behind a content
 delivery network with an origin access control**, which means the origin bucket is

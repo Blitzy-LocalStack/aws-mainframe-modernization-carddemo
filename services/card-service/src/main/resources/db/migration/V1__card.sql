@@ -51,12 +51,12 @@
 --   - A pre-existing schema, owner role and privilege graph, bootstrapped by
 --     data-migration/sql/V0__schemas_and_roles.sql, which is the exclusive
 --     authority for schemas, roles and grants in this system. The schema and
---     owner for this context are established at V0:505-506. Because
+--     owner for this context are established at V0:714-715. Because
 --     spring.flyway.create-schemas is false in application.yml, this
 --     script may migrate the card schema and may not create it.
 --   - The executing role: the schema's owning role. V0 keys its cross-schema
 --     read privileges on that role using ALTER DEFAULT PRIVILEGES at
---     V0:803-804 and V0:877-878, and V0:661-664 records that each
+--     V0:1265-1266 and V0:1555-1556, and V0:327-332 records that each
 --     per-service migration is expected to run as the owner for exactly that
 --     reason. That is what gives the table created below its batch and
 --     reporting read privileges without this file issuing a single GRANT.

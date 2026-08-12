@@ -1,6 +1,7 @@
 package com.carddemo.auth.api;
 
 import com.carddemo.auth.dto.CreateUserRequest;
+import com.carddemo.auth.dto.CreatedUserResponse;
 import com.carddemo.auth.dto.UpdateUserRequest;
 import com.carddemo.auth.dto.UserResponse;
 import com.carddemo.auth.dto.UserSummary;
@@ -279,15 +280,27 @@ public class UserController {
     }
 
     /**
-     * Creates one user row and answers with the row as stored.
+     * Creates one user row and answers with the row as stored plus its one-time credential.
      *
      * <p>Purpose: this is the migrated form of {@code app/cbl/COUSR01C.cbl}.
      *
-     * <p>Assumptions: the body carries no password, because this service creates no credential -- the
-     * pool generates one and this service never sees it -- and no subject reference, because the service
-     * creates the pool account itself and reads the subject back from the provider. Accepting a subject
-     * would let a caller choose which pool identity the new row authenticates as, which is the whole of
-     * the authorization decision.
+     * <p>Assumptions: the REQUEST body carries no password -- the caller does not choose the credential,
+     * the service generates it -- and no subject reference, because the service creates the pool account
+     * itself and reads the subject back from the provider. Accepting a subject would let a caller choose
+     * which pool identity the new row authenticates as, which is the whole of the authorization decision.
+     *
+     * <p>⚠️ Refactoring Rationale: the RESPONSE body now carries one, and its absence was not a hardening
+     * measure but a defect. The account was created with delivery suppressed and no credential supplied,
+     * so the provider minted one internally and sent it nowhere; the pool declares no address to deliver
+     * to and the only credential handover in this deployment runs inside {@code terraform apply} for the
+     * seed identities. A user created through this operation therefore held a pool account, the right
+     * group and a row bound to its subject, and could never sign on. The response is
+     * {@link CreatedUserResponse}, a strict superset of the read body, so the added value costs no
+     * existing consumer a field. The credential is single-use -- the account stands in its force-change
+     * state, so presenting it can do nothing but replace it, through
+     * {@code POST /api/v1/auth/challenge} -- and it appears in this one response and nowhere else, ever:
+     * no column stores it and both the response record and the provisioning result withhold it from their
+     * diagnostic renderings.
      *
      * <p>Refactoring Rationale: the baseline validated a password field on this screen and this operation
      * has no equivalent refusal, which is a deliberate absence rather than a dropped branch. The baseline
@@ -318,15 +331,22 @@ public class UserController {
      * declares the header required and its form absolute-path, which is what this composes.
      *
      * @param request the validated new row's values; must not be {@code null}
-     * @return HTTP 201 carrying the stored row and a location header addressing it; never {@code null}
+     * @return HTTP 201 carrying the stored row, the one-time credential and a location header addressing
+     *     the row; never {@code null}
      * @throws UserService.DuplicateUserException if a row already carries the identifier, which
      *     {@link #onDuplicateUser} below renders as 409
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<UserResponse> createUser(@Valid @RequestBody CreateUserRequest request) {
+    public ResponseEntity<CreatedUserResponse> createUser(
+            @Valid @RequestBody CreateUserRequest request) {
 
-        UserResponse created = this.users.create(request);
+        CreatedUserResponse created = this.users.create(request);
 
+        // WHY : Assumptions: the created value is placed in the body and is not logged, rendered into a
+        //       message, or passed to anything else. Its own toString withholds the credential, so even a
+        //       framework diagnostic that rendered this argument could not disclose it -- but the shortest
+        //       path to a live credential in a log store is a well-meant line added here, which is why
+        //       there is none.
         return ResponseEntity.created(URI.create(COLLECTION_PATH + "/" + created.userId()))
                 .body(created);
     }

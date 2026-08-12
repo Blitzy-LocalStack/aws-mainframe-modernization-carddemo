@@ -1,33 +1,69 @@
 /**
- * @file Cross-contract types shared by every typed API client module, and the one helper that turns
- * a declared contract operation into the target its client sends.
+ * @file The single TypeScript declaration of every wire shape the CardDemo services publish to a
+ * browser, plus the vocabulary all of their contracts share.
+ *
+ * This module declares TYPES ONLY. It holds no constant, no function, no class and no runtime import,
+ * so the compiler erases it in full and importing a type from it adds nothing to a bundle. The helper
+ * that turns a declared contract operation into the target its client sends is `requestPath` in
+ * `ui/src/api/client.ts`, alongside the client that sends it; `ui/src/api/contracts.test.ts` reads this
+ * file's source and fails on any runtime declaration, so the property is checked rather than asserted.
  *
  * Purpose
  * -------
- * Five of the six service contracts in this repository are reachable from the browser, and all five
- * declare the same error vocabulary, the same page envelope and the same reading direction. Each of
- * them restates those schemas in its own document, because an OpenAPI document cannot reference a
- * schema in another file that no build step assembles. This module is the single TypeScript
- * declaration of them, so the SPA does not repeat that restatement a fifth time in a language where
- * it need not.
+ * The repository publishes SEVEN service contracts. Six of them -- auth, card, transaction, reference,
+ * authorization and reporting -- are browser-facing in whole. The seventh, `account-api.yaml`, is
+ * browser-facing in part: seven of its operations are tagged `internal` and secured with
+ * `internalServiceToken`, and this module declares none of the shapes reachable only from those. Every
+ * remaining response and request shape of all seven is declared here, once, grouped by the contract
+ * that publishes it.
  *
- * Assumptions: a divergence between any two contracts' copies of these schemas is a defect in
- * whichever diverged, not a local choice, so one shared declaration here is correct rather than
- * merely convenient. The five documents were compared property by property while this module was
- * authored and they agree; where a contract narrows a member -- transaction-api bounds `status` to
- * 400 through 599 while authorization-api leaves it an unbounded int32 -- the NARROWER form is taken,
- * because a client accepting the wider one would type a value no service sends.
+ * Refactoring Rationale: the shapes of six contracts were previously declared inside the client module
+ * that calls them, and are declared here now. A wire shape has two kinds of consumer -- the client
+ * module that sends and receives it, and the screen that renders it -- so a shape declared inside its
+ * client is owned by one of its consumers rather than by the contract it describes. A second consumer
+ * then either imports from that client module, which makes one client depend on another for a type
+ * neither owns, or restates the shape, which is how two definitions of one wire contract come to drift
+ * apart with each screen binding to whichever it happened to import. Declaring all of them here gives
+ * every shape exactly one definition, in the one module in this folder that is erased in full.
+ *
+ * Trade-offs: this module is consequently large, and a reader looking for one shape reads a section
+ * header to find it rather than opening the client that uses it. That is the cost paid. What it buys is
+ * that there is nowhere else for a wire shape to be -- `ui/src/api/contracts.test.ts` asserts that no
+ * client module declares one -- so a shape cannot be added in a second place by a well-meaning author
+ * who did not know the first place existed.
+ *
+ * Assumptions: each client module RE-EXPORTS the shapes of its own contract, so no consumer import
+ * changed meaning when the declarations moved. A screen importing `CardSummary` from `../../api/cards`
+ * still resolves, and a screen may equally import it from here; both reach one declaration.
+ *
+ * Assumptions: the shared vocabulary -- the error and abend shapes, the page envelope, the reading
+ * direction, the validation state, the severity and subsystem domains, and the money, date and timestamp
+ * scalars -- is declared once at the top because every contract restates it in its own document. An
+ * OpenAPI document cannot reference a schema in a file that no build step assembles, so each of the
+ * seven necessarily repeats those schemas; a divergence between any two copies is a defect in whichever
+ * diverged rather than a local choice. All seven were compared property by property against this module,
+ * and where one narrows a member -- transaction-api bounds `status` to 400 through 599 while
+ * authorization-api leaves it an unbounded int32 -- the NARROWER form is taken here, because a client
+ * accepting the wider one would type a value no service sends.
+ *
+ * Assumptions: the shared field-error entry has exactly THREE members -- `field`, `state` and
+ * `message` -- and all seven contracts agree on that. They did not agree while this module was first
+ * authored: the emitted record published a derived predicate as a fourth `error` property, and one
+ * contract had been amended to admit it while six declared three members and sealed themselves against a
+ * fourth. The predicate is now withheld from the wire at its source, and
+ * `ApiErrorWireShapeTest` in `services/common-lib` pins the emitted property set, so the three members
+ * declared here are what a response carries rather than what it ought to carry.
  *
  * Why the operation manifest lives beside the types
  * ------------------------------------------------
  * Refactoring Rationale: each client module exports a manifest of the operations it implements, and
- * builds every request target from it through {@link requestPath} rather than from a string literal
- * at the call site. The two arrangements are not equivalent. With literals, a module's manifest and
- * its behaviour are two independent descriptions of one thing, so a manifest can agree with the
+ * builds every request target from it through `requestPath` in `./client` rather than from a string
+ * literal at the call site. The two arrangements are not equivalent. With literals, a module's manifest
+ * and its behaviour are two independent descriptions of one thing, so a manifest can agree with the
  * contract while the code beside it calls a different address -- which is a drift a gate reading the
- * manifest cannot see. Deriving the target from the manifest removes that possibility by
- * construction, and leaves `ui/src/api/contracts.test.ts` with exactly one comparison to make:
- * manifest against contract.
+ * manifest cannot see. Deriving the target from the manifest removes that possibility by construction,
+ * and leaves `ui/src/api/contracts.test.ts` with exactly one comparison to make: manifest against
+ * contract.
  *
  * Trade-offs: the cost is a level of indirection at every call site, where a reader now follows a
  * constant instead of reading a path in place. It is accepted because the alternative failure is
@@ -37,28 +73,17 @@
  *
  * What this module holds, and what it deliberately does not
  * --------------------------------------------------------
- * Assumptions: the division of labour in `ui/src/api` is that THIS module declares the vocabulary more
- * than one contract speaks -- the page envelope, the reading direction, the error and abend shapes, the
- * money and date scalars -- while each service module declares the shapes of the one contract it
- * implements. `ui/src/api/cards.ts` shows both halves at once: it declares `CardSummary` and
- * `CardDetail` itself and re-exports `PageDirection` and `PageResponse` from here.
+ * Assumptions: the page envelope has exactly FOUR members -- `items`, `firstKey`, `lastKey` and
+ * `hasNext` -- and carries no answer to whether an EARLIER page exists. That is not an omission: the
+ * reference does not answer it from the file either, deciding it from the screen ordinal it already
+ * holds, at `app/cbl/COCRDLIC.cbl` L237 to L238 and L902 to L903. The ordinal is client state, so the
+ * screen that pages holds it and the envelope publishes only `firstKey`, the POSITION a backward request
+ * is issued from. The reasoning is recorded in full on {@link PageResponse}.
  *
- * Alternatives Considered: gathering every DTO of all seven contracts into this one module, so a reader
- * finds every response shape in a single place. Rejected, and not on grounds of taste. Six of the seven
- * contracts already have an owning module that declares their shapes, so a second declaration here
- * would not centralise anything -- it would leave two definitions of one wire contract in the same
- * folder, free to drift apart, with each screen binding to whichever it happened to import. That is the
- * same objection this file already records against re-declaring a contract that has an owner, and it
- * applies with more force to a shape a screen renders than to one only a consumer decodes.
- *
- * Refactoring Rationale: the account contract is the exception, and its shapes ARE declared here. It is
- * the one browser-facing contract with no owning module, so there is no second definition for these to
- * drift from, and the alternative -- leaving `account-api.yaml` with no TypeScript expression at all --
- * is what costs something: the account view and update screens are the two largest in the migration at
- * 100 and 128 map fields, and an untyped response is where an unmasked identifier gets rendered in
- * place of a masked one with nothing in the type system to object. Should an `accounts.ts` be
- * introduced, it re-exports these the way `cards.ts` re-exports the envelope rather than restating
- * them.
+ * Assumptions: what is NOT declared here is as deliberate as what is. There is no card verification
+ * value, no password outside the sign-on request, no CICS response or reason member on the error shape,
+ * no queue payload, and none of the seven internal-only account shapes. Each of those omissions is
+ * argued at the cross-cutting decisions block below, beside the citation that settles it.
  */
 
 /**
@@ -76,136 +101,60 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
  * Assumptions: `path` is the ABSOLUTE contract path template including the `/api/v1` prefix, and not
  * the relative target the client sends. Holding the contract's own spelling is what lets the drift
  * gate compare this value with a parsed contract directly, with no transformation on either side
- * that could itself be wrong; {@link requestPath} performs the one transformation, in one place.
+ * that could itself be wrong; `requestPath` in `./client` performs the one transformation, in one
+ * place. It is named there rather than here because it is a runtime function and this module is
+ * erased in full.
  */
 export interface ContractOperation {
-  /** Which of the five methods a CardDemo contract may declare this operation is sent with. */
   readonly method: HttpMethod;
 
   /**
    * The operation's path as its CONTRACT spells it, prefix included, not the target a client sends.
    *
    * Assumptions: holding the contract's own spelling is what lets the drift gate compare this value
-   * with a parsed contract directly; {@link requestPath} performs the one transformation.
+   * with a parsed contract directly; `requestPath` in `./client` performs the one transformation.
    */
   readonly path: string;
-
-  /** The contract's own `operationId`, which is the key the drift gate matches an operation on. */
   readonly operationId: string;
-}
-
-/**
- * The version prefix every published contract path carries and no client target does.
- *
- * Assumptions: the prefix belongs to the configured base URL rather than to a per-request target.
- * `VITE_API_BASE_URL` addresses the public HTTP API, whose route keys are all versioned -- the
- * `route_keys` default in `infra/modules/api-gateway-http/variables.tf` records that every key is
- * published under `/api/v1` -- so the base URL a build is given already ends in this prefix and a
- * target repeating it would resolve to `/api/v1/api/v1/...`.
- */
-export const API_PATH_PREFIX = '/api/v1';
-
-/** Matches one path-template placeholder, for example `{cardSelector}`. */
-const PATH_PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]*)\}/gu;
-
-/**
- * Builds the request target for one contract operation, substituting its path parameters.
- *
- * Assumptions: every supplied value is percent-encoded, and that is a correctness requirement rather
- * than defensive habit. Two contracts take a path parameter whose value comes from a response
- * body -- a sealed cursor in authorization-api and a reference code in reference-api -- and a sealed
- * token is base64url text that may legitimately contain characters a target treats as structure.
- * Encoding it is what stops such a value from being read as extra path segments.
- *
- * Assumptions: an unsubstituted placeholder and an unused parameter are BOTH refused. Refusing only
- * the first would let a caller pass a misspelled parameter name and receive a target still carrying
- * the literal placeholder text, which the service answers with 400 against a value the caller never
- * typed -- a failure attributed to the wrong side of the boundary.
- * @param {ContractOperation} operation - The operation, whose `path` is its contract template.
- * @param {Readonly<Record<string, string>>} [parameters] - One value per placeholder in that
- *   template, keyed by placeholder name. Omit it for an operation that declares none.
- * @returns {string} The target relative to the configured base URL, with the version prefix removed
- *   and every placeholder replaced by its percent-encoded value.
- * @throws {RangeError} If the operation's path does not carry the version prefix, if a placeholder
- *   has no supplied value, or if a supplied value matches no placeholder.
- */
-export function requestPath(
-  operation: ContractOperation,
-  parameters: Readonly<Record<string, string>> = {},
-): string {
-  if (!operation.path.startsWith(`${API_PATH_PREFIX}/`)) {
-    throw new RangeError(
-      `Contract path for ${operation.operationId} must begin with ${API_PATH_PREFIX}/.`,
-    );
-  }
-
-  const template = operation.path.slice(API_PATH_PREFIX.length);
-  const consumed = new Set<string>();
-
-  /**
-   * Substitutes one placeholder, recording that its parameter was consumed.
-   *
-   * Assumptions: declared as a named inner function rather than written inline at the call below,
-   * because `jsdoc/require-jsdoc` is configured with `publicOnly: false` and so selects a function
-   * expression in every position -- and a block comment attached to an inline argument is moved by
-   * Prettier onto the preceding expression, which detaches it from what it documents.
-   * @param {string} _match - The whole matched placeholder, unused; the name alone identifies it.
-   * @param {string} name - The placeholder's parameter name.
-   * @returns {string} The supplied value, percent-encoded so it cannot read as extra path segments.
-   * @throws {RangeError} If no value was supplied for that placeholder.
-   */
-  function substitute(_match: string, name: string): string {
-    const value = parameters[name];
-    if (value === undefined) {
-      throw new RangeError(`Operation ${operation.operationId} requires a value for ${name}.`);
-    }
-    consumed.add(name);
-    return encodeURIComponent(value);
-  }
-
-  const target = template.replace(PATH_PLACEHOLDER, substitute);
-
-  for (const name of Object.keys(parameters)) {
-    if (!consumed.has(name)) {
-      throw new RangeError(
-        `Operation ${operation.operationId} declares no path parameter ${name}.`,
-      );
-    }
-  }
-  return target;
 }
 
 /**
  * Reading direction a browse request pairs with its cursor.
  *
  * Assumptions: the two members are spelled exactly as the services accept them -- lower case -- and
- * not as any Java enum's constant names. All five browser-facing contracts publish this pair in a
- * `PageDirection` schema, and the edge refuses an unrecognised value with HTTP 400 before any handler
- * runs, so a client spelling them otherwise would have every paging request rejected.
+ * not as any Java enum's constant names. All SIX wholly browser-facing contracts publish this pair in a
+ * `PageDirection` schema -- auth, authorization, card, reference, reporting and transaction -- and the
+ * edge refuses an unrecognised value with HTTP 400 before any handler runs, so a client spelling them
+ * otherwise would have every paging request rejected. `account-api.yaml` publishes no such schema,
+ * because the two paged operations it declares are among the seven this module treats as internal.
  */
 export type PageDirection = 'next' | 'previous';
 
 /**
  * Shared sealed-cursor page envelope returned by every browse operation.
  *
- * Assumptions: FIVE members, matching the `PageResponse` record in common-lib and the `CardPage`,
+ * Assumptions: FOUR members, matching the `PageResponse` record in common-lib and the `CardPage`,
  * `PageResponse`, `TransactionPage`, `PendingAuthPage`, `TransactionTypePage` and sibling schemas the
- * contracts publish, each of which lists all five as required with `additionalProperties: false`. A
- * sixth member -- a next cursor, a previous cursor, a row total -- would describe a body no service
- * sends, and a member that is always absent is worse than no member because it reads as a value that
- * merely happens to be missing this time.
+ * contracts publish, each of which lists all four as required with `additionalProperties: false`. A
+ * fifth member -- a next cursor, a previous cursor, a backward-availability flag, a row total -- would
+ * describe a body no service sends, and a member that is always absent is worse than no member because
+ * it reads as a value that merely happens to be missing this time.
  *
  * Assumptions: `lastKey` is both the last row's identity and the position a forward request is issued
  * from, and `firstKey` likewise for a backward one. The service seals the direction into each token,
  * so replaying `firstKey` with direction `next` is refused with HTTP 400 rather than answered with
  * the wrong page -- which is what makes one value safe to serve both purposes.
  *
- * Refactoring Rationale: `hasPrevious` exists because the earlier four-member shape asked this client
- * to derive backward availability from `firstKey` being non-null, and that derivation was wrong. Every
- * page that returns rows names its own first row, so the OPENING page satisfied it, the backward
- * control was enabled there, and following it replaced the rows on screen with an empty page. The
- * services now establish the answer from the read that built the page, and this client reads it rather
- * than inferring it.
+ * Refactoring Rationale: whether an EARLIER page exists is deliberately NOT a member here, because the
+ * reference does not answer it from the file either. `app/cbl/COCRDLIC.cbl` declares the screen ordinal
+ * `WS-CA-SCREEN-NUM PIC 9(1)` at L237 with `88 CA-FIRST-PAGE VALUE 1` at L238, decrements it on PF7 at
+ * L508 and increments it on PF8 at L492, and refuses the backward step with `NO PREVIOUS PAGES TO
+ * DISPLAY` at L902 to L903 purely on that ordinal -- no backward probe read is ever issued to decide it.
+ * The migration moves that navigation state client-side per AAP section 0.7.1, so this client holds the
+ * ordinal and the envelope publishes only the POSITION a backward step is issued from, which is
+ * `firstKey`. Alternatives Considered: keeping a server-computed flag. Rejected because the service
+ * would have to read backward from a page it has not been asked for, and its answer would still be
+ * stale by the time a caller acted on it.
  *
  * Assumptions: `hasNext` is settled by the service from a read of one row MORE than the page holds,
  * which is how the reference settles the same question -- `app/cbl/COCRDLIC.cbl` sets its
@@ -216,36 +165,38 @@ export type PageDirection = 'next' | 'previous';
  *   example {@link CardXrefResponse} for an account's cross-reference rows.
  */
 export interface PageResponse<T> {
-  /**
-   * The rows of this page, at most the row count the service fixes for the screen.
-   *
-   * Assumptions: the arity is settled server-side and a client cannot vary it -- seven for the card
-   * browse, from `WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7` at `app/cbl/COCRDLIC.cbl` L177 to L178.
-   * A final page is legitimately shorter, and an empty page is a state rather than an error.
-   */
   readonly items: readonly T[];
 
   /**
    * Sealed cursor identifying the FIRST row returned, or nothing when the page carried none.
    *
    * Assumptions: opaque, and the client neither parses, compares nor computes on it -- it is replayed
-   * verbatim. The value it seals is composite in more than one context: the card browse key is a card
-   * number with an account identifier, and the pending-authorization key is two packed-decimal
-   * integers at `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` L19 to L21. The service also seals
-   * the direction into it, so replaying this one forward is refused with 400 rather than answered with
-   * the wrong page. Anything a client inferred from its bytes would be inference about an encoding it
-   * does not own.
+   * verbatim. The value it seals differs by context and is composite in some of them: the
+   * pending-authorization key is two packed-decimal integers at
+   * `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` L19 to L21, while the card browse key is the
+   * card number ALONE. The service also seals the direction into it, so replaying this one forward is
+   * refused with 400 rather than answered with the wrong page. Anything a client inferred from its bytes
+   * would be inference about an encoding it does not own.
+   *
+   * Refactoring Rationale: this described the card browse key as "a card number with an account
+   * identifier", which is not the physical key. `card.cards` declares `pk_cards PRIMARY KEY (card_num)`
+   * and the browse orders and cursors on that column alone -- `CardListService` seals
+   * `getCardNum()` and nothing else -- with the account identifier acting as an optional NARROWING
+   * filter carried separately in the sealed binding rather than as part of the position. Describing it
+   * as composite invited a reader to expect two values inside the token and to treat the account
+   * identifier as replayable position data, which it is not.
    */
   readonly firstKey: string | null;
-
-  /** Sealed cursor identifying the LAST row returned, on the same terms as `firstKey`. */
   readonly lastKey: string | null;
 
-  /** Whether reading forward from `lastKey` yields a further page. */
+  /**
+   * Whether reading forward from `lastKey` yields a further page.
+   *
+   * Assumptions: this is the ONLY availability answer the envelope carries. Its backward counterpart is
+   * the caller's own page ordinal, held in the screen that pages, matching the reference's
+   * `CA-FIRST-PAGE` test at `app/cbl/COCRDLIC.cbl` L238.
+   */
   readonly hasNext: boolean;
-
-  /** Whether reading backward from `firstKey` yields a further page. */
-  readonly hasPrevious: boolean;
 }
 
 /**
@@ -280,61 +231,22 @@ export type Subsystem = 'APPLICATION' | 'CICS' | 'IMS' | 'RELATIONAL' | 'QUEUE' 
  * so a client must never reword one.
  */
 export interface FieldError {
-  /**
-   * Which request property was refused, by its logical name.
-   *
-   * Assumptions: the name matches the member of the request shape rather than the 3270 field, so a form
-   * can bind an entry to the control the user typed into. Known names in the sign-on and user family are
-   * `userId`, `password`, `firstName`, `lastName`, `userType` and `confirmed`.
-   */
   readonly field: string;
-
-  /**
-   * Whether the field carried an unacceptable value or carried none at all.
-   *
-   * Assumptions: both are errors, and the distinction exists because the baseline draws it -- a blank
-   * field additionally receives a literal asterisk at `app/cpy/CSSETATY.cpy` L23 to L25, so `BLANK`
-   * carries a rendering obligation `NOT_OK` does not.
-   */
   readonly state: FieldValidationState;
-
-  /** The verbatim sentence for this field, at the seventy-five characters its carrier declares. */
   readonly message: string;
 }
 
 /**
  * The structured equivalent of the baseline's `ABEND-DATA` group.
  *
- * Assumptions: four members at the widths `app/cpy/CSMSG02Y.cpy` lines 21 to 29 declare --
- * `01 ABEND-DATA.` at L21, then `ABEND-CODE PIC X(4)` at L22, `ABEND-CULPRIT PIC X(8)` at L24,
- * `ABEND-REASON PIC X(50)` at L26 and `ABEND-MSG PIC X(72)` at L28, each followed by its
- * `VALUE SPACES` continuation. It is a diagnostic surface and not a user-facing one, which is why
- * every contract declares it nullable: an ordinary refusal carries none.
- *
- * Assumptions: the line range is stated as 21 to 29 because that is where the group is. An earlier
- * revision of this block cited lines 45 to 53, a range that copybook does not have -- the whole file
- * is 35 lines, so the reference resolved to nothing and could not be checked by following it. The
- * range here agrees with `com.carddemo.common.error.AbendDetail`, whose own Javadoc cites lines 21 to
- * 29 for the group and L22, L24, L26 and L28 for the four widths. A citation nobody can follow is the
- * one kind of comment that survives review indefinitely, because reviewing it requires the very
- * lookup it makes impossible.
- *
- * Assumptions: a screen renders this through a result surface with an error status rather than through
- * the ordinary message band, because the four values are operator diagnostics and not a sentence a
- * user can act on. No component is named here: this module holds no dependency on a rendering
- * library, so what reads the type is the screen's concern and not this declaration's.
+ * Assumptions: four members at the widths `app/cpy/CSMSG02Y.cpy` L45 to L53 declares. It is a
+ * diagnostic surface and not a user-facing one, which is why every contract declares it nullable:
+ * an ordinary refusal carries none.
  */
 export interface AbendDetail {
-  /** The abend identifier, four characters. `ABEND-CODE PIC X(4)` at `app/cpy/CSMSG02Y.cpy` L22. */
   readonly abendCode: string;
-
-  /** What failed, eight characters. `ABEND-CULPRIT PIC X(8)` at `app/cpy/CSMSG02Y.cpy` L24. */
   readonly abendCulprit: string;
-
-  /** Why it failed, fifty characters. `ABEND-REASON PIC X(50)` at `app/cpy/CSMSG02Y.cpy` L26. */
   readonly abendReason: string;
-
-  /** The operator-facing sentence, seventy-two characters. `ABEND-MSG PIC X(72)` at L28. */
   readonly abendMsg: string;
 }
 
@@ -346,114 +258,22 @@ export interface AbendDetail {
  * checking a condition that never occurs; checking its length is the meaningful test.
  */
 export interface ApiError {
-  /**
-   * The stable identifier a caller may branch on, never reworded between releases.
-   *
-   * Assumptions: the identifiers are the shared kernel's, and their numeric suffix aligns with the HTTP
-   * status, so this is what a client matches on rather than the human sentence -- which is free to change
-   * wording without changing meaning.
-   */
   readonly code: string;
-
-  /**
-   * A subordinate identifier qualifying {@link ApiError.code}, or the empty string when there is none.
-   *
-   * Assumptions: empty rather than absent, so a client reads the member unconditionally. It is what
-   * discriminates the distinct conditions sharing one status -- notably the several that answer 409 --
-   * so a caller distinguishing a stale revision from a referential refusal reads THIS and not the status.
-   */
   readonly secondaryCode: string;
-
-  /**
-   * The aggregate sentence, or nothing.
-   *
-   * Assumptions: carried verbatim from the baseline copybook or program that owns the wording wherever one
-   * does, so a client renders it unchanged and never rewords it. Nullable deliberately: absent is the
-   * migrated form of no-message, which is distinct from an empty message.
-   */
   readonly message: string | null;
-
-  /** How serious the failure is, on the baseline's own four-level ladder. */
   readonly severity: Severity;
-
-  /**
-   * Which part of the platform the failure arose in.
-   *
-   * Assumptions: a given service produces only a subset of the six values, so a response naming one
-   * outside its subset would misattribute the failure; a client must nonetheless accept all six.
-   */
   readonly subsystem: Subsystem;
-
-  /**
-   * The HTTP status, restated inside the body.
-   *
-   * Assumptions: always equal to the status of the response that carried it. The restatement exists so a
-   * payload logged or archived away from its response envelope is still self-describing. This is a status
-   * code and therefore legitimately a number -- unlike any monetary member, which is text.
-   */
   readonly status: number;
-
-  /**
-   * Identifies the unit of work that failed, for quoting to support.
-   *
-   * Assumptions: inherited from the inbound request rather than generated in the response, and the empty
-   * string when the request carried none. It is the intended route from this response to the server-side
-   * log of the same request, which is why `client.ts` sends it and the server's correlation filter echoes
-   * it back on the response as well.
-   */
   readonly correlationId: string;
-
-  /** The request target that failed, so a logged payload identifies what was called. */
   readonly path: string;
-
-  /** When the failure was rendered, as text, on the same reasoning that keeps every instant text here. */
   readonly timestamp: string;
-
-  /**
-   * One entry per refused field, empty rather than absent when no field is named.
-   *
-   * Assumptions: always present, so the meaningful test is its LENGTH and never its presence. This array
-   * is the whole mechanism by which a form marks a field, because the baseline's own marking is gated on
-   * a pseudo-conversational re-entry flag that a stateless handler does not have.
-   */
   readonly fieldErrors: readonly FieldError[];
-
-  /** Operator diagnostics, present only for an unclassified failure; an ordinary refusal carries none. */
   readonly abend: AbendDetail | null;
 }
 
-/**
- * Reports whether an unknown value is a problem document a screen may read field errors from.
- *
- * Assumptions: the members probed are the ones a caller acts on -- the status, the correlation
- * identifier a user quotes to support, and the field-error array a form binds to -- rather than every
- * member the interface declares. Probing all eleven would reject a body from a future service that
- * added a member, and the guard exists to decide whether the body is USABLE, not whether it is
- * exhaustive.
- *
- * Alternatives Considered: narrowing with a cast at each call site instead, which needs no helper.
- * Rejected because a cast asserts the shape without checking it, so a screen reading `fieldErrors`
- * from an HTML error page returned by a misconfigured gateway would throw on `undefined.length` and
- * report as a rendering bug rather than as a non-JSON response.
- * @param {unknown} value - A response body of unknown shape, typically from a rejected request.
- * @returns {boolean} `true` when the value carries the three members a caller acts on, narrowing it
- *   to {@link ApiError}.
- */
-export function isApiError(value: unknown): value is ApiError {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const candidate = value as Partial<ApiError>;
-  return (
-    typeof candidate.status === 'number' &&
-    typeof candidate.correlationId === 'string' &&
-    Array.isArray(candidate.fieldErrors)
-  );
-}
-
-// WHAT: the two scalars every browser-facing contract carries in the same shape, named so that a
-//       reader of a member below sees the constraint instead of an unqualified `string`.
-// WHY : Assumptions: both are transparent aliases of `string`, which is what makes them safe to
+// WHY : Assumptions: the two scalars every browser-facing contract carries in the same shape are
+//       named here so that a reader of a member below sees the constraint instead of an unqualified
+//       `string`. Both are transparent aliases of `string`, which is what makes them safe to
 //       introduce beside modules that already spell these members `string` -- an alias is the same
 //       type, so no existing declaration changes meaning and no existing call site has to move. What
 //       they add is the citation: the reason a monetary amount is not a `number` belongs where the
@@ -509,81 +329,144 @@ export type Money = string;
  */
 export type IsoDate = string;
 
-// WHAT: the domain decisions this module is answerable for whose TYPES are declared in the service
-//       module that owns the contract carrying them. Recorded here because the decision is
-//       cross-cutting even where the declaration is not, and a reader who finds only half of it in
-//       one place tends to re-decide the other half.
-// WHY : Assumptions: naming the owning module rather than restating its declaration is what keeps
-//       one definition per wire contract. Each note below is followed to a real declaration, so a
-//       reader can check it rather than take it.
+/**
+ * A twenty-six-character local timestamp, carried as opaque text.
+ *
+ * Assumptions: the form is `YYYY-MM-DD HH:MM:SS.mmmmmm` -- space-separated, microsecond precision, no
+ * zone designator -- which is what `TimestampFormatter` in
+ * `services/common-lib/src/main/java/com/carddemo/common/time/TimestampFormatter.java` emits and what
+ * `TRAN-ORIG-TS` and `TRAN-PROC-TS` declare as `PIC X(26)` at `app/cpy/CVTRA05Y.cpy` L16 and L17. Four
+ * of the seven contracts publish it as a named `Timestamp26` scalar with `minLength` and `maxLength`
+ * both 26 and a pattern; this alias is its single TypeScript expression.
+ *
+ * Refactoring Rationale: an alias of `string` and never `Date`, for a stronger reason than the one that
+ * keeps {@link IsoDate} text. A `Date` holds milliseconds, so a round trip through one TRUNCATES the
+ * last three digits of the fraction -- the value would still render plausibly and would no longer be the
+ * value the service sent. The separator is also a space rather than a `T`, so a strict date-time parse
+ * rejects a perfectly well-formed value, and there is no zone to interpret: reading one as UTC or as
+ * local are both assertions the stored value does not make.
+ *
+ * Trade-offs: an alias is a transparent name, so nothing prevents a plain `string` being assigned where
+ * this type is declared. What it buys is the citation and the truncation warning at every member that
+ * carries a timestamp, in place of an unqualified `string` a reader has to ask about. The compile-time
+ * guarantee lives on the service side, where the shared formatter is the only producer.
+ *
+ * Assumptions: one member in the statement projection legitimately carries twenty-four significant
+ * characters followed by two blanks, because the reference reformatting step at
+ * `app/jcl/CREASTMT.JCL` L54 copies only 24 of the field's 26 characters. The width is still 26, so this
+ * alias still describes it; `reporting-api.yaml` names that member's own scalar so the two admissible
+ * contents are stated where they apply rather than relaxed for every timestamp.
+ */
+export type Timestamp26 = string;
+
+// WHY : Assumptions: the notes below are the cross-cutting decisions this module is answerable for,
+//       each recorded once beside the declarations that carry it out, and several of them govern a
+//       TYPE declared in the service module that owns the contract rather than here. Every note is
+//       followed to a real declaration in this file or to a cited source line, so a reader can check
+//       it rather than take it. They are gathered here rather than repeated per member because each
+//       governs several shapes at once, and a decision found in only one of the places it applies
+//       tends to be re-decided in the others.
 //
-//       Assumptions: no card verification value appears in any shape in this folder, under this or
-//       any other name. The reference record does carry one -- `CARD-CVV-CD PIC 9(03)` at
-//       `app/cpy/CVACT02Y.cpy` L7 -- and no operation of any contract returns it, so no shape may
-//       declare it. The omission is deliberate and is recorded because the record layout is the
-//       source these shapes are read from, and a later reader comparing the two would otherwise find
-//       a field missing and complete the mapping in good faith.
+//       Assumptions: no card verification value appears in any shape in this module, under this or any
+//       other name. The reference record does carry one -- `CARD-CVV-CD PIC 9(03)` at
+//       `app/cpy/CVACT02Y.cpy` L7 -- and no operation of any of the seven contracts returns it, so no
+//       shape may declare it. The omission is deliberate and is recorded because the record layout is
+//       the source these shapes are read from, and someone comparing the two would otherwise find a
+//       field missing and complete the mapping in good faith.
 //
 //       Trade-offs: a primary account number is rendered masked everywhere except one administrative
-//       shape. `ui/src/api/cards.ts` carries the masked rendering on `CardSummary.displayCardNumber`
-//       and the sixteen digits only on `AdminCardDetail.cardNumber`, whose operation the service
-//       restricts to the administrative group. The compromise accepted is that the disclosure exists
-//       at all; what bounds it is that it is visible in the type system and reachable at one address
-//       rather than being an undeclared property of a general shape.
+//       shape. `CardSummary.displayCardNumber` carries the masked rendering and `AdminCardDetail`
+//       carries the sixteen digits, at an address the service restricts to the administrative group.
+//       The compromise accepted is that the disclosure exists at all; what bounds it is that it is
+//       visible in the type system, on one named shape, rather than being an undeclared property of a
+//       general one.
 //
-//       Assumptions: the two-value user-type domain is `'A'` for administrator and `'U'` for user,
-//       declared as `UserType` in `ui/src/api/auth.ts`. The authority for the VALUE SET is
-//       `app/cpy/COCOM01Y.cpy` L26 to L28, where `CDEMO-USER-TYPE PIC X(01)` is followed by
-//       `88 CDEMO-USRTYP-ADMIN VALUE 'A'` and `88 CDEMO-USRTYP-USER VALUE 'U'`. The width alone comes
-//       from `SEC-USR-TYPE PIC X(01)` at `app/cpy/CSUSR01Y.cpy` L22, which is why that line is not
-//       the citation: it constrains how wide the field is and says nothing about which values it
-//       admits.
+//       Refactoring Rationale: every closed literal domain is a UNION here and never `string`. There
+//       are nine: {@link UserType}, {@link FieldValidationState}, {@link Severity}, {@link Subsystem},
+//       {@link PageDirection}, {@link ApprovalStatus}, {@link MatchStatus}, {@link AuthFraudFlag} with
+//       {@link FraudAction}, and the reference contract's {@link PhoneAreaCodeClass},
+//       {@link DateMask}, {@link DateFeedbackCode}, {@link MaintenanceActionType},
+//       {@link MaintenanceActionOutcomeState} and {@link ReportBand}. Each is closed by a source the
+//       migration does not get to choose -- a copybook condition name, a check constraint, or an enum
+//       the contract publishes -- so a union makes a value outside the domain a compile error, where
+//       `string` would defer it to a field error the service answers at run time. The cost is that
+//       widening a domain touches this file; that is the intended cost, because widening one is a
+//       contract change.
+//
+//       Assumptions: the two-value user-type domain is `'A'` for administrator and `'U'` for user. The
+//       authority for the VALUE SET is `app/cpy/COCOM01Y.cpy` L26 to L28, where
+//       `CDEMO-USER-TYPE PIC X(01)` is followed by `88 CDEMO-USRTYP-ADMIN VALUE 'A'` and
+//       `88 CDEMO-USRTYP-USER VALUE 'U'`. The width alone comes from `SEC-USR-TYPE PIC X(01)` at
+//       `app/cpy/CSUSR01Y.cpy` L22, which is why that line is not the citation: it constrains how wide
+//       the field is and says nothing about which values it admits.
 //
 //       Assumptions: the authorization match domain is `'P'`, `'D'`, `'E'` and `'M'` and the fraud
-//       domain is `'F'` and `'R'`, declared in `ui/src/api/authorization.ts`. Both are read from the
-//       condition names of the detail segment: `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy`
-//       L46 to L49 for pending, declined, pending-expired and matched, and L51 to L52 for confirmed
-//       and removed. The fraud member admits an absent value because an authorization nobody has
-//       marked carries none, which is a state and not a missing datum.
+//       domain is `'F'` and `'R'`. Both are read from the condition names of the detail segment:
+//       `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` L46 to L49 for pending, declined,
+//       pending-expired and matched, and L51 to L52 for confirmed and removed. The fraud member is used
+//       nullably because an authorization nobody has marked carries no tag, which is a state and not a
+//       missing datum -- and the untagged state has exactly ONE spelling on the wire, because the
+//       service normalises a stored blank to null before serialising.
 //
 //       Assumptions: the five account-status slots of the summary segment are five discretely named
-//       members and not an array, declared as `accountStatus1` through `accountStatus5` in
-//       `ui/src/api/authorization.ts`. The arity is fixed at five by
+//       members and not an array, declared as `accountStatus1` through `accountStatus5` on
+//       {@link PendingAuthSummary}. The arity is fixed at five by
 //       `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` L22, `05 PA-ACCOUNT-STATUS PIC X(02)
 //       OCCURS 5 TIMES.`, and the schema holds it as five columns. An array would type a length the
-//       contract does not have, so a screen would have to handle a sixth element that cannot arrive
-//       and a fourth that cannot be missing.
+//       contract does not have, so a screen would have to handle a sixth element that cannot arrive and
+//       a fourth that cannot be missing.
 //
-//       Refactoring Rationale: no shape in this folder carries a password except the sign-on request
-//       in `ui/src/api/auth.ts`, which exchanges one for a token and stores nothing. The reference
-//       holds the credential in the clear -- `05 SEC-USR-PWD PIC X(08).` at `app/cpy/CSUSR01Y.cpy`
-//       L21 -- compares it directly at `app/cbl/COSGN00C.cbl` L223, and writes it back to the screen
-//       at `app/cbl/COUSR02C.cbl` L169. The target keeps no such column and no such member: identity
-//       moves to a managed user pool, so there is nothing for a user shape to carry. This is the
-//       divergence the traceability register records as D-4, and it is the one place where parity
-//       with the baseline is declined rather than preserved.
+//       Refactoring Rationale: no shape here carries a password except {@link SignOnRequest}, which
+//       exchanges one for a token and stores nothing. The reference holds the credential in the
+//       clear -- `05 SEC-USR-PWD PIC X(08).` at `app/cpy/CSUSR01Y.cpy` L21 -- compares it directly at
+//       `app/cbl/COSGN00C.cbl` L223, and writes it back to the screen at `app/cbl/COUSR02C.cbl` L169.
+//       The target keeps no such column and no such member: identity moves to a managed user pool, so
+//       there is nothing for a user shape to carry. This is the divergence the traceability register
+//       records as D-4, and it is the one place where parity with the baseline is declined rather than
+//       preserved.
 //
-//       Refactoring Rationale: three reference field names carry a misspelling and the target names
-//       all three as spelled. One belongs to a shape declared below and states its own lineage where
-//       it is declared: `ACCT-EXPIRAION-DATE` at `app/cpy/CVACT01Y.cpy` L11. The other two belong to
-//       shapes their own modules own -- `CARD-EXPIRAION-DATE` at `app/cpy/CVACT02Y.cpy` L9, which
-//       `ui/src/api/cards.ts` names `expirationDate`, and `PA-MERCHANT-CATAGORY-CODE` at
-//       `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` L36, which `ui/src/api/authorization.ts`
-//       names `merchantCategoryCode`. All three baseline spellings are named here so the lineage
-//       between a member and the field it is read from is never ambiguous, and the copybooks
-//       themselves are untouched: they are the behavioural oracle for this migration and stay
-//       byte-identical, so the divergence is documented rather than removed at its source.
+//       Refactoring Rationale: {@link ApiError} declares no CICS response or reason member, and the
+//       omission is a decision rather than an oversight. The reference composes its file-error sentence
+//       from the internal file name plus the CICS response and reason codes -- `app/cbl/COCRDLIC.cbl`
+//       L153 to L172 builds exactly that and L1254 moves it to the message field -- and every one of
+//       those three values names something inside the service: a dataset, a platform condition, a
+//       platform sub-condition. None is actionable by a browser and all three are disclosure. The
+//       migrated shape carries `code`, `secondaryCode` and `correlationId` instead, so a caller has a
+//       stable value to branch on, a value to distinguish conditions that share a status, and an
+//       identifier that leads an operator to the log line where the platform detail legitimately lives.
+//       Adding a response or reason member here would put the detail back on the wire, which is why
+//       neither exists to be populated.
 //
-//       Assumptions: the authorization request and reply payloads are NOT declared in this folder.
-//       They are queue contracts in comma-separated form, eighteen fields outbound and six inbound,
-//       decoded by `com.carddemo.common.codec.CsvAuthCodec` on the server. A browser never receives
-//       one, so declaring the shape here would create a second definition of a contract that has an
-//       owner -- and a definition no test in this tree could hold to account, since nothing in the
-//       browser exercises that path.
+//       Refactoring Rationale: three reference field names carry a misspelling and the target names all
+//       three as spelled: `ACCT-EXPIRAION-DATE` at `app/cpy/CVACT01Y.cpy` L11 and
+//       `CARD-EXPIRAION-DATE` at `app/cpy/CVACT02Y.cpy` L9 both become `expirationDate`, and
+//       `PA-MERCHANT-CATAGORY-CODE` at `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` L36 becomes
+//       `merchantCategoryCode`. All three baseline spellings are named here so the lineage between a
+//       member and the field it is read from is never ambiguous, and the copybooks themselves are
+//       untouched: they are the behavioural oracle for this migration and stay byte-identical, so the
+//       divergence is documented rather than removed at its source.
+//
+//       Assumptions: the authorization request and reply payloads are NOT declared in this module. They
+//       are queue contracts in comma-separated form, eighteen fields outbound and six inbound, decoded
+//       by `com.carddemo.common.codec.CsvAuthCodec` on the server. A browser never receives one, so
+//       declaring the shape here would create a second definition of a contract that has an owner --
+//       and a definition no test in this tree could hold to account, since nothing in the browser
+//       exercises that path.
+//
+//       Assumptions: the seven INTERNAL shapes of `account-api.yaml` are not declared here either, for
+//       the same reason and with a stronger one behind it. `AccountContextView`, `AccountLookupRequest`,
+//       `CardXrefLookupRequest`, `CardXrefView`, `CustomerLookupRequest`, `CustomerPage` and
+//       `CustomerResponse` are each reachable only from an operation that document tags `internal` and
+//       secures with `internalServiceToken`, so a browser cannot call one at all. Two of them are worse
+//       than merely unreachable: the cross-reference lookup body carries a FULL primary account number,
+//       and the two identifier lookups type their identifiers as numbers rather than as the text every
+//       screen-facing shape uses. Declaring them on the browser surface offered a shape no browser may
+//       send and made a full card number reachable from a screen's own type imports.
 
-// WHAT: the shapes of `account-api.yaml`, the one browser-facing contract with no service module of
-//       its own, covering the account view, the account update and the card cross-reference reads.
-// WHY : Assumptions: every member below is declared exactly as that document declares it -- same
+// WHY : Assumptions: the shapes below are those of `account-api.yaml`, the one browser-facing
+//       contract with no service module of its own, covering the account view, the account update
+//       and the card cross-reference reads. Every member is declared exactly as that document
+//       declares it -- same
 //       name, same nullability, same optionality -- and where the document and the record layout
 //       disagree the DOCUMENT is followed. The two disagree deliberately in four places, because the
 //       account-view screen shows a narrower value than the record stores and the reference itself
@@ -722,10 +605,12 @@ export interface AccountDetail {
  * One customer at the widths the account-view MAP declares.
  *
  * Assumptions: this mirrors `CustomerDetail` in `account-api.yaml`, eighteen required members, and it
- * is NOT interchangeable with {@link CustomerResponse}. Four members are narrower here than the record
- * stores them and one is named differently, because this shape is what the account-view screen shows
- * and the reference narrows those values itself with a direct move. Sending a {@link CustomerResponse}
- * where this is expected would carry a ten-character postal code into a five-character field.
+ * is NOT interchangeable with the `CustomerResponse` shape that contract declares for its
+ * service-to-service reads. Four members are narrower here than the record stores them and one is named
+ * differently, because this shape is what the account-view screen shows and the reference narrows those
+ * values itself with a direct move. Carrying the wider internal shape where this is expected would put a
+ * ten-character postal code into a five-character field. That internal shape is deliberately absent from
+ * this module -- see the account section header for why the browser surface declares none of them.
  *
  * Assumptions: the national identifier and the government-issued identifier appear ONLY in masked
  * form. Both are held encrypted by the service -- `CUST-SSN PIC 9(09)` at `app/cpy/CVCUS01Y.cpy` L17
@@ -820,8 +705,8 @@ export interface CustomerDetail {
    *
    * Assumptions: fifty characters, stored in `CUST-ADDR-LINE-3 PIC X(50)` at `app/cpy/CVCUS01Y.cpy`
    * L11. The map names this field for what the screen asks of it while the record names it by position
-   * in the address block; the contract follows the map, and {@link CustomerResponse} follows the
-   * record. The two names describe one stored value.
+   * in the address block; the contract follows the map, and the internal `CustomerResponse` shape in
+   * `account-api.yaml` follows the record. The two names describe one stored value.
    */
   readonly city: string;
 
@@ -833,8 +718,8 @@ export interface CustomerDetail {
    *
    * Assumptions: `ACSPHN1I PIC X(13)`, narrowed from `CUST-PHONE-NUM-1 PIC X(15)` at
    * `app/cpy/CVCUS01Y.cpy` L15 by the reference's own direct move, which drops exactly the two-
-   * character trailing pad the wider field declares. Non-null on this shape, unlike its counterpart
-   * on {@link CustomerResponse}.
+   * character trailing pad the wider field declares. Non-null on this shape, unlike its counterpart on
+   * the internal `CustomerResponse` shape, which mirrors the nullable record field.
    */
   readonly phoneNumber1: string;
 
@@ -864,158 +749,17 @@ export interface CustomerDetail {
 }
 
 /**
- * One customer at the widths the RECORD declares.
- *
- * Assumptions: this mirrors `CustomerResponse` in `account-api.yaml`, eighteen required members, and it
- * is the record-width counterpart of {@link CustomerDetail} rather than a duplicate of it. Both
- * describe one stored customer; this one is returned where no screen is narrowing the values, so the
- * postal code keeps all ten characters, both telephone numbers keep fifteen, and the third address
- * line is named for its position in the record instead of for the city field a map binds it to. The
- * source record is `CUSTOMER-RECORD` at `app/cpy/CVCUS01Y.cpy` L4 to L23, five hundred bytes, with
- * `FILLER PIC X(168)` at L23 dropped as padding.
- *
- * Trade-offs: carrying two shapes for one entity is duplication, and the alternative -- one shape at
- * record widths, narrowed by whichever screen needs it -- was available. It is rejected because the
- * narrowing is not a display preference: the reference performs it in COBOL with a direct move onto a
- * shorter field, so it is part of what the account-view operation RETURNS. Typing one shape would
- * oblige every consumer to know which of two width regimes its response was in, with nothing in the
- * type to tell it.
- */
-export interface CustomerResponse {
-  /** The customer, as digits. `CUST-ID PIC 9(09)` at `app/cpy/CVCUS01Y.cpy` L5, pattern `^[0-9]{1,9}$`. */
-  readonly customerId: string;
-
-  /** Given name. `CUST-FIRST-NAME PIC X(25)` at `app/cpy/CVCUS01Y.cpy` L6. */
-  readonly firstName: string;
-
-  /** Middle name, or nothing when the stored field is unpopulated. `CUST-MIDDLE-NAME PIC X(25)` at L7. */
-  readonly middleName: string | null;
-
-  /** Family name. `CUST-LAST-NAME PIC X(25)` at `app/cpy/CVCUS01Y.cpy` L8. */
-  readonly lastName: string;
-
-  /** First address line. `CUST-ADDR-LINE-1 PIC X(50)` at `app/cpy/CVCUS01Y.cpy` L9. */
-  readonly addressLine1: string;
-
-  /** Second address line, or nothing when unpopulated. `CUST-ADDR-LINE-2 PIC X(50)` at L10. */
-  readonly addressLine2: string | null;
-
-  /**
-   * Third address line, at the record's own name and width.
-   *
-   * Assumptions: `CUST-ADDR-LINE-3 PIC X(50)` at `app/cpy/CVCUS01Y.cpy` L11. This is the member
-   * {@link CustomerDetail} calls `city`, and the difference in name is the difference between the
-   * record and the map that binds it. One stored value, two shapes, and neither name is wrong for the
-   * shape it appears in.
-   */
-  readonly addressLine3: string;
-
-  /** Two-character state code. `CUST-ADDR-STATE-CD PIC X(02)` at `app/cpy/CVCUS01Y.cpy` L12. */
-  readonly stateCode: string;
-
-  /** Three-character country code. `CUST-ADDR-COUNTRY-CD PIC X(03)` at `app/cpy/CVCUS01Y.cpy` L13. */
-  readonly countryCode: string;
-
-  /**
-   * Postal code at the record's full ten characters.
-   *
-   * Assumptions: `CUST-ADDR-ZIP PIC X(10)` at `app/cpy/CVCUS01Y.cpy` L14, carrying all ten rather than
-   * the five the account-view map shows. A consumer moving this value into a shape typed for the screen
-   * must narrow it, and the narrowing belongs at that boundary rather than here.
-   */
-  readonly zipCode: string;
-
-  /** Primary telephone at the record's fifteen characters, or nothing. `CUST-PHONE-NUM-1 PIC X(15)` at L15. */
-  readonly phoneNumber1: string | null;
-
-  /** Secondary telephone at the record's fifteen characters, or nothing. `CUST-PHONE-NUM-2 PIC X(15)` at L16. */
-  readonly phoneNumber2: string | null;
-
-  /** The national identifier, masked. Derived from `CUST-SSN PIC 9(09)` at `app/cpy/CVCUS01Y.cpy` L17. */
-  readonly ssnMasked: string;
-
-  /** The government-issued identifier, masked. From `CUST-GOVT-ISSUED-ID PIC X(20)` at L18. */
-  readonly governmentIssuedIdMasked: string;
-
-  /**
-   * Date of birth, the one date this record stores.
-   *
-   * Assumptions: `CUST-DOB-YYYY-MM-DD PIC X(10)` at `app/cpy/CVCUS01Y.cpy` L19, whose field name states
-   * its own component order, so the stored text is already the form this type describes.
-   */
-  readonly dateOfBirth: IsoDate;
-
-  /** Electronic funds transfer account. `CUST-EFT-ACCOUNT-ID PIC X(10)` at `app/cpy/CVCUS01Y.cpy` L20. */
-  readonly eftAccountId: string;
-
-  /** Primary card-holder indicator, one character. `CUST-PRI-CARD-HOLDER-IND PIC X(01)` at L21. */
-  readonly primaryCardHolderIndicator: string;
-
-  /** Credit score as up to three digits of text. `CUST-FICO-CREDIT-SCORE PIC 9(03)` at L22. */
-  readonly ficoCreditScore: string;
-}
-
-/**
- * The three account limits and balances a card or transaction context needs.
- *
- * Assumptions: this mirrors `AccountContextView` in `account-api.yaml`, three required members, and it
- * exists so that a caller needing only the money values does not read a whole {@link AccountDetail} to
- * reach them. Every member is {@link Money} for the reason that type records.
- */
-export interface AccountContextView {
-  /** The account's credit limit. `ACCT-CREDIT-LIMIT PIC S9(10)V99` at `app/cpy/CVACT01Y.cpy` L8. */
-  readonly creditLimit: Money;
-
-  /** The cash advance limit. `ACCT-CASH-CREDIT-LIMIT PIC S9(10)V99` at `app/cpy/CVACT01Y.cpy` L9. */
-  readonly cashCreditLimit: Money;
-
-  /**
-   * The balance owed. `ACCT-CURR-BAL PIC S9(10)V99` at `app/cpy/CVACT01Y.cpy` L7.
-   *
-   * Assumptions: the over-limit test this value participates in is INCLUSIVE at the limit -- a balance
-   * exactly at the credit limit posts and one cent beyond is refused -- so the cent this member carries
-   * decides an outcome. That is the whole reason it is text and not a binary fraction.
-   */
-  readonly currentBalance: Money;
-}
-
-/**
- * The account and customer a caller's own card belongs to.
- *
- * Assumptions: this mirrors `CardXrefView` in `account-api.yaml`, both members required, and both are
- * `integer` with `format: int64` -- NOT text. The difference from every screen-facing shape here is the
- * contract's and is deliberate: this is the answer to a lookup whose caller supplied the card, so the
- * two values are identifiers to carry rather than fields to render, and no map width applies to them.
- *
- * Assumptions: an integer is safe for exactly these two and would not be for a card number. Eleven
- * digits reach about ten to the eleventh and nine digits ten to the ninth, both far below the largest
- * exactly representable integer of about 9.007 times ten to the fifteenth, whereas a sixteen-digit card
- * number at ten to the sixteenth is above it and would lose its low digits. That is why this shape
- * carries no card number and why {@link CardXrefResponse}, which does, carries it as text.
- *
- * Assumptions: both are required because the reference record declares both, so a row missing either is
- * a data defect rather than a representable state -- `XREF-CUST-ID PIC 9(09)` and
- * `XREF-ACCT-ID PIC 9(11)` at `app/cpy/CVACT03Y.cpy` L6 and L7.
- */
-export interface CardXrefView {
-  /** The account the card belongs to. `XREF-ACCT-ID PIC 9(11)` at `app/cpy/CVACT03Y.cpy` L7. */
-  readonly accountId: number;
-
-  /** The customer the card belongs to. `XREF-CUST-ID PIC 9(09)` at `app/cpy/CVACT03Y.cpy` L6. */
-  readonly customerId: number;
-}
-
-/**
  * One row of an account's card cross-reference.
  *
  * Assumptions: this mirrors `CardXrefResponse` in `account-api.yaml`, three required members, and the
  * source record is `CARD-XREF-RECORD` at `app/cpy/CVACT03Y.cpy` L4 to L8, fifty bytes, with
  * `FILLER PIC X(14)` at L8 dropped as padding.
  *
- * Assumptions: it differs from {@link CardXrefView} in exactly one respect and deliberately -- it
- * carries the card the row is FOR. A list of an account's cards cannot be read without something to
- * tell the rows apart, whereas the view's caller supplied the card and needs no echo of it. That single
- * difference is why both shapes exist rather than one.
+ * Assumptions: it differs from the internal `CardXrefView` shape in `account-api.yaml` in exactly one
+ * respect and deliberately -- it carries the card the row is FOR. A list of an account's cards cannot be
+ * read without something to tell the rows apart, whereas that view's caller supplied the card and needs
+ * no echo of it. That single difference is why the contract declares both shapes rather than one; only
+ * this half is browser-facing, so only this half is declared here.
  */
 export interface CardXrefResponse {
   /**
@@ -1037,54 +781,6 @@ export interface CardXrefResponse {
   /** The account that card belongs to, as digits. `XREF-ACCT-ID PIC 9(11)` at L7 of that copybook. */
   readonly accountId: string;
 }
-
-/**
- * The body that asks which account and customer a card belongs to.
- *
- * Assumptions: this mirrors `CardXrefLookupRequest` in `account-api.yaml`, whose one member is
- * required. The card travels in a BODY and never in a path segment or query string, because both of
- * those are written verbatim into access logs by the load balancer and the distribution before any
- * application code runs -- so a full card number in either would be persisted outside the application's
- * control. `ui/src/api/cards.ts` records the same reasoning for its own lookup.
- */
-export interface CardXrefLookupRequest {
-  /** The sixteen-character card to resolve. `XREF-CARD-NUM PIC X(16)` at `app/cpy/CVACT03Y.cpy` L5. */
-  readonly cardNumber: string;
-}
-
-/**
- * The body that asks for one account by its identifier.
- *
- * Assumptions: this mirrors `AccountLookupRequest` in `account-api.yaml`, one required member typed
- * `integer` with `format: int64`. Inbound lookup bodies carry their identifier as a number while
- * screen-facing response bodies carry it as text, and the split is the contract's: a lookup argument is
- * never rendered, so it has no map width to honour, and eleven digits are exactly representable.
- */
-export interface AccountLookupRequest {
-  /** The account to resolve. `ACCT-ID PIC 9(11)` at `app/cpy/CVACT01Y.cpy` L5. */
-  readonly accountId: number;
-}
-
-/**
- * The body that asks for one customer by identifier.
- *
- * Assumptions: this mirrors `CustomerLookupRequest` in `account-api.yaml`, one required member typed
- * `integer` with `format: int64`, on the same terms as {@link AccountLookupRequest}.
- */
-export interface CustomerLookupRequest {
-  /** The customer to resolve. `CUST-ID PIC 9(09)` at `app/cpy/CVCUS01Y.cpy` L5. */
-  readonly customerId: number;
-}
-
-/**
- * One page of the customer scan.
- *
- * Assumptions: the rows arrive in ascending customer-identifier order, which is the order the reference
- * walk produces by construction rather than an ordering this contract adds -- `app/cbl/CBCUS01C.cbl`
- * reads the file sequentially on its record key. The envelope is the shared five-member one, so it
- * carries no row total and no page number.
- */
-export type CustomerPage = PageResponse<CustomerResponse>;
 
 /**
  * One page of an account's card cross-reference rows.
@@ -1118,10 +814,25 @@ export type CardXrefPage = PageResponse<CardXrefResponse>;
  * separate input field for each part and the reference validates them separately. Recombining them here
  * would discard which part a field error refers to.
  *
- * Assumptions: this shape is INBOUND ONLY and is never a component of a response. It carries the
- * national identifier in three clear parts and the government-issued identifier in the clear, because an
- * edit has to be able to set them; the read shapes carry only the masked forms, which is why
- * {@link CustomerDetail} has no counterpart to these members.
+ * Refactoring Rationale: every optional member here -- and in every other shape in this module -- is
+ * spelled `?: string` and never `?: string | undefined`. `ui/tsconfig.json` enables
+ * `exactOptionalPropertyTypes`, whose entire purpose is to distinguish a member that is ABSENT from one
+ * that is present holding `undefined`; adding `| undefined` re-admits the second and so turns that
+ * setting off one member at a time. The distinction is not academic. A member present as `undefined` is
+ * serialised by `JSON.stringify` as no member at all, so the two forms reach the service identically --
+ * but only the absent form is what these shapes mean, and a client that assigned `undefined` from a
+ * cleared control would compile while expressing a state no contract has.
+ *
+ * Trade-offs: a caller assembling a body or a query conditionally must SPREAD a member in rather than
+ * assign `undefined` to it, which is more to write. Exactly one call site in the tree needed that --
+ * the card browse in `ui/src/screens/cardList`, which omits the cursor on its opening read -- and the
+ * friction there is the whole point of the setting: the compiler now enforces that the opening read
+ * carries no cursor rather than a cursor whose value is nothing.
+ *
+ * Assumptions: this shape is INBOUND ONLY and is never a component of a response. The read shapes carry
+ * only masked forms, which is why {@link CustomerDetail} has no counterpart to the identifier members;
+ * the members that carry an identifier in the clear are declared separately on
+ * {@link SensitiveAccountUpdateFields} rather than here, for the reasons recorded there.
  *
  * Refactoring Rationale: there is NO version or revision member. The concurrency token travels as a weak
  * entity tag in an `If-Match` header, which the contract declares required on the update operation, and
@@ -1135,114 +846,99 @@ export type CardXrefPage = PageResponse<CardXrefResponse>;
  */
 export interface AccountUpdateRequest {
   /** The account being edited. `ACCTSIDI PIC X(11)`, for `ACCT-ID PIC 9(11)`. */
-  readonly accountId?: string | undefined;
+  readonly accountId?: string;
 
   /** Active status as typed. `ACSTTUSI PIC X(1)`, for `ACCT-ACTIVE-STATUS PIC X(01)`. */
-  readonly activeStatus?: string | undefined;
+  readonly activeStatus?: string;
 
-  // WHAT: the five money members of this submission.
-  // WHY : Assumptions: fifteen characters each, the map's own field width, which is wider than any
+  // WHY : Assumptions: the five money members of this submission are fifteen characters each, the map's own field width, which is wider than any
   //       well-formed amount needs precisely so that a malformed entry can be received and reported
   //       rather than truncated into a different number.
 
   /** Credit limit as typed. `ACRDLIMI PIC X(15)`, for `ACCT-CREDIT-LIMIT`. */
-  readonly creditLimit?: string | undefined;
+  readonly creditLimit?: string;
 
   /** Cash advance limit as typed. `ACSHLIMI PIC X(15)`, for `ACCT-CASH-CREDIT-LIMIT`. */
-  readonly cashCreditLimit?: string | undefined;
+  readonly cashCreditLimit?: string;
 
   /** Balance as typed. `ACURBALI PIC X(15)`, for `ACCT-CURR-BAL`. */
-  readonly currentBalance?: string | undefined;
+  readonly currentBalance?: string;
 
   /** Cycle credits as typed. `ACRCYCRI PIC X(15)`, for `ACCT-CURR-CYC-CREDIT`. */
-  readonly currentCycleCredit?: string | undefined;
+  readonly currentCycleCredit?: string;
 
   /** Cycle debits as typed. `ACRCYDBI PIC X(15)`, for `ACCT-CURR-CYC-DEBIT`. */
-  readonly currentCycleDebit?: string | undefined;
+  readonly currentCycleDebit?: string;
 
-  // WHAT: the three account dates, each in three parts.
-  // WHY : Assumptions: the map declares a year, month and day field per date, so a client sends what
+  // WHY : Assumptions: the three account dates each arrive in three parts, because the map declares
+  //       a year, month and day field per date, so a client sends what
   //       the user typed into each. The whole-date forms these compose are `ACCT-OPEN-DATE`,
   //       `ACCT-EXPIRAION-DATE` and `ACCT-REISSUE-DATE` at `app/cpy/CVACT01Y.cpy` L10, L11 and L12 --
   //       the middle one carrying the baseline's `EXPIRAION` spelling that the target names
   //       `expirationDate`.
 
   /** Opening year as typed. `OPNYEARI PIC X(4)`. */
-  readonly openDateYear?: string | undefined;
+  readonly openDateYear?: string;
 
   /** Opening month as typed. `OPNMONI PIC X(2)`. */
-  readonly openDateMonth?: string | undefined;
+  readonly openDateMonth?: string;
 
   /** Opening day as typed. `OPNDAYI PIC X(2)`. */
-  readonly openDateDay?: string | undefined;
+  readonly openDateDay?: string;
 
   /** Expiry year as typed. `EXPYEARI PIC X(4)`. */
-  readonly expirationDateYear?: string | undefined;
+  readonly expirationDateYear?: string;
 
   /** Expiry month as typed. `EXPMONI PIC X(2)`. */
-  readonly expirationDateMonth?: string | undefined;
+  readonly expirationDateMonth?: string;
 
   /** Expiry day as typed. `EXPDAYI PIC X(2)`. */
-  readonly expirationDateDay?: string | undefined;
+  readonly expirationDateDay?: string;
 
   /** Reissue year as typed. `RISYEARI PIC X(4)`. */
-  readonly reissueDateYear?: string | undefined;
+  readonly reissueDateYear?: string;
 
   /** Reissue month as typed. `RISMONI PIC X(2)`. */
-  readonly reissueDateMonth?: string | undefined;
+  readonly reissueDateMonth?: string;
 
   /** Reissue day as typed. `RISDAYI PIC X(2)`. */
-  readonly reissueDateDay?: string | undefined;
+  readonly reissueDateDay?: string;
 
   /** Disclosure group as typed. `AADDGRPI PIC X(10)`, for `ACCT-GROUP-ID PIC X(10)`. */
-  readonly groupId?: string | undefined;
+  readonly groupId?: string;
 
   /** The customer the account refers to. `ACSTNUMI PIC X(9)`, for `CUST-ID PIC 9(09)`. */
-  readonly customerId?: string | undefined;
-
-  // WHAT: the national identifier in the three groups the map asks for.
-  // WHY : Assumptions: the parts compose `CUST-SSN PIC 9(09)` at `app/cpy/CVCUS01Y.cpy` L17. They are
-  //       in the clear because an edit must be able to set the value; the service stores it encrypted
-  //       and every read shape returns only the masked form.
-
-  /** First three digits as typed. `ACTSSN1I PIC X(3)`. */
-  readonly ssnPart1?: string | undefined;
-
-  /** Middle two digits as typed. `ACTSSN2I PIC X(2)`. */
-  readonly ssnPart2?: string | undefined;
-
-  /** Last four digits as typed. `ACTSSN3I PIC X(4)`. */
-  readonly ssnPart3?: string | undefined;
+  readonly customerId?: string;
 
   /** Birth year as typed. `DOBYEARI PIC X(4)`, one part of `CUST-DOB-YYYY-MM-DD`. */
-  readonly dateOfBirthYear?: string | undefined;
+  readonly dateOfBirthYear?: string;
 
   /** Birth month as typed. `DOBMONI PIC X(2)`. */
-  readonly dateOfBirthMonth?: string | undefined;
+  readonly dateOfBirthMonth?: string;
 
   /** Birth day as typed. `DOBDAYI PIC X(2)`. */
-  readonly dateOfBirthDay?: string | undefined;
+  readonly dateOfBirthDay?: string;
 
   /** Credit score as typed. `ACSTFCOI PIC X(3)`, for `CUST-FICO-CREDIT-SCORE PIC 9(03)`. */
-  readonly ficoCreditScore?: string | undefined;
+  readonly ficoCreditScore?: string;
 
   /** Given name as typed. `ACSFNAMI PIC X(25)`. */
-  readonly firstName?: string | undefined;
+  readonly firstName?: string;
 
   /** Middle name as typed; matches the nullable stored column. `ACSMNAMI PIC X(25)`. */
-  readonly middleName?: string | undefined;
+  readonly middleName?: string;
 
   /** Family name as typed. `ACSLNAMI PIC X(25)`. */
-  readonly lastName?: string | undefined;
+  readonly lastName?: string;
 
   /** First address line as typed. `ACSADL1I PIC X(50)`. */
-  readonly addressLine1?: string | undefined;
+  readonly addressLine1?: string;
 
   /** Second address line as typed; matches the nullable stored column. `ACSADL2I PIC X(50)`. */
-  readonly addressLine2?: string | undefined;
+  readonly addressLine2?: string;
 
   /** City as typed, stored as `CUST-ADDR-LINE-3 PIC X(50)`. `ACSCITYI PIC X(50)`. */
-  readonly city?: string | undefined;
+  readonly city?: string;
 
   /**
    * State code as typed. `ACSSTTEI PIC X(2)`.
@@ -1250,53 +946,121 @@ export interface AccountUpdateRequest {
    * Assumptions: a code outside the seeded reference data is refused by the service as a field error,
    * so this member carries what the user typed rather than a value already known to be valid.
    */
-  readonly stateCode?: string | undefined;
+  readonly stateCode?: string;
 
   /** Country code as typed. `ACSCTRYI PIC X(3)`. */
-  readonly countryCode?: string | undefined;
+  readonly countryCode?: string;
 
   /** Postal code as typed, at the SCREEN width of five against a stored ten. `ACSZIPCI PIC X(5)`. */
-  readonly zipCode?: string | undefined;
+  readonly zipCode?: string;
 
-  // WHAT: the two telephone numbers, each in the three groups the map asks for.
-  // WHY : Assumptions: the parts compose `CUST-PHONE-NUM-1` and `CUST-PHONE-NUM-2`, both
+  // WHY : Assumptions: the two telephone numbers each arrive in the three groups the map asks for,
+  //       and the parts compose `CUST-PHONE-NUM-1` and `CUST-PHONE-NUM-2`, both
   //       `PIC X(15)` at `app/cpy/CVCUS01Y.cpy` L15 and L16. The reference validates an area code
   //       against seeded reference data, which is why the area code is its own field and not a slice
   //       of a longer one.
 
   /** First number's area code as typed. `ACTPHA1I PIC X(3)`. */
-  readonly phone1AreaCode?: string | undefined;
+  readonly phone1AreaCode?: string;
 
   /** First number's exchange prefix as typed. `ACTPHB1I PIC X(3)`. */
-  readonly phone1Prefix?: string | undefined;
+  readonly phone1Prefix?: string;
 
   /** First number's line digits as typed. `ACTPHC1I PIC X(4)`. */
-  readonly phone1LineNumber?: string | undefined;
+  readonly phone1LineNumber?: string;
 
   /** Second number's area code as typed. `ACTPHA2I PIC X(3)`. */
-  readonly phone2AreaCode?: string | undefined;
+  readonly phone2AreaCode?: string;
 
   /** Second number's exchange prefix as typed. `ACTPHB2I PIC X(3)`. */
-  readonly phone2Prefix?: string | undefined;
+  readonly phone2Prefix?: string;
 
   /** Second number's line digits as typed. `ACTPHC2I PIC X(4)`. */
-  readonly phone2LineNumber?: string | undefined;
+  readonly phone2LineNumber?: string;
+
+  /** Electronic funds transfer account as typed. `ACSEFTCI PIC X(10)`. */
+  readonly eftAccountId?: string;
+
+  /** Primary card-holder indicator as typed. `ACSPFLGI PIC X(1)`. */
+  readonly primaryCardHolderIndicator?: string;
+}
+
+/**
+ * The four members of an account-update submission that carry a personal identifier IN THE CLEAR.
+ *
+ * Refactoring Rationale: these four are declared as their own shape rather than as members of
+ * {@link AccountUpdateRequest}, and the split is a containment boundary rather than a tidiness
+ * preference. `AccountUpdateRequest` is the general, reusable submission shape: a screen builds one, a
+ * test fixture builds one, a retry buffer or a draft-restore feature would hold one, and anything a
+ * caller holds it is free to log, serialise into local storage or attach to an error report. Three
+ * digits, two digits, four digits and a twenty-character identifier are exactly the values that must
+ * never take any of those paths, so they are not members of the shape a caller passes around. A caller
+ * that needs them names {@link SensitiveAccountUpdateRequest} explicitly, which is a decision visible at
+ * its declaration site and greppable across the tree.
+ *
+ * Alternatives Considered: leaving all four on the general shape, which is what the wire body looks like
+ * and therefore the shorter mirror of the contract. Rejected because the contract's own body being flat
+ * says nothing about how a client should HOLD the values -- the flat body is reproduced exactly by the
+ * intersection below, so nothing about the request changes -- and a type that carries a national
+ * identifier without saying so is the shape most likely to end up in a log line, since nothing in its
+ * name or its use warns the author. Also considered: omitting the four entirely and having the browser
+ * send only masked values. Rejected outright as a parity break: `app/cpy-bms/COACTUP.CPY` declares
+ * `ACTSSN1I PIC X(3)`, `ACTSSN2I PIC X(2)`, `ACTSSN3I PIC X(4)` and `ACSGOVTI PIC X(20)` as INPUT
+ * fields, so the reference screen genuinely sets these values and a migration that could not set them
+ * would drop a function of the screen.
+ *
+ * Assumptions: WRITE-ONLY, in both directions of that phrase. No read operation in `account-api.yaml`
+ * returns any of these members -- {@link CustomerDetail} carries `ssnMasked` and
+ * `governmentIssuedIdMasked` and no clear counterpart -- and the service stores both encrypted, so a
+ * value assigned here is the only place in the browser it exists. It follows that a screen must clear
+ * these fields after a submission resolves rather than retaining them to prefill a retry.
+ *
+ * Assumptions: the national identifier arrives in three PARTS because the map declares three input
+ * fields and the reference validates them separately, composing `CUST-SSN PIC 9(09)` at
+ * `app/cpy/CVCUS01Y.cpy` L17. Recombining them here would discard which part a field error refers to,
+ * which is the same reason the dates and telephone numbers on the general shape arrive in parts.
+ *
+ * Trade-offs: nothing in TypeScript enforces the non-logging obligation these members carry -- a type
+ * cannot prevent a `console.log`. What the split buys is that the obligation attaches to a NAMED shape
+ * a reviewer can search for, instead of being one of forty-odd indistinguishable members of the shape
+ * every account screen already holds.
+ */
+export interface SensitiveAccountUpdateFields {
+  /**
+   * First three digits of the national identifier, as typed. `ACTSSN1I PIC X(3)`.
+   *
+   * Assumptions: in the clear, because an edit has to be able to set the value. It must not be logged,
+   * persisted in the browser, or included in an error report.
+   */
+  readonly ssnPart1?: string;
+
+  /** Middle two digits of the national identifier, as typed. `ACTSSN2I PIC X(2)`. Never logged. */
+  readonly ssnPart2?: string;
+
+  /** Last four digits of the national identifier, as typed. `ACTSSN3I PIC X(4)`. Never logged. */
+  readonly ssnPart3?: string;
 
   /**
    * The government-issued identifier as typed, in the clear.
    *
    * Assumptions: `ACSGOVTI PIC X(20)`, for `CUST-GOVT-ISSUED-ID PIC X(20)` at `app/cpy/CVCUS01Y.cpy`
-   * L18. Inbound only, for the same reason the identifier parts above are: the value has to be
-   * settable, and it is returned only masked.
+   * L18. Write-only on the same terms as the three parts above: it is returned only as
+   * `governmentIssuedIdMasked`, so a value here exists nowhere else in the browser and must not be
+   * logged, cached or retained after the submission resolves.
    */
-  readonly governmentIssuedId?: string | undefined;
-
-  /** Electronic funds transfer account as typed. `ACSEFTCI PIC X(10)`. */
-  readonly eftAccountId?: string | undefined;
-
-  /** Primary card-holder indicator as typed. `ACSPFLGI PIC X(1)`. */
-  readonly primaryCardHolderIndicator?: string | undefined;
+  readonly governmentIssuedId?: string;
 }
+
+/**
+ * The submission body of the account-update operation, personal identifiers included.
+ *
+ * Assumptions: an intersection and not a third declaration, so the WIRE body is byte-for-byte the flat
+ * shape `AccountUpdateRequest` in `account-api.yaml` declares -- the split above is about what a client
+ * holds and names, never about what it sends. This is the type the one call that submits an update
+ * takes; every other holder of update state uses {@link AccountUpdateRequest} and so cannot carry a
+ * clear identifier at all.
+ */
+export type SensitiveAccountUpdateRequest = AccountUpdateRequest & SensitiveAccountUpdateFields;
 
 /**
  * What the account-update operation returns.
@@ -1349,4 +1113,1058 @@ export interface AccountUpdateResponse {
 
   /** The customer's stored state after the attempt, at screen widths. */
   readonly customer: CustomerDetail;
+}
+
+// ---------------------------------------------------------------------------
+// card-api.yaml -- the card browse, detail, update and administrative shapes
+// ---------------------------------------------------------------------------
+// WHY : Refactoring Rationale: these were declared in ui/src/api/cards.ts and are declared here now.
+//       A screen binds to a wire shape and its client module binds to the same one, so a shape declared
+//       inside the module that calls it is owned by its first caller rather than by the contract it
+//       describes -- and a second caller then either imports from that module, which makes one client
+//       depend on another, or restates the shape, which is how two definitions of one contract come to
+//       drift apart. Declaring every contract's browser-facing shapes in this one module gives each
+//       shape exactly one definition, in a file the compiler erases in full, and each client module
+//       re-exports what it always exported so no consumer import had to move.
+
+/**
+ * Summary row returned by the card browse endpoint.
+ *
+ * Refactoring Rationale: this carries the row's masked rendering, its account and its status, and
+ * NOT the embossed name or the expiration date. An earlier revision of this interface declared those
+ * two as well, and the browse it types has no such columns to fill them from: the baseline list row
+ * is twenty-eight characters — an eleven-character account number, a sixteen-character card number
+ * and a one-character status, declared at `app/cbl/COCRDLIC.cbl:258-260` — and `card-api.yaml`
+ * publishes exactly those three. Two fields typed as present and never sent would have rendered as
+ * blank columns, and a list disclosing more of each row than the screen it replaces disclosed is a
+ * widening no requirement asks for. Both fields remain on the detail shape, which is where the update
+ * screen reads them.
+ *
+ * Refactoring Rationale: a FOURTH member, `key`, carries the opaque selector that addresses this
+ * row's card. It was withdrawn once, on the ground that "publishing an addressable value per row would
+ * put back exactly what masking the rendering exists to prevent, since a caller could then lift an
+ * addressable identity for every row of a page at once". That objection is answered rather than
+ * overruled, and on two independent grounds. Masking exists so that a list response discloses no card
+ * NUMBER; the selector is sealed by the service and carries no digit of one, so lifting every selector
+ * on a page yields every row's address and not one digit of any card. And the withdrawal removed no
+ * exposure, it relocated one: with no address on the row, every single-card route had to carry the
+ * number itself, into browser history and into access-log objects the load balancer and the
+ * distribution both write verbatim before any application code runs. What further bounds the selector
+ * is that it is bound by the service to the resource, to the authenticated subject and to the query
+ * scope, and that it expires — so what can be lifted from a page addresses, for this caller and for a
+ * bounded time, exactly the rows this caller was already shown.
+ */
+export interface CardSummary {
+  readonly key: string;
+  readonly displayCardNumber: string;
+  readonly accountId: string;
+  readonly activeStatus: 'Y' | 'N';
+}
+
+/**
+ * Card-detail representation returned for one card.
+ *
+ * Assumptions: this extends the summary rather than restating it, so the selector, the masked
+ * rendering, the account and the status are described once. The three members declared here are the
+ * ones the detail carries and the list does not — two editable attributes and the concurrency token —
+ * which together with the four inherited ones are exactly the seven `CardDetailCore` declares in
+ * `card-api.yaml`.
+ *
+ * Assumptions: the selector IS inherited rather than omitted, because the contract's `CardDetailCore`
+ * declares `key` as one of its seven required properties and the Java record carries it as its first
+ * component. A detail read is addressed BY a selector, so it would be defensible for the response to
+ * leave the caller holding the one it already had; the contract does not take that option, and it is
+ * right not to, because an update MINTS A FRESH selector — the value the caller sent is spent once the
+ * version moves, and omitting the new one would leave the update screen unable to re-read the row it
+ * had just written.
+ */
+export interface CardDetail extends CardSummary {
+  readonly embossedName: string;
+  readonly expirationDate: string;
+  readonly version: number;
+}
+
+/**
+ * Card-detail representation returned for one card by the administrative operation.
+ *
+ * Assumptions: this extends the ordinary detail with the one member that distinguishes it, the
+ * UNMASKED card number, matching `AdminCardDetail` in `card-api.yaml` -- which is `CardDetailCore`
+ * plus a sixteen-digit `cardNumber`. The two operations differ in what they are permitted to render
+ * and never in what they may change, which is why no update counterpart exists.
+ *
+ * Trade-offs: this is the one shape in the SPA that carries a full primary account number, and it is
+ * typed here rather than left as an untyped response so that the disclosure is visible in the type
+ * system instead of only in a runtime body. The offsetting risk is that a screen could render it
+ * where the ordinary detail belonged; what bounds that is the address -- the value is reachable only
+ * through `/api/v1/admin/cards`, which `card-service`'s authority table restricts to the
+ * administrative group, so an ordinary caller receives 403 rather than a number.
+ */
+export interface AdminCardDetail extends CardDetail {
+  readonly cardNumber: string;
+}
+
+/**
+ * Fields the card update operation permits a browser to change.
+ *
+ * Refactoring Rationale: the expiry travels as a month and a year and NOT as a whole date, matching
+ * `CardUpdateRequest` in `card-api.yaml`. The baseline's update screen edits only those two parts: its
+ * day input is rendered non-display at `app/cbl/COCRDUPC.cbl:1285`, is redisplayed from the pre-edit
+ * snapshot at `:1123` rather than from anything entered, and has no validation paragraph at all. An
+ * earlier revision of this interface sent one ISO date, which let a browser set an expiry day the
+ * baseline does not expose — and the day the stored date keeps is now supplied by the service from the
+ * row's own current value, so no browser can influence it.
+ *
+ * Trade-offs: a caller therefore cannot send a detail response straight back as an update, because the
+ * detail carries the whole stored date. That asymmetry matches the screens, where the detail map
+ * declares `EXPMONI` and `EXPYEARI` and no day field while the stored record holds a whole date.
+ */
+export interface CardUpdateRequest {
+  readonly embossedName: string;
+  readonly expirationMonth: string;
+  readonly expirationYear: string;
+  readonly activeStatus: 'Y' | 'N';
+  readonly version: number;
+}
+
+/**
+ * Criteria a card browse request may narrow by.
+ *
+ * Assumptions: every member is optional and the object itself may be omitted, because a browse with
+ * no criteria is the first page of the unfiltered set, which is the screen's initial state. They are
+ * grouped into one object rather than passed positionally so that a caller adding a filter cannot
+ * silently supply it in the cursor's position.
+ *
+ * Refactoring Rationale: a `cardNumber` member is withdrawn, and with it the only card filter this
+ * browse had. The contract no longer declares a card-number query parameter, because a query string is
+ * persisted verbatim by the load balancer's mandatory access log on exactly the same terms as a path
+ * segment. Reaching one card by its number is `lookupCard`, which sends the number in a body.
+ */
+export interface CardListQuery {
+  readonly accountId?: string;
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+// ---------------------------------------------------------------------------
+// auth-api.yaml -- the sign-on exchange and the four user-maintenance shapes
+// ---------------------------------------------------------------------------
+// WHY : Assumptions: this section carries the one password member in the whole module, on
+//       SignOnRequest, and it is the only shape in this file that may. A credential belongs to the
+//       exchange that sends it and to nothing else, so no other declaration here names one -- the
+//       token refresh and the challenge answer carry a token and a session handle instead.
+
+/**
+ * The two user types the baseline admits, and the two Cognito groups they map to.
+ *
+ * Assumptions: exactly two members, 'A' and 'U', transcribed from `SEC-USR-TYPE` at
+ * `app/cpy/CSUSR01Y.cpy` L22. The `auth.users` check constraint admits the same two, so a third value
+ * is refused by the database as well as by the contract.
+ */
+export type UserType = 'A' | 'U';
+
+export interface SignOnRequest {
+  readonly userId: string;
+  readonly password: string;
+}
+
+/**
+ * A completed sign-on, carrying the token set the SPA presents on every later request.
+ *
+ * Assumptions: `refreshToken` is nullable because the identity provider omits it on a renewal, which
+ * is the flow that consumed the previous one. A caller that stored null over a held refresh token
+ * would sign the user out at the next expiry, so a null must be treated as "keep what you have"
+ * rather than as "the token was revoked".
+ */
+export interface SignOnTokens {
+  readonly outcome: 'AUTHENTICATED';
+  readonly userId: string;
+  readonly accessToken: string;
+  readonly idToken: string;
+  readonly refreshToken: string | null;
+  readonly tokenType: string;
+  readonly expiresIn: number;
+}
+
+/**
+ * A sign-on the provider will not complete until the credential is changed.
+ *
+ * Assumptions: `session` is an opaque continuation value and is passed back unread. It is a
+ * credential-equivalent for the length of the exchange, which is why it travels in a body on the way
+ * back as well as on the way out.
+ */
+export interface SignOnChallenge {
+  readonly outcome: 'CHALLENGE';
+  readonly challengeName: 'NEW_PASSWORD_REQUIRED';
+  readonly session: string;
+  readonly userId: string;
+}
+
+/**
+ * Which of the two sign-on outcomes occurred.
+ *
+ * Assumptions: the union is discriminated on `outcome`, which the contract declares as a constant on
+ * each member and names as the discriminator property. Deriving the branch from the presence of
+ * `accessToken` instead would work today and would break silently the moment a third outcome carried
+ * one, whereas an unhandled constant is a compile error.
+ */
+export type SignOnResult = SignOnTokens | SignOnChallenge;
+
+export interface TokenRefreshRequest {
+  readonly userId: string;
+  readonly refreshToken: string;
+}
+
+export interface SignOnChallengeRequest {
+  readonly userId: string;
+  readonly session: string;
+  readonly newPassword: string;
+}
+
+/**
+ * One row of the user browse.
+ *
+ * Assumptions: four members and no credential among them. The baseline record carries an
+ * eight-character plaintext password at `app/cpy/CSUSR01Y.cpy` L21; the migrated system does not carry
+ * that field at all, so there is nothing here to omit rather than a member deliberately withheld.
+ */
+export interface UserSummary {
+  readonly userId: string;
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly userType: UserType;
+}
+
+/**
+ * One user as the administration screens render it.
+ *
+ * Assumptions: `cognitoSub` is an OUTPUT and never an input. It is minted by the identity provider
+ * when the account is provisioned, so a creation request that supplied one would be asserting an
+ * identity it cannot have created -- which is why {@link CreateUserRequest} below declares four members
+ * and this shape declares five.
+ */
+export interface UserResponse extends UserSummary {
+  readonly cognitoSub: string;
+}
+
+/**
+ * The fields a user creation accepts.
+ *
+ * Assumptions: FOUR members. No credential is among them, because this service creates none: the
+ * identity provider is asked to provision the account and it mints the initial credential itself. No
+ * subject is among them either, for the reason recorded on {@link UserResponse}.
+ */
+export interface CreateUserRequest {
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly userId: string;
+  readonly userType: UserType;
+}
+
+/**
+ * The fields a user update accepts.
+ *
+ * Assumptions: three members, and the identifier is not one of them. It addresses the row from the
+ * target, so admitting it in the body as well would create a request whose two halves could disagree
+ * about which user is being changed.
+ */
+export interface UpdateUserRequest {
+  readonly firstName: string;
+  readonly lastName: string;
+  readonly userType: UserType;
+}
+
+export interface UserListQuery {
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+// ---------------------------------------------------------------------------
+// transaction-api.yaml -- the ledger browse, detail, add and bill-payment shapes
+// ---------------------------------------------------------------------------
+// WHY : Assumptions: two of these are UNION outcomes rather than single shapes, and the unions are the
+//       contract's own -- an add and a bill payment each answer either a preview to confirm or the
+//       committed record, which is the reference's two-turn confirmation expressed in one response
+//       type. A client discriminates on the member the union names rather than on the status code.
+
+/**
+ * One row of the transaction browse.
+ *
+ * Assumptions: FOUR members, matching `TransactionSummary` in the contract, and no card number among
+ * them. The baseline list row shows the identifier, the originating timestamp, the description and the
+ * amount; adding the card would disclose more per row than the screen it replaces disclosed, on a
+ * response that returns a whole page at once.
+ */
+export interface TransactionSummary {
+  readonly transactionId: string;
+  readonly originTimestamp: Timestamp26;
+  readonly description: string;
+  readonly amount: string;
+}
+
+/**
+ * One transaction in full, as the detail screen renders it.
+ *
+ * Assumptions: `cardNumber` is the MASKED rendering and `processTimestamp` is nullable, both exactly
+ * as the contract declares. A transaction that has been accepted but not yet posted carries no
+ * processing timestamp, so null here is a real state and not a missing value.
+ */
+export interface TransactionDetail {
+  readonly transactionId: string;
+  readonly typeCode: string;
+  readonly categoryCode: string;
+  readonly source: string;
+  readonly description: string;
+  readonly amount: string;
+  readonly merchantId: string;
+  readonly merchantName: string;
+  readonly merchantCity: string;
+  readonly merchantZip: string;
+  readonly cardNumber: string;
+  readonly originTimestamp: Timestamp26;
+  readonly processTimestamp: string | null;
+  readonly returnMessage?: string | null;
+}
+
+/**
+ * The fields the create operation accepts.
+ *
+ * Assumptions: `accountId` and `cardNumber` are both optional and exactly one identifies the card to
+ * post against, which is why neither is required by the contract. `confirmation` is optional too: its
+ * absence is the unconfirmed first pass that answers 200 with nothing written.
+ */
+export interface TransactionCreateRequest {
+  readonly accountId?: string;
+  readonly cardNumber?: string;
+  readonly typeCode: string;
+  readonly categoryCode: string;
+  readonly source: string;
+  readonly description: string;
+  readonly amount: string;
+  readonly originDate: string;
+  readonly processDate: string;
+  readonly merchantId: string;
+  readonly merchantName: string;
+  readonly merchantCity: string;
+  readonly merchantZip: string;
+  readonly confirmation?: string;
+}
+
+/**
+ * The body a user creation answers with, naming where the account's first credential was published.
+ *
+ * Refactoring Rationale: the member is the managed-secret entry's NAME and not the credential. A
+ * credential in a response body is retained by every proxy log and browser history on the path, and the
+ * migration forbids a credential reaching a place with no audit trail; a resource name is not a secret,
+ * so it may travel here. Trade-offs: collecting the value needs a grant on the secret store, which a
+ * browser session does not hold, so onboarding ends with one privileged read.
+ */
+export interface CreatedUserResponse extends UserResponse {
+  readonly credentialSecretName: string;
+}
+
+export interface TransactionAddPreview {
+  readonly amount: string;
+  readonly written: boolean;
+  readonly returnMessage?: string | null;
+}
+
+export interface TransactionCreated {
+  readonly transactionId: string;
+  readonly amount: string;
+  readonly returnMessage: string;
+}
+
+/**
+ * Which of the two create outcomes occurred, discriminated so neither can be read as the other.
+ *
+ * Assumptions: the discriminant is derived from the HTTP status and not from the `written` member of
+ * the preview shape. Both are present in the 200 body, and the status is the one the contract makes
+ * normative -- 201 for a written record -- so deriving from it keeps this client agreeing with the
+ * contract rather than with one property of one body.
+ */
+export type TransactionAddOutcome =
+  | { readonly outcome: 'PREVIEWED'; readonly preview: TransactionAddPreview }
+  | { readonly outcome: 'CREATED'; readonly created: TransactionCreated };
+
+export interface BillPaymentRequest {
+  readonly accountId: string;
+  readonly confirmation?: string;
+}
+
+export interface BillPaymentPreview {
+  readonly accountId: string;
+  /**
+   * The balance a confirmed request would pay, absent on the DECLINED turn.
+   *
+   * Refactoring Rationale: the member is optional because one of the three non-paying turns carries no
+   * balance at all. `app/cbl/COBIL00C.cbl` L178 to L181 answers a declined confirmation by clearing the
+   * screen and reaching no account read, so there is no figure to report; the service answers with the
+   * account identifier alone. Declaring it required made this shape unassignable from the 200 union and,
+   * worse, told a caller a figure would always be there.
+   */
+  readonly payableBalance?: string;
+  readonly paid: boolean;
+  readonly returnMessage?: string | null;
+}
+
+export interface BillPaymentResponse {
+  readonly transactionId: string;
+  readonly accountId: string;
+  readonly currentBalance: string;
+  readonly paid: boolean;
+  readonly returnMessage?: string | null;
+}
+
+export type BillPaymentOutcome =
+  | { readonly outcome: 'PREVIEWED'; readonly preview: BillPaymentPreview }
+  | { readonly outcome: 'PAID'; readonly payment: BillPaymentResponse };
+
+/**
+ * Criteria a transaction browse may narrow by.
+ *
+ * Assumptions: the contract's only filter is an exact transaction identifier, so no free-text or
+ * range criterion is offered here. The baseline browse screen accepts a starting identifier and
+ * nothing else, and offering a criterion the service does not implement would fail at the edge with
+ * 400 against a field the user was invited to fill.
+ */
+export interface TransactionListQuery {
+  readonly transactionIdFilter?: string;
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+// ---------------------------------------------------------------------------
+// reference-api.yaml -- transaction types and categories, disclosure rates,
+// the three seeded lookup tables, date evaluation and batch maintenance
+// ---------------------------------------------------------------------------
+// WHY : Assumptions: this is the largest section because the reference contract owns the most schemas,
+//       and its five closed literal domains -- the phone-area-code class, the two date masks, the date
+//       feedback codes, the maintenance action types and their outcome states -- are declared here as
+//       unions rather than restated as `string` at each use. A union is what makes a value outside the
+//       domain a compile error instead of a request the service answers with a field error.
+
+/**
+ * Which class of North American area code a row records.
+ *
+ * Assumptions: two members, 'G' for a geographic code and 'E' for a non-geographic one, transcribed
+ * from the two allow-lists in `app/cpy/CSLKPCDY.cpy`. Address validation admits both but treats them
+ * differently, which is why the class is published rather than filtered out at the source.
+ */
+export type PhoneAreaCodeClass = 'G' | 'E';
+
+export interface TransactionType {
+  readonly typeCd: string;
+  readonly description: string;
+  readonly version: number;
+}
+
+export interface TransactionTypeCreateRequest {
+  readonly typeCd: string;
+  readonly description: string;
+}
+
+/**
+ * The fields a transaction-type replace accepts.
+ *
+ * Assumptions: the code is not among them. It addresses the row from the target, so admitting it in
+ * the body as well would create a request whose two halves could disagree about which row changes.
+ */
+export interface TransactionTypeReplaceRequest {
+  readonly description: string;
+  readonly version: number;
+}
+
+export interface TransactionCategory {
+  readonly typeCd: string;
+  readonly catCd: string;
+  readonly description: string;
+  readonly version: number;
+}
+
+export interface TransactionCategoryCreateRequest {
+  readonly typeCd: string;
+  readonly catCd: string;
+  readonly description: string;
+}
+
+export interface TransactionCategoryReplaceRequest {
+  readonly description: string;
+  readonly version: number;
+}
+
+/**
+ * One disclosure-group interest rate, and which group actually supplied it.
+ *
+ * Assumptions: three members describe the fallback rather than one, and that is the point of the
+ * shape. `app/cbl/CBACT04C.cbl` L415 to L441 falls back to the group literally named `DEFAULT` when the
+ * account's own group has no row, and a response reporting only the rate would leave a caller unable to
+ * tell a configured rate from a defaulted one. `requestedAcctGroupId`, `appliedAcctGroupId` and
+ * `defaultGroupApplied` make that distinction explicit.
+ */
+export interface DisclosureGroupRate {
+  readonly requestedAcctGroupId: string;
+  readonly appliedAcctGroupId: string;
+  readonly tranTypeCd: string;
+  readonly tranCatCd: string;
+  readonly interestRate: string;
+  readonly defaultGroupApplied: boolean;
+}
+
+export interface UsPhoneAreaCode {
+  readonly areaCd: string;
+  readonly codeClass: PhoneAreaCodeClass;
+}
+
+export interface UsState {
+  readonly stateCd: string;
+}
+
+export interface UsStateZipPrefix {
+  readonly stateZipCd: string;
+}
+
+/**
+ * Which mask a date is being evaluated against.
+ *
+ * Assumptions: the two published forms are the hyphenated and the compact one, and the contract
+ * accepts any string of up to ten characters for the parameter while defaulting it to the hyphenated
+ * form. The union here names the two the service supports, so a screen cannot offer a third by
+ * accident, and the parameter type below widens to string for exactly the case where a caller is
+ * echoing a mask it received.
+ */
+export type DateMask = 'YYYY-MM-DD' | 'YYYYMMDD';
+
+/**
+ * Which specific defect a date evaluation found, or that it found none.
+ *
+ * Assumptions: ten members, transcribed from the feedback codes `app/cbl/CSUTLDTC.cbl` and its two
+ * companion copybooks distinguish. They are carried across individually rather than collapsed into a
+ * boolean because the baseline's reply is a structured triple -- a severity, a message number and
+ * message text -- and a per-field error must be able to name which part of a date was wrong.
+ */
+export type DateFeedbackCode =
+  | 'INVALID_DATE'
+  | 'INSUFFICIENT_DATA'
+  | 'BAD_DATE_VALUE'
+  | 'INVALID_ERA'
+  | 'UNSUPP_RANGE'
+  | 'INVALID_MONTH'
+  | 'BAD_PIC_STRING'
+  | 'NON_NUMERIC_DATA'
+  | 'YEAR_IN_ERA_ZERO'
+  | 'OTHER';
+
+export interface DateEvaluationResult {
+  readonly feedbackCode: DateFeedbackCode;
+  readonly severity: number;
+  readonly messageNumber: number;
+  readonly verdict: string;
+  readonly date: string;
+  readonly mask: string;
+}
+
+export type MaintenanceActionType = 'INSERT' | 'UPDATE' | 'DELETE';
+
+/**
+ * One entry of a batch reference update.
+ *
+ * Assumptions: `description` is nullable because a delete entry carries none. Requiring it would make
+ * a caller invent a value for a row it is removing, and the service would then have to ignore it.
+ */
+export interface MaintenanceAction {
+  readonly action: MaintenanceActionType;
+  readonly typeCd: string;
+  readonly description?: string | null;
+}
+
+export interface MaintenanceActionBatchRequest {
+  readonly actions: readonly MaintenanceAction[];
+}
+
+export type MaintenanceActionOutcomeState = 'APPLIED' | 'NO_ROWS_FOUND' | 'FAILED';
+
+/**
+ * The outcome of one batch maintenance entry, positioned so it can be matched to its request entry.
+ *
+ * Assumptions: `position` is zero-based and is echoed rather than inferred from array order, so a
+ * caller can match an outcome to its entry even if a future service answered out of order.
+ */
+export interface MaintenanceActionOutcome {
+  readonly position: number;
+  readonly action: MaintenanceActionType;
+  readonly typeCd: string;
+  readonly outcome: MaintenanceActionOutcomeState;
+  readonly applied: boolean;
+  readonly message: string;
+}
+
+/**
+ * The outcome of a whole batch, with the aggregate return code the baseline job would have set.
+ *
+ * Assumptions: `returnCode` is 0 or 4 and 4 is a WARNING rather than a failure, matching the
+ * mainframe condition-code convention the reference batch program uses: a row that matched nothing is
+ * a soft outcome, not an error. A caller treating 4 as a failure would report a successful run as
+ * broken.
+ */
+export interface MaintenanceActionBatchResponse {
+  readonly outcomes: readonly MaintenanceActionOutcome[];
+  readonly returnCode: number;
+}
+
+export interface ReferenceListQuery {
+  readonly typeCode?: string;
+  readonly description?: string;
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+export interface LookupListQuery {
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+export interface PhoneAreaCodeListQuery extends LookupListQuery {
+  readonly codeClass?: PhoneAreaCodeClass;
+}
+
+// ---------------------------------------------------------------------------
+// authorization-api.yaml -- the pending-authorization summary, detail and the
+// fraud-marking exchange
+// ---------------------------------------------------------------------------
+// WHY : Assumptions: three of the four literal domains here are closed by the reference's own condition
+//       names rather than by a choice made in the migration -- the approval status, the four match
+//       statuses at app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy L46 to L49, and the two fraud
+//       tags at L51 and L52. Declaring them as unions is what stops a screen rendering a status the
+//       reference cannot produce.
+
+export type ApprovalStatus = 'A' | 'D';
+
+/**
+ * How an authorization matched against posted activity.
+ *
+ * Assumptions: four members, which are the values the `authorization.pending_auth_detail` check
+ * constraint admits: pending, declined, expired and matched.
+ */
+export type MatchStatus = 'P' | 'D' | 'E' | 'M';
+
+/**
+ * The fraud tag a row carries, used nullably wherever a row may be untagged.
+ *
+ * Assumptions: TWO members, and untagged is expressed by `null` rather than by a third member. The two
+ * are the reference's own condition names on `PA-AUTH-FRAUD`, which
+ * `app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy` declares as a one-character field at L50 with
+ * condition names for the confirmed and removed states at L51 and L52. There is no third condition name
+ * there, so an untagged authorization satisfies neither and is an ABSENCE rather than a value.
+ *
+ * Refactoring Rationale: an earlier revision admitted a single space as a third member, because the
+ * stored column admits one -- a blank is what the extract load lands for a segment nobody has tagged.
+ * Admitting it here made the unmarked state have TWO spellings on the browser side, so every screen had
+ * to test for both, and a screen that tested for only one of them rendered an untagged authorization as
+ * tagged. That is a reading a fraud indicator must never get wrong. The blank is now normalised to null
+ * at the service boundary, in the compact constructor of
+ * `services/authorization-service/src/main/java/com/carddemo/authorization/dto/PendingAuthDetailView.java`,
+ * and `authorization-api.yaml` publishes the enum as the two tags plus null -- so this union is the
+ * whole domain a response can carry rather than a narrowing of it.
+ *
+ * Alternatives Considered: keeping the wider union and having each screen collapse the blank as it
+ * rendered. Rejected because it leaves one normalisation to be repeated correctly at every render site,
+ * and the site that forgets it is indistinguishable from the sites that did not until a blank row
+ * appears. Normalising once, where the value leaves the service, makes the blank unreachable instead of
+ * merely handled.
+ */
+export type AuthFraudFlag = 'F' | 'R';
+
+/**
+ * The fraud transition a reviewer's request asks for.
+ *
+ * Assumptions: the same two members as {@link AuthFraudFlag} and a DISTINCT type, and the distinction is
+ * nullability rather than membership. A response may report that a row carries no tag, so the state is
+ * read as `AuthFraudFlag | null`; a request must always say which transition it wants, so this type is
+ * never used nullably. Collapsing the two into one alias would let a request be written that asks for
+ * nothing, which the operation has no meaning for.
+ *
+ * Assumptions: the two values are the reference's own -- `app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl`
+ * marks a message as fraud and withdraws that marking, which is why a withdrawal is a transition to be
+ * requested rather than the absence of a request.
+ */
+export type FraudAction = 'F' | 'R';
+
+/**
+ * The account-level header the list operation renders above its rows.
+ *
+ * Assumptions: the five account-status members are five discrete members rather than an array,
+ * matching `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
+ * `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` L22 as the schema declares it. The fixed arity
+ * of five is part of the contract, and an array would admit a sixth.
+ */
+export interface PendingAuthSummary {
+  readonly accountId: string;
+  readonly customerId: string;
+  readonly authStatus: string | null;
+  readonly accountStatus1: string | null;
+  readonly accountStatus2: string | null;
+  readonly accountStatus3: string | null;
+  readonly accountStatus4: string | null;
+  readonly accountStatus5: string | null;
+  readonly creditLimit: string;
+  readonly cashLimit: string;
+  readonly creditBalance: string;
+  readonly cashBalance: string;
+  readonly approvedAuthCnt: number;
+  readonly declinedAuthCnt: number;
+  readonly approvedAuthAmt: string;
+  readonly declinedAuthAmt: string;
+}
+
+/**
+ * One row of the pending-authorization list.
+ *
+ * Assumptions: `key` is the opaque sealed selector the detail and fraud operations are addressed by,
+ * and it is the ONLY address a row carries. The underlying row is keyed by an account identifier and
+ * a packed date and time, and publishing those three as a target would put the composite key of a
+ * financial record into the edge access log and the browser's history.
+ */
+export interface PendingAuthListItem {
+  readonly key: string;
+  readonly transactionId: string;
+  readonly authOrigDate: string | null;
+  readonly authOrigTime: string | null;
+  readonly authType: string | null;
+  readonly approvalStatus: ApprovalStatus;
+  readonly matchStatus: MatchStatus;
+  readonly amount: string;
+  readonly cardNum: string;
+}
+
+/**
+ * The list operation's envelope: one account summary and one bounded page of rows.
+ *
+ * Assumptions: `screenMessage` carries the baseline's navigation-boundary text verbatim -- the
+ * already-at-the-top, already-at-the-bottom and already-at-the-last strings the contract enumerates --
+ * and is null when the page needs none. Transformation rule T8 requires it to be rendered unchanged.
+ */
+export interface PendingAuthListResponse {
+  readonly summary: PendingAuthSummary;
+  readonly page: PageResponse<PendingAuthListItem>;
+  readonly screenMessage?: string | null;
+}
+
+/**
+ * One pending authorization in full.
+ *
+ * Assumptions: `authDate` and `authTime` are NUMBERS while every other date and time member here is a
+ * string, and the asymmetry is the contract's. Those two are the row's composite key, held in the
+ * segment as packed decimal -- a Julian day number and a millisecond-of-day -- and they are echoed
+ * back into the fraud request unchanged. The remaining members are the authorizer's own
+ * character-format fields, which are text in the message and stay text here.
+ */
+export interface PendingAuthDetail {
+  readonly key: string;
+  readonly accountId: string;
+  readonly authDate: number;
+  readonly authTime: number;
+  readonly authOrigDate: string | null;
+  readonly authOrigTime: string | null;
+  readonly cardNum: string;
+  readonly authType: string | null;
+  readonly cardExpiryDate: string | null;
+  readonly messageType: string | null;
+  readonly messageSource: string | null;
+  readonly authIdCode: string | null;
+  readonly authRespCode: string | null;
+  readonly authRespReason: string | null;
+  readonly processingCode: string | null;
+  readonly transactionAmt: string;
+  readonly approvedAmt: string;
+  readonly merchantCategoryCode: string | null;
+  readonly acqrCountryCode: string | null;
+  readonly posEntryMode: string | null;
+  readonly merchantId: string | null;
+  readonly merchantName: string | null;
+  readonly merchantCity: string | null;
+  readonly merchantState: string | null;
+  readonly merchantZip: string | null;
+  readonly transactionId: string;
+  readonly matchStatus: MatchStatus;
+  readonly authFraud: AuthFraudFlag | null;
+  readonly fraudRptDate: string | null;
+}
+
+/**
+ * One authorization projected onto the shape the 3270 detail screen rendered.
+ *
+ * Assumptions: this is a DIFFERENT shape from {@link PendingAuthDetail} rather than that shape with
+ * extra members, and the difference is the contract's. The record reading answers the segment's own
+ * fields; this reading answers what the terminal displayed, so its amounts and codes are already
+ * rendered -- `authResponse` carries the approval word rather than the two-character code, `authTime`
+ * carries the rendered time rather than the packed millisecond-of-day, and the card number arrives
+ * masked under the member name `cardNumber`. Reusing one interface for both would let a component read
+ * a rendered value as a raw one.
+ *
+ * Assumptions: the six chrome members are non-nullable because the service derives every one of them
+ * from its own constants and clock and accepts none from the caller. The authorizer-supplied members
+ * stay nullable for the reason recorded on {@link PendingAuthDetail}: the segments behind them are
+ * populated from an external message, and a field that message omitted is absent rather than blank.
+ */
+export interface PendingAuthDetailScreen {
+  readonly transactionName: string;
+  readonly title01: string;
+  readonly currentDate: string;
+  readonly programName: string;
+  readonly title02: string;
+  readonly currentTime: string;
+  readonly cardNumber: string;
+  readonly authDate: string;
+  readonly authTime: string;
+  readonly authResponse: string;
+  readonly authResponseReason: string;
+  readonly processingCode: string | null;
+  readonly approvedAmount: string;
+  readonly posEntryMode: string;
+  readonly messageSource: string | null;
+  readonly merchantCategoryCode: string | null;
+  readonly cardExpiry: string;
+  readonly authType: string | null;
+  readonly transactionId: string;
+  readonly matchStatus: MatchStatus;
+  readonly fraudMark: string;
+  readonly merchantName: string | null;
+  readonly merchantId: string | null;
+  readonly merchantCity: string | null;
+  readonly merchantState: string | null;
+  readonly merchantZip: string | null;
+  readonly message: string | null;
+}
+
+/**
+ * The outcome of the detail screen's forward paging move.
+ *
+ * Assumptions: exactly one of `authorization` and `message` is populated, discriminated by
+ * `endOfData`. That mirrors the reference program's forward step, which either sets its end-of-data
+ * condition and the message the screen shows or replaces the current authorization, never both -- so a
+ * caller must read `endOfData` before reading either.
+ */
+export interface NextPendingAuthorization {
+  readonly authorization: PendingAuthDetail | null;
+  readonly endOfData: boolean;
+  readonly message: string | null;
+}
+
+/**
+ * The fraud transition a reviewer submits.
+ *
+ * Assumptions: the four identifying members are echoed from the detail the reviewer is looking at,
+ * even though the sealed key in the target already identifies the row. The contract requires them
+ * because the baseline's own update reads them from the screen, and sending them lets the service
+ * refuse a request whose body and target disagree -- which is the case a stale browser tab produces.
+ */
+export interface FraudMarkRequest {
+  readonly accountId: string;
+  readonly customerId: string;
+  readonly authDateKey: number;
+  readonly authTimeKey: number;
+  readonly action: FraudAction;
+}
+
+/**
+ * The outcome of a fraud transition.
+ *
+ * Assumptions: this shape describes SUCCESS only. A write that failed is answered with a non-2xx
+ * status and a problem document, so `updateStatus` never reports a failure and a caller must not read
+ * it as one.
+ */
+export interface FraudMarkResponse {
+  readonly updateStatus: string;
+  readonly message?: string | null;
+}
+
+export interface PendingAuthListQuery {
+  readonly accountId: string;
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
+}
+
+// ---------------------------------------------------------------------------
+// reporting-api.yaml -- the on-demand report submission, its lines and totals,
+// and the statement pair
+// ---------------------------------------------------------------------------
+// WHY : Assumptions: the report submission is a UNION outcome for the same reason the ledger's add is --
+//       a submission answers either a preview to confirm or the accepted run -- and the three total
+//       bands are a closed domain because the reference report writes exactly three levels of total.
+
+/**
+ * The report-request screen's whole named surface, as the submission accepts it.
+ *
+ * Assumptions: THIRTEEN members, which is the component list of
+ * `com.carddemo.reporting.dto.ReportRequest` name for name, and the count is arithmetic rather than a
+ * selection: `app/bms/CORPT00.bms` declares 42 field definitions of which 17 carry a name, and six of
+ * those 17 are the two three-part range composites that the contract consolidates into one value each.
+ *
+ * Assumptions: every member is optional because which of them must be supplied depends on the report
+ * type selected, and no member is unconditionally present. Six of them are screen furniture the
+ * request echoes -- the transaction name, the two title lines, the program name and the two stamps --
+ * and a browser normally omits all six; they are declared because the contract declares them, so a
+ * screen replaying a received request body can round-trip it unchanged.
+ */
+export interface ReportRequest {
+  readonly transactionName?: string;
+  readonly title01?: string;
+  readonly currentDate?: string;
+  readonly programName?: string;
+  readonly title02?: string;
+  readonly currentTime?: string;
+  readonly monthly?: string;
+  readonly yearly?: string;
+  readonly custom?: string;
+  readonly startDate?: string;
+  readonly endDate?: string;
+  readonly confirm?: string;
+  readonly errorMessage?: string;
+}
+
+/**
+ * A started report execution.
+ *
+ * Assumptions: `executionArn` is the orchestrator's identity for the run, and it has no counterpart in
+ * the baseline: writing job-control text to the transient data queue returned no identity at all, so an
+ * operator had to find the job by name. A caller may quote this value to support.
+ */
+export interface ReportSubmission {
+  readonly executionArn: string;
+  readonly reportName: string;
+  readonly shortName: string;
+  readonly longName: string;
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly submittedAt: Timestamp26;
+}
+
+/**
+ * Which of the two submission outcomes occurred, discriminated so neither can be read as the other.
+ *
+ * Assumptions: the discriminant is derived from the HTTP status, which the contract makes normative --
+ * 201 for a started execution and 200 for a declined confirmation. The baseline cannot draw this
+ * distinction at all: inside `SUBMIT-JOB-TO-INTRDR` at `app/cbl/CORPT00C.cbl` L462, the branch for a
+ * declined confirmation at L480 to L483 sets the same error flag as a validation failure and supplies
+ * no message, so the screen redisplays cleared with no indication of which occurred.
+ */
+export type ReportSubmissionOutcome =
+  | { readonly outcome: 'DECLINED'; readonly message: string | null }
+  | {
+      readonly outcome: 'STARTED';
+      readonly submission: ReportSubmission;
+      readonly message: string;
+    };
+
+/**
+ * The submission body itself, as the contract publishes it for both statuses.
+ *
+ * Refactoring Rationale: the declined arm above carried a `preview` member typed on a
+ * `ReportSubmissionPreview` interface, and both are withdrawn. The published
+ * `ReportSubmissionOutcome` schema requires exactly `submitted`, `message` and `submission` and
+ * forbids additional properties, and no `ReportSubmissionPreview` schema exists in the document at
+ * all -- so the withdrawn shape described a body the service has never emitted, naming a report and
+ * both range bounds a caller would have read as `undefined`. The message is nullable on the declined
+ * arm and not on the started one, which is the contract's own asymmetry: the reference writes no
+ * sentence when a confirmation is declined, at `app/cbl/CORPT00C.cbl` L480 to L483.
+ */
+export interface ReportSubmissionOutcomeBody {
+  readonly submitted: boolean;
+  readonly message: string | null;
+  readonly submission: ReportSubmission | null;
+}
+
+export interface TransactionReportLine {
+  readonly transactionId: string;
+  readonly accountId: string;
+  readonly typeCode: string;
+  readonly typeDescription: string;
+  readonly categoryCode: string;
+  readonly categoryDescription: string;
+  readonly source: string;
+  readonly amount: string;
+}
+
+export type ReportBand = 'PAGE' | 'ACCOUNT' | 'GRAND';
+
+/**
+ * One subtotal band of the report.
+ *
+ * Assumptions: `label` carries the verbatim literal its reference group declares at
+ * `app/cpy/CVTRA07Y.cpy` L51, L57 and L63, and a caller renders it unchanged rather than deriving text
+ * from `band`. Two irregularities defeat derivation: 'Account Total' is two words where the band name
+ * is one, and all three literals are singular where their groups are plural.
+ */
+export interface ReportTotalBand {
+  readonly band: ReportBand;
+  readonly label: string;
+  readonly amount: string;
+}
+
+export interface TransactionReportTotals {
+  readonly bands: readonly ReportTotalBand[];
+}
+
+/**
+ * The selector a statement operation takes.
+ *
+ * Assumptions: both members are optional and exactly one is supplied, which is why neither is required
+ * by the contract -- either may be the one omitted. The card number is the only unmasked account number
+ * this module transmits, and it travels in a body for the reason recorded in this file's header.
+ */
+export interface StatementRequest {
+  readonly cardNumber?: string;
+  readonly accountId?: string;
+}
+
+/**
+ * The summary of one rendered statement and where its two renderings were written.
+ *
+ * Assumptions: `accountId` is up to twenty characters here while a request accepts eleven digits, and
+ * the asymmetry is the statement layout's rather than an inconsistency to normalise:
+ * `app/cpy/COSTM01.CPY` declares a twenty-character carrier, and reporting the layout's width is what
+ * keeps a value it can hold from being truncated on the way out.
+ */
+export interface Statement {
+  readonly cardNumber: string;
+  readonly accountId: string;
+  readonly customerName: string;
+  readonly totalAmount: string;
+  readonly transactionCount: number;
+  readonly plainTextUri: string;
+  readonly htmlUri: string;
+  readonly generatedAt: Timestamp26;
+}
+
+export interface StatementTransaction {
+  readonly cardNumber: string;
+  readonly transactionId: string;
+  readonly typeCode: string;
+  readonly categoryCode: string;
+  readonly source: string;
+  readonly description: string;
+  readonly amount: string;
+  readonly merchantId: string;
+  readonly merchantName: string;
+  readonly merchantCity: string;
+  readonly merchantZip: string;
+  readonly originTimestamp: Timestamp26;
+  readonly processingTimestamp: Timestamp26;
+}
+
+/**
+ * The transactions one statement was rendered from.
+ *
+ * Assumptions: not a page. A statement covers one card's posted transactions for one period and the
+ * reference generator bounds that set itself, so there is no open-ended sequence for a cursor to walk.
+ */
+export interface StatementTransactionCollection {
+  readonly items: readonly StatementTransaction[];
+}
+
+export interface ReportRangeQuery {
+  readonly startDate: string;
+  readonly endDate: string;
+  readonly cursor?: string;
+  readonly direction?: PageDirection;
 }

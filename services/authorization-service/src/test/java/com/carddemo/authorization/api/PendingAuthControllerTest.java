@@ -1315,8 +1315,9 @@ class PendingAuthControllerTest {
                     .andReturn();
 
             assertThat(memberNamesAt(result, "page"))
-                    .as("the envelope's members are the two boundary keys, the two flags and the rows")
-                    .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
+                    .as("the envelope's members are the two boundary keys, the further-page flag and the"
+                            + " rows")
+                    .containsExactlyInAnyOrder("items", "firstKey", "lastKey", "hasNext");
 
             for (RecordComponent component : PageResponse.class.getRecordComponents()) {
                 assertThat(component.getName().toLowerCase(Locale.ROOT))
@@ -2003,7 +2004,7 @@ class PendingAuthControllerTest {
      * @return a mapped list view carrying that message and an empty page, never {@code null}
      */
     private PendingAuthListView messageListView(String message) {
-        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), List.of(), false,
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), List.of(),
                 false, message, SUBJECT, null);
     }
 
@@ -2021,7 +2022,7 @@ class PendingAuthControllerTest {
         for (int index = 0; index < PendingAuthSummaryService.PAGE_SIZE; index++) {
             rows.add(rowAt(AUTH_TIME - index));
         }
-        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), rows, true, false,
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID), rows, true,
                 null, SUBJECT, null);
     }
 
@@ -2034,7 +2035,7 @@ class PendingAuthControllerTest {
         PendingAuthSummary summary = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
         summary.refreshLimits(new BigDecimal("5000.00"), new BigDecimal("1000.00"));
         summary.recordApproved(new BigDecimal("250.00"));
-        return this.mapper.toListView(summary, List.of(row()), false, false, null, SUBJECT, null);
+        return this.mapper.toListView(summary, List.of(row()), false, null, SUBJECT, null);
     }
 
     /**
@@ -2049,7 +2050,7 @@ class PendingAuthControllerTest {
      *     {@code null}
      */
     private PendingAuthListView zeroedListView() {
-        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, 0L), List.of(), false, false,
+        return this.mapper.toListView(new PendingAuthSummary(ACCOUNT_ID, 0L), List.of(), false,
                 null, SUBJECT, null);
     }
 

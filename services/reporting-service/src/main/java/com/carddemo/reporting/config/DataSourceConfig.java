@@ -242,8 +242,8 @@ public class DataSourceConfig {
 
     // Assumptions: this names the ONE schema this context's connections may resolve against. It is
     // the schema the bootstrap migration creates to hold nothing but read-only cross-schema views,
-    // at V0__schemas_and_roles.sql L542 to L549, and the one the login role receives USAGE on at
-    // L582. Naming a second schema here would be a change of architecture, not of configuration.
+    // at V0__schemas_and_roles.sql L806 to L807, and the one the login role receives USAGE on at
+    // L1622. Naming a second schema here would be a change of architecture, not of configuration.
     /** The single schema this context's search path may name, lower-cased for comparison. */
     private static final String ALLOWED_SEARCH_PATH_SCHEMA = "reporting";
 

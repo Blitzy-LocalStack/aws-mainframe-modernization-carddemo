@@ -92,7 +92,6 @@ const EMPTY_PAGE: PageResponse<CardSummary> = {
   firstKey: null,
   lastKey: null,
   hasNext: false,
-  hasPrevious: false,
 };
 
 /*

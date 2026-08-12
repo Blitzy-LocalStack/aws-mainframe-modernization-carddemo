@@ -16,16 +16,11 @@
  * registered, which is what every other controller test in this build does, so a reader moving between
  * modules meets one shape.
  *
- * <p>Alternatives Considered: {@code @WebMvcTest} for the wire-level classes, which is the shape this
- * charter originally named for all of them. Rejected on what it would add: a Spring context, this
- * module's own auto-configuration and its security filter chain, none of which decides any outcome
- * asserted here -- while route membership and the security expression are already asserted from the
- * metadata by the contract class. No test in this build uses it, so adopting it here would also make
- * this the one module a reader had to learn twice.
- *
- * <p>Parameters, return values, exceptions or errors. A package declaration accepts no parameter,
- * yields no value and raises nothing, so this charter carries no such at-clause; the inapplicability
- * is declared rather than passed over so that a reader can tell it from an oversight.
+ * <p>Alternatives Considered: {@code @WebMvcTest} for the wire-level classes. Rejected on what it would
+ * add: a Spring context, this module's own auto-configuration and its security filter chain, none of
+ * which decides any outcome asserted here -- while route membership and the security expression are
+ * already asserted from the metadata by the contract class. No test in this build uses it, so adopting
+ * it here would also make this the one module a reader had to learn twice.
  *
  * <h2>What is asserted here, and what is asserted elsewhere</h2>
  *
@@ -72,15 +67,11 @@
  * <h2>What this package does not re-declare</h2>
  *
  * <p>Assumptions: the documentation gate, its suppression policy and the layering rules are declared
- * once, outside this package, and are deliberately not restated here. The gate is the
- * {@code checkstyle-documentation-gate} execution in {@code services/pom.xml} bound to
- * {@code validate} with {@code includeTestSourceDirectory} true, its module set and its two
- * suppression entries live in {@code config/checkstyle}, and layering has exactly one owner in
- * {@code LayeringRulesTest}. A charter that restated any of them would become a second source of
- * truth for a configuration it does not own, and the two could then disagree with nothing to say
- * which was authoritative. What holds for this package is only the consequence: no annotation and no
- * visibility earns an exemption, so every class, test method and private helper carries Javadoc with
- * complete at-clauses.
+ * once, outside this package, and are deliberately not restated here -- a charter that restated a
+ * configuration it does not own would become a second source of truth free to disagree with the first.
+ * What holds for this package is only the consequence: no annotation and no visibility earns an
+ * exemption, so every class, test method and private helper carries Javadoc with complete
+ * at-clauses.
  *
  * <p>Assumptions: this module builds as a plain jar and adds no {@code module-info.java}, which
  * would impose a second, stricter readability model on a test tree whose dependencies are already

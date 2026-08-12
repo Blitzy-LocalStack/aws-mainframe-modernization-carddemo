@@ -51,19 +51,20 @@
  *       data groups.</dd>
  * </dl>
  *
- * <p>Assumptions: {@code BatchStepLedger} is a fifth type in the production package and is
- * deliberately NOT a fifth entry above, because the roster is a roster of transcribed paragraphs and
- * that type transcribes none -- the production charter names it separately for exactly that reason.
- * Its redrive behaviour is nonetheless asserted in this package, since it is a no-container rule
- * over its own arguments like the other four, so a reader counting types in the directory and
- * pairings in this list will find five and four and should not read the difference as an
- * omission.</p>
+ * <p>Assumptions: {@code BatchStepLedger} and {@code BatchErrorPublisher} are the fifth and sixth
+ * types in the production package and are deliberately NOT entries above, because the roster is a
+ * roster of transcribed paragraphs and neither type transcribes one -- the production charter names
+ * both separately for exactly that reason, the ledger because the baseline has no checkpoint contract
+ * to transcribe and the publisher because the baseline's batch programs contain no message-queue verb
+ * at all. Both are nonetheless asserted in this package, each being a no-container rule over its own
+ * arguments like the four above, so a reader counting types in the directory and pairings in this list
+ * will find six and four and should not read the difference as an omission.</p>
  *
  * <p>Refactoring Rationale: the pairings above are the target shape and are NOT a description of the
  * current directory, and stating them as though they were is the single most misleading thing this
  * charter could do -- the production charter records the same hazard against its own inventory.
- * Measured at this revision the directory holds <b>five</b> test types, which is every pairing in
- * the roster above plus the aggregate:
+ * Measured at this revision the directory holds <b>six</b> test types, which is every pairing in
+ * the roster above plus the aggregate and one sender:
  *
  * <ul>
  *   <li>{@code PostingValidationServiceTest} -- landed against the first pairing, 15 cases.</li>
@@ -75,8 +76,15 @@
  *       the preserved fee seam.</li>
  *   <li>{@code DatasetGenerationServiceTest} -- landed against the fourth pairing, 31 cases across
  *       nine nested groupings.</li>
- *   <li>{@code BatchServicesTest} -- 18 cases across four nested groupings: the category-balance
- *       arms, the interest accrual, the generation discipline and the durable step ledger.</li>
+ *   <li>{@code BatchServicesTest} -- 24 cases in five nested groupings: the category-balance
+ *       arms, the interest accrual, the generation discipline, the durable step ledger and the
+ *       ledger's failure-event publication.</li>
+ *   <li>{@code BatchErrorPublisherTest} -- 7 cases against {@code BatchErrorPublisher}, which
+ *       pairs with no roster entry above because it transcribes no paragraph: publishing a batch
+ *       failure to a queue is behaviour the reference does not have, registered as divergence
+ *       {@code D-BATCH-FAILURE-EVENT-PUBLISHED}. The cases cover the destination, the JSON body,
+ *       the closed three-attribute set, the absence of both ordered-queue identifiers, and the two
+ *       failure sources it swallows rather than raises.</li>
  * </ul>
  *
  * <p>So every subject in the roster is under assertion and no ruling below is unasserted, and the
@@ -91,6 +99,15 @@
  * measurement is restated with the per-type case counts so the next reader can re-measure it against
  * the directory rather than trusting it, and the claim that the split had not happened is withdrawn
  * because it had.</p>
+ *
+ * <p>Refactoring Rationale: it drifted a second time in both directions at once. The type count read
+ * five while the directory held six, and the aggregate's own figure read 18 cases in four groupings
+ * while it declared 24 in five -- the added grouping being the ledger's failure-event publication, and
+ * the added type being the sender that publication reaches. Both are re-measured against the directory
+ * rather than incremented, for the reason the paragraph above gives. Assumptions: the sender's entry
+ * says outright that it pairs with no roster entry, because a reader counting six types against four
+ * roster pairings would otherwise read the difference as an omission -- which is the same hazard the
+ * paragraph about the durable step ledger already records, now true of two types rather than one.</p>
  *
  * <p>Assumptions: the generation subject is consequently asserted in TWO places -- its own landed
  * type and the aggregate's third grouping -- and that overlap is recorded rather than removed. The
@@ -297,7 +314,7 @@
  * <p>Assumptions: NO method in the production service package carries a transaction annotation, and
  * this is the single most consequential thing to know before writing an assertion here. The
  * production charter fixes the rule, and a scan of that package confirms it holds: not one
- * {@code Transactional} annotation appears on any of its five types. A rule there therefore
+ * {@code Transactional} annotation appears on any of its six types. A rule there therefore
  * PARTICIPATES in whatever unit of work its caller has already opened, and opens none of its own.
  * The consequence for this package is direct -- a test here must NOT expect, assert or arrange a
  * transaction boundary. There is none to observe, so an assertion about commit or rollback would be
@@ -327,11 +344,18 @@
  * <h2>Test style: no container, and no application context</h2>
  *
  * <p>Every test here is a plain JUnit 5 test that constructs its subject directly and supplies each
- * repository as a mock. No Spring application context is started, no profile is activated, no
+ * collaborator as a mock -- a repository for a rule, and the queue transport for the terminal-sink
+ * producer. No Spring application context is started, no profile is activated, no
  * database container is requested and no queue emulator is contacted. Concretely: none of the
  * context-bootstrapping annotations appears anywhere in this package, and neither does a profile
  * selection, because there is nothing for a profile to configure when the subject is built by a
  * constructor call in the test itself.</p>
+ *
+ * <p>Refactoring Rationale: the sentence above said "each repository as a mock", which described every
+ * subject in this package until the terminal-sink producer joined it. That subject's collaborators are a
+ * queue client and a serialiser rather than a repository, so the narrower wording read as a rule
+ * excluding it from a package whose charter otherwise admits it -- the property that actually matters is
+ * that NOTHING here is resolved from a container, whatever the collaborator happens to be.</p>
  *
  * <p>Trade-offs: what is given up is the ability to observe wiring. These tests cannot tell whether
  * a bean is declared, whether a property binds, whether the datasource resolves its search path, or
@@ -340,9 +364,17 @@
  * {@code spring.cloud.aws.sqs.listener.auto-startup} to false precisely so that a context refresh
  * starts no listener container and performs no receive. What is bought is that a rule assertion runs
  * in milliseconds, needs no daemon and no network, and fails for exactly one reason: the rule
- * disagreed. Wiring is proven where it can actually be observed, by the job and repository tiers,
- * and the profile at {@code services/batch-service/src/test/resources/application-test.yml} exists
- * for those tiers rather than for this one -- the four subjects above need no profile at all.</p>
+ * disagreed. Wiring is proven where it can actually be observed: by the job and repository tiers, and
+ * -- for the one property in this module that is decided by a property rather than by a call -- by
+ * {@code com.carddemo.batch.config}, which is the only test package here permitted to build a context.
+ * The profile at {@code services/batch-service/src/test/resources/application-test.yml} exists
+ * for those tiers rather than for this one; no subject in this package needs a profile at all.</p>
+ *
+ * <p>Refactoring Rationale: the sentence above ended "the four subjects above need no profile at all",
+ * and the figure four is withdrawn rather than raised. It counted the subjects at one revision and has
+ * no bearing on the claim, which is that none of them needs a profile -- so restating a count beside a
+ * property is how the claim came to be wrong the moment a fifth subject arrived while the property
+ * stayed exactly as true.</p>
  *
  * <h2>Inputs, and where record-layout geometry comes from</h2>
  *

@@ -24,12 +24,20 @@ import java.util.Objects;
  *
  * <h2>Why the kind is an enum rather than three types</h2>
  *
- * <p>Alternatives Considered: three separate exception types, one per condition, which would let the
- * advice dispatch on type and carry no switch. Rejected because the three share every component and
- * differ only in which sentence and which secondary code they select, so three types would be three
- * copies of one shape, and a fourth condition would then be a fourth class rather than a fourth constant.
- * The enum keeps the set closed and visible in one place, and the compiler checks that the advice handles
- * every member.</p>
+ * <p>Alternatives Considered: one exception type per condition, which would let the advice dispatch on
+ * type and carry no switch. Rejected because the conditions share every component and differ only in
+ * which sentence and which secondary code they select, so a type per condition would be one copy of one
+ * shape per condition, and each further condition would then be a further class rather than a further
+ * constant. The enum keeps the set closed and visible in one place, and because the advice selects the
+ * sentence with a switch that yields a value and declares no default arm, the compiler requires it to
+ * cover every member.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph and the enumeration's own note below both said THREE, and the
+ * enumeration has carried FOUR since {@link Kind#DUPLICATE_KEY} was added. The counts are not merely
+ * restated here: they are removed from the argument, because the argument does not depend on how many
+ * constants there are and a number written into it goes stale on every addition. What the argument does
+ * depend on -- that the conditions share one shape and that the compiler enforces exhaustiveness -- is
+ * stated directly instead.</p>
  *
  * <p>Assumptions: the sentences themselves are NOT held here. They live on
  * {@code GlobalExceptionHandler} beside the other user-visible strings, because they are message
@@ -48,12 +56,26 @@ public class RecordConflictException extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
     /**
-     * The closed set of contention conditions this migration distinguishes.
+     * The closed set of contention conditions this migration distinguishes, currently four.
      *
-     * <p>Assumptions: the three members are the three the baseline itself distinguishes, and each is
-     * cited where the advice selects its sentence. They are not interchangeable: a caller retrying a
-     * lock timeout should retry unchanged, while a caller that lost a version comparison must re-read
-     * first, and a caller refused for a dependent row must delete the dependents or stop.</p>
+     * <p>Assumptions: every member is a condition the baseline itself distinguishes, and each is cited
+     * on its own constant below and again where the advice selects its sentence. They are not
+     * interchangeable, and the remedy differs for all four:</p>
+     *
+     * <ul>
+     *   <li>{@link #STALE_VERSION} — the caller must RE-READ the row and resubmit against the version it
+     *       lost to, because the value it sent is no longer the stored one. Retrying the same body
+     *       unchanged will be refused again.</li>
+     *   <li>{@link #LOCK_UNAVAILABLE} — the caller should RETRY UNCHANGED, because nothing was compared
+     *       and nothing was written; the body it sent is still the body it wants to send.</li>
+     *   <li>{@link #REFERENCED_ROW} — the caller must DELETE THE DEPENDENTS or stop. No retry of the
+     *       same delete can succeed while a referencing row exists, so retrying is the one wrong
+     *       response.</li>
+     *   <li>{@link #DUPLICATE_KEY} — the caller should RESUBMIT, because the key was derived by the
+     *       service rather than supplied by the caller, so a fresh attempt derives a fresh key. This is
+     *       the one condition whose remedy is a plain resubmission of an unchanged request that is
+     *       expected to succeed.</li>
+     * </ul>
      */
     public enum Kind {
 

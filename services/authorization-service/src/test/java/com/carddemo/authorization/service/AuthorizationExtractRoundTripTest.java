@@ -897,12 +897,42 @@ class AuthorizationExtractRoundTripTest {
                             .limit(limit.max())
                             .toList();
                 });
-        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
+        // WHY : Assumptions: BOTH bounded child reads are answered, because the unload walks an
+        //       account's authorizations in keyset chunks -- the account-only read for the first chunk
+        //       and the strictly-older read to resume -- and a double answering only the first would
+        //       leave the resumption unstubbed and the walk answered with null the moment a chunk filled.
+        //       The limit is honoured for the same reason the page limit above is: a chunk shorter than
+        //       requested is how the walk decides an account is exhausted.
+        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any()))
                 .thenAnswer(invocation -> {
                     Long accountId = invocation.getArgument(0);
+                    Limit limit = invocation.getArgument(1);
                     return this.storedChildren.stream()
                             .filter(child -> accountId.equals(child.getId().getAccountId()))
                             .sorted(AuthorizationExtractRoundTripTest::newestFirst)
+                            .limit(limit.max())
+                            .toList();
+                });
+        // WHY : Assumptions: the resumption read is LENIENT because this class's fixture holds four
+        //       authorizations across two accounts, far fewer than one chunk, so the first chunk always
+        //       comes back short and the walk correctly never resumes. A strict stub would fail every
+        //       case here for the walk behaving properly; the chunk boundary itself is asserted by
+        //       UnloadServiceTest, which is where the walk's own mechanics belong.
+        lenient().when(this.details.findOlderThan(any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    Long accountId = invocation.getArgument(0);
+                    int afterDate = invocation.<Integer>getArgument(1).intValue();
+                    int afterTime = invocation.<Integer>getArgument(2).intValue();
+                    Limit limit = invocation.getArgument(3);
+                    return this.storedChildren.stream()
+                            .filter(child -> accountId.equals(child.getId().getAccountId()))
+                            .filter(child -> {
+                                int date = child.getId().getAuthDate().intValue();
+                                int time = child.getId().getAuthTime().intValue();
+                                return date < afterDate || (date == afterDate && time < afterTime);
+                            })
+                            .sorted(AuthorizationExtractRoundTripTest::newestFirst)
+                            .limit(limit.max())
                             .toList();
                 });
     }

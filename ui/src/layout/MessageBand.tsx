@@ -268,11 +268,12 @@ export interface MessageBandProps {
  *   band, or `null`/`undefined` when the response carried none. A value that
  *   is empty, all blanks, or the `LOW-VALUES` sentinel is treated as no
  *   message.
- * @param {MessageBandSeverity} props.severity - Severity to render with;
- *   defaults to `"error"`.
- * @param {MapsetName} props.mapset - Mapset the band stands in, selecting the
- *   display width it is sized to; omitted, the band renders at the 78-character
- *   width nineteen of the twenty-one mapsets use.
+ * @param {MessageBandSeverity | undefined} props.severity - Severity to render
+ *   with; optional, defaulting to `"error"` when omitted.
+ * @param {MapsetName | undefined} props.mapset - Mapset the band stands in,
+ *   selecting the display width it is sized to; optional, and when omitted the
+ *   band renders at the 78-character width nineteen of the twenty-one mapsets
+ *   use.
  * @returns {ReactElement} The band element: reserved space alone when there is
  *   no message, otherwise reserved space containing the alert.
  */
@@ -295,8 +296,8 @@ export function MessageBand({
    * style layer appends `px` to a numeric token unless it is on its unitless list,
    * so the control height and font size arrive as lengths while the strong font
    * weight arrives as a bare number, which is what the weight property needs.
-   * Trade-offs: a value read this way cannot be inspected in a test with no browser
-   * to resolve the variable, which is why this component's assertions are the
+   * Trade-offs: a value obtained this way cannot be inspected in a test with no
+   * browser to resolve the variable, which is why this component's assertions are the
    * reserved-height and empty-state ones rather than colour equality.
    */
   const { cssVar } = theme.useToken();
@@ -311,18 +312,15 @@ export function MessageBand({
 
   /*
    * Alternatives Considered: delegating to the text component's own ellipsis
-   * tooltip. Rejected on a measured limitation of the pinned version: it gates its
-   * reveal on real truncation, which is the half that matters most, but drives the
-   * reveal from its own POINTER state and forwards no trigger list, so a `focus`
-   * trigger is silently dropped — confirmed in a browser, where a programmatic
-   * focus produced no tooltip while a pointer event on the same element did. A
-   * reveal a keyboard cannot summon is a fidelity loss, because the 3270 original
-   * was operated entirely from the keyboard.
-   * Alternatives Considered: passing `open` through that configuration's tooltip
-   * props, which does override its internal state. Rejected because taking over
-   * `open` also takes over the truncation gate the configuration was being used
-   * for, leaving the measurement below to be written anyway with the reveal now
-   * fighting the component for the same state.
+   * tooltip. Rejected on a limitation of the pinned version: it gates its reveal on
+   * real truncation, which is the half that matters most, but drives the reveal from
+   * its own POINTER state and forwards no trigger list, so a `focus` trigger is
+   * silently dropped. A reveal a keyboard cannot summon is a fidelity loss, because
+   * the 3270 original was operated entirely from the keyboard. Passing `open` through
+   * that configuration's tooltip props does override its internal state and is
+   * rejected too, because taking over `open` also takes over the truncation gate the
+   * configuration was being used for, leaving the measurement below to be written
+   * anyway with the reveal fighting the component for the same state.
    */
   const [messageTextElement, setMessageTextElement] = useState<HTMLSpanElement | null>(null);
   const [isMessageTruncated, setIsMessageTruncated] = useState(false);
@@ -378,7 +376,7 @@ export function MessageBand({
 
       /**
        * Stops observing the element this effect measured.
-       * @returns {void} The observer no longer reports size changes.
+       * @returns {void} Completion leaves the observer disconnected.
        */
       function stopObserving(): void {
         observer.disconnect();

@@ -144,6 +144,35 @@ FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e
 #       aggregator and the two modules selected from it.
 WORKDIR /build/services
 
+# WHY : Refactoring Rationale: this image shipped no database trust anchor, and
+#       nothing about it looked broken. application.yml connects with
+#       sslmode=verify-full and resolves sslrootcert to
+#       /etc/ssl/certs/carddemo-rds-ca-bundle.pem, both environment roots pass that
+#       same literal as CARDDEMO_DB_SSL_ROOT_CERT, and infra/modules/ecs-service
+#       refuses to render a task definition that omits it -- so every layer of the
+#       configuration named a file that no layer of the image created. pgjdbc opens
+#       that path before it opens a socket, so the omission was not a silent
+#       downgrade to an unverified connection: it was eight services that cannot
+#       reach their database, reporting an unreadable-file error while reading as
+#       correctly configured everywhere a reviewer would look.
+# WHY : Assumptions: the fetch, the digest verification and the reasoning behind
+#       both live in config/docker/install-rds-trust-anchor.sh, and are stated once
+#       there rather than eight times here. The script pins the bundle by SHA-256,
+#       so this layer either installs the exact reviewed bytes or fails the build.
+# WHY : Trade-offs: this sits at the TOP of the build stage, above the POM copies,
+#       for the same layer-ordering reason they sit above the sources -- its only
+#       input is the script, so a Java edit does not re-fetch the bundle and a
+#       rebuild pays the network cost once. The cost is that a change to the script
+#       invalidates the dependency warm-up below it, which is the rarer edit of the
+#       two.
+# WHY : Alternatives Considered: fetching it in the runtime stage instead, which
+#       would need one fewer COPY. Rejected because it would put the script and a
+#       scratch download into the shipped image and add a network step to the layer
+#       that ships; fetching here and copying one verified file forward keeps the
+#       runtime stage to exactly the file the JVM reads.
+COPY config/docker/install-rds-trust-anchor.sh /tmp/install-rds-trust-anchor.sh
+RUN /bin/sh /tmp/install-rds-trust-anchor.sh /tmp/carddemo-rds-ca-bundle.pem
+
 # WHY : Trade-offs: POMs and the documentation-gate configuration are copied
 #       before any source file so that a source-only change reuses the resolved
 #       dependency layer. The extra COPY instructions make this file longer, but
@@ -324,6 +353,30 @@ COPY --from=build --chown=10001:10001 \
     /build/services/card-service/target/card-service.jar \
     /app/app.jar
 
+# WHY : Assumptions: the destination is the literal path application.yml resolves
+#       sslrootcert to and both environment roots pass as
+#       CARDDEMO_DB_SSL_ROOT_CERT, so the three statements are one contract read
+#       from three places rather than three independent settings that happen to
+#       agree. A gate in .github/workflows/services-ci.yml asserts that agreement
+#       and asserts this file is present and parseable in the built image, because
+#       the failure it prevents is invisible until a task tries to connect.
+# WHY : Assumptions: /etc/ssl/certs is a SYMLINK in this base --
+#       /etc/pki/ca-trust/extracted/pem/directory-hash -- so the file actually
+#       lands under /etc/pki and is reached through the link at run time. Verified
+#       by building against the pinned digest and reading the file back through
+#       both paths. It is worth stating because a reader assumes a real directory,
+#       and because a copy into a symlinked destination is the kind of thing that
+#       silently becomes a regular file called "certs" under a different builder.
+# WHY : Trade-offs: no --chown here, unlike the jar above. The anchor is
+#       root-owned and world-readable (0644), which is what a trust anchor should
+#       be: the application user must read it and no process in the task should be
+#       able to replace it. Verified readable as UID 10001 against the pinned
+#       digest. Placing it inside the hashed trust directory does NOT add it to the
+#       default OpenSSL trust store -- that lookup uses hash-named links -- so the
+#       bundle is used only where it is named explicitly.
+COPY --from=build /tmp/carddemo-rds-ca-bundle.pem \
+    /etc/ssl/certs/carddemo-rds-ca-bundle.pem
+
 # WHY : Assumptions: 8080 carries BOTH the business REST surface and the actuator
 #       health group, over TLS, because the base profile enables server.ssl and
 #       declares one connector. A second port was considered and is not available
@@ -348,7 +401,31 @@ EXPOSE 8080
 #       entire allocation belongs to one JVM. Measured inside this exact runtime
 #       digest: MaxRAMPercentage defaults to 25.0, so under a 1 GiB limit the heap
 #       ceiling is 256 MiB and three quarters of the task's paid-for memory is
-#       unavailable to it; at 75.0 the same limit yields 768 MiB.
+#       unavailable to it; at 50.0 the same limit yields 512 MiB.
+# WHY : Refactoring Rationale: the ratio was 75.0 and is now 50.0, because 75.0
+#       was derived from an assumption this task does not satisfy -- that the whole
+#       allocation belongs to one JVM. It does not: infra/modules/ecs-service adds
+#       an ESSENTIAL aws-otel-collector sidecar to every workload, and neither
+#       container carries a container-level hard memory limit, so the JVM's cgroup
+#       view is the WHOLE task allocation and 75.0 sized the heap as though the
+#       sidecar were not there. The budget that replaces the assumption, at the
+#       1024 MiB dev allocation: 192 MiB for the collector (its memory_limiter is
+#       configured at limit_mib 128 with spike_limit_mib 32, plus Go runtime
+#       overhead), about 250 MiB of JVM non-heap that MaxRAMPercentage does not
+#       govern at all -- metaspace, code cache, thread stacks, GC structures and
+#       direct buffers -- and the heap ceiling on top. At 75.0 that totals roughly
+#       1210 MiB against a 1024 MiB task and the task is OOM-killed under load; at
+#       50.0 it totals roughly 954 MiB and fits. The same ratio against the 2048 MiB
+#       prod allocation yields a 1024 MiB heap and about 580 MiB of headroom.
+# WHY : Alternatives Considered: keeping 75.0 and giving each container an explicit
+#       hard `memory` limit in the task definition instead -- the collector at its
+#       reservation and the application at the remainder -- so that the JVM's cgroup
+#       limit excluded the sidecar. Rejected for two reasons measured from the
+#       module: a hard limit on an ESSENTIAL container turns a collector spike into
+#       a killed TASK rather than degraded telemetry, and even with the sidecar
+#       excluded, 75.0 of the remaining 832 MiB plus 250 MiB of non-heap still
+#       exceeds that container's own limit. The ratio had to come down either way,
+#       so the change that fixes it is the ratio alone.
 # WHY : Refactoring Rationale: an earlier revision of this file rejected "-Xmx or
 #       -XX container flags" as a single category, on the ground that a hard-coded
 #       ceiling would silently override the task definition's memory and have to be
@@ -373,7 +450,7 @@ EXPOSE 8080
 #       -version` invocation, each of which would then print a "Picked up
 #       JAVA_TOOL_OPTIONS" line onto its output. JAVA_OPTS is read only by the one
 #       process this is meant to configure.
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=50.0"
 
 # WHY : Trade-offs: SPRING_PROFILES_ACTIVE is deliberately NOT set here, and its
 #       absence is the decision rather than an omission. One built image is meant
@@ -432,13 +509,34 @@ USER carddemo:carddemo
 #       in the base profile, so the connector is TLS and a plaintext request would
 #       fail the check on every healthy task - a probe that always fails is worse
 #       than none, because it makes a working deployment look broken.
-# WHY : Trade-offs: --insecure is accepted for this one request. The certificate is
-#       supplied by the deployment and its subject names the service, never
-#       127.0.0.1, so verification could not succeed from inside the container
-#       regardless of how correct the certificate is. What is given up is identity
-#       checking on a loopback call inside the container's own network namespace,
-#       where there is no other party to impersonate; what is kept is that the
-#       encrypted listener is the one actually proven to answer.
+# WHY : Trade-offs: --insecure is accepted for this one request, and the reason is
+#       the trust ANCHOR rather than the name. config/docker/
+#       generate-listener-material.sh mints the leaf with
+#       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so the loopback address this
+#       probe dials IS carried by the certificate; what cannot succeed is
+#       anchoring, because the leaf is self-signed and no store in this image holds
+#       its issuer. Measured against the pinned digests rather than assumed: the
+#       identical request without --insecure exits 60 reporting "SSL certificate
+#       OpenSSL verify result: self-signed certificate (18)", and no
+#       subject-name error appears at all.
+# WHY : Refactoring Rationale: this note used to say the subject "names the
+#       service, never 127.0.0.1", which the generator contradicts on its own line
+#       164 and which sent a reader looking for a naming problem that does not
+#       exist. The distinction matters because the two causes have different fixes:
+#       a name mismatch would be corrected in the certificate, and an unanchored
+#       leaf can only be corrected by trusting it explicitly or by waiving
+#       verification as this probe does.
+# WHY : Alternatives Considered: exporting the minted leaf at start-up and
+#       verifying with --cacert, which was MEASURED to work -- with the exported PEM
+#       the identical loopback request succeeds. Rejected because CMD is a static
+#       exec array, so the PEM path would be a literal here while the directory
+#       holding it is CARDDEMO_SERVER_TLS_DIR, an overridable variable; a
+#       deployment that moved that directory would then fail the probe on a healthy
+#       task, which is the outcome this file already argues is worse than no probe.
+#       What is given up by waiving verification is identity checking on a call
+#       that never leaves this container's own network namespace, where there is no
+#       second party to impersonate; what is kept is that the ENCRYPTED listener is
+#       the one proven to answer.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure", \
          "--max-time", "4", "--output", "/dev/null", \

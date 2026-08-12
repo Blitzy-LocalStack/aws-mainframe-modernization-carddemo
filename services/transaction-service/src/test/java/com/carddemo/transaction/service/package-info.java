@@ -48,16 +48,16 @@
  * gate for it would attribute the obligation to a sentence that does not carry
  * it.
  *
- * <h2>The closed inventory: seven files here, six of them tests</h2>
+ * <h2>The closed inventory: eight files here, seven of them tests</h2>
  *
- * <p>This directory holds exactly seven Java files and no subdirectory. Six are
- * test classes and the seventh is this charter. Each line count below was
+ * <p>This directory holds exactly eight Java files and no subdirectory. Seven are
+ * test classes and the eighth is this charter. Each line count below was
  * counted in the file itself rather than carried over from a summary, and
  * each transaction identifier and screen name is quoted from the transaction
  * inventory in the repository root {@code README.md}:
  *
  * <pre>
- * this directory: 7 java files = 6 tests + 1 charter
+ * this directory: 8 java files = 7 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: the marker line above was added because "exactly six
@@ -73,6 +73,18 @@
  * obliges this line to move rather than obliging the member to justify itself; the
  * check named above reported the stale claim as a failed assertion on the file
  * count, which is the drift it exists to catch working as intended.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: they were raised again, to eight and seven, when
+ * {@code BillPaymentUnitOfWorkIT} landed -- the first member of this directory that
+ * is an INTEGRATION test rather than a unit test, and therefore the first whose name
+ * ends in {@code IT} rather than {@code Test}. Two consequences are worth stating
+ * because neither is visible from the count. The suffix is what selects the runner:
+ * Surefire matches {@code *Test} and Failsafe matches {@code *IT}, so a class holding
+ * a container must carry the second suffix or it runs in the wrong phase and starts a
+ * container during the unit build. And this directory is no longer container-free, so
+ * a build host that cannot start one now fails a class here rather than only in the
+ * sibling {@code repository} package -- which is stated so the failure is
+ * recognisable rather than surprising.</p>
  *
  * <ul>
  *   <li>{@code TransactionViewServiceTest} pins
@@ -130,6 +142,24 @@
  *       reads the composed row back off the write. A failure in one
  *       therefore localises differently from a failure in the other, which is the
  *       same division the two paged-browse entries above draw.</li>
+ *   <li>{@code BillPaymentUnitOfWorkIT} pins the ONE property of that same
+ *       {@code app/cbl/COBIL00C.cbl} that neither class above can hold: that the
+ *       ledger row at line 233 and the balance reduction at line 235 COMMIT
+ *       together, as the one implicit CICS syncpoint makes them.
+ *       Assumptions: it is an integration test rather than a unit test because the
+ *       property is about commit boundaries, and a mocked collaborator does not
+ *       participate in a transaction -- the two classes above observe the writes
+ *       being ISSUED, which is a different claim and was satisfied by an
+ *       implementation that committed the balance change on a separate HTTP
+ *       connection. It runs against a real PostgreSQL container, supplies the
+ *       account-owned foreign table through a Testcontainers init script under
+ *       {@code src/test/resources/db/testharness}, and opens its own explicit
+ *       transactions so that every observation is of COMMITTED state.
+ *       Assumptions: it also holds the read-for-update asymmetry, since that too is
+ *       an engine behaviour: the paying turn escalates to a {@code ROW SHARE} lock on
+ *       the account relation and the reporting turn does not, which is what keeps one
+ *       operator's unconfirmed preview from blocking another operator's payment for
+ *       the whole of a request.</li>
  * </ul>
  *
  * <p>Assumptions: that list is a measurement of the directory as well as the

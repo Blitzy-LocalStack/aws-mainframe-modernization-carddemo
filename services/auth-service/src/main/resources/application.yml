@@ -160,7 +160,38 @@ server:
     protocol: TLS
     enabled-protocols: TLSv1.2,TLSv1.3
 
+  # WHY : (1) Refactoring Rationale: this service omitted graceful shutdown while
+  #       five of the seven web contexts declared it -- this and card-service were
+  #       the two that did not, the batch task having no web server and correctly
+  #       declaring none -- so a task being replaced had its in-flight requests
+  #       cut at SIGTERM. Sign-on is exactly the operation
+  #       where that is most visible: a caller mid-authentication receives a
+  #       transport failure and cannot tell a wrong credential from a replaced
+  #       task, so it retries a credential that may have been accepted.
+  #       (2) Assumptions: graceful shutdown stops accepting new connections and
+  #       lets accepted ones finish, and this service holds no message listener,
+  #       so the only work to drain is HTTP.
+  shutdown: graceful
+
 spring:
+  # WHY : (1) Assumptions: this bounds the graceful shutdown enabled above, and
+  #       twenty seconds is the fleet-wide phase budget -- the same value the
+  #       other seven contexts set, so one number describes the whole fleet.
+  #       (2) Refactoring Rationale: the framework's own default for this key is
+  #       thirty seconds and the platform's SIGTERM-to-SIGKILL window is also
+  #       thirty (ecs-service pins `stopTimeout = 30`), so leaving it unset made
+  #       the drain deadline and the kill deadline the same instant -- a task
+  #       could be killed while still draining, which is the failure graceful
+  #       shutdown exists to prevent. Twenty gives up the tail of that window to
+  #       buy certainty that the drain completes and the JVM flushes its log
+  #       buffers first.
+  #       (3) Trade-offs: twenty is also below the load balancer's thirty-second
+  #       deregistration delay, so a draining task is out of rotation before the
+  #       timer starts. A longer value would delay every deployment by the
+  #       difference without draining anything the delay had not already covered.
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+
   application:
     # Assumptions: management.metrics.tags.service below reads this property
     #   instead of repeating the literal, so the two cannot drift apart.
@@ -273,7 +304,7 @@ spring:
     hibernate:
       # Alternatives Considered: schema generation from the mapped entities was
       #   evaluated and rejected, because it cannot express two things
-      #   V1__auth.sql has to state once it lands. First, the fixed-width CHAR(8)
+      #   V1__auth.sql states. First, the fixed-width CHAR(8)
       #   primary key that app/cpy/CSUSR01Y.cpy L18 fixes as SEC-USR-ID PIC X(08)
       #   at offset 0; a generated column would be variable-length, and the
       #   identifier would stop comparing equal to the blank-padded value the
@@ -530,16 +561,12 @@ springdoc:
     # against that document rather than against this endpoint. The document
     # served here has to agree with it; a difference between the two is a defect
     # in whichever one moved and is not something to reconcile at runtime.
-    # Refactoring Rationale: this note previously said that neither the contract
-    # nor the client existed in the current tree. Both do -- the contract declares
-    # eight operations and the client implements exactly those eight, which
-    # ui/src/api/contracts.test.ts asserts -- so only the third item in that
-    # sentence still holds: the controllers this endpoint would describe are not
-    # yet written, so what it serves today is an empty document.
-    # Refactoring Rationale: this statement previously pointed to a
-    # "State at this checkpoint" header section that this file never contained;
-    # keeping the measured inventory adjacent to the key removes that dangling
-    # cross-reference.
+    # Assumptions: the contract declares eight operations and ui/src/api/auth.ts
+    # implements exactly those eight, which ui/src/api/contracts.test.ts asserts.
+    # The endpoint below describes AuthController and UserController, so what it
+    # serves is the generated view of those two adapters and is comparable against
+    # the contract of record. The inventory is kept adjacent to the key it explains
+    # rather than in a header section, so there is no cross-reference to go stale.
     path: /v3/api-docs
     enabled: true
     # Assumptions: the generated document is pinned to the same specification
@@ -706,6 +733,80 @@ carddemo:
       user-pool-id: ${CARDDEMO_AUTH_COGNITO_USER_POOL_ID}
       client-id: ${CARDDEMO_AUTH_COGNITO_CLIENT_ID}
       client-secret: ${CARDDEMO_AUTH_COGNITO_CLIENT_SECRET}
+
+      # WHY : (1) Purpose: where a user created at run time collects its first
+      #       credential. The pool account is made in its force-change state with
+      #       a generated temporary password, and that password is written to a
+      #       managed-secret entry beneath this prefix rather than returned on the
+      #       response or written to a log. Without the prefix there is nowhere to
+      #       write it, so the account exists holding a credential no principal can
+      #       obtain -- a user who can never sign in.
+      #       (2) Assumptions: it is the SAME prefix the infrastructure writes the
+      #       seed identities' handover entries under, and the two families are
+      #       separated by a fixed segment the service appends: /seed-user/ for
+      #       Terraform's entries, /runtime-user/ for this service's. One prefix
+      #       with two families is what lets the task role be granted write
+      #       permission on this family alone, so a defect here cannot overwrite a
+      #       seed identity's handover or reach the database credential.
+      #       (3) Assumptions: injected with NO fallback, for the same reason the
+      #       pool identifier above has none. A default would let the service start
+      #       and publish a real user's one-time credential somewhere nobody looks.
+      #       (4) Assumptions: this is not a secret and does not belong in the
+      #       secret register. It is a name prefix; what protects the values beneath
+      #       it is secretsmanager:GetSecretValue together with the key policy of
+      #       the key named below.
+      credential-secret-prefix: ${CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX}
+
+      # WHY : (1) Assumptions: the customer-managed key a created credential entry
+      #       is encrypted with, named explicitly rather than letting the store fall
+      #       back to the account's default managed key. The value being stored is
+      #       the direct replacement for the cleartext SEC-USR-PWD field at
+      #       app/cpy/CSUSR01Y.cpy L21, and a customer-managed key carries an
+      #       auditable, revocable key policy that the default does not -- so
+      #       possession of the entry is not sufficient without the key's
+      #       permission. infra/modules/cognito makes the same choice for the seed
+      #       entries.
+      #       (2) Assumptions: no fallback, because the failure a default would
+      #       produce is silent. An entry created under the default key is readable
+      #       by every principal with GetSecretValue and no separate key grant,
+      #       which is a weaker posture that looks identical from the API.
+      credential-secret-kms-key-arn: ${CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN}
+
+      # WHY : (1) Assumptions: how many characters a generated temporary password
+      #       carries. It has a default because it is a policy preference rather
+      #       than a deployment address, unlike the two keys above, and 24 sits
+      #       well above the pool's own configured minimum of 14 declared at
+      #       infra/modules/cognito/variables.tf so a policy change cannot make
+      #       every create fail.
+      #       (2) Trade-offs: the service always draws from all four character
+      #       classes rather than reading the pool's five policy flags, which
+      #       satisfies a policy requiring any SUBSET of them with one property
+      #       instead of five that could disagree with the pool's actual
+      #       configuration. The one policy that cannot be satisfied is a minimum
+      #       length above this value, which is exactly why this value is
+      #       configurable and is validated at startup.
+      temporary-password-length: ${CARDDEMO_AUTH_TEMPORARY_PASSWORD_LENGTH:24}
+
+      # WHY : (1) Refactoring Rationale: the administrative provider client and the
+      #       managed-secret client were built with no override configuration at
+      #       all, and the software development kit's default for both deadlines is
+      #       NO deadline. The sign-on exchange was bounded and these were not, so
+      #       a provider that accepted a connection and stopped answering held the
+      #       calling thread until the socket gave up -- and the concrete shape of
+      #       that is a create-user request that never returns while the pool
+      #       account it asked for has already been made.
+      #       (2) Assumptions: the attempt budget must be SMALLER than the
+      #       whole-call budget, and config/CognitoIdentityConfig.java refuses the
+      #       pair at startup when it is not. The whole-call budget is spent across
+      #       every attempt the retry policy makes, so an attempt allowed to consume
+      #       all of it leaves the policy no room and retries nothing while
+      #       appearing to have a policy.
+      #       (3) Trade-offs: one pair serves both clients. They are called in
+      #       immediate succession on one provisioning path, so a caller's exposure
+      #       is their sum either way, and two pairs would be four numbers whose
+      #       only correct relationship is equality.
+      api-call-timeout-ms: ${CARDDEMO_AUTH_COGNITO_API_CALL_TIMEOUT_MS:10000}
+      api-call-attempt-timeout-ms: ${CARDDEMO_AUTH_COGNITO_API_CALL_ATTEMPT_TIMEOUT_MS:4000}
 
   # Assumptions: validating the issuer is NOT validating the token.
   #   `spring.security.oauth2.resourceserver.jwt.issuer-uri` above makes the

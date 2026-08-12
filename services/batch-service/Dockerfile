@@ -66,6 +66,35 @@ FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e
 #       aggregator and its selected modules.
 WORKDIR /build/services
 
+# WHY : Refactoring Rationale: this image shipped no database trust anchor, and
+#       nothing about it looked broken. application.yml connects with
+#       sslmode=verify-full and resolves sslrootcert to
+#       /etc/ssl/certs/carddemo-rds-ca-bundle.pem, both environment roots pass that
+#       same literal as CARDDEMO_DB_SSL_ROOT_CERT, and infra/modules/ecs-service
+#       refuses to render a task definition that omits it -- so every layer of the
+#       configuration named a file that no layer of the image created. pgjdbc opens
+#       that path before it opens a socket, so the omission was not a silent
+#       downgrade to an unverified connection: it was eight services that cannot
+#       reach their database, reporting an unreadable-file error while reading as
+#       correctly configured everywhere a reviewer would look.
+# WHY : Assumptions: the fetch, the digest verification and the reasoning behind
+#       both live in config/docker/install-rds-trust-anchor.sh, and are stated once
+#       there rather than eight times here. The script pins the bundle by SHA-256,
+#       so this layer either installs the exact reviewed bytes or fails the build.
+# WHY : Trade-offs: this sits at the TOP of the build stage, above the POM copies,
+#       for the same layer-ordering reason they sit above the sources -- its only
+#       input is the script, so a Java edit does not re-fetch the bundle and a
+#       rebuild pays the network cost once. The cost is that a change to the script
+#       invalidates the dependency warm-up below it, which is the rarer edit of the
+#       two.
+# WHY : Alternatives Considered: fetching it in the runtime stage instead, which
+#       would need one fewer COPY. Rejected because it would put the script and a
+#       scratch download into the shipped image and add a network step to the layer
+#       that ships; fetching here and copying one verified file forward keeps the
+#       runtime stage to exactly the file the JVM reads.
+COPY config/docker/install-rds-trust-anchor.sh /tmp/install-rds-trust-anchor.sh
+RUN /bin/sh /tmp/install-rds-trust-anchor.sh /tmp/carddemo-rds-ca-bundle.pem
+
 # WHY : Trade-offs: POMs and the documentation-gate configuration precede source
 #       files so source-only changes reuse the dependency layer. The extra copy
 #       instructions make the Dockerfile longer, but avoid repeating Maven's
@@ -80,18 +109,18 @@ COPY config/checkstyle /build/config/checkstyle
 #       common-lib and batch-service in its build-only module list; otherwise the
 #       intentionally absent service directories fail model loading before Maven
 #       can select the two permitted projects. The source parent POM is unchanged.
-# WHY : Refactoring Rationale: the earlier form of this filter deleted ANY line
-#       inside <modules> that contained `<module>` and was not one of the two
-#       retained entries, and it counted nothing. Two failure modes followed from
-#       that, both silent. An XML comment mentioning a module - exactly the comment
-#       a maintainer would add to explain why a module is absent here - was deleted
-#       as if it were a module entry. And if either retained module were renamed,
-#       the filter would still succeed while emitting a POM that no longer declared
-#       it, so the failure surfaced later as an obscure `-pl` resolution error
-#       pointing at Maven rather than at this line. The rewrite below fixes both:
-#       comments are passed through verbatim, and the transformation ASSERTS its
-#       own outcome so a POM-shape change fails here, with the count that was
-#       wrong, instead of producing a plausible-looking wrong POM.
+# WHY : Refactoring Rationale: the filter matches on the module ENTRY and asserts
+#       its own outcome, rather than deleting any line inside <modules> that
+#       mentions `<module>` and is not one of the two retained entries. A
+#       mention-based filter fails silently in two ways. An XML comment naming a
+#       module - exactly the comment a maintainer would add to explain why a module
+#       is absent here - is deleted as though it were an entry. And if either
+#       retained module is renamed, the filter still succeeds while emitting a POM
+#       that omits it, so the failure surfaces later as an obscure `-pl` resolution
+#       error pointing at Maven rather than at this line. Matching entries and
+#       asserting the surviving count closes both: comments pass through verbatim,
+#       and a POM-shape change fails HERE, reporting the count that was wrong,
+#       instead of producing a plausible-looking wrong POM.
 # WHY : Assumptions: exactly two module entries must survive (common-lib and
 #       batch-service) and at least one must be dropped. The second assertion is
 #       what catches a source POM that has already been trimmed or that lists only
@@ -199,6 +228,30 @@ COPY --from=build --chown=10001:10001 \
     /build/services/batch-service/target/batch-service-1.0.0-SNAPSHOT.jar \
     /app/app.jar
 
+# WHY : Assumptions: the destination is the literal path application.yml resolves
+#       sslrootcert to and both environment roots pass as
+#       CARDDEMO_DB_SSL_ROOT_CERT, so the three statements are one contract read
+#       from three places rather than three independent settings that happen to
+#       agree. A gate in .github/workflows/services-ci.yml asserts that agreement
+#       and asserts this file is present and parseable in the built image, because
+#       the failure it prevents is invisible until a task tries to connect.
+# WHY : Assumptions: /etc/ssl/certs is a SYMLINK in this base --
+#       /etc/pki/ca-trust/extracted/pem/directory-hash -- so the file actually
+#       lands under /etc/pki and is reached through the link at run time. Verified
+#       by building against the pinned digest and reading the file back through
+#       both paths. It is worth stating because a reader assumes a real directory,
+#       and because a copy into a symlinked destination is the kind of thing that
+#       silently becomes a regular file called "certs" under a different builder.
+# WHY : Trade-offs: no --chown here, unlike the jar above. The anchor is
+#       root-owned and world-readable (0644), which is what a trust anchor should
+#       be: the application user must read it and no process in the task should be
+#       able to replace it. Verified readable as UID 10001 against the pinned
+#       digest. Placing it inside the hashed trust directory does NOT add it to the
+#       default OpenSSL trust store -- that lookup uses hash-named links -- so the
+#       bundle is used only where it is named explicitly.
+COPY --from=build /tmp/carddemo-rds-ca-bundle.pem \
+    /etc/ssl/certs/carddemo-rds-ca-bundle.pem
+
 # WHY : Assumptions: port 8080 is reserved for the actuator health probe only.
 #       This argument-driven module publishes no business REST surface and no
 #       administrative endpoint that can trigger a job.
@@ -214,8 +267,8 @@ USER carddemo:carddemo
 #       installation and fails explicitly on a non-success HTTP response. Both
 #       halves were verified by running the digest pinned above: curl 8.17.0 is
 #       present at that path and `command -v wget` finds nothing. The claim is
-#       tied to the digest and not to the tag, because a probe that names a binary
-#       the base no longer ships reports an unhealthy container for a reason
+#       tied to the digest and not to the tag, because a probe naming a binary a
+#       future base image omits would report an unhealthy container for a reason
 #       unrelated to the job -- so this line and the runtime FROM line must be
 #       revisited together.
 # WHY : Assumptions: the probe addresses the LOOPBACK interface, which is not a

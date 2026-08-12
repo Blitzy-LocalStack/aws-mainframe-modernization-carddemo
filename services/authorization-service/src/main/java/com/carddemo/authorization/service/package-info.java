@@ -96,10 +96,18 @@
  * declares another transaction manager or a distributed-transaction coordinator.</p>
  *
  * <p><strong>Pagination.</strong> The repository returns a size-plus-one keyset result and
- * leaves the probe row present. {@code PendingAuthSummaryService} discards that row, derives
- * {@code hasNext} from whether it arrived, encodes the first and last opaque cursor tokens,
- * and assembles {@code com.carddemo.common.web.PageResponse}. Those response semantics do
- * not belong to the repository.</p>
+ * leaves the probe row present. {@code PendingAuthSummaryService} discards that row, derives the
+ * forward availability flag from whether that row arrived, encodes the first and
+ * last opaque cursor tokens,
+ * and hands them to {@code com.carddemo.authorization.mapper} to assemble
+ * {@code com.carddemo.common.web.PageResponse}. Assumptions: the envelope has FOUR
+ * components and the ONE availability flag it carries is supplied here, because only the query that
+ * read past the window knows it. Backward availability is not a component: it is the presence of
+ * the leading cursor, which is the position a backward request is issued from, and the reference
+ * settles the question itself on the terminal side from the page ordinal it carried between turns
+ * rather than from any read of the file. A backward move here therefore establishes forward
+ * availability by its own probe read and publishes no backward answer. Those response
+ * semantics do not belong to the repository.</p>
  *
  * <p><strong>Data disclosure.</strong> PAN masking and CVV suppression belong to
  * {@code com.carddemo.authorization.mapper}. Services pass domain values to that boundary
@@ -146,9 +154,11 @@
  *
  * <p>Assumptions: the request queue is a FIFO queue whose message group is the card number
  * and whose deduplication identifier is the acquirer's transaction identifier. Grouping by
- * card gives per-card ordering while leaving different cards to be delivered in parallel,
- * which is what lets the listener take a pessimistic row lock on one account's summary
- * without serialising the whole service. Deduplicating by transaction identifier makes
+ * card gives per-card ordering while leaving different cards to be delivered in parallel --
+ * and because two cards can belong to ONE account, that parallelism is exactly why the summary
+ * accumulation is a guarded arithmetic statement computed in the database rather than a read,
+ * a decision and a write-back the listener would have to hold a lock across. Deduplicating by
+ * transaction identifier makes
  * suppression independent of the payload, so a re-sent request whose bytes differ is still
  * recognised as the same request; that is why {@code infra/modules/sqs} sets
  * {@code content_based_deduplication = false} rather than letting the transport hash the
@@ -164,15 +174,29 @@
  * retry would then be suppressed as a duplicate of an answer nobody read. The resolution is
  * recorded in {@code docs/adr/ADR-004-messaging.md}.</p>
  *
- * <p><strong>Row protection.</strong> Service methods declare transaction boundaries but
- * no JPA lock mode. The current listener obtains summary-row protection through the
- * repository-owned atomic accumulation statements, which perform the arithmetic in the database
- * rather than reading, mutating and writing back. A {@code PESSIMISTIC_WRITE} declaration stood on
- * that boundary and has been withdrawn: it was concurrency machinery the reference system does not
+ * <p><strong>Row protection.</strong> Classes here declare transaction boundaries; not one of
+ * them declares a lock mode itself, because a lock mode belongs to the query that takes it and
+ * lives on the repository boundary. On the SUMMARY row no lock is taken at all. The listener
+ * moves that row through repository-owned arithmetic statements computed in the database rather
+ * than by reading an instance, deciding, and writing it back, and the statement that records an
+ * approval additionally carries the remaining-headroom predicate in its own {@code where} clause,
+ * so a second card of the same account cannot be admitted against headroom the first has already
+ * consumed. A {@code PESSIMISTIC_WRITE} declaration stood on that boundary and has been
+ * withdrawn: it was concurrency machinery the reference system does not
  * have, since {@code cpy/IMSFUNCS.cpy} declares three get-hold function codes at L19, L21 and L23
  * and no reference program passes any of them. What it protected -- four members that are
- * INCREMENTED rather than assigned -- is now safe by construction. No additional
- * lock declaration or lock-policy duplication belongs in this package.</p>
+ * INCREMENTED rather than assigned -- is now safe by construction.</p>
+ *
+ * <p><strong>Row protection, the one exception.</strong> {@link
+ * com.carddemo.authorization.service.FraudMarkingService} reads through the DETAIL boundary's
+ * {@code findWithLockById}, which does declare {@code PESSIMISTIC_WRITE}, and the difference from the
+ * summary row is the shape of the write rather than a change of policy. Marking an authorization
+ * ASSIGNS two fields from values the caller supplied, so there is no arithmetic to push into the
+ * database and nothing a guarded statement could be guarded on; the lost update it prevents is one
+ * marking overwriting another's, which is a genuine last-write-wins and not an interleaved
+ * accumulation. That declaration is documented at its own point of use, with the bounded lock wait
+ * that keeps a blocked marking from parking. It is named here so that "no lock on the summary" is not
+ * read as "no lock in this context".</p>
  *
  * <p><strong>Bounded-context data.</strong> Account, customer, card, and card-cross-reference
  * data are interface concerns rather than authorization tables. The baseline reads those
@@ -189,11 +213,11 @@
  * its own carrying only the fields a decision reads, so no type from another context's domain
  * package appears in this one even as a parameter. {@code RestAccountContextClient} is its only
  * implementation and is the only class in this service that names a path, a status code or a
- * timeout for that hop. Refactoring Rationale: the boundary was previously described here without
- * being declared anywhere, and the listener stood in for it by resolving a card to an account from
- * this context's OWN authorization history -- so the description was accurate about intent and the
- * code did something else. The interface now exists, and the substitute query has been removed from
- * {@code PendingAuthDetailRepository} so nothing can reach for it again.</p>
+ * timeout for that hop. Refactoring Rationale: the boundary is DECLARED rather than merely
+ * described, because a described boundary let the listener stand in for it by resolving a card to an
+ * account from this context's OWN authorization history -- accurate about intent while the code did
+ * something else. The substitute query is removed from {@code PendingAuthDetailRepository} so
+ * nothing can reach for it again.</p>
  *
  * <p>Assumptions: the boundary stated above is MECHANICALLY enforced rather than carried by review.
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
@@ -213,17 +237,14 @@
  * {@code UnloadService} are plain services, not Spring Batch jobs, so this module acquires
  * neither a restart repository nor a second transaction owner.</p>
  *
- * <p>Refactoring Rationale: this paragraph previously described the first two as
- * "scheduled service methods or Step Functions-invoked entry points", and NEITHER was true
- * of either. There was no schedule, no controller, no runner and no state in the batch
- * state machine, so both were reachable only from their own tests -- and the expiry purge
- * is the only thing that bounds the growth of this schema's two largest tables, so in a
- * deployment that trusted this sentence those tables grew without limit. The correction is
- * both to the sentence and to the code: {@link com.carddemo.authorization.task} now holds
- * a process entry point that resolves either job by name and ends on an exit status, and
- * the actual invocation is a container started with {@code --job=purge-authorizations
- * --business-date=YYYY-MM-DD} or {@code --job=load-authorizations} with its two staged
- * extract paths.</p>
+ * <p>Assumptions: {@code PurgeJob} and {@code LoadService} are reachable as processes rather
+ * than as schedules or state-machine states. {@link com.carddemo.authorization.task} holds the
+ * entry point that resolves either job by name and ends on an exit status, and the invocation
+ * is a container started with {@code --job=purge-authorizations --business-date=YYYY-MM-DD} or
+ * {@code --job=load-authorizations} with its two staged extract paths. Naming a caller this
+ * package does not have would matter here more than elsewhere: the expiry purge is the only
+ * thing that bounds the growth of this schema's two largest tables, so a reader who believed
+ * a schedule ran it would leave those tables growing without limit.</p>
  *
  * <p>Assumptions: the purge is deliberately NOT a state in the nightly batch state machine,
  * and that is an alignment with the plan rather than an omission. The plan fixes that
@@ -233,7 +254,7 @@
  * twelfth state.</p>
  *
  * <p>No {@code module-info.java} exists in this source tree. The three online services are
- * called by controllers planned under
+ * called by {@code PendingAuthController} and {@code FraudController} under
  * {@code services/authorization-service/src/main/java/com/carddemo/authorization/api/};
  * that caller relationship is stated by path because controller classes are not part of
  * this package contract.</p>
@@ -279,9 +300,11 @@
  *
  * <p>Assumptions: the request queue is a FIFO queue whose message group is the card number
  * and whose deduplication identifier is the acquirer's transaction identifier. Grouping by
- * card gives per-card ordering while leaving different cards to be delivered in parallel,
- * which is what lets the listener take a pessimistic row lock on one account's summary
- * without serialising the whole service. Deduplicating by transaction identifier makes
+ * card gives per-card ordering while leaving different cards to be delivered in parallel --
+ * and because two cards can belong to ONE account, that parallelism is exactly why the summary
+ * accumulation is a guarded arithmetic statement computed in the database rather than a read,
+ * a decision and a write-back the listener would have to hold a lock across. Deduplicating by
+ * transaction identifier makes
  * suppression independent of the payload, so a re-sent request whose bytes differ is still
  * recognised as the same request.</p>
  *
@@ -313,18 +336,15 @@
  * run fails before compilation when this file is deleted or reduced to its package
  * declaration.</p>
  *
- * <p>Refactoring Rationale: this closing note previously argued that a package declaration has no
- * executable decision site, so implementation-decision labels stay beside the methods they explain,
- * and it carried no rationale label at all as a result. That reasoning does not survive contact with
- * this package's actual decisions. The five rationales restored above are package-SCOPED rather than
- * method-scoped: the PAN-logging discipline binds every service added here and is satisfied by two
+ * <p>Assumptions: a package declaration has no executable decision site, which would put every
+ * implementation-decision label beside the method it explains -- and that reasoning does not survive
+ * contact with this package's actual decisions. The five rationales above are package-SCOPED rather
+ * than method-scoped: the PAN-logging discipline binds every service added here and is satisfied by two
  * classes today, so stating it beside either one would leave the third author unbound; the four
  * preserved consumer properties, the FIFO grouping contract and the reply-expiry resolution are
  * properties of the queue and its configuration that no single method owns; and the outbox relocation
  * is the reason two classes exist in the shape they do, which is not a fact either class can state
- * alone. An earlier revision of this file did carry exactly these five, and they were dropped when the
- * inventory and ownership sections were added -- a regression rather than a decision, which is why
- * they are restored rather than reinvented.</p>
+ * alone.</p>
  *
  * <p>Assumptions: labels beside individual methods remain the norm and are unaffected. A decision
  * whose blast radius is one statement belongs next to that statement, and moving it here would put it

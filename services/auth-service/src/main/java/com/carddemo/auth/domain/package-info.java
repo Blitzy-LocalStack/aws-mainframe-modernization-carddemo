@@ -51,25 +51,11 @@
  * mapping in this package assumes the {@code auth} schema already exists by the time the migration
  * runs and never attempts to create it.</p>
  *
- * <h2>Why this charter exists, and the form it takes</h2>
- *
- * <p>Assumptions: the project Explainability rule requires a docstring on every module entry point,
- * and in Java the entry point of a package is its package declaration, which only
- * {@code package-info.java} can carry -- so this file is load-bearing rather than decorative. Two
- * Checkstyle modules enforce that independently and neither is redundant: {@code JavadocPackage}
- * inspects the file set and requires this file to exist in any directory holding an audited source
- * file, while {@code MissingJavadocPackage} inspects the parsed tree and requires it to carry Javadoc.
- * A charter reduced to a bare package statement satisfies the first and fails the second, which is
- * why prose is the deliverable and the file's mere existence is not.
- *
- * <p>Assumptions: this compilation unit holds one statement, so the rationale the rule's
- * inline-comment half asks for has no adjacent executable line to sit beside and is carried inside
- * this block under the four canonical labels -- the only placement a package makes available. No
- * parameter, return or exception at-clause appears, because a package declaration accepts no
- * argument, yields no value and raises nothing, and {@code NonEmptyAtclauseDescription} would report
- * an invented tag with an empty body; omitting them is therefore the compliant reading of the rule
- * rather than a departure from it. The written convention every block here follows is
- * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
+ * <p>Assumptions: a package's only documentation anchor is its declaration, so the rationale the
+ * Explainability rule asks for is carried inside this block under the four canonical labels rather
+ * than beside an executable line. No parameter, return or exception at-clause appears, because a
+ * package declaration accepts no argument, yields no value and raises nothing. The written convention
+ * every block here follows is {@code docs/CODE_DOCUMENTATION_STANDARD.md}.
  * <h2>The record this mapping is derived from</h2>
  *
  * <p>The baseline record is {@code 01 SEC-USER-DATA}, declared at {@code app/cpy/CSUSR01Y.cpy}
@@ -134,13 +120,6 @@
  * {@code UserMapper} converts between the entity below and the API shapes in
  * {@code com.carddemo.auth.dto}. Both packages exist, so a reader following this sentence reaches the
  * code it names. A type in this package sees a decoded value and a column, never a byte range.</p>
- *
- * <p>Refactoring Rationale: an earlier revision of the sentence above qualified
- * {@code com.carddemo.auth.mapper} as "not yet authored", on the reasoning that a bare "implemented
- * by" would name a package a reader could not open. The reasoning was sound and the fact it rested on
- * has changed: {@code mapper/UserMapper.java} is present, so the qualification now sends a reader away
- * from the one class that discharges the boundary this section is about. It is withdrawn rather than
- * reworded, because the plain sentence is what the qualification was standing in for.</p>
  *
  * <p>Alternatives Considered: letting the entity hold its own offsets and widths, so that one type
  * describes both the row and the record it came from. Rejected on the precedent the existing test

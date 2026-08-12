@@ -1174,6 +1174,26 @@ account-service deliverable and the authoritative column list for this schema.
 Every column name, type, nullability, key and index recorded above was verified
 against that migration applied to a live PostgreSQL 17 database.
 
+Refactoring Rationale:  A **fourth** table now exists in this schema and is
+deliberately not described above: `account.inquiry_reply_ledger`, created by
+`services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql`.
+It is absent from the mapping tables because it derives from **no copybook** — it
+carries no migrated record and no reference field — and every row in those tables
+states the `PICTURE` clause its column derives from. Listing it there would put a
+column with no baseline provenance beside columns whose whole purpose is to record
+one, which is the property that makes those tables checkable. What it is for belongs
+to the messaging contract and is recorded in
+[`messaging-contracts.md`](messaging-contracts.md): the asynchronous inquiry consumer
+sends its reply and then returns, and the queue acknowledges the request only on that
+return, so a task killed between the two would otherwise let the next delivery send a
+second reply bearing the same correlation identifier as the first. The ledger records
+the answer under the requester's own identity before it is sent.
+
+> Assumptions: the count above is therefore "the three tables **derived from
+> copybooks**" rather than "the three tables in this schema", and the distinction is
+> stated because a reader counting `\dt account.*` against this document must be able
+> to account for the difference.
+
 > Refactoring Rationale: **this subsection formerly recorded the dependency as
 > UNSATISFIED, and the change is worth stating rather than silently editing away.**
 > It reported that the three tables were "described by this document and by two

@@ -37,19 +37,19 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Holds the harness post-state and the four cross-schema repositories against a real engine.
+ * Holds the harness post-state and the six cross-schema repositories against a real engine.
  *
  * <h2>Purpose</h2>
  *
- * <p>Purpose: this module maps eight entities across four schemas and owns only one of the four. The
- * seven mappings that address the other three -- ledger, account and reference -- are the migration
+ * <p>Purpose: this module maps ten entities across five schemas and owns only one of the five. The
+ * nine mappings that address the other four -- ledger, account, reference and card -- are the migration
  * plan's claim that a batch job can read a sibling context's table under a scoped grant without a
  * service call, and until this class existed nothing executed them. What it asserts is therefore the
- * JOIN between two artifacts: the seven foreign tables the init script mirrors, and the repository
+ * JOIN between two artifacts: the nine foreign tables the init script mirrors, and the repository
  * interfaces and entity mappings that address them.</p>
  *
  * <p>Refactoring Rationale: a mirrored schema drifts silently. The init script reproduces column names,
- * widths, nullability and constraints from three other modules' migrations, and nothing compiles the
+ * widths, nullability and constraints from four other modules' migrations, and nothing compiles the
  * two against each other -- so a column renamed in an owning migration leaves the mirror correct-looking
  * and this module's entity mapping pointing at a name production no longer has. Executing every mapping
  * against the mirror is what converts that drift from a silent divergence into a failing test, and the
@@ -71,6 +71,13 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * invalid-key clause, so a missing DEFAULT row reaches {@code 9999-ABEND-PROGRAM} and abends. The
  * observable symptom is a crash attributed to the interest job while the interest job behaves exactly as
  * specified.</p>
+ *
+ * <p>Assumptions: the two export-only masters are asserted for their ORDERING as well as for their
+ * resolution, which the four older groups do not all need. Their walks feed a dataset whose record
+ * sequence numbers are assigned in write order, so a walk that returned the right set in the wrong
+ * order would renumber the export between two runs over identical data -- a difference no assertion
+ * about the set could see. The card master additionally proves that a schema absent from the
+ * connection's search path resolves through the entity's own qualification.</p>
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause. Every member below carries its own.</p>
@@ -189,6 +196,14 @@ class CrossSchemaFeedRepositoryIT {
     @Autowired
     private DisclosureGroupRepository disclosureGroups;
 
+    /** The customer master, injected as the production repository interface. */
+    @Autowired
+    private CustomerRepository customers;
+
+    /** The card master, injected as the production repository interface. */
+    @Autowired
+    private CardRepository cards;
+
     /** The persistence context, used to persist seeds and to detach between write and read. */
     @Autowired
     private EntityManager entityManager;
@@ -236,6 +251,14 @@ class CrossSchemaFeedRepositoryIT {
             this.jdbc.update("DELETE FROM ledger.daily_transactions");
             this.jdbc.update("DELETE FROM ledger.transaction_rejects");
             this.jdbc.update("DELETE FROM account.card_xref");
+            // WHY : Assumptions: the two export-only masters are emptied here as well, and they are
+            //       seeded through plain SQL rather than through the persistence context because
+            //       both projections are immutable and map neither their enciphered columns nor
+            //       their version column -- so there is no entity path that could supply
+            //       account.customers.ssn_encrypted, which the owning schema declares NOT NULL.
+            //       That is the mapping working as intended rather than a gap in it.
+            this.jdbc.update("DELETE FROM account.customers");
+            this.jdbc.update("DELETE FROM card.cards");
         });
     }
 
@@ -246,29 +269,162 @@ class CrossSchemaFeedRepositoryIT {
      * as the missing post-state it is rather than as an unrelated-looking query failure inside a later
      * case. The classpath-relative path has no compiler to check it.</p>
      *
-     * <p>Assumptions: the seven foreign tables are asserted as a closed set rather than by presence
-     * alone. A harness that had grown an eighth table would be mirroring structure no test can reach,
+     * <p>Assumptions: the nine foreign tables are asserted as a closed set rather than by presence
+     * alone. A harness that had grown a tenth table would be mirroring structure no test can reach,
      * which is the drift surface the script's own rationale sets out to keep closed.</p>
+     *
+     * <p>Refactoring Rationale: the set grew from seven tables in three schemas to nine in four, and
+     * the two additions are {@code account.customers} and {@code card.cards}. They are here because the
+     * export job now reads all five masters {@code app/cbl/CBEXPORT.cbl} reads -- it read three, and its
+     * customer and card phases logged a heading, reported zero and emitted nothing. Hibernate validates
+     * every mapped table at context start, so without these two the whole module fails to start rather
+     * than one query failing, which is exactly what this case exists to report by name.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the init script established the three foreign schemas and their seven tables")
+    @DisplayName("the init script established the four foreign schemas and their nine tables")
     void theHarnessEstablishedItsPostState() {
         List<String> tables = this.jdbc.queryForList(
                 "SELECT table_schema || '.' || table_name FROM information_schema.tables"
-                        + " WHERE table_schema IN ('ledger', 'account', 'reference')"
+                        + " WHERE table_schema IN ('ledger', 'account', 'reference', 'card')"
                         + " ORDER BY table_schema, table_name",
                 String.class);
 
+        // WHY : ⚠️ Refactoring Rationale: this expectation named account.customers and card.cards THREE
+        //       TIMES each and is corrected to one occurrence apiece. The query selects from
+        //       information_schema.tables, which reports a table once, so a repeated element made the
+        //       assertion unsatisfiable by any database -- it demanded thirteen rows from a nine-row
+        //       result and reported the two additions as MISSING, which reads as a harness that never
+        //       created them. Assumptions: the ordering asserted is the query's own
+        //       ORDER BY table_schema, table_name and not a hand-kept sequence, which is why the two
+        //       additions sit third and fourth rather than at the end.
         assertThat(tables).containsExactly(
                 "account.accounts",
                 "account.card_xref",
+                "account.customers",
+                "card.cards",
                 "ledger.daily_transactions",
                 "ledger.transaction_category_balances",
                 "ledger.transaction_rejects",
                 "ledger.transactions",
                 "reference.disclosure_groups");
+    }
+
+    /**
+     * Confirms the customer master is readable through its projection, in customer-identifier order.
+     *
+     * <p>Purpose: this is the first half of the seam the export depends on, and until it existed the
+     * customer phase of {@code ExportJob} emitted nothing at all. Two properties are asserted together
+     * because each is worthless without the other: that the walk RESOLVES against a table in a schema
+     * this module reads under a grant, and that it arrives in the key order the reference's sequential
+     * read returns.</p>
+     *
+     * <p>Assumptions: the rows are seeded through plain SQL and are seeded OUT OF ORDER, so the
+     * ascending result is produced by the query's own ordering clause rather than by insertion order.
+     * A relational read guarantees no order unless one is requested, and an unordered walk would pass an
+     * insertion-ordered assertion on most engines while renumbering the export's records between runs.
+     * </p>
+     *
+     * <p>Assumptions: the enciphered columns are supplied here because the owning schema declares
+     * {@code ssn_encrypted} NOT NULL, and they are supplied as ciphertext-shaped bytes rather than as
+     * readable text. What matters for this case is that a row carrying them reads back through a
+     * projection that maps neither, which is exactly the state the registered divergence
+     * {@code D-EXPORT-PROTECTED-FIELDS-ELIDED} describes.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the customer master reads back through its projection in identifier order")
+    void theCustomerMasterWalksInIdentifierOrder() {
+        this.transactionTemplate.executeWithoutResult(status -> {
+            seedCustomer(200L, "SECOND");
+            seedCustomer(100L, "FIRST");
+        });
+
+        List<Long> identifiers = new ArrayList<>();
+        List<String> names = new ArrayList<>();
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.customers.findAllByOrderByCustomerIdAsc().forEach(row -> {
+                    identifiers.add(row.getCustomerId());
+                    names.add(row.getFirstName());
+                }));
+
+        assertThat(identifiers)
+                .as("ascending customer identifier, the record-key order of CBEXPORT.cbl:38")
+                .containsExactly(100L, 200L);
+        assertThat(names)
+                .as("each row carries its own mapped columns, not another row's")
+                .containsExactly("FIRST", "SECOND");
+    }
+
+    /**
+     * Confirms the card master is readable through its projection, in card-number order.
+     *
+     * <p>Purpose: this is the second half of that seam, and it additionally proves the ONE schema this
+     * module reaches by name alone. The connection's search path is
+     * {@code batch,ledger,account,reference} and does not include {@code card}, so a walk that resolved
+     * here proves the entity's explicit schema qualification is doing its job -- a mapping that relied
+     * on the search path would fail with an undefined table instead.</p>
+     *
+     * <p>Assumptions: the seeded card numbers differ in their LAST digit and are inserted in descending
+     * order, so an unordered or a reversed walk is distinguishable from the ascending one the reference
+     * returns. Assumptions: the ordering is a BYTE ordering over a character key rather than a numeric
+     * one, which is why a leading-zero card number is seeded as the lower of the two: a numeric
+     * ordering would place it differently and the record-key order the reference walks is character.
+     * </p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the card master reads back through its projection in card-number order")
+    void theCardMasterWalksInCardNumberOrder() {
+        this.transactionTemplate.executeWithoutResult(status -> {
+            seedCard("4111111111111111", 555L);
+            seedCard("0111111111111111", 555L);
+        });
+
+        List<String> cardNumbers = new ArrayList<>();
+        this.transactionTemplate.executeWithoutResult(status ->
+                this.cards.findAllByOrderByCardNumAsc()
+                        .forEach(row -> cardNumbers.add(row.getCardNum())));
+
+        assertThat(cardNumbers)
+                .as("ascending card number as CHARACTERS, the record-key order of CBEXPORT.cbl:62")
+                .containsExactly("0111111111111111", "4111111111111111");
+    }
+
+    /**
+     * Seeds one customer row, including the two columns the batch projection does not map.
+     *
+     * @param customerId the identifier the row is keyed on
+     * @param firstName the first name, used to prove each row carries its own columns
+     */
+    private void seedCustomer(long customerId, String firstName) {
+        this.jdbc.update("INSERT INTO account.customers (customer_id, first_name, middle_name,"
+                        + " last_name, addr_line_1, addr_line_2, addr_line_3, addr_state_cd,"
+                        + " addr_country_cd, addr_zip, phone_num_1, phone_num_2, ssn_encrypted,"
+                        + " govt_issued_id_encrypted, dob, eft_account_id, pri_card_holder_ind,"
+                        + " fico_credit_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                        + " ?, ?, ?, ?)",
+                customerId, firstName, "MIDDLE", "LAST", "ADDR ONE", "ADDR TWO", "ADDR THREE",
+                "TX", "USA", "78727", "5125551212", "5125551213",
+                new byte[] {1, 2, 3, 4}, new byte[] {5, 6, 7, 8},
+                java.sql.Date.valueOf("1980-05-17"), "EFT0000001", "Y", (short) 750);
+    }
+
+    /**
+     * Seeds one card row, including the enciphered column the batch projection does not map.
+     *
+     * @param cardNum the sixteen-character card number the row is keyed on
+     * @param accountId the account the card belongs to
+     */
+    private void seedCard(String cardNum, long accountId) {
+        this.jdbc.update("INSERT INTO card.cards (card_num, account_id, cvv_encrypted,"
+                        + " embossed_name, expiration_date, active_status)"
+                        + " VALUES (?, ?, ?, ?, ?, ?)",
+                cardNum, accountId, new byte[] {9, 10}, "CARD HOLDER NAME",
+                java.sql.Date.valueOf("2030-01-01"), "Y");
     }
 
     /**

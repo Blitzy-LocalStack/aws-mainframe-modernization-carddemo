@@ -22,7 +22,7 @@
  * interface in this directory would fail the charter-presence check if this
  * file were not part of the same package.
  *
- * <p>Exactly seven {@code .java} files constitute this package, and ALL SEVEN are landed:
+ * <p>Exactly eight {@code .java} files constitute this package, and ALL EIGHT are landed:
  *
  * <ul>
  *   <li>{@code package-info.java}, this charter -- LANDED;</li>
@@ -57,7 +57,14 @@
  *       reject-event sequence {@code reject_seq} the owning migration generates. It declares no
  *       query of its own, because the reference opens the reject dataset for output only and reads
  *       it back nowhere, so there is no read path to transcribe; its role is the owned table's
- *       physical contract rather than a behaviour.</li>
+ *       physical contract rather than a behaviour; and</li>
+ *   <li>{@code AccountBalanceRepository}, the ONE access path in this module that reaches a table
+ *       another context owns -- LANDED. It reads and reduces {@code account.accounts.curr_bal}
+ *       through schema-qualified native statements on the shared persistence context, so the
+ *       bill-payment screen's two writes commit as one transaction the way
+ *       {@code app/cbl/COBIL00C.cbl} L233 and L235 commit under one CICS syncpoint. Its own file
+ *       carries the privilege grant it depends on, the HTTP arrangement it replaced and the reason
+ *       an entity was not added for the table instead.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the inventory is re-stated from the directory each time a file lands,
@@ -67,7 +74,7 @@
  * {@code TransactionCategoryBalanceRepository} as not yet authored; both were present, each
  * carrying substantive query rulings. A later revision then said FOUR of five were landed and
  * kept {@code TransactionRejectRepository} as planned; that interface is present too. The count
- * now stands at seven because the category-balance write path was split into a fragment interface
+ * now stands at eight: the category-balance write path was split into a fragment interface
  * and its implementation, for the reason their own files record. A census is consulted precisely
  * to learn which contracts are settled, so under-reporting sends a reader to write a file that
  * already exists -- which is why the number and the LANDED markers are both re-read from the
@@ -86,14 +93,24 @@
  * batch deployable, and that split is what keeps the posting unit of work one atomic commit. The
  * other six either declare queries a landed caller in this module already issues or, in the
  * fragment pair's case, replace a mechanism that was measurably wrong -- which is a different
- * justification, recorded separately so neither can be mistaken for the other.
+ * justification, recorded separately so neither can be mistaken for the other. The eighth,
+ * {@code AccountBalanceRepository}, has a third justification again: it maps no table at all and
+ * declares two statements against one this module holds a named grant on, so the reasoning that
+ * admits it is atomicity rather than ownership.
 
  *
  * <p>Trade-offs: the inventory is closed rather than extensible. There is no shared base
  * repository, keyset base interface, Specification or Criteria helper, DTO, mapper or service
  * here, and there is no subdirectory. The cost is repetition across the small interfaces; what is
  * bought is one visible repository per physical record contract and no hidden query surface behind
- * an eighth type.
+ * a ninth type.
+ *
+ * <p>Refactoring Rationale: this sentence read "behind an eighth type" while the directory held seven, and
+ * the eighth has now landed -- {@code AccountBalanceRepository}. The bound the sentence expresses is
+ * unchanged and is what matters: one visible type per physical contract reached from this module, and no
+ * query surface a reader of the package cannot see. That type is the first here to reach a table this
+ * module does not own, so it is also the first that could plausibly have been hidden inside a service;
+ * filing it here is what keeps "all data access is in this package" true rather than nearly true.
  *
  * <p>Refactoring Rationale: this paragraph used to include "custom fragment" and "implementation
  * fragment" in that list of absences, and the exclusion has been withdrawn for exactly ONE record.
@@ -162,19 +179,30 @@
  * <p>The service assembles the query result into
  * {@code com.carddemo.common.web.PageResponse}. Its record contract exposes
  * exactly four members: {@code items}, {@code firstKey}, {@code lastKey} and
- * {@code hasNext}. The two boundary keys name the ends of the page returned and
+ * {@code hasNext}. The two boundary keys name the ends of the page returned
+ * and
  * are {@code null} when no row is returned and no scan position remains in that
  * direction; {@code hasNext} is admitted only alongside a present
  * {@code lastKey}, so a caller told a further page follows always holds the
- * token to request it with. A backward step is expressible exactly when
- * {@code firstKey} is present. The repository supplies ordered row boundaries,
+ * token to request it with. Refactoring Rationale: there is no backward availability member.
+ * Whether a backward step is EXPRESSIBLE is the presence of {@code firstKey}; whether a row waits
+ * at that position is a property of where the caller stands in the walk, and the reference answers
+ * it from the terminal rather than from the file -- {@code COTRN00C} carries
+ * {@code CDEMO-CT00-PAGE-NUM} in the communication area at line 65, tests it for greater than one at
+ * line 245 and raises {@code 'You are already at the top of the page...'} at line 248 without
+ * reading anything. That ordinal's migrated home is the client's navigation state, so a fifth
+ * member here would answer from the service what the reference answers from the client.
+ * The repository supplies ordered row boundaries,
  * while the shared envelope owns its sealed cursor representation.
  *
  * <p>Assumptions: requesting one extra row is a transcription of the
  * baseline, not an invented heuristic. {@code COTRN00C} line 308 performs an
  * eleventh {@code READNEXT} beyond the ten-row fill; lines 309 to 313 set the
  * next-page condition solely from that read's outcome. The surplus row is not
- * returned. Its existence becomes {@code hasNext}.
+ * returned. Its existence settles the one availability member on a forward walk. On a backward walk
+ * that member is unconditionally true -- a page reached by paging backward was reached FROM a page,
+ * which therefore exists -- so the backward probe the same program performs at line 360 answers a
+ * question this envelope does not publish.
  *
  * <p>Refactoring Rationale: the mapping is one-to-one because the baseline
  * state at {@code COTRN00C} lines 62 to 70 is a keyset cursor rather

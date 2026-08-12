@@ -175,14 +175,58 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>Two {@code .java} files and no others -- this descriptor, and {@code LayeringRulesTest}, which
- * holds the invariants described above. Both are present: the rule class declares three
- * {@code @Test} methods carrying the invariants and three more guarding against a vacuous pass, and
- * the {@code architecture-rules} execution runs all six in this module and in each of the eight
- * consumers of the shared kernel. The package deliberately carries no helper, no base class, no second rule
- * class, no fixture and no resource, because a rule split between a class and a helper can be
+ * <pre>
+ * this directory: 10 java files = 9 tests + 1 charter
+ * </pre>
+ *
+ * <ul>
+ *   <li>{@code LayeringRulesTest} across 9 cases -- the layering invariants described above, together
+ *       with the cases that guard against a vacuous pass. Assumptions: this is the ONE class the
+ *       {@code architecture-rules} Surefire execution carries into the eight consumers of the shared
+ *       kernel, so its nine cases run once here and once in each of them.</li>
+ *   <li>{@code PackageCharterInventoryTest} across 4 cases -- holds every measured claim a package
+ *       charter publishes to the directory the charter lives in.</li>
+ *   <li>{@code SharedKernelInventoryTest} across 7 cases -- re-derives this module's class inventory
+ *       from the directory and holds the kernel's own charters to it.</li>
+ *   <li>{@code ServiceCatalogInventoryTest} across 4 cases -- re-derives the service catalog's
+ *       measurable current-state claims from the repository.</li>
+ *   <li>{@code RuntimeConfigurationContractTest} across 4 cases -- asserts that every runtime setting a
+ *       service requires is one the infrastructure delivers, and the converse.</li>
+ *   <li>{@code RuntimeDeletePrivilegeContractTest} across 2 cases -- asserts that every row-deleting
+ *       call site is one the database permits, and that no table carries a delete grant nothing
+ *       uses.</li>
+ *   <li>{@code CrossSchemaPrivilegeContractTest} across 3 cases -- asserts that the batch role's
+ *       cross-schema grants are exactly the schemas its code can reach: no schema is granted that the
+ *       service's own {@code search_path} omits, no schema on that path is left ungranted, and every
+ *       schema an entity explicitly maps to is granted.</li>
+ *   <li>{@code ServiceReadmeInventoryTest} across 3 cases -- holds the test census each service README
+ *       publishes to that module's own test tree, so a class added or removed cannot leave a stale count
+ *       standing in prose. The third case is the anti-vacuity floor.</li>
+ *   <li>{@code ApplicationContextWiringContractTest} across 3 cases -- asserts that each deployable
+ *       could actually refresh its context, in the three ways one of them could not: a collaborator a
+ *       module injects but never publishes, a component declaring two constructors and marking neither,
+ *       and a module injecting the HTTP client builder without the Spring Boot 4 starter that publishes
+ *       it. Assumptions: all three defects were found by RUNNING a bootable jar and none by any test,
+ *       because every context-loading test in this reactor defines a narrow configuration of its own
+ *       rather than the application -- which is correct for what those tests assert and is exactly why
+ *       they cannot see production wiring.</li>
+ * </ul>
+ *
+ * <p>Refactoring Rationale: this section said two {@code .java} files and no others, and that
+ * {@code LayeringRulesTest} declared six cases. Both figures are superseded: eight further
+ * repository-reading checks have landed beside it and the rule class now declares nine. The
+ * eight are here rather than in each module for the reason the layering rules are -- the check is
+ * identical everywhere, so nine copies would be nine files to keep in step -- and they read repository
+ * FILES rather than importing service types, so the kernel's inward-only dependency rule is untouched.
+ * The marker line above is re-measured against this directory by
+ * {@code PackageCharterInventoryTest} itself, and each declared case count is re-measured against the
+ * class it names, so this inventory cannot go stale again without failing.</p>
+ *
+ * <p>Assumptions: {@code LayeringRulesTest} remains the only class here carried into other modules, and
+ * the package still deliberately carries no helper, no base class, no fixture and no resource, because a
+ * rule split between a class and a helper can be
  * weakened by editing the helper, where the change reads as maintenance rather than as the
- * relaxation of an architectural constraint that it is. The class name and this directory are
+ * relaxation of an architectural constraint that it is. That class's name and this directory are
  * treated as a fixed external contract rather than an internal detail, since the build descriptors
  * name both and the services pipeline may invoke that class by name as a labelled step of its
  * own.</p>

@@ -145,9 +145,49 @@ class StatementControllerTest {
                 .andExpect(jsonPath("$.items[0].transactionId").value("0000000000000001"))
                 .andExpect(jsonPath("$.items[0].amount").value("-1234.56"))
                 .andExpect(jsonPath("$.statement").doesNotExist())
+                // WHY : Assumptions: the two count members are asserted on the ORDINARY body and not
+                //       only on the truncated one, because false and equal is the state a caller reads
+                //       on nearly every statement and is therefore the state it must be able to trust.
+                //       A member present only when it is interesting is a member a client cannot rely
+                //       on.
+                .andExpect(jsonPath("$.transactionCount").value(1))
+                .andExpect(jsonPath("$.truncated").value(false))
                 .andExpect(header().string(
                         StatementController.CONTENT_SECURITY_POLICY_HEADER,
                         StatementController.STATEMENT_POLICY));
+    }
+
+    /**
+     * Asserts that a bounded window reports the card's whole count and says it was bounded.
+     *
+     * <p>Purpose: this is the case the operation had no way to express. The service bounds the composed
+     * window at {@code MAX_RESPONSE_TRANSACTIONS} rows, and the argument recorded for that bound is that
+     * a caller compares the rows it received against the heading's true count -- but this operation
+     * returns no heading, so before the two count members existed a bounded body and a whole one were
+     * indistinguishable to a caller of it.</p>
+     *
+     * <p>Assumptions: the composed document is stubbed with FEWER rows than its heading counts, which is
+     * exactly the shape the bounded service produces: the heading's count comes from a database aggregate
+     * over the whole card while the rows are a window onto it. The figures are deliberately far apart so
+     * that a body echoing the array's own length is visibly wrong rather than coincidentally right.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a bounded window reports the whole count and flags itself truncated")
+    void aBoundedWindowReportsTheWholeCountAndFlagsItself() throws Exception {
+        when(statements.compose(any())).thenReturn(new StatementDocument(
+                headingCounting(4211), List.of(line(), line())));
+
+        mockMvc.perform(post(StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(REQUEST_MAPPER.writeValueAsString(
+                                new StatementRequest(SAMPLE_CARD, "00000000011"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.transactionCount")
+                        .value(4211))
+                .andExpect(jsonPath("$.truncated").value(true));
     }
 
     // WHY : Assumptions: a card with no activity is asserted to answer 200 with an EMPTY array and not
@@ -184,6 +224,12 @@ class StatementControllerTest {
                 .getContentAsString();
 
         assertThat(body).contains("\"items\":[]");
+        // WHY : Assumptions: an empty statement is asserted NOT truncated, which is the one edge the
+        //       derivation could plausibly get wrong. Zero rows against a zero count is equality and not
+        //       shortfall, so a derivation written as "fewer rows than the count" rather than "strictly
+        //       fewer" would flag every inactive card as a truncated document -- and a caller reading
+        //       that would go looking for rows that do not exist.
+        assertThat(body).contains("\"transactionCount\":0").contains("\"truncated\":false");
     }
 
     /**
@@ -379,12 +425,26 @@ class StatementControllerTest {
      * @return the heading
      */
     private static StatementResponse heading() {
+        return headingCounting(1);
+    }
+
+    /**
+     * Builds one statement heading reporting a stated transaction count.
+     *
+     * <p>Assumptions: the count is a parameter because it is the one heading member that can legitimately
+     * disagree with the number of rows returned beside it -- it is a database aggregate over the whole
+     * card, while the rows are a bounded window onto that card. Every other member is fixed.</p>
+     *
+     * @param transactionCount how many transactions the statement covers in total; must not be negative
+     * @return the heading; never {@code null}
+     */
+    private static StatementResponse headingCounting(int transactionCount) {
         return new StatementResponse(
                 MASKED_CARD,
                 "00000000011",
                 "JOHN Q PUBLIC",
                 Money.of("-1234.56"),
-                1,
+                transactionCount,
                 "s3://bucket/statements/11-1111.txt",
                 "s3://bucket/statements/11-1111.html",
                 "2026-08-05 09:14:27.481903");

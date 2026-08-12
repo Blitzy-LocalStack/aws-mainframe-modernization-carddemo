@@ -453,6 +453,36 @@ accepts it in a request **body**, which this log does not record. Its own
 contract test fails the build if any published path template or declared query
 parameter carries a card number.
 
+The same bound now holds for the two identifiers beside it: **no published
+operation carries an account or a customer identifier in a path or a query
+string either.** Nine operations moved to reach that. Six were machine-called —
+the card listing and the pending-authorization listing narrow by account in a
+request body at `/api/v1/cards/search` and `/api/v1/authorizations/search`; the
+account-context read and the customer existence check became
+`POST /api/v1/accounts/lookup` and `POST /api/v1/customers/lookup`, the latter
+collapsing a `HEAD` and a `GET` into one `POST`; and the account-keyed
+cross-reference read and the bill-payment write moved their identifier into the
+body each already carried. The other three are the end-user account screens:
+`POST /api/v1/accounts/view`, `POST /api/v1/accounts/update` and
+`POST /api/v1/accounts/card-cross-references/search`. `account-service`'s own
+contract test fails the build if any published path template or declared
+parameter regains a place to put either identifier, which is the same standing
+guarantee `card-service` already had for a card number.
+
+Trade-offs: two of those three are READS expressed as `POST`, which gives up
+cacheability by method semantics. That costs nothing — both answers carry the
+revision a caller submits back as `If-Match`, so a cached body would produce a
+conflict that did not exist — and it is the only control available here, because
+this record is composed by the load balancer before any application code runs and
+no masker behind it can reach the field. Alternatives Considered: leaving the
+three keyed and sealing each identifier into an opaque selector, as
+`card-service` does for a card number. Rejected because a selector must be
+**minted** by the service and handed to the caller, and the account view is the
+ENTRY point — the user types the identifier into a filter field, so there is no
+prior response for a token to come from and a selector scheme would still need a
+body-carrying operation to issue one. It would also add a deployment secret to a
+service that needs none.
+
 Refactoring Rationale: this section previously placed that bound on
 [`GlobalExceptionHandler`](../../../services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java),
 stating that the request path is narrowed there "before it reaches either a log
@@ -464,15 +494,22 @@ runs. Nothing behind the load balancer can filter it, redact it or unwrite it.
 What that masker does bound is what the **service** writes — its own log lines and
 its own error bodies — which is a different and also worthwhile exposure.
 
-Trade-offs: other selectors **are** retained here in the clear — an account
-identifier, a customer identifier, a transaction identifier, a user identifier.
-That is accepted and named rather than argued away: none of them is cardholder
-data, each is an internal identifier conferring no access on its own, and the
-destination bounds who can read them. Two further bounds hold at this end: the
-destination is the purpose-built bucket described in §9.1 rather than a general
-log bucket, so the records are reachable only by an operator identity; and the
-header set ALB records does not include `Authorization` or `Cookie`, so no bearer
-credential reaches this destination at all.
+Trade-offs: two selectors **are** retained here in the clear — a transaction
+identifier at `/api/v1/transactions/{transactionId}` and a user identifier at
+`/api/v1/auth/users/{userId}`. That is accepted and named rather than argued
+away: neither appears in the prohibition the sensitive-data contract states, each
+is an internal identifier conferring no access on its own and naming no person,
+and the destination bounds who can read them. Refactoring Rationale: this
+paragraph listed FOUR — adding an account identifier and a customer identifier —
+and defended all four on the ground that "none of them is cardholder data". That
+defence was refuted by this migration's own sensitive-data contract, which names
+account and customer identifiers in the same sentence as the primary account
+number, and the two are now absent from every request line rather than defended
+in one. Two further bounds hold at this end regardless: the destination is the
+purpose-built bucket described in §9.1 rather than a general log bucket, so the
+records are reachable only by an operator identity; and the header set ALB
+records does not include `Authorization` or `Cookie`, so no bearer credential
+reaches this destination at all.
 
 Alternatives Considered: disabling access logging to remove the residue
 outright. Rejected — the baseline already had that property and it is the defect

@@ -78,12 +78,18 @@ public class GenerateReportsTask implements ReportingTask {
         }
         LocalDate businessDate = LocalDate.parse(token);
 
-        TransactionReportService.ReportGenerationSummary summary =
-                publisher.publish(businessDate, businessDate, businessDate);
+        ReportArtifactPublisher.PublishedArtifact published = publisher.publishDaily(businessDate);
+        TransactionReportService.ReportGenerationSummary summary = published.summary();
 
-        LOG.info("event=reporting.report.produced businessDate={} records={} detailLines={}"
-                        + " pageBands={} groupBands={}",
-                businessDate, summary.recordsWritten(), summary.detailLines(),
+        // WHY : Refactoring Rationale: the record names the ARTIFACT and the RUN, where an earlier
+        //       revision recorded only the counts. Neither was recoverable afterwards: the key was
+        //       assembled inside the publisher and discarded, and the run identity was in the container's
+        //       environment and never read. An operator asked which object a night produced had a line
+        //       saying how many records it held and nothing saying where they went.
+        LOG.info("event=reporting.report.produced businessDate={} run={} artifact={} records={}"
+                        + " detailLines={} pageBands={} groupBands={}",
+                businessDate, ReportingTaskRunner.runIdentity(), published.locator(),
+                summary.recordsWritten(), summary.detailLines(),
                 summary.pageTotalBands(), summary.accountTotalBands());
     }
 }

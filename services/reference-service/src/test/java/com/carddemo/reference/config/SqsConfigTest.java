@@ -171,4 +171,53 @@ class SqsConfigTest {
         });
         return configurer;
     }
+
+    /**
+     * The context publishes the shared listener error handler, so a failed delivery is still recorded.
+     *
+     * <p>Purpose: the queue starter's own failure record is switched off by NAME in
+     * {@code carddemo-common-defaults.yml}, because it renders the throwable as a trailing argument and the
+     * logging facade then prints every exception message in the cause chain -- text written by a driver, a
+     * codec or a validation library, which on this queue can quote a request value verbatim. The
+     * suppression is unconditional, so deleting this bean would not leave a quieter log: it would leave the
+     * framework's record with nothing in front of it and no replacement behind it.</p>
+     *
+     * <p>Refactoring Rationale: the handler's own behaviour -- the message-free rendering and the rethrow
+     * that keeps the queue's redrive contract intact -- is asserted once, in the shared kernel's
+     * {@code RethrowingDigestErrorHandlerTest}. What this case asserts is the part that can only be wrong
+     * HERE: that this context publishes it at all, and publishes it under the type the starter's factory
+     * method looks the context up by. A handler declared as its concrete type would compile and would never
+     * be installed.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws ReflectiveOperationException if the bean method cannot be found under the name the
+     *     starter's context lookup depends on, which is the deletion this case exists to report
+     */
+    @Test
+    @DisplayName("the context publishes the shared listener error handler under the starter's own type")
+    void theContextPublishesTheSharedListenerErrorHandler() throws ReflectiveOperationException {
+        java.lang.reflect.Method bean = SqsConfig.class.getDeclaredMethod("dateInquiryListenerErrorHandler");
+
+        assertThat(bean.getReturnType())
+                .as("the starter looks the context up by %s; a bean declared as its concrete type is"
+                        + " created and then never installed",
+                        io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler.class.getName())
+                .isEqualTo(io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler.class);
+        assertThat(bean.isAnnotationPresent(org.springframework.context.annotation.Bean.class))
+                .as("without @Bean the method is ordinary code and the handler is never registered")
+                .isTrue();
+        assertThat(bean.getAnnotations())
+                .as("a condition would let the one record of a failed delivery be absent whenever"
+                        + " something else happened to publish an error handler first")
+                .noneMatch(annotation -> annotation.annotationType().getName()
+                        .startsWith("org.springframework.boot.autoconfigure.condition."));
+        assertThat(new SqsConfig().dateInquiryListenerErrorHandler())
+                .isInstanceOf(com.carddemo.common.messaging.RethrowingDigestErrorHandler.class);
+        assertThat(SqsConfig.LISTENER_SOURCE)
+                .as("the source is the only field distinguishing this listener's failures from another"
+                        + " service's in one log stream")
+                .isEqualTo("date.inquiry");
+    }
+
 }

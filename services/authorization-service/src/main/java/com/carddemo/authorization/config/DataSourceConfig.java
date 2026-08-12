@@ -28,10 +28,10 @@ import org.springframework.context.annotation.Configuration;
  * {@code src/main/resources/application.yml}, is verified here against the schema the migration
  * engine was separately told to use.</p>
  *
- * <p>No business rule lives here. The pessimistic locking that serialises a decision on one pending
- * authorization, the fraud-marking guard and the outbox drain belong to the sibling
- * {@code service} and {@code repository} packages, so a reader looking for why an authorization was
- * declined will not find the answer in this class.</p>
+ * <p>No business rule lives here. The guarded reservation that decides one authorization, the
+ * pessimistic read that serialises a fraud marking, and the outbox drain's claim lease belong to the
+ * sibling {@code service} and {@code repository} packages, so a reader looking for why an
+ * authorization was declined will not find the answer in this class.</p>
  *
  * <h2>There is no second resource manager, and that absence is the point</h2>
  *
@@ -436,9 +436,13 @@ public class DataSourceConfig {
 
         // WHY : Assumptions: the lock bound has to be the smaller of the two server-side bounds, and
         //       the consequence of inverting them is a loss of information rather than a loss of
-        //       safety. This context takes a pessimistic row lock on a summary while it decides and
-        //       the outbox drain holds locks on the rows it has claimed, so contention here is an
-        //       ordinary operating condition rather than an exceptional one. With the lock bound the
+        //       safety. Contention here is an ordinary operating condition rather than an exceptional
+        //       one, and it arrives from two places. An ordinary UPDATE holds a row lock for the
+        //       duration of its own statement, so two guarded reservations against ONE account's
+        //       summary serialise on that row even though nothing on the consumer's path declares a
+        //       lock mode -- which is exactly the case the reservation's headroom predicate exists to
+        //       decide correctly. And the fraud marking DOES declare one, holding a single
+        //       authorization while it rewrites two of its fields. With the lock bound the
         //       larger, a row that is simply contended is cancelled by the statement bound instead,
         //       and the error an operator reads says a statement took too long rather than that two
         //       workers wanted the same authorization -- which are different problems with different

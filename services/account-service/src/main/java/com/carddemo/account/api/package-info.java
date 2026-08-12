@@ -9,22 +9,23 @@
  * carrying validation and no business logic. Persistence lives one layer down again, in the
  * repository layer, and nothing in this package reaches it directly.
  *
- * <h2>Target contract, not a directory listing</h2>
+ * <h2>The roster is a closed contract, not merely a directory listing</h2>
  *
- * <p>Assumptions: every class name, sibling package name and responsibility recorded in this charter
- * states the package's <b>target contract</b> as the migration plan assigns it at its section 0.5.1.3,
- * where this service's files are enumerated, and not a census of whatever
- * {@code services/account-service/src/main/java/com/carddemo/account/api} happens to contain when it is
- * read. The roster below is therefore closed: a type placed in this package that the roster does not
- * name is outside the contract rather than merely new.</p>
+ * <p>Assumptions: the roster below is closed, so a type placed in this package that the roster does not
+ * name is outside the contract rather than merely new. It is also a measurement: this directory holds
+ * this charter and the three controllers {@code AccountController}, {@code CustomerController} and
+ * {@code CardXrefController}, and the marker line is re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a fourth adapter arriving without an entry fails the build:</p>
+ *
+ * <pre>
+ * this directory: 4 java files = 3 classes + 1 charter
+ * </pre>
  *
  * <p>Alternatives Considered: deriving the roster from the directory rather than from the plan.
- * Rejected on two independent grounds. A roster that describes only what is present cannot express
- * what may <em>not</em> be added, and that prohibition is exactly the half of a package contract a
- * reader cannot reconstruct by listing files. Separately, {@code JavadocPackage} audits a directory
- * rather than a single compilation unit, so this charter has to govern the directory as a whole and
- * has to be readable before any class in it exists, or the directory fails the documentation gate
- * and the module does not build.</p>
+ * Rejected because a roster that describes only what is present cannot express what may <em>not</em> be
+ * added, and that prohibition is exactly the half of a package contract a reader cannot reconstruct by
+ * listing files.</p>
  *
  * <h2>The roster, and the baseline programs behind it</h2>
  *
@@ -69,35 +70,31 @@
  * the surface. Responsibilities are attributed to named baseline programs instead, because those
  * programs can be opened at the cited lines and a count could not be.</p>
  *
- * <p>Refactoring Rationale: this paragraph previously justified the absence of a count partly on the
- * grounds that no {@code openapi} directory existed under
- * {@code services/account-service/src/main/resources} for one to be read from. That is no longer true.
- * {@code openapi/account-api.yaml} now exists and is the contract of record for EVERY operation this
- * package publishes, and the sentence was corrected rather than left standing because a charter that
- * misdescribes its own module is worse than one that says less.</p>
- *
- * <p>Refactoring Rationale: the sentence that replaced it was corrected a second time, and the
- * correction is worth recording because the first version described a state that had already been left
- * behind. It said the document declares ONLY the three internal read operations and deliberately not
- * the account view or account update named in the roster above -- which was true when the view and the
- * update did not exist. They were then built and mounted here, and the document was not extended, so
- * three routes served requests that no contract described. That is the same defect as a contract
- * publishing an operation with no handler, in the opposite direction, and it is closed the same way:
- * the document now declares both surfaces and marks each operation with the surface it belongs to, and
- * the contract test at
+ * <p>Assumptions: the operation inventory lives in one place, and that place is
+ * {@code src/main/resources/openapi/account-api.yaml}, the contract of record for EVERY operation this
+ * package publishes -- both the human-facing surface and the internal read surface, with each operation
+ * marked for the surface it belongs to. This charter therefore cites it rather than summarising it. The
+ * two are held together mechanically: the contract test at
  * {@code src/test/java/com/carddemo/account/api/AccountContextContractTest.java} compares the mapping
  * annotations of all three controllers with the operations the document declares and fails on any
- * difference in EITHER direction. Neither the document nor this package can gain or lose an operation
- * without the other.</p>
+ * difference in EITHER direction, so neither the document nor this package can gain or lose an operation
+ * without the other. A route served but undeclared is the same defect as an operation declared but
+ * unserved, pointed the other way, and one assertion covering both directions is what makes either
+ * fail.</p>
  *
- * <p>Assumptions: the two surfaces share the account address rather than being separated by a path
- * prefix -- the machine read is a {@code GET} on {@code /api/v1/accounts/{accountId}} and the end-user
- * edit is a {@code PUT} on the same address -- and they are separated by filter CHAIN instead, which
- * {@code SecurityConfig.ACCOUNT_PATH_PATTERN} records in full. One consequence is load bearing enough
- * to state here: the matcher that selects the internal chain has to name the METHOD and not the path
- * alone, because a path-only matcher claims every method at that address and would demand a
- * service-minted token for the end-user edit, which no browser holds. That property is asserted by
- * {@code InternalApiSecurityConfigTest}.</p>
+ * <p>Assumptions: the two surfaces share the account PREFIX rather than being separated by one, and they
+ * are separated by filter CHAIN instead, which {@code SecurityConfig.ACCOUNT_PATH_PATTERN} records in
+ * full. Every operation on the prefix now sits on its own fixed sub-path -- the machine read at
+ * {@code POST /api/v1/accounts/lookup}, the human read at {@code POST /api/v1/accounts/view}, the edit at
+ * {@code POST /api/v1/accounts/update} and the cross-reference walk at
+ * {@code POST /api/v1/accounts/card-cross-references/search} -- because none of them may carry the
+ * account identifier in a request line, which is a disclosure property recorded on each path constant
+ * and asserted by the contract test. One consequence of the chain split is load bearing enough to state
+ * here: the matcher that selects the internal chain names the METHOD as well as the path. That is now
+ * defence in depth rather than a repair -- no end-user operation shares an address with an internal one,
+ * so a path-only matcher could no longer claim one -- and it is retained because the overlap it was
+ * written for would return the moment a second method were mounted on any of these addresses. Both
+ * properties are asserted by {@code InternalApiSecurityConfigTest}.</p>
  *
  * <h2>The layer boundary, and the two prohibitions that define it</h2>
  *
@@ -204,8 +201,8 @@
  * arrangement mirrors the baseline exactly, where every program reached one copybook library through a
  * single compiler include path rather than keeping a private copy of a record layout. Duplicating
  * either shape per service would let two services drift apart on the wire while each remained
- * internally consistent, and wire drift between two
- * independently deployed services is the failure a single owning package exists to prevent. This
+ * internally consistent, and wire drift between two independently deployed services is the failure a
+ * single owning package exists to prevent. This
  * package therefore consumes {@code com.carddemo.common.error.ApiError} for the problem body,
  * {@code com.carddemo.common.error.GlobalExceptionHandler} as the single advice that renders it,
  * {@code com.carddemo.common.error.AbendDetail} for the structured system-error surface,
@@ -231,42 +228,7 @@
  * resumes from a position that concurrent writes do not move, so paging behaviour stays what the
  * baseline browse produced.</p>
  *
- * <h2>Why this charter exists, and why it omits the tags it omits</h2>
- *
- * <p>Assumptions: this file exists because Rule 1, the project's single user-specified rule, requires
- * a docstring on every module entry point at its L15. In Java a {@code package} declaration is that
- * entry point, and a {@code package-info.java} charter is the only place its docstring can live, so
- * no functional requirement puts this file in scope and that clause alone does. The obligation is
- * mechanised by a pair of checks in {@code config/checkstyle/checkstyle.xml} that have to be read
- * together, because each one alone is satisfiable without the other. {@code JavadocPackage} is
- * declared at <em>Checker</em> level at L245, outside the {@code TreeWalker} that opens at L259, so
- * it is a file-set check and asserts only that a {@code package-info.java} file <em>exists</em> in
- * any directory holding a processed compilation unit. {@code MissingJavadocPackage} is declared at
- * L378 <em>inside</em> that {@code TreeWalker}, and it asserts that the file <em>carries</em>
- * Javadoc. A file holding nothing but a bare {@code package} statement therefore passes the first and
- * fails the second, which is why this charter opens on a documentation comment rather than on a plain
- * block comment, and why it had to be written before the three controllers rather than after
- * them.</p>
- *
- * <p>Assumptions: the gate runs at the Maven {@code validate} phase, bound in
- * {@code services/pom.xml} at L816 to L817 under execution id
- * {@code checkstyle-documentation-gate}, with {@code failOnViolation} true at L906 and
- * {@code violationSeverity} warning at L907, so a finding stops every local build ahead of
- * compilation rather than surfacing only in continuous integration. Worth noting is what the
- * configuration leaves out: not one of the three filters that could silence a finding from inside the
- * source is declared in it, so there is no in-code bypass available and the only way to satisfy the
- * gate is to write the documentation.</p>
- *
- * <p>Assumptions: Rule 1's parameter, return-value and exception elements at its L19 to L21 describe
- * callable code and have no counterpart on a package declaration, so they are omitted here
- * deliberately rather than written out empty. Fabricating such a block tag to look thorough would add
- * a claim nothing could verify and would offend the specificity requirement at L41, which is the
- * clause forbidding a rationale that does not say anything particular. Authorship and version tags are
- * absent for a separate reason: the three formatting checks that would ask for them,
- * {@code JavadocStyle}, {@code WriteTag} and {@code JavadocParagraph}, are themselves declared nowhere
- * in {@code config/checkstyle/checkstyle.xml}, so adding such a tag would be noise rather than
- * compliance. Their absence is recorded here precisely so a later reader does not mistake it for an
- * oversight and supply the tags to fix it.</p>
+ * <h2>Parity</h2>
  *
  * <p>Trade-offs: no golden-master oracle exists for any path this package serves, and the guarantee
  * behind it is correspondingly weaker than the batch contexts enjoy. The online programs named above

@@ -110,17 +110,36 @@
  * extract-transform-load path to load into it. No other context may read or write this schema,
  * and this context reads no other context's schema.
  *
- * <p><strong>Messaging.</strong> Two queues are consumed, both of them ordered rather than
- * best-effort: a per-environment authorization request queue and a per-environment authorization
- * reply queue, each named {@code carddemo-pauth-request-} and {@code carddemo-pauth-reply-}
- * followed by the environment name and the {@code .fifo} suffix, and each paired with its own
- * dead-letter queue at a {@code maxReceiveCount} of 5. Ordering uses a purpose-scoped opaque HMAC
- * token derived from the card number, so source-queue messages for one card remain ordered while
- * the number itself never becomes queue metadata. Dead-letter transfer is the documented
- * quarantine boundary: later messages may proceed, native bulk redrive is denied, and recovery is
- * reviewed per-message replay after reconciliation. No queue URL, endpoint, account identifier or
- * credential appears in this file or anywhere else in this package tree; every such value is
- * resolved at startup from configuration owned by the infrastructure and resources channels.
+ * <p><strong>Messaging.</strong> Two ordered queues are involved and only ONE of them is
+ * consumed: a per-environment authorization request queue, named
+ * {@code carddemo-pauth-request-} followed by the environment name and the {@code .fifo}
+ * suffix, is consumed by the single {@code @SqsListener} in {@code .service}; the matching
+ * {@code carddemo-pauth-reply-} queue is PUBLISHED to, and only from the {@code auth_reply_outbox}
+ * row committed with the decision. Each is paired with its own dead-letter queue at a
+ * {@code maxReceiveCount} of 5. Dead-letter transfer is the documented quarantine boundary: later
+ * messages may proceed, native bulk redrive is denied, and recovery is reviewed per-message replay
+ * after reconciliation. No queue URL, endpoint, account identifier or credential appears in this
+ * file or anywhere else in this package tree; every such value is resolved at startup from
+ * configuration owned by the infrastructure and resources channels.
+ *
+ * <p>Refactoring Rationale: this paragraph said TWO queues are consumed and that ordering uses "a
+ * purpose-scoped opaque HMAC token derived from the card number, so source-queue messages for one
+ * card remain ordered while the number itself never becomes queue metadata". Both halves are
+ * withdrawn. There has never been a reply CONSUMER here -- one listener exists, on the request
+ * queue -- and a reader acting on the old sentence would have gone looking for the second one, or
+ * would have concluded that the reply path was somebody else's. And sections 0.4.1.8 and 0.7.6 of
+ * the technical specification freeze the reply queue's identities as the LITERAL values
+ * {@code MessageGroupId = card_num} and {@code MessageDeduplicationId = transaction_id}, so both
+ * are emitted verbatim: a group identity orders one card's messages only while every producer on
+ * the queue computes it identically, and a deduplication identity suppresses a resend only while
+ * the requester can predict it, and a value keyed from this service's own secret is neither. The
+ * card number consequently DOES become queue metadata, which a queue's server-side encryption of a
+ * body does not cover. Trade-offs: that exposure is registered as divergence
+ * {@code D-AUTHORIZATION-FIFO-IDENTITY-METADATA} in
+ * {@code docs/architecture/cobol-to-service-traceability.md} and bounded by the deployment --
+ * customer-managed-key encryption on the queue, an interface endpoint inside the private network,
+ * and read access scoped to task roles -- rather than derived away. The judgement belongs to the
+ * specification; what belongs here is stating it so nobody rediscovers it.
  *
  * <p><strong>Charter of the nine packages in this context.</strong> Each of the eight
  * subpackages carries its own {@code package-info.java} for exactly the reason this file exists,

@@ -48,8 +48,8 @@ What this module publishes
     Derive the offset through which a record's source must carry data, which is the bound the
     shared text-record iterator applies before it pads a short line.
 
-WHY (Refactoring Rationale)
----------------------------
+Refactoring Rationale:
+----------------------
 Every ASCII path reader in this package was the same two statements -- a ``Path.open`` in text mode
 under the single-byte code page with newline translation pinned to the separator, followed by
 handing the handle to the module's own line iterator -- and both statements were wrong in the same
@@ -62,8 +62,8 @@ refuse it -- the check that would have rejected it runs after the allocation tha
 problem. Both are properties of a source rather than of a record, and a reader whose subject is
 one record layout is the wrong place to decide either.
 
-WHY (Alternatives Considered)
------------------------------
+Alternatives Considered:
+------------------------
 Hardening each reader in place, which is what fixing the eight sites independently would mean.
 Rejected because the eight would then hold eight statements of the same policy, and the failure
 mode of a divergence between them is silence: a reader that validated the file type slightly
@@ -78,8 +78,8 @@ kept here is the one already in place for the byte path, where
 :mod:`carddemo_migration.copybook.ebcdic_codec` owns the dataset open: geometry is declared in one
 layer and reached for in another.
 
-WHY (Trade-offs)
-----------------
+Trade-offs:
+-----------
 The hardened path is built on :func:`os.open` and :func:`os.fstat` rather than on
 :class:`pathlib.Path`, which costs the readability of the higher-level API and gains the only
 property that matters here: the file type is checked on the descriptor that will be read, not on

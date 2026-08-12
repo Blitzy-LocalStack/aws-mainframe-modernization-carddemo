@@ -3,6 +3,8 @@ package com.carddemo.transaction.api;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.transaction.dto.BillPaymentOutcome;
+import com.carddemo.transaction.dto.BillPaymentPreview;
 import com.carddemo.transaction.dto.BillPaymentRequest;
 import com.carddemo.transaction.dto.BillPaymentResponse;
 import com.carddemo.transaction.service.BillPaymentService;
@@ -247,9 +249,10 @@ public class BillPaymentController {
      * @param request the submitted payment, bean-validated before this method is entered, carrying the
      *     eleven-digit account identifier and the one-character confirmation and no amount; must not be
      *     {@code null}
-     * @return 201 carrying the posted acknowledgement and the {@code Location} of the transaction that
-     *     was written, or 200 carrying the balance a confirmed submission would pay together with the
-     *     baseline's prompt, its nothing-to-pay advisory or no sentence at all; never {@code null}
+     * @return 201 carrying the posted {@link BillPaymentResponse} and the {@code Location} of the
+     *     transaction that was written, or 200 carrying the {@link BillPaymentPreview} with the balance a
+     *     confirmed submission would pay together with the baseline's prompt, its nothing-to-pay advisory
+     *     or no sentence at all; never {@code null}
      * @throws ClientInputException an invalid-argument failure raised when the account identifier was
      *     never supplied, answered with line 161, or the confirmation carries a value outside the four
      *     the baseline accepts, answered with lines 187 and 188; rendered as 400 with the one-element
@@ -278,19 +281,27 @@ public class BillPaymentController {
                             + " the response. Supply it to tie this request to one a caller has already"
                             + " named, or omit it and the service mints one.",
                     schema = @Schema(type = "string")))
+    // WHY : ⚠️ Refactoring Rationale: the 200 body is BillPaymentPreview, and the description no longer
+    //       says the service emits something narrower than the published contract declares. It used to
+    //       name BillPaymentResponse here and record the divergence as visible-by-comparison, which
+    //       documented a defect instead of removing it: the body carried a null transactionId that the
+    //       published preview schema forbids outright, and reported the balance under currentBalance
+    //       where the contract and ui/src/api/transactions.ts both name it payableBalance. The service
+    //       now returns the preview shape on this status, so the annotation, the published document and
+    //       the browser client agree and there is no divergence left to point at.
     @ApiResponse(responseCode = "200",
-            description = "The confirmation was withheld or declined, so no payment was made. The body"
-                    + " reports the balance a confirmed request would pay and, when the confirmation was"
-                    + " blank, the prompt \"Confirm to make a bill payment...\" verbatim from"
+            description = "The confirmation was withheld or declined, so no payment was made. On a"
+                    + " withheld confirmation the body reports the balance a confirmed request would pay"
+                    + " together with the prompt \"Confirm to make a bill payment...\" verbatim from"
                     + " app/cbl/COBIL00C.cbl L237, or \"You have nothing to pay...\" from L201 when the"
-                    + " balance is not positive. The published contract declares a narrower preview shape"
-                    + " for this status; the shape named here is the one this service emits, so the"
-                    + " difference is visible in a comparison rather than hidden behind a reference.",
+                    + " balance is not positive. On a declined confirmation it reports the account"
+                    + " identifier alone, with neither a balance nor a sentence, because L180 clears the"
+                    + " screen and L178 reaches no account read at all.",
             headers = @Header(name = CorrelationIdFilter.CORRELATION_ID_HEADER,
                     description = "Identity of the unit of work, echoed from the request or minted.",
                     schema = @Schema(type = "string")),
             content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
-                    schema = @Schema(implementation = BillPaymentResponse.class)))
+                    schema = @Schema(implementation = BillPaymentPreview.class)))
     @ApiResponse(responseCode = "201",
             description = "The payment was posted and the balance was reduced by the amount paid, which"
                     + " for this operation is the whole balance. The body carries the assigned"
@@ -304,6 +315,13 @@ public class BillPaymentController {
                         description = "Identity of the unit of work, echoed from the request or minted.",
                         schema = @Schema(type = "string"))
             },
+            // WHY : Assumptions: this status carries BillPaymentResponse and the 200 above carries
+            //       BillPaymentPreview, which is the whole point of the sealed pair -- a written
+            //       payment reports the transaction identifier the preview shapes have no member for.
+            //       An earlier revision named the preview on BOTH statuses, which disagreed with the
+            //       published contract's 201 schema and with the arm below that returns the payment
+            //       shape, so a generated client would have been typed to discard the one member the
+            //       created resource exists to report.
             content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
                     schema = @Schema(implementation = BillPaymentResponse.class)))
     @ApiResponse(responseCode = "400",
@@ -347,7 +365,7 @@ public class BillPaymentController {
             description = "Writes are quiesced for the batch window, so no payment can be posted.",
             content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE,
                     schema = @Schema(implementation = ApiError.class)))
-    public ResponseEntity<BillPaymentResponse> payAccountBalanceInFull(
+    public ResponseEntity<BillPaymentOutcome> payAccountBalanceInFull(
             @Valid @RequestBody BillPaymentRequest request) {
 
         // WHY : Assumptions: no try-catch stands around this call, and the omission is deliberate. Every
@@ -357,10 +375,10 @@ public class BillPaymentController {
         //       and anything else to 500. Catching here would stand a second translation beside that one
         //       with no declared precedence between them, so the status a caller received would depend on
         //       which ran first.
-        BillPaymentResponse outcome = this.billPaymentService.payBalanceInFull(request);
+        BillPaymentOutcome outcome = this.billPaymentService.payBalanceInFull(request);
 
         // WHY : Refactoring Rationale: the status is chosen from the outcome rather than left at 200 for
-        //       every turn, which is what the preceding revision of this class did by returning the body
+        //       every turn, which is what an earlier revision of this class did by returning the body
         //       type directly. What was wrong with that is measurable rather than stylistic: the browser
         //       client at ui/src/api/transactions.ts decides which of the two outcomes occurred from the
         //       status alone, reporting a payment only when it reads 201, so a posted payment answered
@@ -368,10 +386,22 @@ public class BillPaymentController {
         //       header the published contract marks required on that outcome was never sent at all.
         //       Reading the discriminator is not a decision about the payment: the service has already
         //       decided and has already published its answer in that member of the body.
-        if (!outcome.paid()) {
-            return ResponseEntity.ok(outcome);
-        }
-        return ResponseEntity.created(paidTransactionLocation(outcome.transactionId())).body(outcome);
+        // WHY : ⚠️ Refactoring Rationale: the outcome is now matched on its TYPE rather than read through
+        //       one record's nullable identifier, because the service returns two distinct published
+        //       shapes -- BillPaymentPreview for the three turns that pay nothing and BillPaymentResponse
+        //       for the one that pays. A pattern switch over the sealed hierarchy is what makes the
+        //       identifier available exactly where it exists: the previous form read
+        //       outcome.transactionId() off a record whose identifier was null on every non-paying turn,
+        //       so the Location header depended on a member the preview shape does not publish at all.
+        //       Alternatives Considered: an instanceof test plus a cast. Rejected because a switch over a
+        //       sealed interface is checked for exhaustiveness by the compiler, so a third outcome added
+        //       to that hierarchy fails this method to compile rather than silently taking a default arm.
+        return switch (outcome) {
+            case BillPaymentPreview preview -> ResponseEntity.ok(preview);
+            case BillPaymentResponse payment ->
+                    ResponseEntity.created(paidTransactionLocation(payment.transactionId()))
+                            .body(payment);
+        };
     }
 
     /**

@@ -1,13 +1,15 @@
 package com.carddemo.batch;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.batch.dto.BatchErrorEvent;
+import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.service.BatchErrorPublisher;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -18,20 +20,63 @@ import org.springframework.batch.core.ExitStatus;
 import org.springframework.batch.core.job.JobExecution;
 import org.springframework.batch.core.job.JobInstance;
 import org.springframework.batch.core.job.parameters.JobParameters;
+import org.springframework.batch.core.step.StepExecution;
+import org.springframework.context.support.GenericApplicationContext;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
 
 /**
- * Verifies the two properties of the batch entry point that a reading of the class cannot settle: that
- * an echoed command-line value can neither forge nor flood a log record, and that every one of the
- * three exit tiers is reported rather than only the failing ones.
+ * Verifies the properties of the batch entry point that a reading of the class cannot settle: that
+ * an echoed command-line value can neither forge nor flood a log record, that every one of the
+ * three exit tiers is reported rather than only the failing ones, and that a run's failure
+ * notification is published for exactly the tiers that stop the chain and for no others.
  *
  * <p>Assumptions: the tier assertions read captured log events rather than the returned status,
  * because the status was already correct before these tests existed and the defect was that the middle
  * tier was invisible. Asserting the return value would therefore pass against the defect.</p>
+ *
+ * <p>Refactoring Rationale: this block opened by counting "the two properties", and the count is
+ * withdrawn rather than raised. It was accurate when written and the notification assertions made it a
+ * third, so a figure stated beside a list that grows is a figure that will be wrong before anyone
+ * notices -- exactly the class of defect these notification assertions were added to close.</p>
  */
 class BatchApplicationTest {
 
     /** A well-formed job token, so a rejection under test is caused by the value beside it. */
     private static final String VALID_JOB = "--job=post-transactions";
+
+    /**
+     * Repository-relative path of the Terraform module that dispatches this container's commands.
+     *
+     * <p>Assumptions: relative to the module directory, which is where Surefire runs, so it resolves the
+     * same way from a developer's shell and from continuous integration.</p>
+     */
+    private static final String STATE_MACHINE_SOURCE =
+            "../../infra/modules/step-functions-batch/main.tf";
+
+    /** Opening of the Terraform local declaring the daily chain's jobs. */
+    private static final String BATCH_JOBS_OPEN = "batch_jobs = {";
+
+    /** The declaration that follows it, bounding the region scanned for its entries. */
+    private static final String BATCH_JOBS_CLOSE = "reporting_jobs = {";
+
+    /** Matches each {@code job = "<token>"} entry of the daily chain's job map. */
+    private static final Pattern DECLARED_BATCH_JOB = Pattern.compile("job\\s*=\\s*\"([a-z-]+)\"");
+
+    /**
+     * Matches every {@code --job=<token>} literal dispatched inline at THIS container.
+     *
+     * <p>Assumptions: the container name is required on the preceding line, because the module dispatches
+     * inline literals at two different containers -- the dataset round-trip states at this one and the
+     * on-demand report state at the reporting one -- and a pattern that ignored the distinction would
+     * demand this entry point accept a token belonging to a different image. That is not a hypothetical:
+     * the sibling assertion in the reporting module was written without the distinction and broke the
+     * moment the dataset states landed.</p>
+     */
+    private static final Pattern INLINE_BATCH_JOB = Pattern.compile(
+            "Name\\s*=\\s*var\\.batch_container_name\\s*\\R\\s*\"Command\\.\\$\"\\s*="
+                    + "\\s*\"States\\.Array\\('--job=([a-z-]+)'");
 
     /** A well-formed business-date token in the ten-character hyphenated spelling. */
     private static final String VALID_DATE = "--business-date=2022-07-18";
@@ -248,6 +293,210 @@ class BatchApplicationTest {
         assertThat(BatchApplication
                 .exitStatusOf(executionWith(BatchStatus.FAILED, ExitStatus.FAILED)))
                 .isEqualTo(BatchReturnCode.HARD_FAILURE.numericValue());
+    }
+
+    /**
+     * Confirms a failed run publishes exactly one notification, carrying the step that failed.
+     *
+     * <p>Assumptions: the producer is a real one over a recording double rather than a mock of the
+     * producer itself, because the property under assertion is that the entry point ASSEMBLES a
+     * publishable payload -- a mock producer would accept any argument, including one the payload's own
+     * constructor would refuse, and so would pass against the defect it is meant to catch.</p>
+     */
+    @Test
+    @DisplayName("a failed run publishes one notification naming the step that failed")
+    void failedRunPublishesOneNotification() {
+        RecordingPublisher publisher = new RecordingPublisher();
+        try (GenericApplicationContext context = contextWith(publisher)) {
+            BatchApplication.publishFailureNotification(context, "post-transactions",
+                    "post-transactions-step", BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        }
+
+        assertThat(publisher.published).hasSize(1);
+        BatchErrorEvent event = publisher.published.getFirst();
+        assertThat(event.stepName()).isEqualTo("post-transactions-step");
+        assertThat(event.jobName()).isEqualTo(BatchJobName.POST_TRANSACTIONS);
+        assertThat(event.returnCode()).isEqualTo(BatchReturnCode.HARD_FAILURE);
+        assertThat(event.runId()).isEqualTo(event.correlationId());
+        assertThat(event.abendDetail()).isEqualTo(BatchErrorEvent.ABSENT_ABEND_DETAIL);
+    }
+
+    /**
+     * Confirms the warn tier publishes NOTHING, which is the property that keeps the sink credible.
+     *
+     * <p>Assumptions: this is asserted here as well as being refused by the payload's constructor,
+     * because the two guard different things. The constructor refuses a warn-tier payload if one is
+     * ever assembled; this asserts that the entry point does not assemble one, so a correctly rejecting
+     * constructor is never reached with a value that would make the swallow log an error for a run that
+     * did its job. The reference reaches the warn tier by design at
+     * {@code app/cbl/CBTRN02C.cbl:229-230}, where a non-zero reject count selects a code of four.</p>
+     */
+    @Test
+    @DisplayName("a soft-warn run publishes nothing at all")
+    void softWarnRunPublishesNothing() {
+        RecordingPublisher publisher = new RecordingPublisher();
+        try (GenericApplicationContext context = contextWith(publisher)) {
+            BatchApplication.publishFailureNotification(context, "post-transactions",
+                    "post-transactions-step", BatchApplication.EXIT_STATUS_SOFT_WARN);
+            BatchApplication.publishFailureNotification(context, "post-transactions",
+                    "post-transactions-step", BatchApplication.EXIT_STATUS_CLEAN);
+        }
+
+        assertThat(publisher.published).isEmpty();
+        assertThat(this.captured.list).isEmpty();
+    }
+
+    /**
+     * Confirms a deployment with no producer configured still completes the notification attempt.
+     *
+     * <p>Assumptions: the absent-producer case is the DEFAULT rather than an edge case -- the whole
+     * queue configuration is gated on the sink address, so a deployment that supplies none has no
+     * producer bean at all -- and a run must not fail because it had nothing to notify.</p>
+     */
+    @Test
+    @DisplayName("an unconfigured deployment publishes nothing and raises nothing")
+    void unconfiguredDeploymentRaisesNothing() {
+        try (GenericApplicationContext context = new GenericApplicationContext()) {
+            context.refresh();
+            BatchApplication.publishFailureNotification(context, "post-transactions",
+                    "post-transactions-step", BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        }
+
+        assertThat(this.captured.list).isEmpty();
+    }
+
+    /**
+     * Confirms a producer that throws does not replace the run's own reported failure.
+     *
+     * <p>Assumptions: the throwing producer raises an unchecked fault, which is what a closing context
+     * or a refused payload would raise. The property is that the entry point returns normally and
+     * records the suppression, because its caller's exit status is the only channel the orchestrator
+     * reads and a throwable here would replace a graded failure with an unreported one.</p>
+     */
+    @Test
+    @DisplayName("a throwing producer is suppressed and recorded, not propagated")
+    void throwingProducerIsSuppressed() {
+        RecordingPublisher publisher = new RecordingPublisher();
+        publisher.fault = new IllegalStateException("context is closing");
+        try (GenericApplicationContext context = contextWith(publisher)) {
+            BatchApplication.publishFailureNotification(context, "post-transactions",
+                    "post-transactions-step", BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        }
+
+        assertThat(this.captured.list).hasSize(1);
+        assertThat(this.captured.list.getFirst().getLevel()).isEqualTo(Level.ERROR);
+        String rendered = this.captured.list.getFirst().getFormattedMessage();
+        assertThat(rendered).contains("event=batch.error.notify-failed")
+                .contains("post-transactions-step")
+                .contains(IllegalStateException.class.getName());
+        // WHY : Assumptions: the fault's own MESSAGE must not appear, because a fault reachable here is
+        //       composed by whatever refused the value -- a payload rejection quotes the component it
+        //       refused, and that component is the one the payload's constructor redacts.
+        assertThat(rendered).doesNotContain("context is closing");
+        assertThat(this.captured.list.getFirst().getThrowableProxy()).isNull();
+    }
+
+    /**
+     * Confirms the failing step is named from the execution, and that a clean run of steps names none.
+     */
+    @Test
+    @DisplayName("the failing step is the first non-completed one, or the no-step token")
+    void failingStepIsNamedFromTheExecution() {
+        JobExecution execution = executionWith(BatchStatus.FAILED, ExitStatus.FAILED);
+        addStep(execution, "preflight-step", BatchStatus.COMPLETED);
+        addStep(execution, "post-transactions-step", BatchStatus.FAILED);
+        addStep(execution, "interest-step", BatchStatus.ABANDONED);
+
+        assertThat(BatchApplication.failingStepNameOf(execution))
+                .isEqualTo("post-transactions-step");
+
+        JobExecution allClean = executionWith(BatchStatus.FAILED, ExitStatus.FAILED);
+        addStep(allClean, "preflight-step", BatchStatus.COMPLETED);
+        assertThat(BatchApplication.failingStepNameOf(allClean))
+                .isEqualTo(BatchApplication.STEP_NAME_NO_STEP);
+
+        assertThat(BatchApplication
+                .failingStepNameOf(executionWith(BatchStatus.FAILED, ExitStatus.FAILED)))
+                .isEqualTo(BatchApplication.STEP_NAME_NO_STEP);
+    }
+
+    /**
+     * Attaches one step execution carrying the given name and status to an execution.
+     *
+     * <p>Assumptions: the step is constructed and added rather than created through the execution,
+     * because the framework version in use offers no factory on {@code JobExecution} -- the addition is
+     * explicit, and the constructor is the only way to name a step outside a running job.</p>
+     *
+     * <p>Assumptions: the three-argument constructor is used, which takes an identifier, and NOT the
+     * two-argument one that generates it. The shorter form is deprecated and marked for removal in the
+     * framework version in use, and this project's build reports a deprecation as a compiler warning --
+     * so the shorter spelling would add a warning to a module that currently has none. The identifier
+     * is derived from the number of steps already attached so each is distinct without a counter field.</p>
+     *
+     * @param execution the execution to attach the step to; must not be {@code null}
+     * @param stepName the step's name; must not be {@code null}
+     * @param status the batch status the step reports, which is what the substitution rule reads
+     */
+    private static void addStep(JobExecution execution, String stepName, BatchStatus status) {
+        StepExecution step = new StepExecution(execution.getStepExecutions().size() + 1L, stepName,
+                execution);
+        step.setStatus(status);
+        execution.addStepExecution(step);
+    }
+
+    /**
+     * Builds and refreshes a context holding exactly the supplied producer.
+     *
+     * @param publisher the recording producer to register; must not be {@code null}
+     * @return the refreshed context, which the caller closes
+     */
+    private static GenericApplicationContext contextWith(RecordingPublisher publisher) {
+        GenericApplicationContext context = new GenericApplicationContext();
+        context.registerBean(BatchErrorPublisher.class, () -> publisher);
+        context.refresh();
+        return context;
+    }
+
+    /**
+     * A producer that records what it was asked to publish, and optionally refuses to.
+     *
+     * <p>Assumptions: it EXTENDS the production producer rather than implementing an interface,
+     * because the production type is a class and introducing an interface for one test would add a seam
+     * to production code that nothing else needs. Its superclass constructor is given collaborators it
+     * never uses, since every method that would touch them is overridden.</p>
+     */
+    private static final class RecordingPublisher extends BatchErrorPublisher {
+
+        /** Every event this producer was asked to publish, in order. */
+        private final java.util.List<BatchErrorEvent> published = new java.util.ArrayList<>();
+
+        /** When set, the fault raised instead of publishing; null means publish normally. */
+        private RuntimeException fault;
+
+        /** Builds the double over collaborators no overridden method reaches. */
+        private RecordingPublisher() {
+            super(org.mockito.Mockito.mock(software.amazon.awssdk.services.sqs.SqsClient.class),
+                    new com.carddemo.batch.config.SqsConfig.ErrorSinkBinding(
+                            "https://sqs.us-east-1.amazonaws.com/000000000000/carddemo-error-test",
+                            "application/json", "CARDDEMO", "BATCHSVC"),
+                    new tools.jackson.databind.ObjectMapper());
+        }
+
+        /**
+         * Records the event, or raises the configured fault.
+         *
+         * @param event the event handed in; recorded rather than sent
+         * @return {@code true} always, because a recorded event is a delivered one for this double
+         * @throws RuntimeException the configured fault, when one is set
+         */
+        @Override
+        public boolean publish(BatchErrorEvent event) {
+            if (this.fault != null) {
+                throw this.fault;
+            }
+            this.published.add(event);
+            return true;
+        }
     }
 
     /**

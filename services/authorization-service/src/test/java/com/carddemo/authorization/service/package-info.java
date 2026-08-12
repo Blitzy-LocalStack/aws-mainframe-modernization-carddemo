@@ -13,7 +13,7 @@
  * divergence, and how far the parity claim actually reaches. It declares no type and holds no import, so
  * nothing here executes; its entire effect is on what the classes beside it assert.</p>
  *
- * <h2>The closed inventory: nineteen files here, eighteen of them tests</h2>
+ * <h2>The closed inventory: twenty files here, nineteen of them tests</h2>
  *
  * <p>The parent charter at {@code com.carddemo.authorization} deliberately fixes no leaf-class count and
  * names no leaf class, making each package's own charter the authority for its own inventory. This is that
@@ -23,7 +23,7 @@
  * citation that normalises either half points at nothing.</p>
  *
  * <pre>
- * this directory: 19 java files = 18 tests + 1 charter
+ * this directory: 20 java files = 19 tests + 1 charter
  * </pre>
  *
  * <p>Alternatives Considered: stating the inventory in prose alone, which is what this charter did before
@@ -58,6 +58,14 @@
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl}.</li>
  *   <li>{@code AuthorizationRequestListenerTest} exercises {@code AuthorizationRequestListener} against
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}.</li>
+ *   <li>{@code ContainerCyclingWindowBoundaryTest} exercises {@code ContainerCyclingWindowBoundary},
+ *       the asynchronous half of that same program's five-hundred-message processing window at
+ *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl}. Refactoring Rationale: this is a
+ *       separate class from the listener test rather than more cases in it, because the property it
+ *       asserts is an ORDERING between three operations on a collaborator the listener only hands a
+ *       callback to -- that intake reopens between the container stopping and starting again, on every
+ *       path including the ones where either operation throws. The listener test cannot observe that
+ *       ordering at all, since it supplies the boundary as a double that runs the callback immediately.</li>
  *   <li>{@code AuthorizationDecisionServiceTest} exercises {@code AuthorizationDecisionService} against
  *       that same program's {@code 6000-MAKE-DECISION} paragraph at lines 657 to 734. The decision is a
  *       collaborator of the listener rather than a service role of its own.</li>
@@ -68,6 +76,22 @@
  *   <li>{@code OutboxPublisherTest} exercises {@code OutboxPublisher}, which has no COBOL antecedent as a
  *       component: the baseline has no outbox at all, and the reply the publisher replaces is sent inline
  *       at {@code COPAUA0C.cbl} line 461.</li>
+ *   <li>{@code ContainerCyclingWindowBoundaryTest} exercises {@code ContainerCyclingWindowBoundary}, the one
+ *       production implementation of {@code RequestWindowBoundary}. Like the outbox it has no COBOL
+ *       antecedent as a component: the reference consumer's bounded run simply ENDS and the queue
+ *       re-triggers it -- {@code COPAUA0C.cbl} declares its limit of 500 at line 40 and leaves the receive
+ *       loop at line 326 once line 339 finds the count past it -- and a container model has no
+ *       equivalent of ending, so the bound is enforced by stopping and restarting the listener container
+ *       instead. What is asserted is therefore the MECHANISM rather than a transcribed rule: the container
+ *       identifier resolved is the one the listener is registered under, the stop precedes the start, the
+ *       work leaves the admitting thread onto the boundary's own named single thread, two boundaries cycle
+ *       serially, every failure path still reopens intake, and disposal waits for a cycle in flight.
+ *       Refactoring Rationale: the bound itself is asserted next door by
+ *       {@code AuthorizationRequestListenerTest} against a recording lambda, and the reason recorded there
+ *       for this class's absence was that the mechanism needed "a live queue" -- which is false, both
+ *       collaborators being interfaces. The enforcement half of a published guarantee therefore had no test
+ *       at all, and could not have raised one: a boundary that cycles nothing lets every window run long and
+ *       reports nothing.</li>
  *   <li>{@code OutboxMetadataConfidentialityTest} exercises that same publisher for one separable
  *       property, that no value taken off the wire reaches a log line or an exception message.</li>
  *   <li>{@code PurgeJobTest} exercises {@code PurgeJob} against

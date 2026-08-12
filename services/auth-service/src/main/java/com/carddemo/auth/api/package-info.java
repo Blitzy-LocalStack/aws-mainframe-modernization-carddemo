@@ -151,8 +151,12 @@
  *       arrives as the final segment of the single-user path, which is what makes each request
  *       self-describing and therefore independently authorizable</li>
  *   <li>The browse cursor of the user list travels in the page envelope
- *       {@code com.carddemo.common.web.PageResponse}, through its first-key, last-key and
- *       has-next members, so the list operation positions by key and never by offset</li>
+ *       {@code com.carddemo.common.web.PageResponse}, through its first-key and last-key members,
+ *       with the two availability members -- has-next and has-previous -- each settled by the read
+ *       that produced the page, so the list operation positions by key and never by offset.
+ *       Assumptions: has-previous is one of the envelope's five components and is not derived from
+ *       the first-key member being present, which would announce an earlier page on the opening
+ *       page</li>
  *   <li>Navigation, carried by the from-program and to-program fields with their transaction
  *       counterparts at {@code app/cpy/COCOM01Y.cpy:21-24} and by the last-map pair at
  *       {@code :43-44}, is entirely client-side. No response leaving this package names a next

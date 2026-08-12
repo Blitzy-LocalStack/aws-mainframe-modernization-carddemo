@@ -33,31 +33,27 @@
  * this directory: 8 java files = 7 classes + 1 charter
  * </pre>
  *
- * <p>Refactoring Rationale: that marker line is what makes the closure checkable, and it is added because
- * this section has now been wrong twice in the same direction. It closed the set at four while
- * {@code InternalApiSecurityConfig} stood beside it, and then at five while
- * {@code CustomerIdentifierProtectionConfig} and {@code KmsConfig} both did. The second omission is the
- * more damaging of the two, because those two classes are the ENTIRE production implementation of this
- * context's encryption boundary: {@code CustomerMapper} requires the
+ * <p>Assumptions: that marker line is what makes the closure checkable rather than merely asserted. It
+ * and the entries under it are measured by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so an eighth class arriving without an entry here fails the build instead of quietly falsifying this
+ * paragraph. Mechanical measurement earns its keep in this package more than in most, because two of the
+ * seven members -- {@code CustomerIdentifierProtectionConfig} and {@code KmsConfig} -- are the ENTIRE
+ * production implementation of this context's encryption boundary: {@code CustomerMapper} requires the
  * {@code CustomerIdentifierProtection} port through its constructor and is component-scanned, so a reader
  * who acted on "anything else here does not belong" and removed them would not get a compile failure --
  * they would get a context that refuses to refresh, and, if they instead satisfied the port with
  * something inert, two columns named {@code ssn_encrypted} and {@code govt_issued_id_encrypted} holding
- * cleartext. The marker and the entries under it are measured by
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so an eighth class arriving without an entry here now fails the build instead of quietly falsifying
- * this paragraph.</p>
+ * cleartext.</p>
  *
- * <p>Refactoring Rationale: this section was headed "the closed set of four" and enumerated four,
- * omitting {@code InternalApiSecurityConfig} after it landed. The omission is worse here than an
- * ordinary stale count, because the sentence beside it -- "that is a constraint on what may be added
- * here, not a snapshot of what happens to exist" -- instructed a reader to treat anything else in the
- * directory as not belonging. A reader acting on that would have removed the second filter chain, and
- * removing it does not fail a build: it makes three internal reads from the authorization context
- * refuse authentication, which that caller reports as the dependency being unavailable, so the
- * authorization would be redelivered until the queue dead-lettered it. The closure argument below,
- * which grounds each member on a capability the POM declares, is extended to each new member rather than
- * loosened.</p>
+ * <p>Trade-offs: the closure statement below -- that this is a constraint on what may be added here and
+ * not a snapshot of what happens to exist -- is deliberately paired with the measured marker rather than
+ * left to stand on its own. Alone it invites a reader to treat anything else in the directory as not
+ * belonging, and acting on that would remove the second filter chain, which does not fail a build: it
+ * makes three internal reads from the authorization context refuse authentication, which that caller
+ * reports as the dependency being unavailable, so the authorization would be redelivered until the queue
+ * dead-lettered it. The closure argument grounds each member on a capability the POM declares, and it is
+ * extended to each new member rather than loosened.</p>
  *
  * <ul>
  *   <li>{@code SecurityConfig} -- which tokens are accepted and what authority each route requires. It
@@ -77,13 +73,12 @@
  *   <li>{@code InternalApiSecurityConfig} -- the second filter chain, and the only one that authorises a
  *       caller which is a workload rather than a person. It matches exactly the internal read addresses
  *       its own {@code internalPaths()} enumerates and verifies a shared-symmetric-key service token on
- *       them. Refactoring Rationale: this entry read "exactly the three internal read paths the
- *       authorization context calls" while the customer record read and the customer scan were landing on
- *       that chain. Neither is called by the authorization context -- they are matched there because
- *       {@code SecurityConfig}'s customer pattern denies the whole subtree on the human chain -- so the
- *       sentence named both the wrong count and the wrong caller. It now points at the single enumeration
- *       instead of restating it, because a restated list drifts from the list it copies and this one
- *       already drifted once. Assumptions: it is ordered <b>ahead</b> of {@code SecurityConfig}'s chain,
+ *       them. Assumptions: the enumeration is pointed at rather than restated here, because a restated
+ *       list drifts from the list it copies. Two of the paths it matches are worth naming for a reader
+ *       reasoning about callers: the customer record read and the customer scan sit on this chain not
+ *       because the authorization context calls them, but because {@code SecurityConfig}'s customer
+ *       pattern denies that whole subtree on the human chain. Assumptions: it is ordered <b>ahead</b> of
+ *       {@code SecurityConfig}'s chain,
  *       and the ordering is absolute rather than a preference -- the framework offers a request to each
  *       chain in turn and the first matcher that accepts it decides it, so a lower-precedence internal
  *       chain would never see a request at all. Alternatives Considered: adding those paths to the human
@@ -101,17 +96,25 @@
  *       configurable. Alternatives Considered: constructing the client inside the cipher instead.
  *       Rejected because a class that builds its own infrastructure client cannot be handed a substitute,
  *       so every case asserting what an envelope discloses would then need a real key.</li>
- *   <li>{@code CustomerIdentifierProtectionConfig} -- the implementation of the
+ *   <li>{@code CustomerIdentifierProtectionConfig} -- the WIRING of the
  *       {@code CustomerMapper.CustomerIdentifierProtection} port, which is the only production route by
  *       which the national identifier {@code CUST-SSN} at {@code app/cpy/CVCUS01Y.cpy} L17 and the
  *       government-issued identifier {@code CUST-GOVT-ISSUED-ID} at L18 become the {@code BYTEA}
- *       ciphertext that {@code src/main/resources/db/migration/V1__account.sql} declares. Assumptions: it
- *       is a separate class from {@code KmsConfig} above even though both concern one key, because the
- *       two answer different questions -- that one supplies a client, this one decides the framing
- *       (envelope encryption under a fresh data key per identifier, Galois/Counter Mode, and an
- *       encryption context naming the purpose and the column but never the customer) -- and folding them
- *       together would put a cryptographic decision and a client builder behind one name. Assumptions: it
- *       lives in this package and not in {@code mapper} because the port is declared there precisely so
+ *       ciphertext that {@code src/main/resources/db/migration/V1__account.sql} declares. ⚠️ Refactoring
+ *       Rationale: this entry read "the implementation of the port" and said that this class "decides the
+ *       framing", and both were true of a private nested implementation it used to hold -- one that framed
+ *       with no marker and no version byte while
+ *       {@code com.carddemo.account.service.CustomerIdentifierCipher} framed both. Two writers of one
+ *       {@code BYTEA} column, selected by whichever bean a context happened to register, and no decipher
+ *       path in this context to notice. The bean method now delegates to that cipher, so the framing
+ *       decision -- envelope encryption under a fresh data key per identifier, Galois/Counter Mode, and an
+ *       encryption context naming the purpose and the column but never the customer -- is recorded and
+ *       implemented in ONE place, and this class supplies no cryptography of its own. Assumptions: it
+ *       remains a separate class from {@code KmsConfig} above even though both concern one key, because
+ *       the two answer different questions -- that one supplies a client, this one satisfies a port -- and
+ *       because it is what keeps the port satisfiable in a context that scans {@code mapper} without
+ *       scanning {@code service}, which is the slice several of this module's own tests use. Assumptions:
+ *       it lives in this package and not in {@code mapper} because the port is declared there precisely so
  *       the mapping layer can state what it needs of a key provider without naming one; an infrastructure
  *       type is admissible here and is not admissible there.</li>
  * </ul>
@@ -239,7 +242,7 @@
  * no forward recovery log, that trio appearing verbatim at L9, L46, L59 and L72 for the stanzas opening
  * at L1, L37, L50 and L63 respectively. All four additionally declare uncommitted read integrity, at L3,
  * L40, L53 and L66. The target this package wires gives up the baseline's read behaviour: reads are
- * transactional and no longer see uncommitted data, and encryption at rest with automated backups
+ * transactional and do not see uncommitted data, and encryption at rest with automated backups
  * replaces a resource declaring no recovery at all. That is a correction of posture rather than a port of
  * it, so it is a deliberate divergence and is recorded as one. The compromise accepted is real and worth
  * naming: stronger isolation is not free, since a read that the baseline satisfied without regard to
@@ -286,58 +289,5 @@
  * healthy outcome; the build that compiles and audits this package passes or fails outright, with no
  * tolerated middle level. The two must not be read against each other, and this module's own test sources
  * are not that reference suite.</p>
- *
- * <h2>The rationale label form used in this file</h2>
- *
- * <p>Trade-offs: every rationale in this file is tagged with one of the project Explainability rule's own
- * four category labels, written plural, unparenthesised, with an ASCII hyphen where one occurs, and with
- * the colon kept -- the form fixed at {@code docs/CODE_DOCUMENTATION_STANDARD.md} L205 to L213 and
- * itemised at L218 to L226. The reasonable alternative was the singular, sometimes parenthesised idiom
- * that predominates in this repository's older reference-only material, and which the standard names as
- * the very thing this form diverges from at L236 to L245. Choosing it would have read more consistently
- * with that older material. The plural form is used instead because it is the wording the rule itself
- * carries at its L31 to L34, and its validation gate at L43 makes that wording the sentence this tree is
- * audited against; a reviewer grepping one spelling across seven languages finds every rationale, whereas
- * several spellings of one category make that search silently partial. The cost accepted is that this
- * tree and the reference material genuinely do read differently. The forms are never mixed inside a
- * single file, and they are not mixed inside this one.</p>
- *
- * <p>Assumptions: that choice is written down here rather than left to be inferred, because the
- * Explainability rule's L40 treats a non-obvious choice left undocumented as a violation wherever a
- * reasonable alternative existed, and a repository-wide idiom pointing the other way is exactly such an
- * alternative. The mechanical gate cannot catch this one: the only check with any grip on rationale
- * wording is {@code SummaryJavadoc}, configured at {@code config/checkstyle/checkstyle.xml} L505, and its
- * forbidden-fragment pattern reads a Javadoc summary only, never an ordinary sentence. A singular label
- * would therefore pass the build and still breach the rule, which is why this ruling is carried in prose
- * rather than left to the linter.</p>
- *
- * <h2>Why this descriptor exists</h2>
- *
- * <p>Assumptions: a Java {@code package} declaration is the module entry point the Explainability rule
- * requires a docstring on at its L15, and {@code package-info.java} is the only place such a docstring
- * can attach. Two paired checks in {@code config/checkstyle/checkstyle.xml} enforce that pairing from
- * opposite sides: the file-set check declared at Checker level at L245 demands that this file
- * <em>exist</em> in any directory holding an audited compilation unit, which the sibling
- * {@code SecurityConfig} in this directory is what activates, while the tree check declared at L378
- * demands that it <em>carry</em> Javadoc. A descriptor holding nothing but the bare {@code package}
- * statement satisfies the first and fails the second, so neither omitting this file nor emptying it was
- * available. The gate is bound to the build's validate phase at {@code services/pom.xml} L817, failing on
- * violation per L906 at a threshold of warning per L907, so both failures stop a local build before
- * compilation rather than surfacing only in continuous integration.</p>
- *
- * <p>Assumptions: the rule's parameter, return-value and exception elements at its L19 to L21 describe
- * callable code and have no counterpart on a package declaration, so they are omitted deliberately rather
- * than written out empty. Fabricating such a tag here to look compliant would add content no reader could
- * verify and would offend the specificity requirement at L41. Authorship and version tags are absent for
- * a different reason: {@code WriteTag}, the check that exists in order to demand them, is itself listed
- * among the deliberately excluded modules at {@code config/checkstyle/checkstyle.xml} L572, as is
- * {@code JavadocStyle} at L568, so this file adds no ceremony the gate does not ask for. There is likewise
- * no in-code suppression anywhere in this file, because all three filters that could honour one are
- * excluded at L588 -- a suppression written here would be inert, and its presence would misinform the
- * next reader about what is enforceable. Depth on this context's records, tables, concurrency and message
- * contracts is not repeated here; it is held once at {@code com.carddemo.account}, and this descriptor is
- * scoped to the wiring layer alone. Where this file, the linter configuration and the prose standard could
- * ever disagree, the Explainability rule decides, and the linter configuration outranks the prose
- * standard.</p>
  */
 package com.carddemo.account.config;

@@ -3,6 +3,7 @@ package com.carddemo.account.service;
 import com.carddemo.account.domain.Account;
 import com.carddemo.account.mapper.AccountInquiryReplyMapper;
 import com.carddemo.account.repository.AccountRepository;
+import com.carddemo.account.repository.InquiryReplyLedger;
 import com.carddemo.common.codec.InquiryRequestCodec;
 import com.carddemo.common.codec.InquiryRequestCodec.InquiryRequest;
 import com.carddemo.common.messaging.MessageExpiry;
@@ -10,6 +11,8 @@ import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import java.time.Clock;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -36,8 +39,7 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * <p>This class is the migrated form of {@code app/app-vsam-mq/cbl/COACCT01.cbl}, a 620-line queue-triggered
  * CICS transaction that reads a fixed one-thousand-character request, performs one keyed read of the account
  * master and puts a labelled fixed-width reply on a reply queue. That program is REFERENCE-ONLY: it is read
- * as the specification for this class and is never modified. The framing throughout is deliberate -- the
- * baseline does X, the Java implements Y, and every divergence is named here and registered in
+ * as the specification for this class and is never modified. Every divergence named below is registered in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <p>Paragraph-to-method traceability, cited by PHYSICAL line in that file because it is legacy
@@ -54,11 +56,10 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  *       failure path through {@link #reportFailure(RuntimeException, String, String)}.</li>
  * </ul>
  *
- * <p>The baseline's driver is not reproduced as code. Its {@code 1000-CONTROL} opens three queues -- input at
- * physical line 222, output at physical line 255 and error at physical line 289 -- and then loops, performing
- * {@code 3000-GET-REQUEST} at physical line 214 and {@code 4000-MAIN-PROCESS UNTIL NO-MORE-MSGS} at physical
- * lines 215 and 216. Those queue handles and that loop are the listener container's job in the target, so
- * this class holds only the body of one iteration.</p>
+ * <p>The baseline's driver is not reproduced as code. Its {@code 1000-CONTROL} opens the input, output and
+ * error queues and then loops, performing {@code 3000-GET-REQUEST} and
+ * {@code 4000-MAIN-PROCESS UNTIL NO-MORE-MSGS}. Those queue handles and that loop are the listener
+ * container's job in the target, so this class holds only the body of one iteration.</p>
  *
  * <h2>Delivery discipline: NO transactional outbox, and the absence is the decision</h2>
  * <p>Assumptions: this consumer needs no transactional outbox, and the reason is in the reference programs
@@ -87,6 +88,46 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * request becomes visible again, and repeated failure carries it to the dead-letter queue at the configured
  * receive count. Nothing is ever acknowledged for a request that was not answered, which is the property the
  * baseline's single unit of work provided.</p>
+ *
+ * <h2>What delete-on-success does NOT provide: the duplicate reply</h2>
+ * <p>⚠️ Refactoring Rationale: the paragraphs above were complete about ONE direction of the syncpoint
+ * bracket and silent about the other, and the silence read as an all-clear. A baseline unit of work spanning
+ * get, read and put rolls the PUT back when the unit fails, so the baseline can neither lose a reply nor send
+ * one twice. Delete-on-success reproduces the first half only. The send is committed at the queue the moment
+ * it returns, and the acknowledgement is a SEPARATE call afterwards, so a task killed between them -- or a
+ * container cycled there, or an acknowledgement lost there, or a visibility timeout that elapsed while the
+ * send was in flight -- leaves the request visible again and the next delivery composes and sends a SECOND
+ * reply carrying the same correlation identifier as the first. A requester pairing an answer to a question on
+ * that identifier then holds two answers for one question, and nothing on the wire distinguishes the
+ * duplicate from the original. That is a divergence from the baseline, not a property of it.</p>
+ *
+ * <p>Assumptions: the remedy is a durable CLAIM keyed by the requester's own identity for its request, in
+ * {@code account.inquiry_reply_ledger} through
+ * {@link com.carddemo.account.repository.InquiryReplyLedger}. The reply is composed, then recorded and
+ * COMMITTED, then sent, then marked sent. A redelivery finding the claim already retired suppresses its
+ * duplicate; a redelivery finding it outstanding re-sends the RECORDED bytes rather than recomposing them,
+ * so the second copy of one answer cannot disagree with the first about a balance that moved in between.</p>
+ *
+ * <p>Assumptions: this is NOT the outbox the section above rules out, and the distinction is the
+ * requirement rather than the mechanism. An outbox guarantees a reply EXISTS for every committed decision,
+ * which this exchange does not need because it commits no decision -- its read is read-only, so no state
+ * survives that a missing reply would contradict. A claim guarantees a reply is not sent TWICE. The
+ * authorization consumer needs the first and has one; this consumer needs the second and now has one, and
+ * neither is a substitute for the other.</p>
+ *
+ * <p>Trade-offs: one crash window remains open and is stated rather than glossed. A task that dies after the
+ * send and before the mark leaves the claim outstanding, so the redelivery re-sends and the requester
+ * receives two byte-identical copies. Closing it entirely would require the queue send and the database mark
+ * to commit together across two resource managers, which is the two-phase commit AAP section 0.7.6 records as
+ * eliminated by this migration and not to be refilled. What is bought is that duplication is now one specific
+ * failure rather than the outcome of every redelivery.</p>
+ *
+ * <p>Trade-offs: a request carrying NEITHER identity is answered unguarded, exactly as before, and the fact
+ * is logged. There is nothing to key a claim on, and the alternative -- keying on a digest of the payload --
+ * was rejected because it cannot tell a redelivery of one request from a second, legitimately identical
+ * request, so it would silently answer only the first of two genuine inquiries. Treating an unidentified
+ * request as new is also the baseline's own behaviour, which performs no idempotency check of any kind, so
+ * the unguarded path is a preserved property rather than a weakened one.</p>
  *
  * <h2>Statelessness</h2>
  * <p>Assumptions: this bean holds no cross-message state, and the baseline asks for exactly that.
@@ -121,10 +162,10 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  *
  * <h2>Queue topology and endpoints</h2>
  * <p>Assumptions: all three destinations arrive from configuration and none is written into this class, and
- * that is what the baseline itself does. {@code 01 QUEUE-INFO.} at physical line 92 declares four queue-name
- * fields at physical lines 93 to 96 -- the queue manager, the input queue, the reply queue and the error
- * queue -- and every one of them is {@code PIC X(48) VALUE SPACES}, filled at run time. The two places the
- * baseline does assign a name by literal, at physical lines 198 and 294, produce dotted uppercase names that
+ * that is what the baseline itself does. {@code 01 QUEUE-INFO.} at physical line 92 declares four
+ * queue-name fields -- the queue manager, the input queue, the reply queue and the error queue -- and every
+ * one of them is {@code PIC X(48) VALUE SPACES}, filled at run time. The two places the baseline does assign
+ * a name by literal produce dotted uppercase names that
  * are not legal queue names in the target service at all, so no name from the baseline could be carried
  * across as written even if hard-coding one were acceptable.</p>
  *
@@ -157,7 +198,7 @@ import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
  * which survives a task restart in a way an in-process retry does not, and which is the only tier that can
  * honour the delete-on-success contract above. An in-process retry would also hold the message invisible for
  * the whole of its own backoff, shrinking the window the queue has to hand the request to a healthy task. The
- * framework's core retry support does exist and was checked rather than assumed -- it is enabled with
+ * framework's core retry support does exist -- it is enabled with
  * {@code @EnableResilientMethods} and bounded by {@code maxRetries}, where total attempts are one plus that
  * value, and it is NOT the older {@code @EnableRetry} with {@code maxAttempts} -- but it is deliberately
  * unused here. A breaker is omitted for the same structural reason: the only dependency on this path is the
@@ -351,6 +392,25 @@ public class InquiryMessageListener {
      */
     private final TransactionTemplate readTransaction;
 
+    /**
+     * The durable record of which requests have already been answered.
+     *
+     * <p>Assumptions: a repository rather than a service, because it holds three named statements over one
+     * table and no rule of its own. The class documentation records why the claim it performs cannot be a
+     * mapped write.</p>
+     */
+    private final InquiryReplyLedger ledger;
+
+    /**
+     * The unit of work the claim and the mark are written in, one each.
+     *
+     * <p>Assumptions: a SECOND template rather than a reuse of the read one, and the difference is not
+     * cosmetic: that one is read-only, so a write through it would be refused, and this one must COMMIT
+     * before the send while that one must commit before it. Two templates is what lets the claim, the send
+     * and the mark be three separate committed steps in that order, which is the whole of the guarantee.</p>
+     */
+    private final TransactionTemplate ledgerTransaction;
+
     private final Map<String, String> queueUrls = new ConcurrentHashMap<>();
 
     /**
@@ -361,8 +421,9 @@ public class InquiryMessageListener {
      * @param sqs the queue client; must not be {@code null}
      * @param replyQueue the configured reply queue name; must not be {@code null} or blank
      * @param errorQueue the configured error queue name; must not be {@code null} or blank
+     * @param ledger the durable record of already-answered requests; must not be {@code null}
      * @param clock the clock the expiry check reads; must not be {@code null}
-     * @param transactionManager the manager the short read-only unit of work is opened against; must not
+     * @param transactionManager the manager the short units of work are opened against; must not
      *     be {@code null}
      * @throws NullPointerException if any reference argument is {@code null}
      * @throws IllegalArgumentException if either queue name is blank, because a consumer that cannot address
@@ -373,6 +434,7 @@ public class InquiryMessageListener {
             SqsClient sqs,
             @Value("${carddemo.account.inquiry.reply-queue}") String replyQueue,
             @Value("${carddemo.account.inquiry.error-queue}") String errorQueue,
+            InquiryReplyLedger ledger,
             Clock clock,
             PlatformTransactionManager transactionManager) {
 
@@ -387,6 +449,7 @@ public class InquiryMessageListener {
         this.sqs = Objects.requireNonNull(sqs, "sqs must not be null");
         this.replyQueue = requireQueueName(replyQueue, "carddemo.account.inquiry.reply-queue");
         this.errorQueue = requireQueueName(errorQueue, "carddemo.account.inquiry.error-queue");
+        this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         Objects.requireNonNull(transactionManager, "transactionManager must not be null");
 
@@ -396,6 +459,13 @@ public class InquiryMessageListener {
         this.readTransaction = new TransactionTemplate(transactionManager);
         this.readTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         this.readTransaction.setReadOnly(true);
+
+        // WHY : Assumptions: REQUIRES_NEW and NOT read-only, for the reason recorded on the field: the
+        //   claim must be committed before the reply is sent and the mark must be committed after it, so
+        //   each has to be a unit of work that ends when this class says it does rather than one that
+        //   ends with the handler.
+        this.ledgerTransaction = new TransactionTemplate(transactionManager);
+        this.ledgerTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /**
@@ -445,7 +515,7 @@ public class InquiryMessageListener {
      * <p>Trade-offs: the third value, concurrency, has no counterpart in the reference and is ADDITIVE. The
      * baseline's driver is one task performing one get at a time, whereas this container fetches a batch and
      * runs handlers concurrently, so the target processes more requests per unit of time than the reference
-     * did and the ordering between two requests in one batch is no longer the ordering they were enqueued
+     * does and two requests in one batch are not guaranteed to be answered in the order they were enqueued
      * in. That is admissible for this flow specifically: the exchange is request/reply keyed on a correlation
      * identifier the reply echoes, each request is answered from one keyed read of one account, and no
      * request mutates anything -- so no outcome depends on which of two requests is answered first.
@@ -543,7 +613,7 @@ public class InquiryMessageListener {
                     this.readTransaction.execute(status -> replyFor(request)),
                     "the read transaction returned no reply, which its callback cannot do");
 
-            publishReply(reply, resolveReplyDestination(requestedReplyTo), messageId, correlationId);
+            answerOnce(reply, resolveReplyDestination(requestedReplyTo), messageId, correlationId);
         } catch (RuntimeException failure) {
             reportFailure(failure, messageId, correlationId);
             throw failure;
@@ -556,8 +626,7 @@ public class InquiryMessageListener {
      * Chooses and renders the reply for one decoded request.
      *
      * <p>Purpose: transcribes {@code 4000-PROCESS-REQUEST-REPLY} at physical line 390, whose three outcomes
-     * are the keyed read succeeding at physical lines 407 to 427, the read finding nothing at physical lines
-     * 428 to 435, and the request never qualifying at physical lines 448 to 456.</p>
+     * are the keyed read succeeding, the read finding nothing, and the request never qualifying.</p>
      *
      * <p>Assumptions: the guard is the baseline's own, transcribed rather than reinterpreted.
      * {@code IF WS-FUNC = 'INQA' AND WS-KEY > ZEROES} at physical line 393 admits a request only when BOTH
@@ -592,11 +661,30 @@ public class InquiryMessageListener {
             // WHY : Assumptions: this is ANSWERED rather than raised. The baseline's not-found branch at
             //   physical lines 428 to 435 replies and consumes the message, so raising here would redeliver a
             //   request whose answer cannot change and then dead-letter a request the baseline answered.
-            LOG.info("event=account.inquiry.not-found accountId={}", request.keyValue());
+            // WHY : Refactoring Rationale: the account identifier is NOT logged, and these two lines
+            //   carried it. An eleven-digit ACCT-ID -- app/cpy/CVACT01Y.cpy line 5 declares
+            //   ACCT-ID PIC 9(11) -- reached the mapped diagnostic context of every inquiry the queue
+            //   delivered, so ordinary successful traffic wrote an account identifier per message into log
+            //   storage. That is the same exposure the correlation attribute's own rule exists to prevent,
+            //   arriving through a hand-written format argument instead of through a metadata field, which
+            //   is why no character or shape rule could see it.
+            // WHY : Assumptions: what replaces it is already present. The correlation identity is put into
+            //   the diagnostic context for the whole handling of the message, so every line below is
+            //   already attributable to one request without naming its subject, and the requester holds
+            //   the key it sent because the reply still carries it.
+            // WHY : Alternatives Considered: logging a digest of the identifier instead of dropping it.
+            //   Rejected because an eleven-digit space has a hundred billion members and is enumerable in
+            //   seconds, so an UNKEYED digest is a reversible rendering of the value rather than a
+            //   redaction of it. A KEYED one -- com.carddemo.common.security.OpaqueIdentifier, which the
+            //   authorization context uses for exactly this -- is safe and was rejected here on cost: this
+            //   service holds no signing material and needs none for anything else, so adopting it would
+            //   introduce a secret, an environment variable, an IAM grant and a rotation obligation to
+            //   improve two log lines.
+            LOG.info("event=account.inquiry.not-found");
             return this.replies.frame(this.replies.accountNotFound(request.key()));
         }
 
-        LOG.info("event=account.inquiry.answered accountId={}", request.keyValue());
+        LOG.info("event=account.inquiry.answered");
         return this.replies.frame(this.replies.accountFound(account.get()));
     }
 
@@ -617,9 +705,9 @@ public class InquiryMessageListener {
      *
      * <p>Trade-offs: a value that does not match falls back to the configured destination rather than
      * failing, and the substitution is logged. Failing would dead-letter a request the baseline answered,
-     * because the baseline reaches its destination through a handle opened once from the configured
-     * reply-queue name -- assigned at physical line 198, opened at physical lines 255 and 261, and used at
-     * physical line 480 -- and therefore answers a request whose reply-to field names anything at all.
+     * because the baseline reaches its destination through a handle its driver opens once from the
+     * configured reply-queue name, and therefore answers a request whose reply-to field names anything at
+     * all.
      * Honouring an arbitrary address instead would make this consumer a confused deputy, able to direct an
      * account's financial position to a queue of the sender's choosing.</p>
      *
@@ -646,10 +734,9 @@ public class InquiryMessageListener {
     /**
      * Publishes one reply, echoing both identifiers the request carried.
      *
-     * <p>Purpose: transcribes {@code 4100-PUT-REPLY} at physical line 462, whose put at physical lines 479 to
-     * 486 addresses the reply destination through the handle named at physical line 480, immediately after it
-     * restores the saved identifiers at physical lines 469 and 470 and declares the payload format at
-     * physical line 471.</p>
+     * <p>Purpose: transcribes {@code 4100-PUT-REPLY} at physical line 462, which restores the saved
+     * identifiers and declares the payload format before addressing the reply destination through the handle
+     * its driver opened.</p>
      *
      * <p>Assumptions: the correlation identifier is echoed VERBATIM, matching
      * {@code MOVE SAVE-CORELID TO MQMD-CORRELID} at physical line 470 -- the definitive proof that this is a
@@ -684,30 +771,152 @@ public class InquiryMessageListener {
     }
 
     /**
+     * Sends one reply at most once for a request, whatever the delivery count.
+     *
+     * <p>Purpose: this is the step the baseline obtains from its syncpoint bracket and delete-on-success does
+     * not provide. The class documentation carries the full argument; in outline, the reply is recorded and
+     * COMMITTED, then sent, then marked sent, so a redelivery can tell an answer that has already gone out
+     * from one that has not.</p>
+     *
+     * <p>Assumptions: the three steps are in that ORDER and each is committed before the next begins.
+     * Recording after the send would leave a reply a redelivery cannot discover, which is the state being
+     * removed; marking before the send would suppress the re-send of a reply that never reached the queue,
+     * which turns a duplicated answer into a missing one -- the worse failure, because a requester waiting on
+     * an answer that will never arrive receives no signal at all.</p>
+     *
+     * <p>Assumptions: a redelivery whose claim is still outstanding re-sends the RECORDED bytes to the
+     * RECORDED destination with the recorded identities, rather than the reply just composed. The two are
+     * normally identical; when they are not, it is because the account moved between the two deliveries, and
+     * sending the recorded copy is what stops two replies bearing one correlation identifier from disagreeing
+     * about a balance. It also means a configuration change between deliveries cannot send the second copy of
+     * one answer to a different queue from the first.</p>
+     *
+     * <p>Assumptions: the mark is NOT required to succeed for the exchange to be complete. A redelivery may
+     * have retired the claim already, in which case this delivery's send was the duplicate and the count is
+     * simply reported; the request is still acknowledged, because the requester has its answer.</p>
+     *
+     * @param reply the framed reply this delivery composed; must not be {@code null}
+     * @param destination the resolved reply destination; must not be {@code null}
+     * @param messageId the request's message identity to echo, or {@code null} if it supplied none
+     * @param correlationId the request's correlation identity to echo, possibly empty when none was supplied
+     * @throws software.amazon.awssdk.core.exception.SdkException if the send fails, which propagates so the
+     *     request becomes visible again rather than being acknowledged unanswered
+     * @throws org.springframework.dao.DataAccessException if the ledger cannot be written, which propagates
+     *     for the same reason -- an unrecorded answer must not be sent
+     */
+    private void answerOnce(String reply, String destination, String messageId, String correlationId) {
+        String requestKey = requestKey(messageId, correlationId);
+        if (requestKey == null) {
+            // WHY : Assumptions: an unidentified request is answered unguarded and the fact is logged, for
+            //   the reason the class documentation records -- there is nothing to key a claim on, keying on
+            //   a payload digest would suppress a second genuine inquiry, and the baseline performs no
+            //   idempotency check at all. The line exists so the gap is visible in the operational record
+            //   rather than silent.
+            LOG.warn("event=account.inquiry.unidentified reason=no-request-identity");
+            publishReply(reply, destination, messageId, correlationId);
+            return;
+        }
+
+        boolean claimed = Boolean.TRUE.equals(this.ledgerTransaction.execute(status ->
+                this.ledger.claim(requestKey, reply, destination, correlationId, messageId,
+                        LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC))));
+
+        if (claimed) {
+            publishReply(reply, destination, messageId, correlationId);
+            retireClaim(requestKey);
+            return;
+        }
+
+        // WHY : Assumptions: the recorded row is read in its own unit of work, and its absence is treated
+        //   as a defect rather than as a first delivery. The claim reported a conflict, so a row holds that
+        //   key; a read finding none means it was removed underneath this delivery, and answering anyway
+        //   would send a reply this class can no longer record.
+        InquiryReplyLedger.RecordedReply recorded = this.ledgerTransaction
+                .execute(status -> this.ledger.find(requestKey))
+                .orElseThrow(() -> new IllegalStateException(
+                        "the claim reported a conflict and no row holds the key"));
+
+        if (recorded.sent()) {
+            // WHY : Assumptions: the duplicate is DROPPED and the request is acknowledged, not raised. The
+            //   requester already has its answer, so redelivering this request could only produce the
+            //   duplicate again and would eventually dead-letter a request that was correctly answered.
+            LOG.info("event=account.inquiry.duplicate-suppressed");
+            return;
+        }
+
+        LOG.warn("event=account.inquiry.reply-resent reason=claim-outstanding");
+        publishReply(recorded.payload(), recorded.destination(), recorded.messageId(),
+                recorded.correlationId());
+        retireClaim(requestKey);
+    }
+
+    /**
+     * Marks a sent reply as sent, reporting rather than raising when another delivery got there first.
+     *
+     * @param requestKey the requester's own identity for its request; must not be {@code null}
+     */
+    private void retireClaim(String requestKey) {
+        boolean retired = Boolean.TRUE.equals(this.ledgerTransaction.execute(status ->
+                this.ledger.markSent(requestKey,
+                        LocalDateTime.ofInstant(this.clock.instant(), ZoneOffset.UTC))));
+        if (!retired) {
+            // WHY : Assumptions: this is reported and not raised. It means a concurrent delivery retired
+            //   the claim between this one's read and its mark, so THIS send was the duplicate -- and
+            //   raising would redeliver a request the requester has already been answered twice for.
+            LOG.warn("event=account.inquiry.claim-already-retired");
+        }
+    }
+
+    /**
+     * Chooses the identity a claim is keyed on, preferring the message identity.
+     *
+     * <p>Assumptions: the message identity is preferred because it identifies the REQUEST, where a
+     * correlation identity identifies the exchange a requester is pairing -- and a requester is entitled to
+     * reuse one correlation identity across several questions. Keying on the correlation identity when a
+     * message identity is present would therefore suppress a second, distinct request as though it were a
+     * redelivery of the first. The baseline holds both, saving the correlation identifier at physical line
+     * 370 and the message identifier at physical line 372, so both are available here for the same reason.</p>
+     *
+     * <p>Assumptions: a blank value counts as absent. The correlation reader answers with an empty string
+     * when the request carried no conforming identity, and an empty key would collide every unidentified
+     * request onto one row -- so the first such request would suppress every later one.</p>
+     *
+     * @param messageId the request's message identity, or {@code null} if it supplied none
+     * @param correlationId the request's correlation identity, possibly empty when none was supplied
+     * @return the key to claim on, or {@code null} when the request supplied no identity at all
+     */
+    private static String requestKey(String messageId, String correlationId) {
+        if (messageId != null && !messageId.isBlank()) {
+            return messageId;
+        }
+        if (correlationId != null && !correlationId.isBlank()) {
+            return correlationId;
+        }
+        return null;
+    }
+
+    /**
      * Publishes a diagnostic to the configured error sink.
      *
-     * <p>Purpose: transcribes {@code 9000-ERROR} at physical line 501, which moves its diagnostic block into
-     * the buffer at physical lines 505 and 506, sets the buffer length at physical line 507, declares the
-     * payload format at physical line 508 and puts to the error handle at physical line 517.</p>
+     * <p>Purpose: transcribes {@code 9000-ERROR} at physical line 501, which frames its diagnostic block to
+     * the buffer length, declares the payload format and puts to the error handle.</p>
      *
      * <p>Assumptions: this is exposed rather than kept private because the error sink is reachable in the
      * baseline before any request exists, and the target keeps that reachability. {@code 1000-CONTROL}
-     * performs {@code 2100-OPEN-ERROR-QUEUE} at physical line 187 -- ahead of its {@code EXEC CICS RETRIEVE}
-     * at physical line 191, ahead of {@code 2300-OPEN-INPUT-QUEUE} at physical line 212 and ahead of
-     * {@code 2400-OPEN-OUTPUT-QUEUE} at physical line 213 -- and then enters {@code 9000-ERROR} at physical
-     * line 208 when that retrieve fails, at a point where no queue has been read and there is nothing to
-     * reply to. Note that paragraph DECLARATION order is the reverse and is not the execution order: the
-     * error-queue paragraph is declared at physical line 289, below the input paragraph at 222 and the output
-     * paragraph at 255, so reading the declarations alone gives the opposite impression. Publishing this
-     * operation is what lets a caller in this context report a diagnostic with no exchange in progress. It is
-     * deliberately NOT reached from the reply path: a business outcome is a reply, not an error report.</p>
+     * performs {@code 2100-OPEN-ERROR-QUEUE} at physical line 187, ahead of its {@code EXEC CICS RETRIEVE}
+     * and ahead of both the input and output opens, and then enters {@code 9000-ERROR} when that retrieve
+     * fails -- at a point where no queue has been read and there is nothing to reply to. Paragraph
+     * DECLARATION order is the reverse of that execution order, so reading the declarations alone gives the
+     * opposite impression. Publishing this operation is what lets a caller in this context report a
+     * diagnostic with no exchange in progress. It is deliberately NOT reached from the reply path: a business
+     * outcome is a reply, not an error report.</p>
      *
      * <p>Assumptions: the diagnostic text is composed by the caller and must name no value that came off the
      * wire, for the same reason the reply path logs a length rather than a value. The failure path composes
      * its own text through {@link #reportFailure(RuntimeException, String, String)}, which renders a failure
      * as its chain of types and carries no message text at all.</p>
      *
-     * @param diagnostic the diagnostic text, no longer than the message length; must not be {@code null}
+     * @param diagnostic the diagnostic text, at most the message length; must not be {@code null}
      * @throws NullPointerException if {@code diagnostic} is {@code null}
      * @throws IllegalArgumentException if the text is longer than the message length, which is a defect in
      *     the caller's own formatting rather than a wire condition and must not be silently truncated
@@ -722,9 +931,9 @@ public class InquiryMessageListener {
      * Reports an unexpected failure to the error sink without letting the report replace it.
      *
      * <p>Purpose: this is the target form of the baseline's {@code WHEN OTHER} branch at physical lines 437 to
-     * 445, which fills the diagnostic fields at physical lines 439 to 443, performs {@code 9000-ERROR} at
-     * physical line 444 and only then performs {@code 8000-TERMINATION} at physical line 445. The caller
-     * propagates afterwards, which is this flow's form of that termination.</p>
+     * 445, which fills the diagnostic fields, performs {@code 9000-ERROR} and only then performs
+     * {@code 8000-TERMINATION}. The caller propagates afterwards, which is this flow's form of that
+     * termination.</p>
      *
      * <p>Assumptions: a failure in the REPORT is attached to the original failure rather than thrown, so an
      * unreachable error sink can never disguise the fault an operator is actually looking for. This matters
@@ -802,7 +1011,7 @@ public class InquiryMessageListener {
      *     blank
      * @param detail the failure rendering appended after the positional prefix, or {@code null} to append
      *     nothing
-     * @return the composed buffer, no longer than the message length, never {@code null}
+     * @return the composed buffer, at most the message length, never {@code null}
      */
     private static String errorDiagnostic(String paragraph, String returnMessage, String queueName,
             String detail) {

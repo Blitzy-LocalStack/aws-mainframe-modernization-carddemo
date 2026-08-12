@@ -177,12 +177,12 @@ eight split the contract census in
 [Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service)
 already draws.
 
-*WHY (Refactoring Rationale).* This read "**Every** service additionally validates
-the token itself," which contradicted this record's **own** census two sentences
-earlier: that census counts seven OpenAPI contracts, "one per service with an HTTP
-surface," precisely because `batch-service` has none. A service with no HTTP surface
-cannot validate a bearer token, so the word "every" made the document disagree with
-itself and overstated the number of enforcement points by one.
+Assumptions: the count above is seven and not eight, and it has to be, because this
+record's own census two sentences earlier counts seven OpenAPI contracts — "one per
+service with an HTTP surface" — precisely because `batch-service` has none. A service
+with no HTTP surface cannot validate a bearer token, so writing "every service" here
+would make the document disagree with itself and overstate the number of enforcement
+points by one.
 
 **Interface.** The **21** screens are **to be** re-implemented as one **React 19 +
 TypeScript** single-page application, one route per mapset, using **Ant Design**
@@ -346,10 +346,9 @@ the property that decided between them are recorded rather than implied.
 - **Shadcn/ui — rejected on ownership, assembly depth and one genuine gap.** It
   requires a utility-CSS toolchain plus hand-assembly of each component into the
   repository: components are copied into the codebase and owned there rather than
-  consumed from a versioned package. Refactoring Rationale: this entry previously
-  claimed the catalog ships **no `Table`**, which is wrong — the catalog does
-  publish `Table`, and a `Data Table` alongside it — so the rejection is re-grounded
-  on what is actually true of them. `Table` is a set of unstyled structural
+  consumed from a versioned package. Assumptions: the rejection is NOT that the
+  catalog ships no `Table` — it publishes one, and a `Data Table` alongside it — so
+  the ground is what those two actually are. `Table` is a set of unstyled structural
   primitives (`Table`, `TableHeader`, `TableRow`, `TableHead`, `TableBody`,
   `TableCell`, `TableCaption`), and `Data Table` is **a documented recipe rather
   than a component**: sorting, filtering, pagination, column visibility and row
@@ -432,19 +431,17 @@ placeholder left unsubstituted. Each client module exports its operation manifes
 and derives every request target from it, so the manifest the gate reads and the
 address the code sends cannot disagree.
 
-Refactoring Rationale: this record previously said that a renamed, retyped or
-removed field "is a compile-time failure on the other" side. That described a
-**generated** client, and it was not merely unimplemented — it was unimplementable
-with the dependency set this project pins. [`ui/package.json`](../../ui/package.json)
-declares 7 runtime and 15 development dependencies and names no OpenAPI code
-generator; the migration plan's dependency inventory fixes that set, and adding to
-it is not a decision this record may take. No build step could therefore ever have
-turned a YAML edit into a TypeScript type error. Writing more hand-authored clients
-would not have made the claim true either. What is delivered instead is the
-operation-level gate described
-above, and it is recorded here in those terms because a decision record that
-overstates its own mechanism is worse than one that understates it: a reader trusts
-the overstatement and stops checking.
+Alternatives Considered: a GENERATED client, in which a renamed, retyped or removed
+field is a compile-time failure on the other side. Unavailable rather than merely
+unchosen: [`ui/package.json`](../../ui/package.json) declares 7 runtime and 15
+development dependencies and names no OpenAPI code generator, the migration plan's
+dependency inventory fixes that set, and adding to it is not a decision this record
+may take — so no build step here can turn a YAML edit into a TypeScript type error,
+and writing more hand-authored clients would not change that. What is delivered
+instead is the operation-level gate described above. Trade-offs: a decision record
+that overstates its own mechanism is worse than one that understates it, because a
+reader trusts the overstatement and stops checking — which is why the coupling is
+described here in exactly the terms the gate delivers.
 
 Trade-offs: the gate decides which operations exist on each side; it does **not**
 decide field-level agreement, which a generator would have. That is the residual
@@ -460,39 +457,32 @@ Assumptions: the contract is authoritative for the client. Where a service's
 handler and its contract disagree, the contract governs — not the client that
 believed it.
 
-**What is mechanically enforced, and what is not.** Refactoring Rationale: this
-section previously said that renaming or retyping a field on one side is "a
-compile-time failure on the other". That overstated the coupling and is corrected
-here, because a reader would otherwise trust a compiler to catch a class of drift
-that no compiler sees. The client's request and response types are **hand-written
-TypeScript, not generated from the contracts**, so nothing links the two at compile
-time. What does hold the line is enforced on the service side and in tests:
+**What is mechanically enforced, and what is not.** Assumptions: renaming or
+retyping a field on one side is NOT a compile-time failure on the other, and the
+negative is stated because the opposite belief would have a reader trust a compiler
+to catch a class of drift no compiler sees. The client's request and response types
+are **hand-written TypeScript, not generated from the contracts**, so nothing links
+the two at compile time. What does hold the line is enforced on the service side and
+in tests:
 
 | Boundary | Enforcement | Mechanism |
 |---|---|---|
-| Contract ↔ handler routes, **both directions** | **Mechanical** | `transaction`, `reference` and `reporting` each assert that every published path is served and every served path is published |
-| Contract ↔ handler routes, **one direction** | **Mechanical** | `account` asserts that the published paths are exactly the ones its consumer builds, and that the document names nothing the module withholds — a narrower claim than the row above, and it is stated separately rather than folded into it |
-| Contract ↔ published authority and schema rules | **Mechanical** | Every one of the seven contract tests asserts the authority model, the paging envelope and the path-shape rules the contract declares — this is the only enforcement `auth`, `authorization` and `card` currently have |
+| Contract ↔ mounted handler routes, **both directions** | **Mechanical** | Six of the seven — `transaction`, `reference`, `reporting`, `account`, `auth` and `card` — enumerate the handlers the module mounts and assert that set and the published set agree exactly, so a published path no handler answers and a mounted path the document omits both fail |
+| Contract ↔ controller path constants, **both directions** | **Mechanical** | `authorization` asserts the published path set is exactly five paths composed from `PendingAuthController.BASE_PATH`, its `SEARCH_PATH` and `FraudController.FRAUD_PATH`, and that the published operation identifiers are exactly the five the module serves. It reads the controllers' constants rather than enumerating their mapping annotations, which is a narrower claim than the row above and is stated separately rather than folded into it |
+| Contract ↔ published authority and schema rules | **Mechanical** | Every one of the seven contract tests asserts the authority model, the paging envelope and the path-shape rules the contract declares |
 | Contract ↔ DTO wire shape | **Mechanical** | Per-service wire and DTO contract tests assert declared field names, types and money-as-string |
 | Contract ↔ TypeScript client types | **Manual** | No code generation; a contract change and its client change are two edits a reviewer must keep together |
 
-Assumptions: the rows above are deliberately separate because they cover different
-services and make different claims. Of the seven services publishing a contract,
-only `card` has no controllers at all, so for `card` there is genuinely no route set
-to compare against. `auth` and `authorization` **do** have handlers — one
-`AuthController`, and `PendingAuthController` with `FraudController` — but their
-contract tests bind the contract to its own declared rules rather than to the
-handler route set, so a handler-binding claim is still one this record cannot
-support for them. The distinction matters because the two situations are fixed
-differently: `card` needs controllers, while `auth` and `authorization` need the
-route-comparison case their contract tests do not yet carry.
-
-Refactoring Rationale: this paragraph previously grouped `auth`, `card` and
-`authorization` together as services that "publish a contract but have no
-controllers yet". That was accurate when written and is now true of `card` alone.
-Left standing it would have understated what is deployed and, worse, pointed the
-remedy at the wrong work: a reader would have set out to write controllers that
-already exist rather than the route assertions that do not.
+Assumptions: the first two rows are separate because they make different claims, not
+because one service is behind the others. Every one of the seven contexts that
+publishes a contract has controllers — `card` has `CardController`, `auth` has
+`AuthController` and `UserController`, `authorization` has `PendingAuthController` and
+`FraudController` — so no service is left without a route set to compare against. What
+differs is what the comparison is made against: six read the handlers the module
+mounts, while `authorization` reads the path constants those handlers are annotated
+with. The second is strictly weaker, because a constant can be correct while the
+annotation using it is missing, and the row records that residue rather than claiming
+the stronger form for all seven.
 
 Trade-offs: the third row is a real residual risk and it is recorded as one under
 [Risk — the typed client is hand-written, so contract drift is not a compile error](#risk--the-typed-client-is-hand-written-so-contract-drift-is-not-a-compile-error)
@@ -557,13 +547,13 @@ four destinations are named. The source is
    access log of every intermediary between the browser and the service. Those are
    durable, searchable stores outside this system's control.
 
-   Refactoring Rationale: an earlier revision of this record mapped
-   `CDEMO-CARD-NUM` straight onto a path segment and answered the exposure by
-   redacting sixteen-digit runs from the operational records the services write. That
-   redaction is real and it does not reach far enough — a service can redact what IT
-   writes and cannot redact what a content distribution or a load balancer wrote
-   before the request arrived — so the number is kept out of the request line
-   instead. The three single-card card operations take a **sealed selector**: an
+   Alternatives Considered: mapping `CDEMO-CARD-NUM` straight onto a path segment and
+   answering the exposure by redacting sixteen-digit runs from the operational records
+   the services write. Rejected as insufficient rather than wrong: that redaction is
+   real, and a service can redact only what IT writes — not what a content
+   distribution or a load balancer wrote before the request arrived — so the number is
+   kept out of the request line instead. The three single-card card operations take a
+   **sealed selector**: an
    authenticated, deployment-keyed sealing of the primary key, carried on every list
    row and every detail response so a client can act on what it was shown, with one
    `POST` operation exchanging a number a user typed for a selector in a request
@@ -1057,15 +1047,15 @@ enough that a catalog holding one of them would look complete.
 The client's request and response types under [`ui/src/api`](../../ui/src/api) are
 authored by hand rather than generated from the OpenAPI documents, as
 [Rationale 2](#2-the-openapi-contract-is-what-stops-the-client-and-the-service-drifting-apart)
-now states exactly. The consequence is specific: a service may rename, retype or
+states exactly. The consequence is specific: a service may rename, retype or
 remove a field, keep its own contract test green by updating the contract in the
-same change, and leave the client compiling against a field that no longer exists.
+same change, and leave the client compiling against a field the service has dropped.
 The failure surfaces at runtime, on one screen, as an undefined value rather than a
 build error.
 
 The controls that do exist are named so the residual risk is visible rather than
-implied. Each service's contract test binds the contract to its handlers in both
-directions, so the contract cannot silently disagree with the service. The
+implied. The per-service census binds the contract to the module's route set in both
+directions, so the contract cannot silently disagree about which operations exist. The
 per-screen tests assert the exact strings and field widths a screen renders, so a
 client type that stops matching what the screen needs fails there. What neither
 control covers is the join between the contract and the client type, and that is
@@ -1191,43 +1181,29 @@ plainly, and the first item is the largest:
   service clients they will call are: [`ui/src/api`](../../ui/src/api) holds six client
   modules — `auth`, `authorization`, `cards`, `reference`, `reporting` and
   `transactions` — one for each of the six browser-facing contracts, so the boundary is
-  a screen boundary and no longer a client boundary. Refactoring Rationale: this
-  sentence named `auth.ts` and `cards.ts` as the only authored clients and reported the
-  rest as outstanding. That is measurably no longer true, and the correction is stated
-  rather than the sentence deleted, because which half of the gap closed is the useful
-  fact: the typed client layer is complete against the published contracts while the
-  screens that consume it are not, so what remains is composition rather than
-  transcription. The
-  shared shell, the key-binding hook, the message catalog and the token module are
-  authored, and **all four authored screens compose the shell in full** — screen
-  header, message band, and key bar driven by the key-binding hook.
-  Refactoring Rationale: this bullet previously recorded that only the sign-on screen
-  composed the shell and that the three card screens composed the message band alone,
-  tracked as an obligation below. That is no longer the delivered state and the
-  sentence is corrected rather than deleted, because the obligation it pointed at is
-  still standing for the 17 unauthored routes — what changed is that the four
-  authored ones now satisfy it, and a per-screen test asserts each one does.
+  a screen boundary and no longer a client boundary: the typed client layer is complete
+  against the published contracts while the screens that consume it are not, so what
+  remains is composition rather than transcription. The shared shell, the key-binding
+  hook, the message catalog and the token module are authored, and **all four authored
+  screens compose the shell in full** — screen header, message band, and key bar driven
+  by the key-binding hook — with a per-screen test asserting each one does. That
+  obligation still stands for the 17 unauthored routes.
   Assumptions: the decision above is deliberately written as a decision and not as a
   report — an ADR records what is chosen, and the delivery boundary belongs here,
   where a reader looking for it will find it rather than discovering it by counting
   files.
-- **Every one of the seven contracts now has a contract test, but only three bind
-  the route set in both directions.** Refactoring Rationale: this bullet has been
-  narrowed twice. It first recorded that `account-service` published neither a
-  contract nor controllers; it then recorded that six of seven contracts had a
-  contract test and that `account-service` was the exception. Both are now wrong —
-  `account-api.yaml` declares both of this context's surfaces, `api/` holds `AccountController`,
-  `CustomerController` and `CardXrefController`, and `AccountContextContractTest`
-  pins the document to what the module serves. What is genuinely still outstanding is
-  narrower again and is stated in the enforcement matrix above rather than repeated
-  here: only `transaction`, `reference` and `reporting` compare the published path set
-  against the served path set in both directions, so for `auth`, `authorization` and
-  `account` a published path that no handler serves would not fail a build, and for
-  `card` there is no handler set to compare at all. The boundary is kept rather than
-  removed because the reason it existed — that a published document is only as
-  trustworthy as the test that pins it — still holds; what has changed is which part
-  of the pinning is missing. Every claim in this record about eight services still
-  describes the decided architecture and not eight running APIs.
+- **All seven contracts are pinned to a route set, and one of the seven is pinned
+  through path constants rather than through mounted handlers.** Six — `transaction`,
+  `reference`, `reporting`, `account`, `auth` and `card` — compare the published path
+  set against the handlers the module mounts, in both directions, so a published path
+  no handler serves fails the build and so does a mounted path the document omits.
+  `authorization` compares the published set against its two controllers' path
+  constants instead, which leaves one residue: a handler whose mapping annotation was
+  removed while its constant remained would not fail. The boundary is recorded rather
+  than rounded up because a published document is only as trustworthy as the test that
+  pins it, and the enforcement matrix above states which form of pinning each service
+  has. Every claim in this record about eight services still describes the decided
+  architecture and not eight running APIs.
 - **No `terraform apply` against a live AWS account.** That is an operator action
   outside this scope, so no distribution, no front door and no user pool exists as
   a running resource.
@@ -1239,16 +1215,12 @@ plainly, and the first item is the largest:
   behaviour and the design system, not against observed operator performance. Where
   this record claims a difference is acceptable — the masked entry field, for
   instance — that is a reasoned judgement, and it is not presented as a tested one.
-- **The contract census is complete, and it is seven rather than eight.** Refactoring
-  Rationale: this bullet reported five of eight documents authored with the account,
-  batch and reporting contracts outstanding. All three cases have since resolved and
-  none resolved the way the bullet predicted: the account and reporting contracts are
-  authored, and `batch-service` publishes no HTTP surface at all, so its contract was
-  never outstanding but absent by design. The measured census and the reasoning behind
-  the count are in
+- **The contract census is seven rather than eight, and that is by design.**
+  `batch-service` publishes no HTTP surface at all, so it holds no OpenAPI document
+  and never was expected to. The count and the reasoning behind it are in
   [Consequences](#seven-openapi-contracts-one-per-service-with-an-http-surface-held-with-the-service).
-  The decision that each service holds its own contract is settled and delivered; what
-  remains outstanding is the one missing contract test named above.
+  The decision that each service with an HTTP surface holds its own contract is
+  settled and delivered.
 
 Assumptions: naming these boundaries is more useful than a confident summary would
 be. A reader who needs to know whether a screen has been driven through a real
@@ -1270,11 +1242,11 @@ is worth stating because "one per service" is the shape but not the count:
 | Contract | Operations | Reachable from the browser |
 |---|---|---|
 | `auth-service/…/auth-api.yaml` | 8 | yes |
-| `account-service/…/account-api.yaml` | 11 | **8 internal-only; 3 end-user, no client module yet** |
+| `account-service/…/account-api.yaml` | 10 | **7 internal-only; 3 end-user, no client module yet** |
 | `card-service/…/card-api.yaml` | 5 | yes |
 | `transaction-service/…/transaction-api.yaml` | 4 | yes |
 | `reference-service/…/reference-api.yaml` | 19 | yes |
-| `authorization-service/…/authorization-api.yaml` | 3 | yes |
+| `authorization-service/…/authorization-api.yaml` | 5 | yes |
 | `reporting-service/…/reporting-api.yaml` | 5 | yes |
 | `batch-service` | — | **no HTTP surface at all** |
 
@@ -1292,28 +1264,42 @@ any `/batch` route outright. Three artifacts already agreed that this module has
 contract, and this record was the only one that disagreed.
 
 The `account-api.yaml` row is the one that repays reading twice: it carries
-**eleven** operations split across **both** surfaces, and it is the only contract in
-the census that is not wholly one or the other. The **eight** internal-tagged
+**ten** operations split across **both** surfaces, and it is the only contract in
+the census that is not wholly one or the other. The **seven** internal-tagged
 operations are `POST /api/v1/card-xrefs/lookup`,
 `POST /api/v1/card-xrefs/lookup-by-account`,
-`POST /api/v1/card-xrefs/search-by-account`, `GET /api/v1/accounts/{accountId}`,
-`GET /api/v1/customers`, `HEAD /api/v1/customers/{customerId}`,
-`GET /api/v1/customers/{customerId}` and
-`GET /api/v1/customers/{customerId}/record` — exactly the matcher set
+`POST /api/v1/card-xrefs/search-by-account`, `POST /api/v1/accounts/lookup`,
+`GET /api/v1/customers`, `POST /api/v1/customers/lookup` and
+`POST /api/v1/customers/record` — exactly the matcher set
 `InternalApiSecurityConfig` enumerates. The remaining **three** are end-user
-operations reachable from the browser by design: `PUT /api/v1/accounts/{accountId}`,
-`GET /api/v1/accounts/{accountId}/view` and
-`GET /api/v1/accounts/{accountId}/card-cross-references`.
+operations reachable from the browser by design: `POST /api/v1/accounts/update`,
+`POST /api/v1/accounts/view` and
+`POST /api/v1/accounts/card-cross-references/search`.
 
-*WHY (Refactoring Rationale).* This row recorded **3** operations and marked the
-whole contract "**no — internal only**." Both halves were wrong, and they were wrong
-in opposite directions, which is why neither corrected the other. The count was
-stale by eight — the contract holds eleven operations, measured from the document
-itself — and the reachability verdict inverted the very split the count was missing:
-the three operations it did count are in fact the **browser-reachable** ones, so the
-row named the right number for the wrong set and then labelled that set
-machine-facing. The prose below already conceded that "the internal-tagged set grew
-when the customer scan and the customer record read landed," so this table was
+Refactoring Rationale:  The enumeration above named eleven operations of
+which four were addresses this contract no longer publishes — a keyed account read,
+a keyed customer record read, and a keyed customer probe counted twice for its `GET`
+and its `HEAD`. All four had already moved onto request bodies, the probe's two
+methods collapsing into one `POST`, which is what took the total from eleven to ten
+and the internal set from eight to seven. The three end-user operations have since
+moved too, from keyed addresses onto fixed ones. Every operation on the account
+prefix is now a `POST` on a fixed sub-path, and the reason is one property rather
+than a style: a load balancer composes its access record from the request line
+before any application code runs, and this migration's sensitive-data contract names
+account and customer identifiers among the values a durable diagnostic may not hold.
+A reader should NOT infer from the uniform verb that the two surfaces are separated
+by method — they are separated by filter chain and by sub-path, and
+`AccountContextContractTest` asserts both alongside a sweep that fails the build if
+any published template or declared parameter regains a place to put an identifier.
+
+Assumptions: the operation count and the reachability verdict in this row are two
+independent measurements and are stated as such, because an error in either does not
+correct the other. The count is eleven, read from the contract document itself; the
+reachability split is that three of the eleven are browser-reachable and the rest are
+internal-tagged. Collapsing the two — naming one number and one verdict for the whole
+contract — is what previously labelled the browser-reachable subset machine-facing.
+The prose below records that "the internal-tagged set grew when the customer scan and
+the customer record read landed," so this table was
 contradicting the paragraph immediately beneath it. Enumerating both surfaces
 explicitly makes the row checkable against the contract and against
 `InternalApiSecurityConfig` rather than against a recollection of either.
@@ -1347,7 +1333,7 @@ The interface is to implement one route per mapset, 21 in total. **`CP00`, `CDRD
 and `CDRA` have no route**, because they have no map: each is driven by a message
 and belongs to [ADR-004](ADR-004-messaging.md). A reader auditing routes against
 the transaction inventory should expect exactly that difference and no other — and
-should expect, separately, that only three of the 21 are authored today, per
+should expect, separately, that only four of the 21 are authored today, per
 [Honest boundary](#honest-boundary--what-this-record-does-not-establish).
 
 ### A shared shell, authored once

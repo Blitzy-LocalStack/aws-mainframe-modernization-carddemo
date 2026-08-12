@@ -33,23 +33,11 @@
 #   See the note above the data sources below; infra/bootstrap owns state.
 #
 # Parameters:
-#   All thirteen variables declared in variables.tf are read by this file, so the
-#   module has no input that reaches nothing. Their types, defaults and
-#   constraints are documented on the `variable` blocks themselves rather than
-#   restated here, where a second copy could drift from the first:
-#     name_prefix, environment ......... composed into local.bucket_name
-#     kms_key_arn ...................... the SSE-KMS key
-#     dataset_families ................. the ten generation prefixes and rules
-#     non_generation_prefixes .......... the two statement prefixes and rules
-#     noncurrent_version_retention ..... default logical/version-history count
-#     noncurrent_version_transition_days,
-#     noncurrent_version_transition_storage_class
-#                                      . the optional noncurrent transition
-#     abort_incomplete_multipart_upload_days
-#                                      . orphaned-part reclamation
-#     access_log_bucket_name ........... enables server access logging
-#     force_destroy .................... destroy-with-contents behaviour
-#     tags ............................. merged onto the bucket
+#   Every variable declared in variables.tf is read by this file, so the module has
+#   no input that reaches nothing. Their types, defaults and constraints are
+#   documented on the `variable` blocks themselves and tabulated in the generated
+#   region of README.md, rather than restated here where a second copy could drift
+#   from the first.
 #
 # Return values:
 #   No `output` is declared here; outputs.tf owns the module's return surface
@@ -62,22 +50,17 @@
 #   table in README.md stale until it is regenerated.
 #
 # Errors:
-#   Four failure modes, three of them at apply rather than at plan:
-#     1. `kms_key_arn` naming a key that does not exist, sits in another
-#        region, or whose key policy does not permit S3 to use it: the bucket
-#        is created and the encryption configuration then fails, leaving the
-#        bucket present and unencrypted until the apply is corrected.
-#     2. A globally taken bucket name. The S3 name namespace spans every AWS
-#        account, so creation fails with an ownership conflict; the account id
-#        and region in local.bucket_name are what make that improbable rather
-#        than merely unlikely.
-#     3. A noncurrent-version lifecycle action attached before versioning is
-#        enabled is rejected, which is why the lifecycle configuration declares
-#        an explicit dependency on the versioning resource.
-#     4. `terraform destroy` against a populated bucket fails while
-#        `force_destroy` is false -- and a versioned bucket is affected more
-#        than an unversioned one, because every noncurrent version and delete
-#        marker must be removed before the bucket itself will delete.
+#   Four failure modes, three of them at apply rather than at plan: a
+#   `kms_key_arn` naming a key that does not exist, sits in another region or whose
+#   policy does not permit S3 to use it, which leaves the bucket created and
+#   unencrypted until the apply is corrected; a globally taken bucket name, which
+#   the account id and region in local.bucket_name make improbable rather than
+#   merely unlikely; a noncurrent-version lifecycle action attached before
+#   versioning is enabled, which is why the lifecycle configuration declares an
+#   explicit dependency on the versioning resource; and `terraform destroy` against
+#   a populated bucket while `force_destroy` is false, which affects a versioned
+#   bucket more because every noncurrent version and delete marker must be removed
+#   before the bucket will delete.
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: the AAP fixes the distinct-key convention
@@ -113,7 +96,7 @@
 # between the two and the one most likely to be "helpfully" consolidated away.
 # infra/bootstrap declares NO noncurrent-version expiration at all, because
 # every prior version of a state file is recovery material and pruning it
-# destroys the only record of what the infrastructure previously was. This
+# destroys the only record of the infrastructure that version described. This
 # module is the opposite: logical generation cleanup keeps the newest five
 # dt=/gen= prefixes and physically removes older prefixes, while lifecycle
 # bounds repeat-write versions within the retained prefixes. Identical resource
@@ -127,39 +110,28 @@
 #
 #   s3://<bucket>/<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/
 #
-# The two relative-generation forms map onto that convention directly:
-#
-#   (+1)  a NEW generation  => a new gen=NNNN prefix and a new current object
-#         version. Written by app/jcl/TRANBKP.jcl:L33, app/jcl/POSTTRAN.jcl:L38,
-#         app/jcl/INTCALC.jcl:L41, app/jcl/COMBTRAN.jcl:L37,
-#         app/jcl/TRANREPT.jcl:L33, L55 and L80, app/jcl/PRTCATBL.jcl:L39, and
-#         app/jcl/DEFGDGD.jcl:L40, L63 and L86.
-#   (0)   the CURRENT generation => the current object version. Read by
-#         app/jcl/COMBTRAN.jcl:L24 and L26.
-#
-# app/jcl/COMBTRAN.jcl is the cleanest single proof that both forms are one
-# mechanism rather than two: in ONE job it reads TRANSACT.BKUP(0) at L24 and
-# SYSTRAN(0) at L26 as current, sorts them into TRANSACT.COMBINED(+1) at L37,
-# then reads that same new generation back at L44. Under versioning the same
-# sequence is a read of two current versions, a write creating a third, and a
-# read of what that write just made current -- no bookkeeping in between.
+# The two relative-generation forms map onto that convention directly: `(+1)`, a
+# NEW generation, becomes a new gen=NNNN prefix and a new current object version,
+# and `(0)`, the CURRENT generation, becomes the current object version. The
+# per-job citations are tabulated in README.md. app/jcl/COMBTRAN.jcl is the
+# cleanest single proof that both forms are one mechanism rather than two: in ONE
+# job it reads two backups as current, sorts them into a new generation, then reads
+# that same new generation back. Under versioning the same sequence is a read of
+# two current versions, a write creating a third, and a read of what that write
+# just made current -- no bookkeeping in between.
 #
 # Alternatives Considered: creating one zero-byte `aws_s3_object` per prefix so
-# that the "directories" visibly exist, which is the obvious way to make a
-# provisioned prefix inspectable and is what an operator used to catalogued
-# datasets will expect. Rejected, and NO SUCH RESOURCE IS DECLARED ANYWHERE
-# BELOW. S3 has no directories: a prefix is not an entity that is created, it
-# comes into existence the moment the first object is written under it and
-# ceases to exist when the last one is removed, so a marker object provisions
-# nothing that was missing. Worse, it would be actively harmful in three ways
-# specific to this bucket. A marker is itself a versioned object, so the
-# retention rules below would apply to it and it would accrue noncurrent
-# versions of an empty file. It would appear in every listing, so the ETL
-# readers and the batch tasks that enumerate a prefix would see a spurious
-# zero-length record among real dataset generations and would have to learn to
-# skip it. And a marker under `<domain>/<dataset>/` does not even match the keys
-# consumers use, which include the `dt=` and `gen=` segments, so it would
-# document a path nothing writes to.
+# the "directories" visibly exist, which is what an operator used to catalogued
+# datasets will expect. Rejected, and NO SUCH RESOURCE IS DECLARED ANYWHERE BELOW.
+# S3 has no directories -- a prefix comes into existence when the first object is
+# written under it and ceases to exist when the last is removed -- so a marker
+# provisions nothing that was missing, and it would be actively harmful three ways
+# here: a marker is itself a versioned object, so the retention rules below would
+# accrue noncurrent versions of an empty file; it would appear in every listing, so
+# the ETL readers and batch tasks that enumerate a prefix would have to learn to
+# skip a spurious zero-length record; and a marker under `<domain>/<dataset>/` does
+# not match the keys consumers use, which include the `dt=` and `gen=` segments, so
+# it would document a path nothing writes to.
 # WHAT "PROVISIONS PREFIXES" THEREFORE MEANS HERE: this module declares the
 # prefix CONVENTION -- as the lifecycle-rule filters that govern retention and
 # as the map outputs.tf publishes -- and never as placeholder objects.
@@ -173,17 +145,12 @@
 # why outputs.tf publishes local.all_dataset_prefixes rather than leaving each
 # consumer to compose a prefix and risk composing it differently.
 #
-# The record formats are worth one line each, because they are what makes these
-# objects large enough for the multipart rule below to matter and small enough
-# for the transition minimum to matter: the reject stream is RECFM=F,LRECL=430
-# (app/jcl/POSTTRAN.jcl:L36) written as DALYREJS(+1) at L38; system-generated
-# interest transactions are RECFM=F,LRECL=350 (app/jcl/INTCALC.jcl:L39) written
-# as SYSTRAN(+1) at L41; transaction backups are LRECL=350,RECFM=FB
-# (app/jcl/TRANBKP.jcl:L31); the report is LRECL=133,RECFM=FB
-# (app/jcl/TRANREPT.jcl:L78); the category-balance backup is LRECL=50,RECFM=FB
-# (app/jcl/PRTCATBL.jcl:L37); and the three reference backups are LRECL 60, 60
-# and 50 (app/jcl/DEFGDGD.jcl:L42, L65 and L88). The per-family lineage table
-# lives in README.md and in each family's own `description` in variables.tf.
+# Record formats matter here because they are what makes these objects large
+# enough for the multipart rule below to matter and small enough for the
+# transition minimum to matter: the fixed record lengths across the ten families
+# run from 50 to 430 bytes. The per-family lineage table, with each family's
+# record format and its originating JCL, lives in README.md and in each family's
+# own `description` in variables.tf.
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
@@ -257,8 +224,8 @@ locals {
   # namespace. Rejected twice over: it would add the hashicorp/random provider
   # that versions.tf deliberately omits and that
   # terraform_unused_required_providers would then police, and it would make
-  # the bucket name unreproducible, so a lost state file could no longer be
-  # reconciled with the bucket it described.
+  # the bucket name unreproducible, so a lost state file could not be reconciled
+  # with the bucket it described.
   # The 63-character S3 limit is already guaranteed by the twelve-character
   # caps validated on name_prefix and environment in variables.tf; the budget
   # arithmetic lives there, on the inputs that have to satisfy it.
@@ -519,8 +486,8 @@ resource "aws_s3_bucket_ownership_controls" "datasets" {
     # DISABLES ACLs ENTIRELY, so access is decided by bucket policy and IAM
     # alone. That collapses two overlapping permission systems into one
     # auditable one: with ACLs live, an object can carry a grant that widens
-    # access beyond anything the policy says, and answering "who can read this
-    # object" means reading the policy, the bucket ACL and every object ACL.
+    # access past whatever the policy says, and answering "who may read a given
+    # object" means consulting the policy, the bucket ACL and every object ACL.
     # With ACLs disabled the policy and IAM are the complete answer.
     # It also removes a whole class of cross-account confusion, because every
     # object is owned by this account regardless of which principal wrote it --
@@ -684,7 +651,7 @@ resource "aws_s3_bucket_policy" "datasets" {
 # generation-dataset families and two for the sequential statement artifacts --
 # plus one bucket-wide housekeeping rule documented at the end of the resource.
 #
-# 1. Assumptions: TEN generation families, not six. This is the single most
+#   - Assumptions: TEN generation families, not six. This is the single most
 #    error-prone fact in the module, because app/jcl/DEFGDGB.jcl defines six
 #    bases in one IDCAMS step under the heading "DEFINE GDG BASES NEEDED BY
 #    CARDDEMO PROJECT" (L19) and reads as the complete inventory. It is not.
@@ -709,7 +676,7 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    are still ten; the LIMIT(5) definition is the one applied, and the conflict
 #    is recorded on `dataset_families` in variables.tf.)
 #
-# 2. Alternatives Considered: `newer_noncurrent_versions` -- a COUNT -- rather
+#   - Alternatives Considered: `newer_noncurrent_versions` -- a COUNT -- rather
 #    than a days-based expiry. LIMIT(5) is COUNT-BASED, NOT AGE-BASED, and a
 #    days-based rule is the trap here because it looks equivalent, passes every
 #    gate, and then deletes the wrong generations. It fails in both directions:
@@ -724,7 +691,7 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    supplied because the provider requires it, pinned to the one-day minimum
 #    in `local.noncurrent_expiration_min_age_days` as an eligibility gate.
 #
-# 3. Trade-offs: one prefix-scoped rule per family rather than a single
+#   - Trade-offs: one prefix-scoped rule per family rather than a single
 #    bucket-wide rule. The cost is twelve rules where one would have compiled,
 #    and it is accepted deliberately for two reasons. Per-family retention
 #    becomes overridable for one environment through the optional
@@ -735,17 +702,17 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    bucket-wide rule would retain five versions of everything with no way to
 #    tell which baseline contract each retention was serving.
 #
-# 4. Assumptions: the noncurrent-version actions require versioning enabled, so
+#   - Assumptions: the noncurrent-version actions require versioning enabled, so
 #    this configuration takes an explicit dependency on the versioning resource.
 #    Both reference the same bucket but neither references the other, so without
 #    the dependency Terraform may attach a noncurrent-version rule to a
 #    still-unversioned bucket on a first apply, which S3 rejects.
 #
-# 5. Assumptions: every rule carries a `filter`, and every rule that EXPIRES or
+#   - Assumptions: every rule carries a `filter`, and every rule that EXPIRES or
 #    TRANSITIONS a version is prefix-scoped. A retention rule left filterless
 #    would apply to the whole bucket, imposing one retention policy on every
-#    dataset at once and erasing the per-family control point 3 exists to
-#    provide. The single bucket-wide rule at the end of this resource is
+#    dataset at once and erasing the per-family control the third item above
+#    exists to provide. The single bucket-wide rule at the end of this resource is
 #    deliberately exempt from that scoping because it carries no retention
 #    action at all; its reasoning is recorded there.
 resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
@@ -754,8 +721,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   # Trade-offs: set explicitly, and matching the service's current default, so
   # the value is pinned and reviewable rather than inherited. The argument is
   # `computed`, meaning an unset value silently adopts whatever the API returns
-  # -- and AWS has already changed this default once, introducing the 128 KB
-  # floor where transitions previously had none. Pinning it means a future
+  # -- and AWS has already changed this default once, introducing a 128 KB floor
+  # on transitions that had none before it. Pinning it means a future
   # service-side change cannot alter this bucket's behaviour without a visible
   # diff. It is stated for a concrete reason rather than for tidiness: the
   # reference-data generations are genuinely small (LRECL 50 and 60 per
@@ -936,16 +903,15 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   depends_on = [aws_s3_bucket_versioning.datasets]
 }
 
-# WHY : Refactoring Rationale: an aws_lambda_permission and an
-#       aws_s3_bucket_notification stood here, invoking a caller-supplied function
-#       on every completed object write so it could prune all but the newest five
-#       generation prefixes. Both were removed with the `object_created_lambda_arn`
-#       input that fed them; variables.tf records the reasoning at the point the
-#       input used to be declared. The short form: an
-#       aws_s3_bucket_notification is a WHOLE-BUCKET resource, so claiming it here
-#       took the bucket's only notification slot away from every consumer of this
-#       module, for an event integration that belongs to whichever root owns the
-#       function.
+# WHY : Assumptions: this module declares no aws_s3_bucket_notification and no
+#       aws_lambda_permission, and neither belongs here. An
+#       aws_s3_bucket_notification is a WHOLE-BUCKET resource, so claiming it in a
+#       reusable module takes the bucket's only notification slot away from every
+#       consumer of that module -- for an event integration that belongs to
+#       whichever root owns the function. Generation pruning is therefore driven by
+#       the staging writer and the lifecycle rules above rather than by an
+#       object-created hook; variables.tf records the same reasoning on the input
+#       surface.
 
 resource "aws_s3_bucket_logging" "datasets" {
   # Trade-offs: conditional rather than mandatory, so the module stays
@@ -1034,27 +1000,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
   bucket = aws_s3_bucket.audit.id
 
   rule {
-    # WHY : Assumptions: the identifier names what the rule now does -- abandoning
-    #       incomplete multipart uploads -- rather than the compliance expiration it
-    #       used to carry. A stale identifier on a lifecycle rule is worse than an
-    #       imprecise one, because an operator reads the identifier in the console
-    #       and would infer an expiration horizon that is no longer configured.
+    # WHY : Assumptions: the identifier names exactly what the rule does --
+    #       abandoning incomplete multipart uploads -- and names no retention
+    #       horizon. An identifier naming an expiration this rule does not configure
+    #       is worse than an imprecise one, because an operator reads the identifier
+    #       in the console and would infer a compliance horizon that is not there.
     id     = "abort-incomplete-multipart-uploads"
     status = "Enabled"
 
     filter {}
 
-    # WHY : Refactoring Rationale: an `expiration` and a
-    #       `noncurrent_version_expiration` stood here, both computed from an
-    #       `audit_log_retention_days` input that defaulted to seven years. Both
-    #       were removed with that input; variables.tf records the reasoning where
-    #       the input used to be declared. What remains is the multipart cleanup
-    #       below, which is storage hygiene rather than a retention policy, so it
-    #       needs no compliance horizon to justify it.
-    #       Assumptions: a lifecycle rule needs at least one action, and
-    #       abort_incomplete_multipart_upload is one -- so removing the two
-    #       expirations leaves a rule that is still valid rather than an empty one
-    #       the API would reject.
+    # WHY : Assumptions: this rule configures no `expiration` and no
+    #       `noncurrent_version_expiration`, so the audit trail's objects are kept
+    #       until an account-level retention decision removes them rather than being
+    #       aged out by this module. A module cannot know the compliance horizon its
+    #       caller is subject to, and an object-access audit trail deleted on a
+    #       module default is exactly the record an investigation needs; variables.tf
+    #       records the same reasoning on the input surface. What remains is the
+    #       multipart cleanup below, which is storage hygiene rather than a retention
+    #       policy -- and it is also what keeps this rule VALID, because a lifecycle
+    #       rule needs at least one action and the API rejects an empty one.
     abort_incomplete_multipart_upload {
       days_after_initiation = var.abort_incomplete_multipart_upload_days
     }

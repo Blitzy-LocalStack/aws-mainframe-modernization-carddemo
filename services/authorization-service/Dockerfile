@@ -125,6 +125,35 @@ FROM maven:3.9.16-amazoncorretto-21-al2023@sha256:a7f84ee223e9b6a1ba462667cdb98e
 #       aggregator and the two modules selected from it.
 WORKDIR /build/services
 
+# WHY : Refactoring Rationale: this image shipped no database trust anchor, and
+#       nothing about it looked broken. application.yml connects with
+#       sslmode=verify-full and resolves sslrootcert to
+#       /etc/ssl/certs/carddemo-rds-ca-bundle.pem, both environment roots pass that
+#       same literal as CARDDEMO_DB_SSL_ROOT_CERT, and infra/modules/ecs-service
+#       refuses to render a task definition that omits it -- so every layer of the
+#       configuration named a file that no layer of the image created. pgjdbc opens
+#       that path before it opens a socket, so the omission was not a silent
+#       downgrade to an unverified connection: it was eight services that cannot
+#       reach their database, reporting an unreadable-file error while reading as
+#       correctly configured everywhere a reviewer would look.
+# WHY : Assumptions: the fetch, the digest verification and the reasoning behind
+#       both live in config/docker/install-rds-trust-anchor.sh, and are stated once
+#       there rather than eight times here. The script pins the bundle by SHA-256,
+#       so this layer either installs the exact reviewed bytes or fails the build.
+# WHY : Trade-offs: this sits at the TOP of the build stage, above the POM copies,
+#       for the same layer-ordering reason they sit above the sources -- its only
+#       input is the script, so a Java edit does not re-fetch the bundle and a
+#       rebuild pays the network cost once. The cost is that a change to the script
+#       invalidates the dependency warm-up below it, which is the rarer edit of the
+#       two.
+# WHY : Alternatives Considered: fetching it in the runtime stage instead, which
+#       would need one fewer COPY. Rejected because it would put the script and a
+#       scratch download into the shipped image and add a network step to the layer
+#       that ships; fetching here and copying one verified file forward keeps the
+#       runtime stage to exactly the file the JVM reads.
+COPY config/docker/install-rds-trust-anchor.sh /tmp/install-rds-trust-anchor.sh
+RUN /bin/sh /tmp/install-rds-trust-anchor.sh /tmp/carddemo-rds-ca-bundle.pem
+
 # WHY : Trade-offs: POMs and the documentation-gate configuration are copied
 #       before any source file so that a source-only change reuses the resolved
 #       dependency layer. The extra COPY instructions make this file longer, but
@@ -267,16 +296,49 @@ WORKDIR /app
 #       What is kept is a runtime layer holding no build tooling at all, which
 #       also removes a compiler and a package resolver from the running task's
 #       attack surface.
-# WHY : Assumptions: the archive is named for this module's artifactId and the
-#       version it inherits from the parent, and the Boot repackage goal has made
-#       it self-contained. Copying exactly that one file is therefore sufficient,
-#       and it leaves sources, build caches, test reports and every reactor
-#       target directory behind in the discarded stage. A renamed artifactId or
-#       an overridden finalName would break this path at build time rather than
-#       silently ship an empty image.
+# WHY : ⚠️ Refactoring Rationale: this path used to spell the version out --
+#       authorization-service-1.0.0-SNAPSHOT.jar -- a value this module inherits
+#       from services/pom.xml and never declares. A version bump in the parent is
+#       a routine edit that touches no file in this module, and it broke this
+#       instruction, which is the LAST one in the build: the whole reactor had
+#       already compiled, and the error read as a missing artifact rather than as
+#       a stale literal. services/authorization-service/pom.xml now pins
+#       <finalName>authorization-service</finalName>, so this path is deterministic
+#       and independent of the version. The two files are a contract and neither
+#       may change the name alone.
+# WHY : Assumptions: the Boot repackage goal has made that one archive
+#       self-contained, so copying exactly it is sufficient and it leaves sources,
+#       build caches, test reports and every other reactor target directory behind
+#       in the discarded stage. A renamed artifactId or a withdrawn final name
+#       breaks this path at build time rather than silently shipping an empty
+#       image.
 COPY --from=build --chown=10001:10001 \
-    /build/services/authorization-service/target/authorization-service-1.0.0-SNAPSHOT.jar \
+    /build/services/authorization-service/target/authorization-service.jar \
     /app/app.jar
+
+# WHY : Assumptions: the destination is the literal path application.yml resolves
+#       sslrootcert to and both environment roots pass as
+#       CARDDEMO_DB_SSL_ROOT_CERT, so the three statements are one contract read
+#       from three places rather than three independent settings that happen to
+#       agree. A gate in .github/workflows/services-ci.yml asserts that agreement
+#       and asserts this file is present and parseable in the built image, because
+#       the failure it prevents is invisible until a task tries to connect.
+# WHY : Assumptions: /etc/ssl/certs is a SYMLINK in this base --
+#       /etc/pki/ca-trust/extracted/pem/directory-hash -- so the file actually
+#       lands under /etc/pki and is reached through the link at run time. Verified
+#       by building against the pinned digest and reading the file back through
+#       both paths. It is worth stating because a reader assumes a real directory,
+#       and because a copy into a symlinked destination is the kind of thing that
+#       silently becomes a regular file called "certs" under a different builder.
+# WHY : Trade-offs: no --chown here, unlike the jar above. The anchor is
+#       root-owned and world-readable (0644), which is what a trust anchor should
+#       be: the application user must read it and no process in the task should be
+#       able to replace it. Verified readable as UID 10001 against the pinned
+#       digest. Placing it inside the hashed trust directory does NOT add it to the
+#       default OpenSSL trust store -- that lookup uses hash-named links -- so the
+#       bundle is used only where it is named explicitly.
+COPY --from=build /tmp/carddemo-rds-ca-bundle.pem \
+    /etc/ssl/certs/carddemo-rds-ca-bundle.pem
 
 # WHY : Assumptions: 8080 carries BOTH the business REST surface and the actuator
 #       health group, over TLS, because the base profile enables server.ssl and
@@ -346,16 +408,31 @@ USER carddemo:carddemo
 #       fail the check on every healthy task - a probe that always fails is worse
 #       than none, because it makes a working deployment look broken.
 # WHY : Trade-offs: --insecure is accepted for this one request. The certificate is
-#       the self-signed leaf the entry point mints for THIS task, so its subject is
-#       the task's own name and never the loopback address this probe dials;
-#       verification therefore could not succeed from inside the container however
-#       correct the certificate is. Measured rather than assumed: the same request
-#       without --insecure fails with curl exit 60, "no alternative certificate
-#       subject name matches target ipv4 address 127.0.0.1". What is given up is
-#       identity checking on a loopback call inside the container's own network
-#       namespace, where there is no second party to impersonate; what is kept is
-#       that the ENCRYPTED listener is the one proven to answer, which a plaintext
-#       probe would not establish.
+#       the self-signed leaf the entry point mints for THIS task, and the reason
+#       verification cannot succeed is that nothing in this image anchors it --
+#       config/docker/generate-listener-material.sh:164 mints it with
+#       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so the loopback address this
+#       probe dials IS carried by the certificate.
+# WHY : Refactoring Rationale: this note previously reported a MEASUREMENT that
+#       does not reproduce -- curl exit 60 with "no alternative certificate subject
+#       name matches target ipv4 address 127.0.0.1". Re-measured against the pinned
+#       digests, using the generator's own keytool arguments and a loopback TLS
+#       listener, the identical request without --insecure exits 60 reporting "SSL
+#       certificate OpenSSL verify result: self-signed certificate (18)" and
+#       produces no subject-name error. A false measurement is worse than an
+#       unsupported claim, because it is the thing a later reader trusts instead of
+#       re-checking, and the two causes have different fixes: a name mismatch is
+#       corrected in the certificate, an unanchored leaf only by trusting it
+#       explicitly or waiving verification as this probe does.
+# WHY : Alternatives Considered: exporting the minted leaf at start-up and
+#       verifying with --cacert, which the same measurement shows DOES succeed on
+#       loopback. Rejected because CMD is a static exec array, so the PEM path would
+#       be a literal here while the directory holding it is CARDDEMO_SERVER_TLS_DIR,
+#       an overridable variable; a deployment that moved that directory would fail
+#       the probe on a healthy task. What is given up is identity checking on a
+#       loopback call inside the container's own network namespace, where there is no
+#       second party to impersonate; what is kept is that the ENCRYPTED listener is
+#       the one proven to answer, which a plaintext probe would not establish.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure", \
          "--max-time", "4", "--output", "/dev/null", \

@@ -262,7 +262,7 @@ final class PendingAuthViewMapperTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("subject");
         assertThatThrownBy(
-                () -> this.mapper.toListView(summaryRow(), List.of(), false, false, null, "", CUSTOMER_DISPLAY))
+                () -> this.mapper.toListView(summaryRow(), List.of(), false, null, "", CUSTOMER_DISPLAY))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("subject");
     }
@@ -339,7 +339,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("assembles the list body with boundaries taken from the rows returned")
     void listViewCarriesTheEnvelope() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(detailWith("00")), true, false, null, SUBJECT, CUSTOMER_DISPLAY);
+                summaryRow(), List.of(detailWith("00")), true, null, SUBJECT, CUSTOMER_DISPLAY);
 
         assertThat(view.summary().accountId()).isEqualTo("00000000011");
         assertThat(view.page().items()).hasSize(1);
@@ -356,7 +356,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("returns an empty page with no boundary tokens")
     void emptyPageCarriesNoBoundaries() {
         PendingAuthListView view = this.mapper.toListView(
-                summaryRow(), List.of(), false, false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE,
+                summaryRow(), List.of(), false, PendingAuthListView.MESSAGE_BOTTOM_OF_PAGE,
                 SUBJECT, CUSTOMER_DISPLAY);
 
         assertThat(view.page().items()).isEmpty();
@@ -376,7 +376,7 @@ final class PendingAuthViewMapperTest {
     @DisplayName("refuses a navigation sentence outside the three reference strings")
     void authoredBoundarySentenceIsRefused() {
         assertThatThrownBy(() -> this.mapper.toListView(
-                summaryRow(), List.of(), false, false, "You are already at the bottom of the page.",
+                summaryRow(), List.of(), false, "You are already at the bottom of the page.",
                 SUBJECT, CUSTOMER_DISPLAY))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("reference navigation sentences");

@@ -3,6 +3,7 @@ package com.carddemo.auth.service;
 import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.CreateUserRequest;
+import com.carddemo.auth.dto.CreatedUserResponse;
 import com.carddemo.auth.dto.UpdateUserRequest;
 import com.carddemo.auth.dto.UserResponse;
 import com.carddemo.auth.dto.UserSummary;
@@ -64,9 +65,10 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UsernameExi
  * that FAILS CLOSED, and the row is the authority on whether a user exists. Creation provisions the pool
  * account first, because the row cannot be written without the subject the pool mints; update writes the
  * row first and then brings the pool in line, because the row is what the request describes; deletion
- * removes the row first and then the account, because a row without an account is a user who cannot sign
- * on while an account without a row is an identity with no membership -- and the first of those is the
- * safer intermediate state.
+ * removes the row first and then the account, so an interruption leaves an ACCOUNT WITH NO ROW -- an
+ * identity that can still authenticate but holds no membership here and is therefore refused at every
+ * guarded route. Removing the account first would leave the opposite: a row whose user cannot sign on at
+ * all and which no later operation repairs without reprovisioning. The first is the recoverable direction.
  *
  * <p>Trade-offs: there is no distributed transaction across the two stores and none is attempted. The
  * pool is a managed service reached over HTTP and has no enlistable transaction, so the only options
@@ -81,12 +83,11 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UsernameExi
  *
  * <p>Assumptions: transformation rule T8 carries user-visible strings across character for character,
  * and every sentence this class raises is transcribed from a cited reference line rather than authored.
- * That includes their punctuation: the four validation literals and the not-found, conflict and write
- * failure literals carry NO space before the ellipsis, while the unchanged-body literal DOES, exactly as
- * the programs write them. It also includes one the reference itself got wrong -- the delete failure
- * sentence says "Update", because {@code app/cbl/COUSR03C.cbl} line 332 says "Update" -- which is
- * carried across rather than corrected, because the string is externally observable and correcting it
- * would be an undocumented divergence in output.
+ * That includes their punctuation -- the four validation literals and the not-found, conflict and write
+ * failure literals carry NO space before the ellipsis, while the unchanged-body literal DOES -- and it
+ * includes the delete failure sentence naming "Update", which is the literal
+ * {@code app/cbl/COUSR03C.cbl} line 332 writes on that path. An externally observable string is part of
+ * the interface whether or not it reads well, so each is reproduced exactly as the programs write it.
  *
  * <h2>The order failures are reported in is decided here, and only here</h2>
  *
@@ -232,11 +233,10 @@ public class UserService {
     /**
      * The sentence the reference writes when a change could not be written.
      *
-     * <p>Assumptions: transcribed from {@code app/cbl/COUSR02C.cbl} line 386. It is ALSO the sentence
-     * the delete program writes for a failed delete, at {@code app/cbl/COUSR03C.cbl} line 332 -- naming
-     * "Update" on a delete, which reads as a copy of the update program's handler that was never
-     * reworded for its new home. It is carried across as it stands and used on both paths, because the
-     * string is externally observable; the wrong verb is documented rather than fixed.
+     * <p>Assumptions: transcribed from {@code app/cbl/COUSR02C.cbl} line 386, and ALSO the sentence the
+     * delete program writes for a failed delete at {@code app/cbl/COUSR03C.cbl} line 332. It therefore
+     * names "Update" on both paths, which is what the published interface carries; the divergence from
+     * intent is registered in {@code docs/architecture/cobol-to-service-traceability.md}.
      */
     static final String MESSAGE_UNABLE_TO_UPDATE = "Unable to Update User...";
 
@@ -477,17 +477,13 @@ public class UserService {
      * client composes them from the envelope, which is where every user-visible string of this migration
      * lives.
      *
-     * <p>Assumptions: those five sentences are TWO classes and the client needs both, which is why the
-     * envelope reports the direction's availability rather than a single exhausted flag. Two are GUARDS,
-     * written when the caller asked to move past a boundary already known to have been reached:
-     * {@code app/cbl/COUSR00C.cbl} tests the page number at line 248 and writes the top guard at line 251,
-     * and tests the next-page flag at line 270 and writes the bottom guard at line 273 -- in each case
-     * without touching the file. Three are ARRIVALS, written when the browse itself struck a boundary while
-     * walking: the start-browse not-found arm at line 600 writes line 603, the forward end-of-file arm at
-     * line 634 writes line 637, and the backward end-of-file arm at line 668 writes line 671. The last two
-     * are distinct sentences and not one repeated, and the backward arrival differs again from the
-     * start-browse arrival, so all five are carried separately by whatever renders them. Every one of them
-     * accompanied a rendered screen rather than an abend, so every one of them is a success here.
+     * <p>Assumptions: those five sentences fall into TWO classes and the client needs both, which is why
+     * the envelope reports each direction's availability rather than a single exhausted flag. Two are
+     * GUARDS, written when the caller asked to move past a boundary already known to have been reached,
+     * without touching the file; three are ARRIVALS, written when the browse itself struck a boundary while
+     * walking. All five are distinct strings and are carried separately by whatever renders them, and every
+     * one accompanied a rendered screen rather than an abend, so every one is a success here. The five
+     * originating line numbers are listed in {@code docs/architecture/cobol-to-service-traceability.md}.
      *
      * <p>Assumptions: a cursor naming a row that has since been deleted is repositioned rather than
      * refused, and the reference behaves the same way. Its start-browse arm at line 600 keys on the
@@ -570,7 +566,7 @@ public class UserService {
                 ? readOpeningWindow()
                 : readWindow(cursorKey, backward);
 
-        return page(window, backward, cursorKey != null, subject);
+        return page(window, backward, subject);
     }
 
     /**
@@ -628,9 +624,17 @@ public class UserService {
      * line 159. Checking after the probe or after provisioning would report a duplicate or a provider fault
      * for a body the reference would have refused on a blank field.
      *
+     * <p>⚠️ Refactoring Rationale: the answer is {@link CreatedUserResponse} rather than the read
+     * projection, because creating a user produces one thing that is readable again and one thing that is
+     * not. The pool account is created with a generated one-time credential and the account stands in its
+     * force-change state; nothing persists that credential, so this response is the only place it will
+     * ever appear. Answering with the read shape is what left a created user unable to sign on at all:
+     * the account existed, held its group, had a row bound to its subject, and its credential was known
+     * to nobody.
+     *
      * @param request the validated new row's values; must not be {@code null}
      * @return the row as stored, as a subsequent read would return it, including the subject it was bound
-     *     to; never {@code null}
+     *     to, PLUS the one-time credential to hand its owner now; never {@code null}
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if a submitted field is blank or the user type is outside the two
      *     admitted values, carrying the FIRST failing field's own reference sentence and that field's key
@@ -650,7 +654,7 @@ public class UserService {
     //       all-or-nothing shape explicitly. What it costs is that a caller can no longer observe a
     //       partially applied write -- which the reference could not offer either, so nothing observable is
     //       given up.
-    public UserResponse create(CreateUserRequest request) {
+    public CreatedUserResponse create(CreateUserRequest request) {
 
         Objects.requireNonNull(request, "request must not be null");
 
@@ -673,9 +677,9 @@ public class UserService {
         //       previous arrangement could not claim. This method was annotated transactional, so the
         //       provider call and the insert shared one transaction and a connection was held for the
         //       duration of a network round trip to the provider.
-        UUID subject = provision(request);
+        ProvisionedIdentity identity = provision(request);
 
-        User candidate = this.mapper.toEntity(request, subject);
+        User candidate = this.mapper.toEntity(request, identity.subject());
 
         try {
             // WHY : Refactoring Rationale: the row is written by an INSERT statement rather than by the
@@ -705,12 +709,22 @@ public class UserService {
             this.writeTransaction.execute(status -> this.users.insertUser(
                     candidate.getUserId(), candidate.getFirstName(), candidate.getLastName(),
                     candidate.getUserType(), candidate.getCognitoSub().toString()));
+            // WHY : Assumptions: the line names the identifier and neither the subject nor the
+            //       credential. Everything about why is on ProvisionedIdentity's own rendering override:
+            //       the credential is live for the width of one handover and a log store holds it for the
+            //       whole retention period.
             LOG.info("event=auth.user.created userId={}", userId);
 
             // WHY : Assumptions: the response is rendered from the row THIS METHOD WROTE rather than from
             //       a re-read of it, because the statement above wrote exactly these five values and
             //       nothing on this table is generated by the database.
-            return this.mapper.toResponse(candidate);
+            // WHY : Assumptions: the credential is taken from the provisioning result rather than being
+            //       re-derived or re-read, because there is nowhere to re-read it FROM. Neither the pool
+            //       nor this schema can answer with it -- the pool holds it only as a verifier and
+            //       auth.users has no column for it -- so the value returned here is the same object the
+            //       provider call was made with, and this response is the last point at which it exists.
+            return CreatedUserResponse.of(this.mapper.toResponse(candidate),
+                    identity.credentialSecretName());
 
             // WHY : Assumptions: the integrity violation is caught SEPARATELY from other store failures
             //       because it is the race the probe above cannot close, and its answer is a conflict
@@ -1253,32 +1267,25 @@ public class UserService {
      * that count changes when any row before the window is inserted or deleted, so between two requests a
      * caller silently skips rows and sees others twice. A key-bounded window cannot drift, because its
      * boundary is a value carried in the data rather than a count of rows scanned. The reference's page
-     * number is display chrome and was never a position: {@code app/cbl/COUSR00C.cbl} moves it to the screen
-     * at lines 327 and 376 and adjusts it at lines 309 to 310, 320 to 321 and 367 to 369, and no read
-     * anywhere in the program is positioned from it -- both walks are positioned from a stored KEY, at lines
-     * 242 and 265. So declining offsets keeps the reference's own mechanism rather than replacing it.
+     * number is display chrome and was never a position -- both of its walks are positioned from a stored
+     * KEY ({@code app/cbl/COUSR00C.cbl} lines 242 and 265) -- so declining offsets keeps the reference's own
+     * mechanism rather than replacing it.
      *
      * <p>Refactoring Rationale: both cursors are derived from the rows actually returned, where the
      * reference derived them from two invariant screen slots, and the difference is observable rather than
-     * cosmetic. Its capture paragraph switches on the row index at line 386: the first-row arm at line 387
-     * stores the
-     * leading key, with the second receiver on line 389, and the tenth-row arm at line 433 stores the
-     * trailing key, with the second receiver on line 435. On any short final page the index never reaches
-     * ten, so the tenth-row arm never fires and the trailing key still holds the value the PREVIOUS page
-     * left there. Taking the trailing key from the last row that was returned makes it name a row the caller
-     * was actually shown, on a full page and a short one alike, and an empty page names no boundary at all.
+     * cosmetic. Its capture paragraph switches on the row index ({@code app/cbl/COUSR00C.cbl} line 386),
+     * storing the trailing key only on the tenth-row arm, so on any short final page that arm never fires
+     * and the trailing key still holds the value the PREVIOUS page left there. Taking the trailing key from
+     * the last row actually returned makes it name a row the caller was shown, on a full page and a short
+     * one alike, and an empty page names no boundary at all.
      *
      * @param window the rows read, at most one more than a page, in the order the query returned them
      * @param backward whether the window was walked backwards
-     * @param resumed whether the request that produced this window carried a cursor, which is what
-     *     settles backward availability on a forward walk: the cursor is the trailing key of a page the
-     *     caller was shown, and the forward predicate is strictly greater than it, so at least that page
-     *     lies behind this one
      * @param subject the authenticated caller the two issued cursors are sealed against
      * @return the page envelope; never {@code null}
      */
     private PageResponse<UserSummary> page(
-            List<User> window, boolean backward, boolean resumed, String subject) {
+            List<User> window, boolean backward, String subject) {
 
         List<User> rows = new ArrayList<>(window);
         boolean more = rows.size() > PAGE_SIZE;
@@ -1334,20 +1341,23 @@ public class UserService {
         //       and reporting otherwise would strand it at the position it had just retreated from.
         boolean hasNext = backward || more;
 
-        // WHY : Refactoring Rationale: backward availability is now REPORTED rather than implied by the
-        //       leading cursor, and the two branches answer it without a second query. On a backward walk
-        //       the surplus row IS the answer -- it is a row lying further back than the page -- and on a
-        //       forward walk the answer is whether the caller arrived by cursor, because the forward
-        //       predicate is strictly greater than that cursor and the cursor names a row the caller was
-        //       already shown. An opening forward request therefore reports no earlier page, which is
-        //       what app/cbl/COUSR00C.cbl does at lines 309 to 310 when its page ordinal is already one.
-        boolean hasPrevious = backward ? more : resumed;
-
+        // WHY : Refactoring Rationale: backward availability is NOT reported, and this envelope carries
+        //       the backward POSITION instead -- the leading cursor below. The reference settles the
+        //       question on the terminal side rather than from the file: app/cbl/COUSR00C.cbl tests
+        //       CDEMO-CU00-PAGE-NUM > 1 at line 247 and, when it is not, raises 'You are already at the
+        //       top of the page...' at line 251 without reading anything. That ordinal is declared at
+        //       line 70 inside the communication area the screen carried between turns, so its migrated
+        //       home is the client's navigation state. A service component restating it would recompute
+        //       what the caller already knows -- whether it arrived by cursor -- and would put this
+        //       envelope out of agreement with the four members every consumer of it declares.
+        // WHY : Trade-offs: this method therefore no longer needs to be told whether the request
+        //       carried a cursor, and that parameter is withdrawn with the component it fed. Nothing else
+        //       consumed it, and re-admitting it would invite a service-side answer to the client-side
+        //       question above.
         return PageResponse.ofRows(items,
                 this.cursorToken.seal(cursorBinding(subject, true), leading),
                 this.cursorToken.seal(cursorBinding(subject, false), trailing),
-                hasNext,
-                hasPrevious);
+                hasNext);
     }
 
     /**
@@ -1457,19 +1467,27 @@ public class UserService {
      * the account itself -- moving account creation out of this service without removing this service's
      * dependence on it. The create body accordingly declares four properties and no subject.
      *
-     * <p>Assumptions: no credential passes through this method or anywhere else in this class. The pool
-     * mints the initial one for an account it creates and the migration's infrastructure writes the seed
-     * users' passwords straight into the managed secret store, so the only place a credential is handled at
-     * all is the sign-on collaborator that presents one for verification. That is what replaces the
-     * reference's arrangement, where the credential sat in clear in the record at
-     * {@code app/cpy/CSUSR01Y.cpy} line 21.
+     * <p>⚠️ Refactoring Rationale: this paragraph used to read "no credential passes through this method
+     * or anywhere else in this class", and gave as the reason that "the pool mints the initial one for an
+     * account it creates and the migration's infrastructure writes the seed users' passwords straight into
+     * the managed secret store". The first clause was true and the second does not cover the accounts this
+     * method creates: the infrastructure's credential handover reaches only the SEED identities, at apply
+     * time, so the credential the pool minted internally for a runtime-created account was known to
+     * nobody and the user could never sign on. One credential does now pass through -- the one-time value
+     * the provisioning collaborator generated -- and it passes STRAIGHT THROUGH: it is not read, not
+     * compared, not stored and not logged here; it is carried to the create response and dropped. What
+     * still holds is the property that mattered about the reference's arrangement, where the credential
+     * sat in clear in the record at {@code app/cpy/CSUSR01Y.cpy} line 21 and was compared in clear at
+     * {@code app/cbl/COSGN00C.cbl} line 223: no column of {@code auth.users} holds a credential, and no
+     * verification anywhere in this service sees one.
      *
      * @param request the validated new row's values
-     * @return the subject the provider minted; never {@code null}
+     * @return the subject the provider minted and the one-time credential the account was created with;
+     *     never {@code null}
      * @throws IllegalStateException if the account could not be created, carrying the reference sentence
      *     for a failed add
      */
-    private UUID provision(CreateUserRequest request) {
+    private ProvisionedIdentity provision(CreateUserRequest request) {
         try {
             return this.provisioning.provision(request.userId(), request.firstName(),
                     request.lastName(), request.userType());
@@ -1482,6 +1500,19 @@ public class UserService {
         } catch (SdkException providerFault) {
             throw unableTo(MESSAGE_UNABLE_TO_ADD,
                     "provision-" + providerFault.getClass().getSimpleName());
+
+            // WHY : Refactoring Rationale: an IllegalStateException is now translated here as well, and it
+            //       is reachable for one reason: the provisioning collaborator raises it when the created
+            //       account carries no readable subject, and it WITHDRAWS the account before doing so.
+            //       Untranslated it escaped as an internal fault carrying no reference sentence, so a
+            //       caller was told nothing actionable about a failure that had already been cleaned up.
+            //       It is caught after the SDK arms rather than before them because it is the narrower
+            //       condition; neither type is a subtype of the other, so the order is for a reader
+            //       rather than for the compiler.
+        } catch (IllegalStateException unreadableSubject) {
+            LOG.error("event=auth.user.create-failed reason=subject-unreadable userId={}",
+                    request.userId(), unreadableSubject);
+            throw unableTo(MESSAGE_UNABLE_TO_ADD, "provision-subject-unreadable");
         }
     }
 

@@ -2352,7 +2352,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         # WHY : Assumptions: the upper bound of seven is declared on the array
@@ -2439,18 +2438,6 @@ components:
             filtered after being read, this and not the row count is the only
             statement about whether more rows exist. When it is true, lastKey is
             present.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
     # WHY : Refactoring Rationale: a CardSelectorLookupRequest and a
     #       CardSelectorLookupResponse pair once stood here, for an operation that
@@ -2641,9 +2628,25 @@ components:
         and one array of per-field entries that accumulates every offending
         field. A client must not reconstruct the sentence by joining the array,
         and must not assume the array holds exactly one entry.
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
       required:
         - code
         - secondaryCode
+        - message
         - severity
         - subsystem
         - status
@@ -2651,6 +2654,7 @@ components:
         - path
         - timestamp
         - fieldErrors
+        - abend
       properties:
         code:
           type: string

@@ -196,23 +196,23 @@ import com.carddemo.common.web.CursorToken;
  *
  * <h2>The five row selectors</h2>
  *
- * <p>Refactoring Rationale: this record previously carried NO row-addressing value, on the stated ground
- * that the key is not on the screen either, and that ground was true about the map and wrong about the
- * payload. {@code MOVE PA-AUTHORIZATION-KEY TO CDEMO-CPVS-AUTH-KEYS(n)} at L545, L557, L569, L581 and L593
- * stores one eight-position key per displayed row in the communication area, and a mark on a row moves that
- * stored key into {@code CDEMO-CPVS-PAU-SELECTED} across L288 to L305. That key is
- * {@code PA-AUTH-DATE-9C PIC S9(05) COMP-3} at {@code cpy/CIPAUDTY.cpy} L20, three bytes, followed by
- * {@code PA-AUTH-TIME-9C PIC S9(09) COMP-3} at L21, five bytes, which is exactly the eight positions the
- * slot declares. It is a different item from the displayed {@code PDATE0nI} and {@code PTIME0nI}, which
- * render {@code PA-AUTH-ORIG-DATE} and {@code PA-AUTH-ORIG-TIME}, both {@code PIC X(06)} at L22 and L23, so
- * neither can be reconstructed from the other and the two are not interchangeable.
+ * Assumptions: a row-addressing value belongs in this payload even though the key is not on the
+ * screen, because the baseline keeps it beside the screen rather than on it. {@code MOVE PA-
+ * AUTHORIZATION-KEY TO CDEMO-CPVS-AUTH-KEYS(n)} at L545, L557, L569, L581 and L593 stores one
+ * eight-position key per displayed row in the communication area, and a mark on a row moves that
+ * stored key into {@code CDEMO-CPVS-PAU-SELECTED} across L288 to L305. That key is {@code PA-AUTH-
+ * DATE-9C PIC S9(05) COMP-3} at {@code cpy/CIPAUDTY.cpy} L20, three bytes, followed by {@code PA-
+ * AUTH-TIME-9C PIC S9(09) COMP-3} at L21, five bytes -- exactly the eight positions the slot
+ * declares. It is a different item from the displayed {@code PDATE0nI} and {@code PTIME0nI}, which
+ * render {@code PA-AUTH-ORIG-DATE} and {@code PA-AUTH-ORIG-TIME}, both {@code PIC X(06)} at L22 and
+ * L23, so neither can be reconstructed from the other and the two are not interchangeable.
  *
- * <p>Refactoring Rationale: the consequence of omitting it was that a client of this payload could not act
- * on a row at all. The migration retires the communication area, so a stateless client holds nothing
- * between turns and the row key has exactly one place left to travel -- this response. Deferring the
- * problem to "the path parameter of the detail endpoint", which is what the earlier reasoning did, only
- * moves it: a client cannot put a value in a path it was never given. The five components are therefore the
- * migrated form of the communication area's key table, one per displayed row, and they are what the detail
+ * Assumptions: omitting it would leave a client of this payload unable to act on a row at all. The
+ * migration retires the communication area, so a stateless client holds nothing between turns and
+ * the row key has exactly one place left to travel -- this response. Deferring the problem to the
+ * path parameter of the detail endpoint only moves it, because a client cannot put a value in a
+ * path it was never given. The five components are therefore the migrated form of the communication
+ * area's key table, one per displayed row, and they are what the detail
  * and fraud-marking operations take as their subject.
  *
  * <p>Assumptions: a selector is an OPAQUE sealed token and never the key itself, and the canonical
@@ -261,14 +261,13 @@ import com.carddemo.common.web.CursorToken;
  * caller-supplied field for a per-field entry to name. The canonical constructor therefore refuses, and it
  * refuses at construction so that no instance can exist in a state this file documents as impossible.
  *
- * <p>Refactoring Rationale: {@code toString} IS overridden, at the foot of this file, to withhold every
- * component value from a log. An earlier revision declined to override it, on the reasoning that the
- * migration's masking rules name a primary account number and a card verification value, that neither is a
- * component here, and that the personal components are shown whole on the screen this record projects at
- * {@code cbl/COPAUS0C.cbl} L763, L769, L776 and L779. Every one of those statements is true and the
- * conclusion still does not follow, because a screen and a log are different channels: the screen renders
- * to one operator already authorised for that one account, while a rendering reaches a log that is
- * retained, aggregated and readable by every holder of log access. A composed name, two address lines, a
+ * Assumptions: {@code toString} IS overridden, at the foot of this file, to withhold every
+ * component value from a log. The migration's masking rules name a primary account number and a
+ * card verification value, neither of which is a component here, and the personal components are
+ * shown whole on the screen this record projects at {@code cbl/COPAUS0C.cbl} L763, L769, L776 and
+ * L779 -- but a screen and a log are different channels. The screen renders to one operator already
+ * authorised for that one account, while a rendering reaches a log that is retained, aggregated and
+ * readable by every holder of log access. A composed name, two address lines, a
  * telephone number, a credit limit and six balances emitted once per served request accumulate into a
  * searchable copy of the customer file, which no screen produces. The override therefore names the screen
  * and the count of populated rows and nothing else; the components and their accessors are untouched, so
@@ -1019,11 +1018,11 @@ public record PendingAuthSummaryResponse(
      * carries every component and every accessor still returns it, so nothing the screen renders is
      * lost; only the log line is narrowed.
      *
-     * <p>Trade-offs: a test failure comparing two instances of this record no longer shows which
-     * component differs, which the generated rendering did show. That cost is accepted because the
-     * assertions this record owes are written against its accessors rather than against its rendering,
-     * and because the alternative -- keeping the values for the convenience of a failure message --
-     * pays for that convenience in every successful request as well.
+     * <p>Trade-offs: a test failure comparing two instances of this record does not show which
+     * component differs, which a generated rendering would. That cost is accepted because the
+     * assertions this record owes are written against its accessors rather than against its
+     * rendering, and because keeping the values for the convenience of a failure message would pay
+     * for that convenience in every successful request as well.
      *
      * @return a single-line rendering naming the type, the transaction identifier, the program name
      *     and the count of populated rows, and carrying no other component value

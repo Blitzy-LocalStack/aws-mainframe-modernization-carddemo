@@ -198,9 +198,6 @@ public final class ReferencePaging {
      * @param rows the bounded rows in ascending key order, holding at most {@code pageSize} plus one
      * @param pageSize the number of rows the page publishes
      * @param backward whether the walk was backward, in which case the surplus row is the first
-     * @param resumed whether the request carried a cursor, which settles backward availability on a
-     *     forward walk: the cursor names a row the caller was already shown and the forward predicate is
-     *     strictly greater than it, so a page lies behind exactly when one was supplied
      * @param backwardBinding the binding the LEADING key is sealed under, being the position a backward
      *     request moves from
      * @param forwardBinding the binding the TRAILING key is sealed under, being the position a forward
@@ -214,7 +211,6 @@ public final class ReferencePaging {
             List<E> rows,
             int pageSize,
             boolean backward,
-            boolean resumed,
             String backwardBinding,
             String forwardBinding,
             CursorToken cursorToken,
@@ -237,11 +233,12 @@ public final class ReferencePaging {
         for (E row : window) {
             items.add(render.apply(row));
         }
-        // WHY : Refactoring Rationale: backward availability is reported rather than inferred from the
-        //       leading position, which every page carrying rows supplies. On a backward walk the surplus
-        //       row IS a row lying further back and answers it directly; on a forward walk the answer is
-        //       whether a cursor was supplied, so the opening page reports nothing behind it instead of
-        //       advertising an earlier page that would come back empty.
+        // WHY : Refactoring Rationale: no backward availability answer is published, and the leading
+        //       position below is what this page owes a caller stepping back. The reference asks the
+        //       backward question of the TERMINAL rather than of the table -- the browse screens hold a
+        //       page ordinal in the communication area and refuse the backward key on the first page from
+        //       that ordinal alone -- so the answer belongs to the client, and the shared envelope
+        //       carries four members that every consumer of it declares.
         // WHY : Refactoring Rationale: forward availability is UNCONDITIONALLY true on a backward walk,
         //       where it previously reported the backward surplus. The surplus row on a backward walk lies
         //       further BACK, so reporting it as forward availability answered the wrong question: a
@@ -255,7 +252,6 @@ public final class ReferencePaging {
                 items,
                 cursorToken.seal(backwardBinding, key.apply(window.get(0))),
                 cursorToken.seal(forwardBinding, key.apply(window.get(window.size() - 1))),
-                backward || more,
-                backward ? more : resumed);
+                backward || more);
     }
 }

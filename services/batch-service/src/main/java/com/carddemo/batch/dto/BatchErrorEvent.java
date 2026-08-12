@@ -33,8 +33,13 @@ import java.util.Set;
  * belong to. And it is deposited in the job's own output rather than delivered anywhere, so reaching
  * it is a retrieval an operator performs instead of a notification an operator receives. This record
  * is what the migrated failure path publishes in place of that; the reference does one thing, the
- * Java does another, and the divergence is registered in
- * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ * Java does another, and the divergence is registered as
+ * <b>{@code D-BATCH-FAILURE-NOTIFICATION}</b> in
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Refactoring Rationale: that citation
+ * named no identifier until the producer landed, and a claim of registration that names nothing
+ * cannot be checked -- there was in fact no entry to find, so the sentence asserted a registration
+ * that did not exist. The register's own discipline is to cite by identifier from each citing site,
+ * and this is that citation.</p>
  *
  * <p>Assumptions: the justification for publishing anything at all rests on three properties of the
  * target architecture rather than on the reference. The migration provisions a standard queue as a
@@ -99,17 +104,15 @@ import java.util.Set;
  * {@link #stepName()} to the durable step ledger row and {@link #correlationId()} to the run's log
  * lines, and reads the input there, inside stores that do have the controls for it.</p>
  *
- * <p>Refactoring Rationale: an earlier revision of this paragraph claimed the record's INHERITED
- * {@code toString} was safe to write into a log line, on the ground that the constraint above was
- * enforced. It was not enforced -- it was only asserted in this prose -- and the inherited rendering
- * emits every component, including the two widest free-text components of the abend detail, whose
- * content no part of this type inspected. A caller passing a database driver's message, an exception
- * message or a rejected record image through the abend reason or the abend message therefore put that
- * content onto a long-lived, widely readable sink, and the file said the opposite. Both halves of
- * that gap are now closed by mechanism rather than by wording: the canonical constructor REFUSES an
- * abend detail whose text carries an identifier-shaped digit run or one of
- * {@link #PROHIBITED_DIAGNOSTIC_MARKERS}, and {@link #toString()} is overridden to a CLOSED rendering
- * that omits the free-text components altogether.</p>
+ * <p>Refactoring Rationale: the constraint above is enforced by MECHANISM and not by this prose,
+ * because a record's INHERITED {@code toString} emits every component -- including the two widest
+ * free-text components of the abend detail, whose content nothing else inspects. Relying on a stated
+ * rule would let a caller passing a database driver's message, an exception message or a rejected
+ * record image through the abend reason or the abend message put that content onto a long-lived,
+ * widely readable sink while the file promised the opposite. Both halves are therefore closed in code:
+ * the canonical constructor REFUSES an abend detail whose text carries an identifier-shaped digit run
+ * or one of {@link #PROHIBITED_DIAGNOSTIC_MARKERS}, and {@link #toString()} is overridden to a CLOSED
+ * rendering that omits the free-text components altogether.</p>
  *
  * <p>Trade-offs: the two mechanisms overlap deliberately, and the overlap is the point. The
  * constructor check is a heuristic -- it recognises identifier SHAPE and a vocabulary of credential
@@ -425,9 +428,10 @@ public record BatchErrorEvent(
         }
 
         // WHY : Refactoring Rationale: the reason and message components of the abend detail are
-        //       free-form text, and an earlier revision of this constructor only STATED that a caller
-        //       must never populate either with record content. Stating it was not enough: free text
-        //       is the one part of this payload wide enough to defeat the migration's masking rules
+        //       free-form text, so the rule that a caller must never populate either with record
+        //       content is ENFORCED here rather than merely stated. A stated rule is not enough: free
+        //       text is the one part of this payload wide enough to defeat the migration's masking
+        //       rules
         //       by accident -- a primary account number is reduced to its last four digits on every
         //       path but one administrative detail endpoint, a card verification value is returned
         //       nowhere at all, and a national or government-issued identifier is stored encrypted
@@ -881,7 +885,7 @@ public record BatchErrorEvent(
         //       at the constructor. Rejected because the absent form is a decision, not a value, and
         //       a decision spelled at each call site is a decision each call site may spell
         //       differently -- one caller writing four empty strings, another four nulls, a third a
-        //       single space that is no longer blank at all. Naming it once here means the absent
+        //       single space that is not blank at all. Naming it once here means the absent
         //       case has one form and one place a reader looks to learn what it is.
         // WHY : Assumptions: this factory takes exactly the five components that are not the abend
         //       detail and nothing else. No parameter it accepts could carry a record image or an

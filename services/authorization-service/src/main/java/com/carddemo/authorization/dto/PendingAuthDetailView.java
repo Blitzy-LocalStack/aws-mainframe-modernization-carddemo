@@ -72,8 +72,9 @@ import java.util.Objects;
  * @param merchantZip the merchant postal code, or {@code null} when none
  * @param transactionId the acquirer's transaction identifier, never {@code null}
  * @param matchStatus one of the four one-character match statuses, never {@code null}
- * @param authFraud the one-character fraud indicator, or {@code null} when the authorization is
- *     unmarked
+ * @param authFraud {@link #FRAUD_TAGS one of the two fraud tags}, or {@code null} when the
+ *     authorization is unmarked; a blank supplied here is normalised to {@code null}, so no instance
+ *     ever carries two spellings of the unmarked state
  * @param fraudRptDate the eight stored characters of the fraud report date, or {@code null} when the
  *     authorization is unmarked
  */
@@ -158,6 +159,24 @@ public record PendingAuthDetailView(
         requireWithinDomain(authRespCode, RESPONSE_CODES, "authRespCode");
         requireWithinDomain(authRespReason, RESPONSE_REASONS, "authRespReason");
 
+        // WHY : Refactoring Rationale: a stored BLANK fraud tag is normalised to null here rather than
+        //       republished, so the wire domain of this member is exactly F, R or absent. The stored
+        //       column admits a blank as well -- V1__authorization.sql keeps that tolerance because the
+        //       ETL lands the reference segment's PIC X(01) field, which cpy/CIPAUDTY.cpy L50 declares
+        //       with condition names for only the confirmed and removed states at L51-L52, so an
+        //       untagged row arrives holding a space -- and the reference itself treats the two as one
+        //       state: cbl/COPAUS1C.cbl L344 tests for either condition and L349 renders a lone
+        //       separator when neither holds. Publishing both a blank and a null for one state obliged
+        //       every client to test for two values, and a client that tested for only one of them
+        //       rendered an untagged authorization as tagged.
+        // WHY : Alternatives Considered: tightening the column's CHECK to reject a blank instead.
+        //       Rejected because the blank is the ETL's legitimate landing state for an untagged
+        //       segment, and refusing it at the column would make a faithful load fail; the wire
+        //       contract is where the two spellings of one state need to become one, and normalising at
+        //       this boundary makes the blank unobservable to any caller without rejecting a real row.
+        authFraud = (authFraud == null || authFraud.isBlank()) ? null : authFraud;
+        requireWithinDomain(authFraud, FRAUD_TAGS, "authFraud");
+
         // WHY : Refactoring Rationale: the mask check delegates to the shared module's validator rather
         //       than restating a weaker one. The restated form here tested only the length and the first
         //       character, so "*123456789012345" satisfied it and disclosed fifteen digits of a primary
@@ -176,6 +195,16 @@ public record PendingAuthDetailView(
      * branch between them. The published contract enumerates the same two plus null.</p>
      */
     public static final List<String> RESPONSE_CODES = List.of("00", "05");
+
+    /**
+     * The two fraud tags a detail body may carry, absence being the only other admissible state.
+     *
+     * <p>Assumptions: two values, from the two condition names declared on {@code PA-AUTH-FRAUD} --
+     * {@code cpy/CIPAUDTY.cpy} L50 declares the one-character field and L51 and L52 declare the
+     * confirmed and removed conditions. There is no third condition name, so an untagged authorization
+     * satisfies neither and is represented by absence rather than by a third value.</p>
+     */
+    public static final List<String> FRAUD_TAGS = List.of("F", "R");
 
     /**
      * The response reasons this context can produce, and the only ones a detail body may carry.

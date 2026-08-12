@@ -44,16 +44,30 @@
  * ruleset audits at-clause bodies for emptiness, so a fabricated tag would be
  * either discarded or reported.
  *
- * <h2>The closed inventory: eight files</h2>
+ * <h2>The closed inventory: twelve files</h2>
  *
- * <p>Eight {@code .java} files constitute this package and no more. Seven are
- * records; the eighth is this charter. All eight are landed, so this inventory is
- * also a measurement of the directory and every entry below reads in the present
- * tense. Each record is named with the reference program and symbolic map it
- * derives from, because that provenance is the only authority for its component
- * set.
+ * <p>Twelve {@code .java} files constitute this package and no more. Nine are
+ * records; two are the sealed alternatives that pair the two response shapes of each
+ * write operation; the twelfth is this charter. All twelve are landed, so this
+ * inventory is also a measurement of the directory and every entry below reads in the
+ * present tense. Each record is named with the reference program and symbolic map it
+ * derives from, because that provenance is the only authority for its component set.
  *
- * <p>Refactoring Rationale: all eight are landed, and every entry below is written in
+ * <p>Refactoring Rationale: the count moved from eight to twelve when each write
+ * operation's 200 body became its own type. Both write operations answer two statuses
+ * with two bodies, and both were answering the 200 with the record the 201 publishes:
+ * transaction add returned {@code TransactionAddResponse}, which declares no
+ * {@code written} member the published preview requires and does declare an identifier
+ * it forbids, and bill payment returned {@code BillPaymentResponse}, whose money member
+ * is named for the balance before a payment where the preview names the balance a
+ * payment would settle. Both published schemas close themselves with
+ * {@code additionalProperties: false}, so both bodies were invalid against the contract
+ * their own status publishes and a generated client rejected them. Four files is what
+ * the correction costs: two preview records, and two sealed alternatives so that a
+ * service can return either shape and a controller can select the status from which one
+ * it received rather than from a nullable member.
+ *
+ * <p>Refactoring Rationale: all landed entries are written in
  * the present tense for that reason. Two earlier revisions of this paragraph were each
  * wrong in the opposite direction: the first wrote all eight as present while
  * {@code BillPaymentResponse} was unauthored, and the second over-corrected to "seven
@@ -87,8 +101,19 @@
  *   <li>{@code TransactionAddRequest} -- the capture payload, from
  *       {@code app/cbl/COTRN02C.cbl} and {@code app/cpy-bms/COTRN02.CPY} lines
  *       60 to 138.</li>
- *   <li>{@code TransactionAddResponse} -- the capture result, from the same two
- *       files.</li>
+ *   <li>{@code TransactionAddResponse} -- the capture result on the written outcome, from
+ *       the same two files. Three components: the assigned identifier, the normalised
+ *       amount and the return message.</li>
+ *   <li>{@code TransactionAddPreview} -- the capture result on the outcome that
+ *       writes nothing, from the same two files and specifically from the turn at
+ *       {@code app/cbl/COTRN02C.cbl} lines 166 to 181, which validates the submission,
+ *       normalises the amount at lines 383 to 386 and then asks for a confirmation at
+ *       line 178 without writing. Three components: the normalised amount, a
+ *       {@code written} discriminator fixed false and the prompt. It declares NO
+ *       identifier, because the reference reaches the four verbs that derive one only
+ *       from the affirmative arm.</li>
+ *   <li>{@code TransactionAddOutcome} -- the sealed alternative of the two above, which
+ *       is what the capture service returns and what its adapter switches over.</li>
  *   <li>{@code BillPaymentRequest} -- the payment payload, from
  *       {@code app/cbl/COBIL00C.cbl} and {@code app/cpy-bms/COBIL00.CPY} lines
  *       60 to 72, being the account identifier at {@code ACTIDINI PIC X(11)}
@@ -109,14 +134,45 @@
  *       card number as well; the figure is re-measured from the record's own component list
  *       rather than carried forward, because this roster is the authority the sibling mapper
  *       charter quotes.</li>
+ *   <li>{@code BillPaymentPreview} -- the payment result for the three turns that write nothing:
+ *       the declined branch at {@code app/cbl/COBIL00C.cbl} lines 178 to 181, the nothing-to-pay
+ *       advisory at lines 200 to 204 and the confirmation prompt at lines 236 to 239. Four
+ *       components: the account identifier, the balance a confirmed request would pay, the fixed
+ *       {@code paid} discriminator and the return message. Refactoring Rationale: it is new, and
+ *       before it existed the adapter answered status 200 with {@code BillPaymentResponse}. The
+ *       published {@code BillPaymentPreview} schema requires {@code payableBalance} and forbids
+ *       additional properties, so every preview turn emitted a body missing a required member and
+ *       carrying a {@code transactionId} the schema does not admit, as an explicit null. Its two
+ *       money members are NOT renamings of one another: this one is what a confirmed request would
+ *       pay, that one the balance a payment was taken from.</li>
+ *   <li>{@code BillPaymentOutcome} -- the sealed interface permitting exactly those two payment
+ *       shapes, so the payment operation can return either without its signature widening and so
+ *       the adapter's status selection is an exhaustive switch rather than a boolean test. It is
+ *       the one type here that is not a record, and it declares only the three members both shapes
+ *       already declare -- deliberately not the money member, whose meaning differs between
+ *       them.</li>
+ *   <li>{@code BillPaymentPreview} -- the payment result on any of the three turns
+ *       that pay nothing, from the same two files. Four components, matching the published
+ *       preview member for member: the account identifier, the balance a confirmed request
+ *       would pay, a {@code paid} discriminator fixed false and the return message. Its
+ *       money member is named for what it is -- a balance that WOULD be paid -- and
+ *       deliberately not for the balance-before-payment the posted shape reports, because
+ *       the reference fills one screen field on both turns and a reader of that position
+ *       cannot tell which figure it holds. The three turns are distinguished only by the
+ *       sentence: the confirm prompt at lines 237 and 238, the nothing-to-pay advisory at
+ *       lines 201 and 202, and no sentence at all for the declined turn at lines 178 to
+ *       181, which moves none.</li>
+ *   <li>{@code BillPaymentOutcome} -- the sealed alternative of the payment pair, which is
+ *       what the payment service returns and what its adapter switches over.</li>
  * </ul>
  *
- * <p>Assumptions: two different counts of eight meet in this module and must
- * not be conflated. The root charter of this module records that the module
- * holds eight Java packages and therefore exactly eight package charter files.
- * The eight above is a different quantity entirely: it is the file count of
- * this one package. The two figures are independent, and a reader reconciling
- * one against the other would conclude that seven charters are missing.
+ * <p>Assumptions: two counts that were both eight met in this module and must still
+ * not be conflated. The root charter of this module records that the module holds
+ * eight Java packages and therefore exactly eight package charter files. The twelve
+ * above is a different quantity entirely: it is the file count of this one package.
+ * The two figures are independent -- which is now visible, because this one moved to
+ * twelve while the package count did not move at all. A reader reconciling one against
+ * the other would previously have concluded that seven charters were missing.
  *
  * <p>Trade-offs: the inventory is closed rather than open-ended, so a shape
  * that a fifth screen would need does not belong here even when it would be
@@ -128,14 +184,29 @@
  *
  * <h2>The naming convention this package holds itself to</h2>
  *
- * <p>Every type here ends in {@code Request} or {@code Response}, following the
- * migration plan's own file pattern for this layer. The convention is stated
- * rather than assumed because one member of the inventory invites a departure
- * from it: {@code TransactionListItemResponse} is an element type rather than a
- * whole reply, so a bare noun would read more naturally for it. It keeps the
- * suffix all the same, because the suffix is what makes the closed inventory
- * self-checking -- a file in this directory whose name ends in neither word is
- * visibly outside the list without anyone having to consult the list.
+ * <p>Every type here ends in {@code Request}, {@code Response} or {@code Outcome},
+ * following the migration plan's own file pattern for this layer and one documented
+ * extension of it. The convention is stated rather than assumed because two members of
+ * the inventory invite a departure from it. {@code TransactionListItemResponse} is an
+ * element type rather than a whole reply, so a bare noun would read more naturally for
+ * it; it keeps the suffix all the same, because the suffix is what makes the closed
+ * inventory self-checking -- a file in this directory whose name ends in none of the
+ * three is visibly outside the list without anyone having to consult the list.
+ *
+ * <p>Refactoring Rationale: {@code Outcome} is the extension, and it is admitted rather
+ * than avoided for a reason that is about accuracy and not about brevity. The two sealed
+ * alternatives are neither a request nor a reply: nothing serialises them, no client
+ * ever receives one, and their whole purpose is to name the pair of shapes a caller
+ * might receive. Naming one {@code ...Response} would assert that it reaches the wire,
+ * which is exactly the kind of claim this package's suffix rule exists to make
+ * trustworthy. Alternatives Considered: declaring them in the adapter or service package
+ * so that this rule needed no extension. Rejected on a language constraint rather than a
+ * preference -- a {@code sealed} type's permitted subtypes must sit in the same package
+ * unless the whole hierarchy sits in one named module, and this reactor builds on the
+ * class path with no {@code module-info.java}; an unsealed interface in a layer above
+ * would have these records implement a type their own ArchUnit layering rules forbid
+ * them to depend on. The suffix is extended by one word, and the self-checking property
+ * is retained by naming all three words in the rule.
  *
  * <h2>Where every width, type and scale comes from</h2>
  *
@@ -385,7 +456,10 @@
  * {@code com.carddemo.common.web.PageResponse}, whose shape is
  * {@code PageResponse<T>(List<T> items, String firstKey, String lastKey, boolean hasNext)}
  * -- four components and one type parameter, both cursors opaque and either
- * absent. {@code TransactionListItemResponse} is only the element type that
+ * absent, and the one availability component independent of the cursor beside it. Backward
+ * availability is not a component: {@code firstKey} is the position a retreat resumes from, and
+ * whether a row waits there is the caller's own page ordinal.
+ * {@code TransactionListItemResponse} is only the element type that
  * envelope carries, and the envelope is never redeclared here.
  *
  * <p>Alternatives Considered: an envelope local to this package was evaluated

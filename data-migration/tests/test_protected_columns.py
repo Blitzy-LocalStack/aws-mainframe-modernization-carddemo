@@ -16,7 +16,7 @@ Alternatives Considered:
     a key-management service and a live key, none of which this suite has. (2) Asserting the
     framing against literal offsets written here: it proves the framing is stable but not that it
     is the RIGHT framing, because the literals would have been copied from the Java once and then
-    never compared again. (3) Reading the two Java sources from disk and asserting this module's
+    never compared again. (3) Reading the owning Java sources from disk and asserting this module's
     constants against the constants declared there -- adopted, because it is the only option that
     fails when either side moves. The repository already applies exactly this discipline across
     trees for its runtime configuration contract.
@@ -30,11 +30,23 @@ Assumptions:
 Trade-offs:
     The parity assertions compare DECLARED CONSTANTS and the byte layout each side assembles from
     them; they do not parse the Java. A Java author could reorder the parts of the envelope
-    without changing any constant and these tests would still pass. What they do catch is every
-    failure that has actually happened in practice on a contract like this -- a changed marker, a
-    changed version byte, a changed vector width, a changed tag length, a changed encryption
-    context, and an endianness assumed rather than stated -- and they catch it in the tree that
-    would otherwise write unreadable data.
+    without changing any constant and these tests would still pass. That residue is covered from
+    the other side rather than left open: ``CustomerIdentifierCipherTest`` and
+    ``EncryptedCvvTest`` assert the field ORDER against their own output, and the former names
+    this module explicitly as the second implementation a format change has to be coordinated
+    with. What the assertions here catch is every failure that has actually happened in practice
+    on a contract like this -- a changed marker, a changed version byte, a changed vector width, a
+    changed tag length, a changed encryption context, and an endianness assumed rather than
+    stated -- and they catch it in the tree that would otherwise write unreadable data.
+
+⚠️ Refactoring Rationale:
+    The customer authority named below used to be
+    ``account/config/CustomerIdentifierProtectionConfig.java``, and that was the wrong file: it
+    held a private nested writer that omitted the marker and the version byte while the
+    component-scanned ``account/service/CustomerIdentifierCipher`` wrote both. Two writers of one
+    ``BYTEA`` column, and this suite pinned the loser -- so it PASSED while asserting a framing the
+    account service does not write. The authority is now the file that writes the bytes, and the
+    marker is read from its declaration rather than duplicated as a literal here.
 """
 
 from __future__ import annotations
@@ -56,14 +68,22 @@ from carddemo_migration.loaders.protected_columns import (
     ProtectedColumnError,
 )
 
-# Assumptions: the two Java sources are the authority for the framings this module reproduces,
-#   and they are named by path rather than searched for, so a file MOVED rather than edited fails
+# Assumptions: the Java sources are the authority for the framings this module reproduces, and
+#   they are named by path rather than searched for, so a file MOVED rather than edited fails
 #   these tests loudly instead of quietly reducing them to nothing.
+# WHY : ⚠️ Refactoring Rationale: the customer authority was
+#   `account/config/CustomerIdentifierProtectionConfig.java`, which was the WRONG file. It held
+#   a private nested implementation that framed with no marker and no version byte, while the
+#   component-scanned `account/service/CustomerIdentifierCipher` -- which supersedes it under
+#   `@ConditionalOnMissingBean` wherever the service package is scanned -- framed `["CDCI"][1]`
+#   first. One column, two writers, two formats, and this suite asserted against the one that
+#   lost. The account service now has a single writer and this path names it: the file that
+#   WRITES the bytes is the only defensible authority for what the bytes are.
 _SERVICES_ROOT: Final[Path] = Path(__file__).resolve().parents[2] / "services"
 _CUSTOMER_JAVA: Final[Path] = (
     _SERVICES_ROOT
-    / "account-service/src/main/java/com/carddemo/account/config"
-    / "CustomerIdentifierProtectionConfig.java"
+    / "account-service/src/main/java/com/carddemo/account/service"
+    / "CustomerIdentifierCipher.java"
 )
 _CARD_CIPHER_JAVA: Final[Path] = (
     _SERVICES_ROOT
@@ -184,6 +204,46 @@ def _java_string(source: Path, name: str) -> str:
     return matched.group(1)
 
 
+def _java_byte_array(source: Path, name: str) -> bytes:
+    """Read one declared ``byte[]`` character-literal constant out of a Java source file.
+
+    Parameters
+    ----------
+    source : Path
+        The Java file to read.
+    name : str
+        The constant's identifier.
+
+    Returns
+    -------
+    bytes
+        The declared bytes, in declaration order.
+
+    Raises
+    ------
+    AssertionError
+        If the file does not declare the constant as a brace initialiser of character literals.
+    """
+    # WHY : ⚠️ Refactoring Rationale: both envelope markers used to be asserted against a literal
+    #   written HERE -- `assert envelope[:magic_length] == b"CDCV"` -- with only the marker's
+    #   LENGTH read from the Java. A Java author changing `CDCV` to `CDCX` would therefore have
+    #   kept this suite green while making every value this module writes unparseable, which is
+    #   the same class of failure that produced the two-writer defect on the customer column.
+    #   Reading the marker itself out of the declaration closes that hole for both families.
+    # Assumptions: the declaration form is a brace initialiser of single-quoted characters, which is
+    #   how both Java classes write it. A future declaration using a string's `getBytes` would fail
+    #   this helper LOUDLY rather than silently matching nothing, which is the required direction --
+    #   an assertion that quietly stops comparing is worse than one that breaks.
+    matched = re.search(
+        rf"\bbyte\[\]\s+{re.escape(name)}\s*=\s*\{{([^}}]*)\}}\s*;",
+        source.read_text(encoding="utf-8"),
+    )
+    assert matched, f"{source.name} declares no byte-array constant {name}"
+    characters = re.findall(r"'(.)'", matched.group(1))
+    assert characters, f"{source.name} declares {name} without character literals"
+    return "".join(characters).encode("ascii")
+
+
 def test_the_customer_framing_matches_the_constants_the_account_service_declares() -> None:
     """Assemble a customer envelope whose every part matches what the Java class parses.
 
@@ -195,25 +255,46 @@ def test_the_customer_framing_matches_the_constants_the_account_service_declares
     Raises
     ------
     AssertionError
-        If the vector width, tag length, encryption context or layout differs from the Java's.
+        If the marker, version byte, vector width, tag length, encryption context or layout
+        differs from the Java's.
     """
     keys = _FixedKeys()
     envelope = CustomerIdentifierCipher(key_id="alias/synthetic", keys=keys).seal(
         "020973888", "ssn_encrypted"
     )
+    magic = _java_byte_array(_CUSTOMER_JAVA, "ENVELOPE_MAGIC")
+    version = _java_int(_CUSTOMER_JAVA, "FORMAT_VERSION")
+    key_length_bytes = _java_int(_CUSTOMER_JAVA, "KEY_LENGTH_FIELD_BYTES")
     vector_length = _java_int(_CUSTOMER_JAVA, "INITIALISATION_VECTOR_LENGTH")
     tag_bits = _java_int(_CUSTOMER_JAVA, "TAG_LENGTH_BITS")
-    # WHY : the layout is asserted from the JAVA's own numbers, offset by offset. The customer
-    #   framing begins with its two-byte length prefix at offset ZERO -- it carries no marker and
-    #   no version byte, unlike the card framing -- so a layout borrowed from the card envelope
-    #   would shift every part by five bytes and store values nothing can parse.
-    assert envelope[:2] == len(_WRAPPED_KEY).to_bytes(2, "big")
-    assert envelope[2 : 2 + len(_WRAPPED_KEY)] == _WRAPPED_KEY
-    assert len(envelope) == 2 + len(_WRAPPED_KEY) + vector_length + 9 + tag_bits // 8
-    # WHY : the encryption context is the other half of the contract, and it is checked against
-    #   the Java's declared strings rather than against literals. KMS refuses to unwrap a data key
-    #   under a different context, so a context differing by one character makes every identifier
-    #   written under it permanently unreadable -- and nothing in a migration would notice.
+    # WHY : ⚠️ Refactoring Rationale: this assertion used to require the two-byte length prefix at
+    #   offset ZERO, with a comment stating that the customer framing "carries no marker and no
+    #   version byte, unlike the card framing". Both the assertion and the comment were
+    #   transcribed from a Java writer that no longer exists -- a private nested implementation
+    #   inside `CustomerIdentifierProtectionConfig` that omitted the header, and that competed
+    #   with the component-scanned `CustomerIdentifierCipher` for the same column. The surviving
+    #   writer frames `[magic][version]` first, exactly as the card writer does, so the
+    #   "five-byte shift" the old comment warned against is the CORRECT layout rather than the
+    #   broken one.
+    # WHY : Assumptions: the marker is compared against the Java's own DECLARATION rather than a
+    #   literal written here, so a change to `ENVELOPE_MAGIC` on either side fails this test
+    #   instead of silently producing values the account service refuses before it parses
+    #   anything else.
+    assert magic == b"CDCI"
+    assert envelope[: len(magic)] == magic
+    assert envelope[len(magic)] == version
+    prefix_offset = len(magic) + 1
+    assert envelope[prefix_offset : prefix_offset + key_length_bytes] == len(_WRAPPED_KEY).to_bytes(
+        key_length_bytes, "big"
+    )
+    key_offset = prefix_offset + key_length_bytes
+    assert envelope[key_offset : key_offset + len(_WRAPPED_KEY)] == _WRAPPED_KEY
+    assert len(envelope) == key_offset + len(_WRAPPED_KEY) + vector_length + 9 + tag_bits // 8
+    # WHY : the encryption context is the other half of the contract, and it is checked against the
+    #   Java's declared strings rather than against literals. KMS refuses to unwrap a data key
+    #   under a different context, so a context differing by one character makes every
+    #   identifier written under it permanently unreadable -- and nothing in a migration would
+    #   notice.
     purpose_key = _java_string(_CUSTOMER_JAVA, "CONTEXT_PURPOSE_KEY")
     purpose_value = _java_string(_CUSTOMER_JAVA, "CONTEXT_PURPOSE_VALUE")
     column_key = _java_string(_CUSTOMER_JAVA, "CONTEXT_COLUMN_KEY")
@@ -238,15 +319,23 @@ def test_the_card_framing_matches_the_constants_the_card_service_declares() -> N
     """
     keys = _FixedKeys()
     envelope = CardVerificationValueCipher(key_id="alias/synthetic", keys=keys).seal("123")
+    magic = _java_byte_array(_CARD_ENVELOPE_JAVA, "MAGIC")
     magic_length = _java_int(_CARD_ENVELOPE_JAVA, "MAGIC_LENGTH")
     version = _java_int(_CARD_ENVELOPE_JAVA, "FORMAT_VERSION")
     vector_length = _java_int(_CARD_ENVELOPE_JAVA, "INITIALISATION_VECTOR_LENGTH")
     minimum = _java_int(_CARD_ENVELOPE_JAVA, "MIN_CIPHERTEXT_LENGTH")
     tag_bits = _java_int(_CARD_CIPHER_JAVA, "TAG_LENGTH_BITS")
-    # WHY : `hasEnvelopeShape` checks the marker and the version byte BEFORE parsing anything
-    #   else, and rejects on either -- so these four bytes and this one byte are what decide
-    #   whether the card service will even attempt to read a stored value.
-    assert envelope[:magic_length] == b"CDCV"
+    # WHY : `hasEnvelopeShape` checks the marker and the version byte BEFORE parsing anything else,
+    #   and rejects on either -- so these four bytes and this one byte are what decide whether
+    #   the card service will even attempt to read a stored value.
+    # WHY : Assumptions: the marker is read from the Java DECLARATION and its length is separately
+    #   required to equal the declared `MAGIC_LENGTH`, because the Java carries both a marker
+    #   constant and a width constant and parses using the width. A marker edited to a different
+    #   number of characters than the width says would make the class reject its own output, and
+    #   comparing only against a literal written here would not notice.
+    assert magic == b"CDCV"
+    assert len(magic) == magic_length
+    assert envelope[:magic_length] == magic
     assert envelope[magic_length] == version
     key_length_offset = magic_length + 1
     assert envelope[key_length_offset : key_length_offset + 2] == len(_WRAPPED_KEY).to_bytes(
@@ -257,9 +346,9 @@ def test_the_card_framing_matches_the_constants_the_card_service_declares() -> N
     ciphertext_length = CARD_VERIFICATION_VALUE_DIGITS + tag_bits // 8
     assert ciphertext_length >= minimum
     assert len(envelope) == key_offset + len(_WRAPPED_KEY) + vector_length + ciphertext_length
-    # WHY : this context is PURPOSE ONLY -- no column key -- which is where the two framings
-    #   differ beyond their headers. Adding a column key would bind the data key to a context the
-    #   card service never presents on decrypt, so KMS would refuse to unwrap it.
+    # WHY : this context is PURPOSE ONLY -- no column key -- which is where the two framings differ
+    #   beyond their headers. Adding a column key would bind the data key to a context the card
+    #   service never presents on decrypt, so KMS would refuse to unwrap it.
     purpose_key = _java_string(_CARD_CIPHER_JAVA, "CONTEXT_PURPOSE_KEY")
     purpose_value = _java_string(_CARD_CIPHER_JAVA, "CONTEXT_PURPOSE_VALUE")
     assert keys.requests[0][1] == {purpose_key: purpose_value}
@@ -279,9 +368,9 @@ def test_the_declared_verification_value_width_matches_the_card_service() -> Non
         If the two widths differ.
     """
     # WHY : the card service re-checks the width on its DECIPHER path, so a value of another width
-    #   would encipher here successfully and be refused there -- weeks later, against a row whose
-    #   provenance is no longer obvious. Agreeing on the number is what keeps the refusal at the
-    #   load boundary.
+    #   would encipher here successfully and be refused there -- weeks later, against a row
+    #   whose provenance is no longer obvious. Agreeing on the number is what keeps the refusal
+    #   at the load boundary.
     assert CARD_VERIFICATION_VALUE_DIGITS == _java_int(
         _CARD_CIPHER_JAVA, "VERIFICATION_VALUE_DIGITS"
     )
@@ -304,8 +393,8 @@ def test_neither_framing_binds_the_encryption_context_into_the_local_cipher() ->
     # WHY : this is the single easiest thing in the whole framing to get wrong, and it is asserted
     #   from the Java rather than merely commented. The encryption context travels to KMS on the
     #   data-key call and binds the WRAPPED KEY; the local GCM cipher is constructed with a key
-    #   and a vector and `doFinal` is called directly. Binding the canonicalised context into the
-    #   local cipher here instead would produce envelopes that frame correctly, store
+    #   and a vector and `doFinal` is called directly. Binding the canonicalised context into
+    #   the local cipher here instead would produce envelopes that frame correctly, store
     #   successfully, and fail authentication the first time either service read them.
     for source in (_CUSTOMER_JAVA, _CARD_CIPHER_JAVA):
         text = source.read_text(encoding="utf-8")
@@ -358,8 +447,8 @@ def test_each_protected_customer_column_binds_its_own_name(column: str) -> None:
     AssertionError
         If the column name does not reach the encryption context.
     """
-    # WHY : the binding is what stops an envelope written for one column being read from the
-    #   other. Both hold identifiers about the same customer, so without the binding a value moved
+    # WHY : the binding is what stops an envelope written for one column being read from the other.
+    #   Both hold identifiers about the same customer, so without the binding a value moved
     #   between them would decipher successfully into the wrong field.
     keys = _FixedKeys()
     CustomerIdentifierCipher(key_id="alias/synthetic", keys=keys).seal("000000001", column)
@@ -379,8 +468,8 @@ def test_an_empty_value_is_refused_rather_than_enciphered() -> None:
     AssertionError
         If an empty value is enciphered.
     """
-    # WHY : the nullable column's absent state is a NULL. Enciphering an empty string would store
-    #   a present envelope that deciphers to zero characters, which no reader can distinguish from
+    # WHY : the nullable column's absent state is a NULL. Enciphering an empty string would store a
+    #   present envelope that deciphers to zero characters, which no reader can distinguish from
     #   a corrupted one -- so the absence has to be expressed by omitting the value.
     cipher = CustomerIdentifierCipher(key_id="alias/synthetic", keys=_FixedKeys())
     with pytest.raises(ProtectedColumnError) as refused:
@@ -403,8 +492,9 @@ def test_a_data_key_pair_that_cannot_be_framed_is_refused() -> None:
     """
     # WHY : both cases are silent otherwise. An empty wrapped key frames a zero-length prefix, so
     #   the vector begins where the key was expected; a wrapped key above 65535 bytes wraps the
-    #   two-byte prefix, so the envelope parses as a shorter key followed by a longer vector. Each
-    #   produces bytes that store successfully and report only an authentication failure later.
+    #   two-byte prefix, so the envelope parses as a shorter key followed by a longer vector.
+    #   Each produces bytes that store successfully and report only an authentication failure
+    #   later.
     with pytest.raises(ProtectedColumnError):
         DataKey(plaintext=b"", wrapped=_WRAPPED_KEY)
     with pytest.raises(ProtectedColumnError):
@@ -456,9 +546,9 @@ def test_a_refused_key_service_call_names_no_value_and_no_service_message() -> N
     with pytest.raises(ProtectedColumnError) as refused:
         source.data_key(key_id="alias/synthetic", encryption_context={"a": "b"})
     message = str(refused.value)
-    # WHY : the TYPE is reported and the service message is not. A service message is free text
-    #   that can echo the request it rejected, and the request here carries an identifier -- so
-    #   the cause keeps the detail in a traceback rather than in a string an alarm copies.
+    # WHY : the TYPE is reported and the service message is not. A service message is free text that
+    #   can echo the request it rejected, and the request here carries an identifier -- so the
+    #   cause keeps the detail in a traceback rather than in a string an alarm copies.
     assert "RuntimeError" in message
     assert "020973888" not in message
 

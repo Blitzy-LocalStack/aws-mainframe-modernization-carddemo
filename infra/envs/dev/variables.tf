@@ -30,14 +30,11 @@
 #   a deployable artifact, a privilege ceiling or an alarm destination has no
 #   defensible default, and defaulting one would make a root that cannot serve
 #   TLS -- or cannot tell anyone it has failed -- look complete.
-#   WHY (Refactoring Rationale): this paragraph claimed thirty-five inputs and
-#   nine required, then enumerated only SEVEN names. All three figures were
-#   wrong in different directions: the total was never thirty-five, four
-#   required inputs were missing from the list, and `alarm_email_endpoints`
-#   became required when the alarm topic stopped defaulting to a repository
-#   value. A summary that under-counts required inputs is the worst kind to
-#   leave standing, because a reader trusts it to be the checklist for a first
-#   apply and then discovers the remainder one failed plan at a time.
+#   Assumptions: the eleven names above are the complete required set, and the
+#   count is what a reader treats as the checklist for a first apply. An input
+#   omitted from it is not discovered until a plan fails, so the list is
+#   maintained against the `variable` blocks below rather than described in
+#   round numbers.
 #
 #   Each `variable` block below carries its own authoritative `type` and
 #   `description`. The contract for an input lives on the input rather than in a
@@ -1060,8 +1057,18 @@ variable "image_digests" {
         "authorization-service",
         "reporting-service",
         "data-migration",
+        "aws-otel-collector",
       ], artifact)
     ])
-    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment builds: the eight services plus data-migration. A key that names no repository would be silently ignored."
+    error_message = "Every image_digests key must name one of the ten ECR artifacts this deployment publishes: the eight services and data-migration, which it builds, plus aws-otel-collector, which it mirrors. A key that names no repository would be silently ignored."
   }
+
+  # WHY : Refactoring Rationale: `aws-otel-collector` was added to the admissible
+  #       keys, and it is the one entry this deployment does not BUILD. The mirror
+  #       step in .github/workflows/deploy.yml records the digest it pushed, and
+  #       main.tf prefers that digest for the telemetry sidecar exactly as it does
+  #       for the eight services -- so without this key the value would be rejected
+  #       by the check above and the sidecar would stay on its tag alone. `ui` is
+  #       still absent on purpose: the browser bundle is published to S3 and its
+  #       image runs no ECS task, so a digest for it would configure nothing.
 }

@@ -36,7 +36,7 @@ import org.junit.jupiter.api.Test;
  * one instance of it that was found.</p>
  *
  * <p>Trade-offs: nothing here substitutes the identity provider, because nothing here reaches it. The
- * provider-facing halves are covered by {@code com.carddemo.auth.service.UserAuthorityServiceTest} and by
+ * provider-facing halves are covered by {@code com.carddemo.auth.service.IdentitySyncServiceTest} and by
  * {@code com.carddemo.auth.service.UserServiceTest}, whose changed-update case asserts the previously stored
  * type and the newly requested one are BOTH handed to the provisioner -- which is what makes the group move.
  * Keeping the three separate is what lets this class fail for exactly one reason.</p>
@@ -152,15 +152,20 @@ class UserMapperAuthorityTest {
     }
 
     /**
-     * Verifies only the two provider-coordinated classes assign the reference-type column.
+     * Verifies only the provider-coordinated mapper assigns the reference-type column.
      *
-     * <p>Assumptions: the rule is stated as an allow-list of two rather than as a prohibition, and the two are
-     * exactly the sites at which a membership move is guaranteed to accompany the assignment.
-     * {@code UserMapper} is reached only from {@code UserService#update}, which hands the previously stored
-     * type and the requested one to the provisioner in the same transaction that writes the row -- so a
-     * provider failure propagates and the row rolls back. {@code UserAuthorityService} moves the membership
-     * BEFORE it assigns, and registers a compensation that puts the membership back if the transaction does
-     * not commit. Any third site would have neither property.</p>
+     * <p>Assumptions: the rule is stated as an allow-list of ONE rather than as a prohibition, and that one
+     * is the only site at which a membership move is guaranteed to accompany the assignment.
+     * {@code UserMapper} is reached only from {@code UserService#update}, which records the intended
+     * membership move in the durable task ledger inside the same transaction that writes the row -- so a
+     * rollback discards the intention with the row, and a commit leaves an intention the applier converges.
+     * Any second site would have neither property.</p>
+     *
+     * <p>Refactoring Rationale: the allow-list held TWO names, the second being
+     * {@code UserAuthorityService}, and that service has been withdrawn: it had no production caller, and
+     * the compensation it registered ran after completion in the same process, so a process death between
+     * the provider call and the commit left the two stores disagreeing with nothing recording it. The
+     * ledger survives that death, which is why the list is now one name and not two.</p>
      *
      * <p>Alternatives Considered: relying on the behavioural assertions above alone. They cover every path a
      * caller can take today, but they would all still pass if a future edit assigned the column from a new
@@ -174,22 +179,19 @@ class UserMapperAuthorityTest {
      * under every build. Bytecode carries the resolved call target, so it answers the question asked.</p>
      */
     @Test
-    @DisplayName("only the mapper and the authority service assign the reference-type column")
-    void onlyTheProviderCoordinatedClassesAssignTheReferenceType() {
+    @DisplayName("only the mapper assigns the reference-type column")
+    void onlyTheProviderCoordinatedMapperAssignsTheReferenceType() {
         JavaClasses service = new ClassFileImporter().importPackages("com.carddemo.auth");
 
         ArchRule rule = ArchRuleDefinition.noClasses()
                 .that()
                 .doNotHaveFullyQualifiedName("com.carddemo.auth.mapper.UserMapper")
-                .and()
-                .doNotHaveFullyQualifiedName("com.carddemo.auth.service.UserAuthorityService")
                 .should()
                 .callMethod(User.class, "setUserType", String.class)
                 .because("moving auth.users.user_type without moving the cognito:groups membership behind "
-                        + "it records an authority nobody granted; the only two sites that move both are "
-                        + "com.carddemo.auth.mapper.UserMapper, whose caller synchronises the provider in "
-                        + "the same transaction, and com.carddemo.auth.service.UserAuthorityService, which "
-                        + "moves the membership first and compensates on rollback");
+                        + "it records an authority nobody granted; the only site that moves both is "
+                        + "com.carddemo.auth.mapper.UserMapper, whose caller records the membership move "
+                        + "in the durable task ledger inside the same transaction as the row change");
 
         rule.check(service);
     }

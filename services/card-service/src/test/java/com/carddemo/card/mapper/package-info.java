@@ -2,7 +2,7 @@
  * Executable proof of the two data-exposure properties this module's anti-corruption layer owes every
  * caller.
  *
- * <h2>Purpose, and the tree state at the checkpoint that authored this descriptor</h2>
+ * <h2>Purpose, and what this package holds</h2>
  *
  * <p>Purpose: this package holds the tests that establish, rather than presume, the two disclosure
  * properties the migration mandates of {@code com.carddemo.card.mapper.CardMapper}. The card
@@ -13,13 +13,32 @@
  * route rather than a branch inside a shared one. The production package one source root away states
  * those properties as its charter; this package is where they stop being a claim.</p>
  *
- * <p>Assumptions: the inventory in this descriptor describes the package's target contract as the
- * migration plan assigns it, not a census of the files sitting beside this one. Artifacts land in plan
- * order and this descriptor is authored first, so at the checkpoint that authored it the directory
- * holds this descriptor alone. The closed set is two compilation units -- this descriptor and
- * {@code CardMapperTest}, which carries the suppression and masking assertions -- and the second name
- * is therefore planned rather than missing. Stating the distinction here is what lets a reader tell a
- * target from a measurement without opening the directory.</p>
+ * <p>Assumptions: the inventory below is a census of this directory and no longer a projection of one.
+ * Both test classes are present:
+ *
+ * <pre>
+ * this directory: 3 java files = 2 tests + 1 charter
+ * </pre>
+ *
+ * <ul>
+ *   <li>{@code CardMapperTest} across 14 cases -- the verification-value suppression, the masking of the
+ *       primary account number on every ordinary response, the whole-number disclosure on the one
+ *       administrative route, the removal of the record's trailing padding, and the two identifiers
+ *       travelling as digit strings with their leading zeros intact.</li>
+ *   <li>{@code CardExpiryParityTest} across 4 cases -- what an expiry edit does to the stored day. The
+ *       reference edits a month and a year and never a day, and composes a day into the stored value
+ *       without consulting a calendar, so the target's true date column cannot hold the impossible
+ *       combination the reference can; the mapper clamps the day to the target month's last, which is
+ *       registered as divergence {@code D-CARD-EXPIRY-DAY-CLAMP}.</li>
+ * </ul>
+ *
+ * <p>Refactoring Rationale: this paragraph previously declared the second name planned rather than
+ * missing, on the ground that artifacts land in plan order and this descriptor was authored first. That
+ * device outlived its occasion twice over -- {@code CardMapperTest} landed, and a second class landed
+ * beside it that the closed set did not admit at all. The marker line above is the form
+ * {@code common-lib}'s {@code PackageCharterInventoryTest} re-measures against this directory, and the
+ * same test checks each enumerated member's file and each declared case count against the annotations
+ * in it, so a projection can no longer survive the artifact it projected.</p>
  *
  * <p>Assumptions: this descriptor governs the test source root only. A separate descriptor under
  * {@code src/main/java} governs the production package of the same name, and the duplication of the

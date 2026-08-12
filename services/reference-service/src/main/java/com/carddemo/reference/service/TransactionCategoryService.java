@@ -573,7 +573,7 @@ public class TransactionCategoryService {
         List<TransactionCategory> rows =
                 readWindow(decodeCursor(position), backward, typeFilter, searchText);
 
-        return ReferencePaging.page(rows, PAGE_SIZE, backward, position != null,
+        return ReferencePaging.page(rows, PAGE_SIZE, backward,
                 ReferencePaging.binding(binding, subject, true, typeFilter, searchText),
                 ReferencePaging.binding(binding, subject, false, typeFilter, searchText),
                 cursorToken, TransactionCategoryMapper::toResponse,
@@ -593,8 +593,8 @@ public class TransactionCategoryService {
      * <p>Assumptions: no backward availability is computed from this read, because the baseline never
      * computed one. Its backward reader in {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} takes
      * no wider window than it displays and the program declares no previous-page flag anywhere. The
-     * absence is fidelity rather than an omission, and the envelope's own backward flag is derived
-     * from whether this read resumed from a position at all.</p>
+     * absence is fidelity rather than an omission, and the shared envelope publishes the backward
+     * POSITION rather than a backward answer, so there is no flag here to derive.</p>
      *
      * @param position the opened two-part boundary, or {@code null} on a first page
      * @param backward whether the caller asked to step back from that boundary

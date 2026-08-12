@@ -89,6 +89,26 @@ public final class ReportingTaskRunner {
     public static final String REPORT_TYPE_PARAMETER = "reportType";
 
     /**
+     * Container environment variable carrying the orchestrator's identity for this run.
+     *
+     * <p>Assumptions: the name matches what both report states set in
+     * {@code infra/modules/step-functions-batch/main.tf} -- the nightly {@code GenerateReports} state and
+     * the on-demand {@code GenerateAdHocReport} state each supply it as the execution name through
+     * {@code $$.Execution.Name}. It is an ENVIRONMENT value rather than a command-line option because the
+     * orchestrator supplies it to every state uniformly and no operator types it.</p>
+     */
+    public static final String RUN_ID_VARIABLE = "CARDDEMO_BATCH_RUN_ID";
+
+    /**
+     * The token recorded for a run the orchestrator did not identify.
+     *
+     * <p>Assumptions: a distinguishable literal rather than an empty field, because a run started by hand
+     * for a diagnosis legitimately carries no execution name and a blank in the record would be
+     * indistinguishable from a lost value.</p>
+     */
+    public static final String UNIDENTIFIED_RUN = "unidentified";
+
+    /**
      * Exact character width of a date token, ten.
      *
      * <p>Assumptions: ten is the baseline's width and not a preference. The report driver supplies its
@@ -476,6 +496,27 @@ public final class ReportingTaskRunner {
                     + DATE_TOKEN_LENGTH + " characters");
         }
         return value;
+    }
+
+    /**
+     * Reports the orchestrator's identity for this run, for an operational record to be tied to.
+     *
+     * <p>Purpose: an artifact record that names only what was written cannot be joined to the execution
+     * that wrote it, and the execution is what an operator has when investigating -- a state machine
+     * history entry, not a log line. Reading the identity here rather than at each task keeps one reading
+     * of one variable name.</p>
+     *
+     * <p>Assumptions: the value is sanitised before it is returned, even though it arrives from the
+     * orchestrator rather than from a caller. Its ad-hoc form is assembled partly from a request-supplied
+     * correlation identifier, and the cost of sanitising a value that is already safe is nothing next to
+     * the cost of a control character reaching a journal line from a path nobody re-examined.</p>
+     *
+     * @return the run identity, or {@value #UNIDENTIFIED_RUN} when the variable is unset or blank; never
+     *     {@code null}
+     */
+    public static String runIdentity() {
+        String value = System.getenv(RUN_ID_VARIABLE);
+        return value == null || value.isBlank() ? UNIDENTIFIED_RUN : LogSafeText.sanitize(value);
     }
 
     /**

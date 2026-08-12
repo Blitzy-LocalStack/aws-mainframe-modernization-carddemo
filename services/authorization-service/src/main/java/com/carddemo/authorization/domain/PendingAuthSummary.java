@@ -81,8 +81,9 @@ import org.hibernate.type.SqlTypes;
  * omission is a decision rather than an oversight. The account, customer and card entities carry one
  * because the reference programs for those records compare a before-image across a screen turn,
  * which is the situation an optimistic check exists for. No before-image pattern exists anywhere in
- * this context's programs; this row is updated only by the authorization consumer, inside the same
- * transaction that reads it, under the row lock that consumer takes with a select-for-update; and,
+ * this context's programs; the four accumulating members are moved by a guarded arithmetic statement
+ * computed in the database rather than by writing back a loaded instance, so the interleaving an
+ * optimistic check exists to detect cannot arise on the path that moves them; and,
  * decisively, the migration that owns the table declares no such column, so adding one would leave
  * this mapping asserting a column that does not exist. The migration is the source of truth for what
  * this type maps, and where the two could disagree the migration wins.</p>

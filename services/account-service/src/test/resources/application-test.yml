@@ -81,18 +81,16 @@
 #   4. Both schema selectors are restated even though the base profile already
 #      sets them, because the failure they prevent is a PASSING test rather than
 #      a failing one. Recorded on spring.jpa.properties.hibernate.
-#   5. The queue listener is stopped from starting even though neither current
-#      consumer builds one. Recorded on spring.cloud.aws.sqs.listener.
+#   5. The queue listener is stopped from starting even though the repository
+#      tests reading this profile build none. Recorded on
+#      spring.cloud.aws.sqs.listener.
 #   6. The bind-parameter logger is pinned even though the level it is pinned to
 #      is the level it would otherwise inherit. Recorded on logging.level.
 #   7. Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md. YAML has
 #      no docstring construct, so this header block is the module-entry-point
-#      equivalent the project's single user-specified rule requires, and every
-#      value below carries an adjacent rationale under one of that rule's four
-#      category labels. That standard also limits the Java documentation gate to
-#      files carrying a .java extension, so no linter reads this file and the
-#      obligation rests on the written standard and on review. No comment here
-#      claims a gate enforces something it does not.
+#      equivalent, and every value below carries an adjacent rationale under one
+#      of the four category labels that standard fixes. No linter reads this
+#      file, so no comment here claims a gate enforces something it does not.
 #   8. A register at the foot of the file records what this overlay deliberately
 #      does NOT set, because several of those values are ones a reasonable
 #      reader would expect to find.
@@ -129,12 +127,12 @@ spring:
         listener:
           # Assumptions: the base profile does not set this key, so the
           #   framework default applies and a listener container starts with the
-          #   context. Neither consumer of this profile builds one today, since
-          #   both exclude the queue auto-configuration by name and neither
-          #   reaches the package holding the inquiry listener. The flag is set
-          #   for the contexts that follow them: a messaging test, or any test
-          #   that reaches the service package, would otherwise start a poller
-          #   that resolves a queue name against no broker and report a
+          #   context. The repository tests using this profile build no
+          #   listener, because each excludes the queue auto-configuration by
+          #   name and none reaches the package holding the inquiry listener.
+          #   The flag is set for the contexts that do: a messaging test, or any
+          #   test that reaches the service package, would otherwise start a
+          #   poller that resolves a queue name against no broker and report a
           #   failure belonging to the transport rather than to the behaviour
           #   under test.
           # Trade-offs: a test that DOES want the listener has to start it
@@ -224,8 +222,8 @@ spring:
     #   objects belong to the NOLOGIN owner is the mechanism these tests
     #   actually exercise. CustomerMasterRepositoryIT asserts the resulting
     #   owner by name, which is what would catch that statement being lost.
-    # Alternatives Considered: two shapes were rejected here, and both had been
-    #   in place. Turning Flyway's create-schemas on for the test profile makes
+    # Alternatives Considered: two shapes are rejected here.
+    #   Turning Flyway's create-schemas on for the test profile makes
     #   the schema appear but leaves it owned by whichever user the container
     #   generated, so every default-privilege grant keyed on the owning role is
     #   inert and the ownership assertion fails. Adding statements to
@@ -260,7 +258,7 @@ logging:
     #   encrypted precisely so they do not appear in the clear, and the customer
     #   records this module loads carry values of exactly that shape. Pinning it
     #   here is what stops a later broadening above from raising it by accident:
-    #   root is WARN today, and a developer who sets root to DEBUG to
+    #   root is set to WARN above, and a developer who sets root to DEBUG to
     #   investigate a context failure would otherwise print every bound
     #   identifier in the run.
     # Trade-offs: bind values are therefore unavailable when a repository test
@@ -364,4 +362,3 @@ logging:
 #      second place to change when one of them moves, and the one place no
 #      compiler and no test would check.
 # =============================================================================
-

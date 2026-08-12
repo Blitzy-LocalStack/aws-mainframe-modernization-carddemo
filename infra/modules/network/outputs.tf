@@ -9,17 +9,14 @@
 #   hard-codes one. A value not published here cannot be reached by a sibling
 #   at all, so every name below is load-bearing.
 #
-#   WHY (Refactoring Rationale): this file previously published twenty-one
-#   outputs against a contract specified at sixteen, and its own header claimed
-#   that each description without a reader said so. Neither held. Five names
-#   were withdrawn - the three route-table exports, the flow-log group ARN and
-#   the flow-log resource id - after measuring every published name against
-#   every reference in the package: no sibling module and no environment root
-#   read any of the five, and two descriptions asserted consumers that do not
-#   exist. The remaining sixteen are the contract, and every one of them is read
-#   by the consumer its description names. Each withdrawal is recorded in a
-#   comment at the position the output occupied, so a later reader finds out why
-#   a name is absent rather than restoring it.
+#   Refactoring Rationale: five names were withdrawn from this surface - the
+#   three route-table exports, the flow-log group ARN and the flow-log resource
+#   id - after measuring every published name against every reference in the
+#   package: no sibling module and no environment root read any of the five. The
+#   remaining sixteen are the contract, and every one of them is read by the
+#   consumer its description names. Each withdrawal is recorded in a comment at
+#   the position the output occupied, so a later reader finds out why a name is
+#   absent rather than restoring it.
 #
 # Parameters:
 #   None. This file declares no input. All thirteen module inputs are declared,

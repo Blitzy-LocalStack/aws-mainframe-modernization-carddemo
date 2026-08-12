@@ -317,10 +317,18 @@ spring:
       connection-init-sql: SET search_path TO "authorization"
 
       # WHY : Trade-offs: ten connections against a task count of two or more.
-      #       This context holds a PESSIMISTIC row lock on a summary while it
-      #       decides, and the outbox drain holds locks on its claimed rows, so
-      #       connections here are held for longer than in a purely
-      #       request-response context. Ten leaves headroom for the consumer's
+      #       No path here holds a declared row lock across a wait, but connections
+      #       are still held longer than in a purely request-response context: the
+      #       consumer's deciding transaction spans up to three outbound reads of
+      #       the account context, and the drain runs a claim, a settlement and a
+      #       retention chunk as separate short transactions on the same pass.
+      #       Refactoring Rationale: this comment previously justified the figure by
+      #       a pessimistic lock held on a summary while the consumer decided, and
+      #       by the drain holding locks on its claimed rows. Neither is true --
+      #       the summary is moved by a guarded arithmetic statement and the drain
+      #       owns its rows by lease -- and the figure survives the correction
+      #       because what actually consumes a connection is the outbound reads, not
+      #       a hold. Ten leaves headroom for the consumer's
       #       concurrency plus the drain plus the web endpoints without letting one
       #       task monopolise a serverless cluster's connection budget.
       maximum-pool-size: 10
@@ -1260,10 +1268,13 @@ carddemo:
 
     # WHY : Trade-offs: both timeouts are deliberately short, and the reason is
     #       what the calls run inside rather than what the network usually costs.
-    #       Each runs within the deciding transaction, which by the second call is
-    #       holding a row lock on the account's summary, so an unbounded read would
-    #       hold that lock and a pooled connection for as long as the dependency
-    #       stayed silent. Three seconds is well beyond the in-network latency of a
+    #       Each runs within the deciding transaction and before the guarded
+    #       reservation that ends it, so an unbounded read would hold an open
+    #       transaction and its pooled connection for as long as the dependency
+    #       stayed silent -- and would hold the queue message past its visibility
+    #       period, which is the more damaging half, because the transport then
+    #       hands the same request to a second consumer.
+    #       Three seconds is well beyond the in-network latency of a
     #       keyed read and well inside the queue's own visibility timeout, so a
     #       stalled dependency surfaces as a redelivered message rather than as an
     #       exhausted connection pool. Alternatives Considered: leaving them at the

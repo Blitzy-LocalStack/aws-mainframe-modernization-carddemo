@@ -289,8 +289,17 @@ than merely overwrite the value.
    Alternatives Considered: reusing the application group, which needs a
    self-referencing 443 ingress rule that would also permit task-to-task traffic
    on 443 — widening the very radius the isolated tier exists to narrow; or
-   reusing the load-balancer group, which needs an application-to-load-balancer
-   443 rule that would let every task reach the edge listener group.
+   reusing the load-balancer group, which would collapse two genuinely different
+   flows onto one rule, because an application-to-load-balancer 443 rule already
+   exists for the three synchronous context-to-context calls and folding the
+   endpoint ENIs into that group would make the same rule also grant every task
+   the ten private service endpoints, so withdrawing either permission would
+   withdraw both.
+   Refactoring Rationale: the load-balancer half of this comparison used to
+   read that such a rule "would let every task reach the edge listener group", as
+   though the rule did not exist. It does exist and the system requires it, so
+   the premise was false; the conclusion is unchanged and now rests on keeping
+   the two flows separately withdrawable.
    Trade-offs: one more group to reason about, accepted in exchange for a rule
    set in which each permitted flow has exactly one source and one destination.
 
@@ -680,7 +689,6 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | [aws_vpc_endpoint_route_table_association.private_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint_route_table_association) | resource |
 | [aws_vpc_security_group_egress_rule.alb_to_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
-| [aws_vpc_security_group_egress_rule.app_to_alb_https](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_egress_rule.app_to_identity_provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
@@ -688,7 +696,6 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | [aws_vpc_security_group_egress_rule.data_to_s3_gateway](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.alb_to_app](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.app_to_alb](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
-| [aws_vpc_security_group_ingress_rule.app_to_alb_https](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.app_to_data](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.app_to_endpoints](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_availability_zones.available](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/availability_zones) | data source |

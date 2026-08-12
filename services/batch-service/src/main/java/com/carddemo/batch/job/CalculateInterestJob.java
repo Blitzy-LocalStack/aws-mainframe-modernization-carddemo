@@ -163,7 +163,7 @@ public class CalculateInterestJob {
     public static final String JOB_NAME = BatchJobName.CALCULATE_INTEREST.token();
 
     /** The step name the durable ledger records this job's progress under. */
-    public static final String STEP_NAME = "calculate-interest-step";
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /** The name of the single object each staged generation of the {@code SYSTRAN} family holds. */
     public static final String DATASET_OBJECT_NAME = "systran";
@@ -284,7 +284,8 @@ public class CalculateInterestJob {
                 START_BANNER, runId, businessDate.token());
 
         BatchStepLedger.StepOutcome outcome = this.ledgerOfSteps.runStep(
-                runId, STEP_NAME, () -> accrueEveryCategoryBalance(runId, accrual));
+                runId, STEP_NAME, BatchJobName.CALCULATE_INTEREST,
+                () -> accrueEveryCategoryBalance(runId, accrual));
 
         // WHY : Assumptions: WS-RECORD-COUNT at :172 is incremented at :192 and never displayed
         //       anywhere in the reference, so there is no output line to reproduce for it. The count is
@@ -449,9 +450,19 @@ public class CalculateInterestJob {
         //       for an operator, because it names every unresolvable account in one run instead of the
         //       first. Registered as divergence D-INTEREST-ORPHAN-ROW in
         //       docs/architecture/cobol-to-service-traceability.md §7.4.
+        // WHY : Refactoring Rationale: the account identifier was this line's only field and it is gone.
+        //       docs/architecture/observability.md names the account identifier among the values a
+        //       retained log line may not hold and requires omission rather than abbreviation, so there
+        //       is no partial form to fall back to. The row ordinal replaces it: the pass reads rows in
+        //       one deterministic order, so the ordinal locates the row within this run's input, and the
+        //       skip total the summary already reports says how many such rows there were. What is given
+        //       up is joining the line to an account without re-reading the input in the same order --
+        //       accepted, because the account is by definition absent from the master, so its number
+        //       identifies nothing a reader could then look up.
         if (accrual.openAccount == null) {
             accrual.rowsSkipped++;
-            LOG.warn("event=batch.interest.account-absent accountId={}", accountId);
+            LOG.warn("event=batch.interest.account-absent rowOrdinal={} rowsSkipped={}",
+                    accrual.rowsRead, accrual.rowsSkipped);
             return;
         }
 

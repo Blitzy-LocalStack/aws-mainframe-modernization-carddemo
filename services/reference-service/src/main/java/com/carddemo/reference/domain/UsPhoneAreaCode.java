@@ -98,20 +98,17 @@ import org.hibernate.type.SqlTypes;
  *
  * <p>Assumptions: <b>there is no baseline table for this entity, so {@code V1__reference.sql} is
  * the only source of column names,</b> stated so that a reader does not go looking for a definition
- * that does not exist. The source is a set of 88-level literal lists over a working-storage field,
- * so unlike the transaction-type and transaction-category entities there is no earlier column name
- * to carry across and no declared record length to reconcile. If this mapping and that migration
- * ever disagree, the migration is right and this file is the defect. </p>
+ * that does not exist -- the source is a set of 88-level literal lists over a working-storage field,
+ * with no earlier column name to carry across and no declared record length to reconcile. If this
+ * mapping and that migration ever disagree, the migration is right and this file is the defect. </p>
  *
  * <p>Assumptions: <b>the reader of this lookup sits in another bounded context and may not import
- * this type.</b> The consumer is {@code account-service} and its address validation, which neither
- * owns nor seeds this table, and
- * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java}
- * forbids a class under one bounded-context root from depending on a {@code domain} class owned by
- * another, so that service reaches this data through this service's published contract. One
- * consequence is easy to mistake for a defect here: a code absent from the seed does not fail in
- * this service at all, it surfaces as an address declined during account maintenance in the other
- * one. </p>
+ * this type.</b> The consuming address validation neither owns nor seeds this table, and the shared
+ * layering test forbids a class under one bounded-context root from depending on a {@code domain}
+ * class owned by another, so that service reaches this data through this service's published
+ * contract. One consequence is easy to mistake for a defect here: a code absent from the seed does
+ * not fail in this service at all, it surfaces as an address declined during account maintenance in
+ * the other one. </p>
  *
  * <p>Trade-offs: <b>the rows are exactly the 490 the baseline declares, and no code is
  * invented.</b> Functional parity is measured against the copybook lists and not against the
@@ -188,14 +185,14 @@ public class UsPhoneAreaCode {
      *
      * <p>Assumptions: the specification requires a persistence entity to declare a constructor taking
      * no arguments, which the provider invokes before writing the mapped columns into the members
-     * above. It is {@code protected} rather than public, which is the policy every other entity in this
-     * codebase already follows: 30 of the 33 entity declarations across the eight services declare it
-     * protected, and the five public ones were all in this package. The provider reaches a protected
-     * constructor, and application code outside this package cannot allocate an unpopulated row and
-     * pass it on as though it had been loaded.
+     * above. It is {@code protected} rather than public, which is the policy the entities across these
+     * services follow: the provider reaches a protected constructor, while application code outside this
+     * package cannot allocate an unpopulated row and pass it on as though it had been loaded.
      *
-     * <p>Refactoring Rationale: this was public, and each of the five gave its own reason -- that a
-     * mapper or a test needs to assemble a row member by member. For this type the reason has been withdrawn outright along with the two setters it rested on: with no setter to assemble through, member-by-member assembly was never available here in the first place.
+     * <p>Alternatives Considered: declaring it public so that a mapper or a test could assemble a row
+     * member by member. That reasoning does not apply to this type: it publishes no setter, so
+     * member-by-member assembly is not available through it in any case, and the two-argument
+     * constructor below is the one way to build a row outside the provider.
      */
     protected UsPhoneAreaCode() {
         // Assumptions: the body is empty by design rather than unfinished. The provider assigns both
@@ -257,18 +254,18 @@ public class UsPhoneAreaCode {
     }
 
 
-    // WHY : Refactoring Rationale: this type published setAreaCode and setCodeClass and nothing called
-    //       either. The first mutated the @Id, so a loaded row could be given a different identity while
-    //       the provider still held it under the old one -- which the provider resolves by INSERTING a
-    //       second row rather than by refusing, so the defect surfaces as duplicated seed data and not as
-    //       an error. The second was equally unreachable: the classification is seed content copied from
-    //       the allow-lists in app/cpy/CSLKPCDY.cpy, this service publishes no route that edits it, and
-    //       the check constraint in db/migration/V1__reference.sql admits only two letters. Both are
-    //       withdrawn rather than narrowed, because the provider maps these members by FIELD -- the @Id
-    //       annotation sits on the field declaration -- so no setter is required for persistence at all.
-    //       Alternatives Considered: keeping setCodeClass for a future maintenance route. Rejected: an
-    //       accessor with no caller is indistinguishable from one whose caller was lost, and the entity
-    //       reads as editable when nothing edits it.
+    // WHY : Assumptions: this type publishes NO setter for either member, and neither may be added.
+    //       A setter on the area code mutates the @Id, so a loaded row could be given a different
+    //       identity while the provider still held it under the old one -- which the provider resolves by
+    //       INSERTING a second row rather than by refusing, so the defect surfaces as duplicated seed
+    //       data and not as an error. A setter on the classification has nothing to serve: the value is
+    //       seed content copied from the allow-lists in app/cpy/CSLKPCDY.cpy, this service publishes no
+    //       route that edits it, and the check constraint in db/migration/V1__reference.sql admits only
+    //       two letters. Neither is required for persistence either, because the provider maps these
+    //       members by FIELD -- the @Id annotation sits on the field declaration.
+    //       Alternatives Considered: a setter kept for a future maintenance route. Rejected: an accessor
+    //       with no caller is indistinguishable from one whose caller was lost, and the entity reads as
+    //       editable when nothing edits it.
 
     /**
      * Reports whether another object denotes the same area-code row as this one.

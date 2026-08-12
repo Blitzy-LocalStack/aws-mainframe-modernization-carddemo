@@ -17,38 +17,36 @@
 #   read path), and app/cpy/CVACT02Y.cpy, the 150-byte card record from which
 #   this module's single schema and single table are derived.
 #
-#   State at this checkpoint, stated once here rather than repeated at every key
-#   that names one of them. The two profile overlays named throughout this
-#   document now exist: application-dev.yml and application-prod.yml. Two other
-#   classes of artifact remain contracted at later indexes of the same plan:
-#     - db/migration/V1__card.sql, the single Flyway migration this module owns.
-#       Flyway does not fail on a location that resolves to nothing, so the
-#       service starts and reports zero migrations applied; the configured
-#       location below is the contract that migration will land at, not a
-#       description of a migration that runs today.
-#     - openapi/card-api.yaml, the hand-authored contract of record, together
-#       with the com.carddemo.card.config classes that bind these keys and the
-#       controllers a generated document would be derived from. Until that file
-#       lands, the static-resource location and the springdoc keys below publish
-#       nothing, and the contract-versus-generated comparison they exist to make
-#       possible cannot yet be made.
-#   And one class of artifact named throughout this document HAS landed, so the
-#   statements about it describe rather than anticipate:
-#     - application-dev.yml and application-prod.yml, the two profile overlays.
-#       Both EXIST, so the statements below about what a profile MAY and MAY NOT
+#   The artifacts this document names, all of which exist, stated once here rather
+#   than repeated at every key that names one of them:
+#     - db/migration/V1__card.sql, the single Flyway migration this module owns, so
+#       the configured location below resolves to real DDL and a start-up applies
+#       it into the `card` schema. Assumptions: this is worth confirming rather
+#       than assuming, because Flyway does not fail on a location that resolves to
+#       nothing -- a service whose migration is absent starts and reports zero
+#       migrations applied.
+#     - openapi/card-api.yaml, the hand-authored contract of record, together with
+#       the com.carddemo.card.config classes that bind these keys -- CardSelectorConfig,
+#       DataSourceConfig, KmsConfig, OpenApiConfig and SecurityConfig -- and
+#       CardController, the adapter a generated document is derived from. The
+#       static-resource location and the springdoc keys below therefore publish that
+#       document, and the contract-versus-generated comparison they exist to make
+#       possible is available.
+#     - application-dev.yml and application-prod.yml, the two profile overlays, so
+#       the statements below about what a profile MAY and MAY NOT
 #       vary are constraints those two files are held to. The development overlay
 #       raises this module's own package and the statement logger and holds the
 #       bind-parameter logger at this file's WARN; the production overlay narrows
 #       the exposure list back. A reader confirms the set with
 #       `ls services/card-service/src/main/resources`, which is how this paragraph
-#       is meant to be checked -- the previous version of it listed both overlays
-#       as absent after they had landed.
-#   Every key below is nevertheless declared now, deliberately: these are the
-#   decisions a module author needs settled BEFORE writing the first class, and a
-#   schema search path or a migration location retrofitted afterwards is exactly
-#   how a service ends up applying another context's migration into its own
-#   schema. Nothing here is to be read as a claim that any of those artifacts is
-#   currently being served, applied, overridden or compared.
+#       is meant to be checked. Assumptions: an inventory written into a comment is
+#       correct on the day it is written and misleading afterwards, so this one
+#       names the command that confirms it rather than asking to be trusted.
+#   Assumptions: every key below is declared in this one document rather than added
+#   as its consumer lands, because these are the decisions a module author needs
+#   settled BEFORE writing the first class -- a schema search path or a migration
+#   location retrofitted afterwards is exactly how a service ends up applying
+#   another context's migration into its own schema.
 #
 # Parameters:
 #   Environment variables this configuration consumes. They are listed by name
@@ -88,12 +86,11 @@
 #   Environment yields: one HTTP listener on the port below; one pooled
 #   DataSource whose every connection has its schema search path pinned to
 #   card; a Flyway run that applies db/migration/V1__card.sql into that schema
-#   before the JPA EntityManagerFactory is built, once that migration lands; a
+#   before the JPA EntityManagerFactory is built; a
 #   JWT resource-server configuration; an actuator surface answering GET
-#   /actuator/health, /actuator/info and the metrics scrape path; a served
-#   OpenAPI 3.1 document, once openapi/card-api.yaml lands; and the base log
-#   levels the two profiles adjust. The two clauses qualified by "once ... lands"
-#   are the two artifacts named under State at this checkpoint above.
+#   /actuator/health, /actuator/info and the metrics scrape path; the served
+#   OpenAPI 3.1 document openapi/card-api.yaml; and the base log
+#   levels the two profiles adjust.
 #
 # Exceptions or errors:
 #   Startup failure modes a reader will actually meet, in the order the context
@@ -264,7 +261,40 @@ server:
     protocol: TLS
     enabled-protocols: TLSv1.2,TLSv1.3
 
+  # WHY : (1) Refactoring Rationale: this service omitted graceful shutdown while
+  #       five of the seven web contexts declared it -- this and auth-service were
+  #       the two that did not, the batch task having no web server and correctly
+  #       declaring none -- so a task being replaced had its in-flight requests
+  #       cut at SIGTERM. The cost here is specific: the card update is a
+  #       write guarded by an optimistic version check, and a caller whose request
+  #       is severed mid-write cannot tell a rejected version from a replaced
+  #       task, so it re-submits an edit that may already have committed.
+  #       (2) Assumptions: graceful shutdown stops accepting new connections and
+  #       lets accepted ones finish. This service holds no message listener, so
+  #       the only work to drain is HTTP, and the writes it drains are already
+  #       transactional -- draining bounds the CALLER's uncertainty, not the
+  #       database's consistency.
+  shutdown: graceful
+
 spring:
+
+  # WHY : (1) Assumptions: this bounds the graceful shutdown enabled above, and
+  #       twenty seconds is the fleet-wide phase budget -- the same value the
+  #       other seven contexts set, so one number describes the whole fleet.
+  #       (2) Refactoring Rationale: the framework's own default for this key is
+  #       thirty seconds and the platform's SIGTERM-to-SIGKILL window is also
+  #       thirty (ecs-service pins `stopTimeout = 30`), so leaving it unset made
+  #       the drain deadline and the kill deadline the same instant -- a task
+  #       could be killed while still draining, which is the failure graceful
+  #       shutdown exists to prevent. Twenty gives up the tail of that window to
+  #       buy certainty that the drain completes and the JVM flushes its log
+  #       buffers first.
+  #       (3) Trade-offs: twenty is also below the load balancer's thirty-second
+  #       deregistration delay, so a draining task is out of rotation before the
+  #       timer starts. A longer value would delay every deployment by the
+  #       difference without draining anything the delay had not already covered.
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
 
   # Assumptions: common-lib's MetricsConfig derives the value of the `service`
   #   metric tag from this property, so the string below is what a dashboard or
@@ -526,9 +556,8 @@ spring:
       #
       #   Flyway therefore owns every DDL statement, and Hibernate validates
       #   nothing and emits nothing. db/migration/V1__card.sql is the single
-      #   migration this module owns; it is authored at a later index of the same
-      #   plan, so today this key describes which component will own the DDL
-      #   rather than DDL that has been applied. There is no V2__ migration here:
+      #   migration this module owns, and it is the only DDL this service applies.
+      #   There is no V2__ migration here:
       #   V2__seed_reference.sql belongs to reference-service alone, which owns
       #   the lookup data it seeds.
       ddl-auto: none
@@ -849,14 +878,12 @@ springdoc:
   #   from the controllers is therefore not a second source of truth - it is a
   #   check on the first. The two must agree, and any difference between them is a
   #   bug in whichever side drifted, not a formatting artifact to be tolerated.
-  # Refactoring Rationale: this note previously said that neither the contract,
-  #   nor the controllers, nor the browser client existed at this checkpoint. Two
-  #   of those three now do: the contract declares five operations and
-  #   ui/src/api/cards.ts implements exactly those five, which
-  #   ui/src/api/contracts.test.ts asserts in both directions. Only the
-  #   controllers a generated document would come from are still to be written, so
-  #   the keys below describe where the contract IS published while the comparison
-  #   they exist to make possible waits on the handler side alone.
+  # Assumptions: all three sides of that comparison exist. The contract declares
+  #   five operations, ui/src/api/cards.ts implements exactly those five -- which
+  #   ui/src/api/contracts.test.ts asserts in both directions -- and CardController
+  #   is the adapter springdoc generates from, which CardApiContractTest holds to
+  #   the published path set in both directions. The keys below therefore describe
+  #   a comparison that runs rather than one waiting on a side.
   api-docs:
 
     # Assumptions: stated explicitly because the library's two defaults for this

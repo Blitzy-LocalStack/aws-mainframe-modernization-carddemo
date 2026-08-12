@@ -62,7 +62,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>The reference paragraphs this class carries, so that the traceability matrix can cite pairs rather
  * than a whole file: {@code 9000-READ-FORWARD.} at {@code :1123} and {@code 9100-READ-BACKWARDS.} at
  * {@code :1264} become {@link #list(Long, String, boolean, String)} with
- * {@link #pageOf(List, boolean, boolean, Long, String)};
+ * {@link #pageOf(List, boolean, Long, String)};
  * {@code 9500-FILTER-RECORDS.} at {@code :1382} becomes the optional predicate of the repository query;
  * {@code 2210-EDIT-ACCOUNT.} at {@code :1003} becomes {@link #accountFilterState(Long)}; and
  * {@code 1400-SETUP-MESSAGE.} at {@code :895} becomes {@link #pageMessage(PageResponse)} with
@@ -503,33 +503,37 @@ public class CardListService {
         //       assembles the page -- and it does so in ONE private method rather than inline in each
         //       direction, so the two directions cannot drift apart on where the surplus row sits.
         return this.mapper.toSummaryPage(
-                pageOf(rows, readBackward, position != null, narrowing, subject));
+                pageOf(rows, readBackward, narrowing, subject));
     }
 
     /**
-     * Reports whether a backward step is expressible from a page, since the envelope does not say so
-     * directly.
+     * Reports whether a backward step can be ADDRESSED from a page -- whether the page names a position
+     * a backward request could be issued from.
      *
-     * <p>Refactoring Rationale: this used to DERIVE the answer from the presence of the leading boundary
-     * token, and that derivation was wrong. Every page that returned rows names its own first row, so the
-     * derivation reported an earlier page on the OPENING page too, and a client that followed the report
-     * replaced the rows it was showing with an empty page. The reference does the opposite: its refusal at
-     * {@code app/cbl/COCRDLIC.cbl:903} fires on exactly that page, redisplaying it with the
-     * nothing-precedes notice at {@code :1301-1302}. The envelope now carries the answer as its own
-     * component, established by the read that produced the page, so this method reports it rather than
-     * inferring it.
+     * <p>Refactoring Rationale: this answers expressibility and deliberately not availability, and the
+     * two are separated here because only one of them is a property of the page. A page names the
+     * position a backward request seeks from, so this method can answer that from the envelope. Whether a
+     * row waits at that position is a property of where the CALLER stands in the walk, and the reference
+     * keeps that on the terminal side: {@code app/cbl/COCRDLIC.cbl:237-238} declares the one-digit page
+     * ordinal with {@code 88 CA-FIRST-PAGE VALUE 1}, {@code :902-903} raises
+     * {@code 'NO PREVIOUS PAGES TO DISPLAY'} on that condition without reading anything, and
+     * {@code :492} and {@code :508} move the ordinal as the two paging keys are pressed. A revision of
+     * the shared envelope published the availability answer as a fifth component; it is withdrawn, and
+     * the ordinal's migrated home is the SPA's own navigation state.
      *
-     * <p>Trade-offs: the method is kept rather than being replaced at its two call sites by a direct
-     * accessor read, because it is public API this service's controller documents and its tests assert.
-     * Keeping it costs one delegation and leaves one place to look for the definition of the answer.
+     * <p>Trade-offs: the method is kept rather than being replaced at its call sites by a direct accessor
+     * read, because it is public API this service's controller documents and its tests assert, and
+     * because the question it names is easy to answer the wrong way round. Keeping it leaves one place to
+     * look for the definition of the answer.
      *
-     * @param page the page whose backward availability is being read; must not be {@code null}
-     * @return {@code true} when an earlier page exists, as established by the read that built this page
+     * @param page the page whose backward addressability is being read; must not be {@code null}
+     * @return {@code true} when the page names a leading boundary a backward request could be issued
+     *     from, which is not a claim that a row waits there
      * @throws NullPointerException if {@code page} is {@code null}
      */
     public static boolean backwardAvailable(PageResponse<?> page) {
         Objects.requireNonNull(page, "page must not be null");
-        return page.hasPrevious();
+        return page.firstKey() != null;
     }
 
     /**
@@ -592,22 +596,30 @@ public class CardListService {
      * used twice. Backward is the seventh paging key and forward the eighth, from the attention
      * identifiers those two arms test.
      *
+     * <p>Trade-offs: the BACKWARD arm here refuses only the step that cannot be addressed -- a page that
+     * names no leading boundary. The reference's own backward arm additionally refuses the step whenever
+     * its page ordinal says it is on the first page ({@code :902-903} over the condition declared at
+     * {@code :237-238}), and that half of the condition is answered by the caller rather than here,
+     * because the ordinal is client-side navigation state and this service is stateless. The sentence
+     * this method returns is the same one, so a caller that holds the ordinal renders identical text; what
+     * it must not do is treat an empty optional as permission to page back from the first page.
+     *
      * @param page the page the caller currently holds, from which the step would be taken; must not be
      *     {@code null}
      * @param backward whether the step in question is backward rather than forward
-     * @return the reference refusal for a step that cannot be taken, or an empty optional when the step
-     *     is available; never {@code null}
+     * @return the reference refusal for a step that cannot be addressed from this page, or an empty
+     *     optional when the page names the position that step would be issued from; never {@code null}
      * @throws NullPointerException if {@code page} is {@code null}
      */
     public static Optional<String> pagingRefusal(PageResponse<?> page, boolean backward) {
         Objects.requireNonNull(page, "page must not be null");
 
-        // WHY : Assumptions: backward availability is the presence of the leading boundary token rather
-        //       than a component of its own, for the reason recorded on backwardAvailable, and forward
-        //       availability is the further-page indicator rather than the presence of the trailing
-        //       token. The asymmetry is the envelope's: a final page still names its trailing boundary,
-        //       because that is what a backward step off it seeks from, so reading forward availability
-        //       from that token's presence would offer a forward step on every last page.
+        // WHY : Assumptions: the backward answer is the presence of the leading boundary token, for the
+        //       reason recorded on backwardAvailable, and forward availability is the further-page
+        //       indicator rather than the presence of the trailing token. The asymmetry is the
+        //       envelope's: a final page still names its trailing boundary, because that is what a
+        //       backward step off it seeks from, so reading forward availability from that token's
+        //       presence would offer a forward step on every last page.
         if (backward) {
             return backwardAvailable(page) ? Optional.empty()
                     : Optional.of(MESSAGE_NO_PREVIOUS_PAGES);
@@ -733,9 +745,6 @@ public class CardListService {
      *
      * @param rows the rows read, at most the page size plus one, in ascending order
      * @param backward whether the read travelled backward, which decides which end the surplus came from
-     * @param resumed whether the request carried a cursor, which settles backward availability on a
-     *     forward read: the cursor names a row the caller was already shown and the forward predicate is
-     *     strictly greater than it, so a page lies behind exactly when one was supplied
      * @param narrowing the account the page was narrowed to, or {@code null} for an unnarrowed page;
      *     part of every cursor's binding so a cursor cannot be carried to a differently narrowed browse
      * @param subject the authenticated caller both boundary cursors are bound to
@@ -744,7 +753,7 @@ public class CardListService {
      * @throws IllegalArgumentException if a sealed boundary is rejected by the envelope's own cursor
      *     check, which no value produced here can provoke
      */
-    private PageResponse<Card> pageOf(List<Card> rows, boolean backward, boolean resumed,
+    private PageResponse<Card> pageOf(List<Card> rows, boolean backward,
             Long narrowing, String subject) {
 
         boolean hasSurplus = rows.size() > PAGE_SIZE;
@@ -804,13 +813,17 @@ public class CardListService {
         //       at :1333 with :1334, each proceeding to filter and display the row. It arises because the
         //       secondary access path is declared with a non-unique key, so nothing here models it as an
         //       error either.
-        // WHY : Refactoring Rationale: backward availability is now REPORTED, and the two branches settle
-        //       it without a second query. A backward read's surplus row IS a row lying further back, so
-        //       it answers directly; a forward read's answer is whether a cursor was supplied, so the
-        //       OPENING page reports nothing behind it. That is what the reference does -- its refusal at
-        //       app/cbl/COCRDLIC.cbl:903 fires exactly on the page whose ordinal condition at :238 says
-        //       nothing precedes it -- and it is what the previous derivation from the leading boundary
-        //       could not express, because every page names its own first row.
+        // WHY : Refactoring Rationale: backward availability is NOT reported and this envelope carries
+        //       the backward POSITION instead, because the reference answers that question from the
+        //       TERMINAL's own page ordinal and never from a read of the file: app/cbl/COCRDLIC.cbl:238
+        //       declares 88 CA-FIRST-PAGE VALUE 1 over the one-digit ordinal at :237, :902-903 raises
+        //       'NO PREVIOUS PAGES TO DISPLAY' on that condition alone, and :492 and :508 move the
+        //       ordinal up and down as the two paging keys are pressed. The ordinal lived in the
+        //       communication area the screen carried between turns, so its migrated home is the SPA's
+        //       navigation state -- ui/src/screens/cardList holds it and withholds the backward key on
+        //       the first page. Publishing a fifth component here would answer from the service what the
+        //       reference answers from the client, and would put this envelope out of agreement with the
+        //       four members every consumer of it declares.
         // WHY : Assumptions: the leading boundary is sealed under the BACKWARD binding and the trailing
         //       one under the FORWARD binding, because each is only ever presented in one direction. That
         //       is what makes the pair non-interchangeable: a holder who sent the trailing cursor with a
@@ -823,8 +836,7 @@ public class CardListService {
                         shown.getFirst().getCardNum()),
                 this.cursorToken.seal(listCursorBinding(narrowing, subject, false),
                         shown.getLast().getCardNum()),
-                backward || hasSurplus,
-                backward ? hasSurplus : resumed);
+                backward || hasSurplus);
     }
 
     /**

@@ -1,14 +1,14 @@
 package com.carddemo.authorization.service;
 
+import com.carddemo.common.security.ApprovedOriginPolicy;
 import com.carddemo.common.security.InternalServiceToken;
 import java.math.BigDecimal;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -24,8 +24,18 @@ import org.springframework.web.client.RestClientException;
  * the baseline performs against the cross-reference, account and customer files -- at
  * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} paragraphs {@code 5100-READ-XREF-RECORD},
  * {@code 5200-READ-ACCT-RECORD} and {@code 5300-READ-CUST-RECORD} -- into calls on the context that owns
- * those records. Everything specific to the transport lives here and nothing else in this service names
- * a URL, a status code or a media type, so a change of transport is a change to this one file.</p>
+ * those records, plus a fourth read that serves the SCREEN rather than the decision. Everything specific
+ * to the transport lives here and nothing else in this service names a URL, a status code or a media type,
+ * so a change of transport is a change to this one file.</p>
+ *
+ * <p>Assumptions: the four calls split two-and-two by WHICH baseline program they come from, and the split
+ * is why the customer file is read twice in two different shapes. Three of them serve the decision the
+ * queue consumer takes and correspond to the paragraphs above; the fourth,
+ * {@link #customerDisplay(long)}, serves {@code GATHER-ACCOUNT-DETAILS} of
+ * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} at L750 through L779 -- the online summary
+ * screen, which composes a name, two address lines and a telephone number the decision path never looks
+ * at. Collapsing the two customer calls into one would make the decision path materialise nine display
+ * fields it discards, on every authorization.</p>
  *
  * <p>Assumptions: three failure modes are distinguished, and keeping them apart is the whole reason this
  * class is not two lines long. A 404 means the record does not exist and becomes an empty optional,
@@ -63,8 +73,10 @@ import org.springframework.web.client.RestClientException;
  * touches no row itself. That is why both timeouts below are short and why neither is optional: an
  * unbounded read here would hold a connection for as long as the dependency stayed silent, and a
  * serverless cluster's connection budget would be exhausted by a dependency that never actually returned
- * an error. Alternatives Considered: reading the account context asynchronously and resuming the message
- * on its reply. Rejected because a decision cannot be made without these records, so the consumer would
+ * an error. That paragraph is about the three DECISION reads: the display read is issued from a screen
+ * request rather than from the queue consumer, so it occupies a request thread and no deciding
+ * transaction. Alternatives Considered: reading the account context asynchronously and resuming the
+ * message on its reply. Rejected because a decision cannot be made without these records, so the consumer would
  * have to suspend a transaction mid-flight and resume it elsewhere, which turns one unit of work into a
  * saga and makes partial states observable.</p>
  *
@@ -87,7 +99,7 @@ import org.springframework.web.client.RestClientException;
  * <p>Refactoring Rationale: every request now carries a WORKLOAD CREDENTIAL, and an earlier revision of
  * this class carried none at all. That revision presented no bearer token, no client certificate and no
  * signed request, while the account context requires one of the two signed-on group authorities on every
- * business route -- so each of these three calls would have been refused before it reached a handler, and
+ * business route -- so each of these calls would have been refused before it reached a handler, and
  * the refusal would have surfaced as an unavailable dependency rather than as the missing credential it
  * was. The credential is a signed machine token minted by
  * {@link com.carddemo.common.security.InternalServiceToken} for the account context's audience and the
@@ -102,9 +114,10 @@ import org.springframework.web.client.RestClientException;
  * that session, and the authority actually needed here belongs to the platform.</p>
  *
  * <p>Assumptions: the credential is attached by a request INITIALIZER on the builder rather than by each
- * of the three methods below. An initializer runs for every request this client issues, including one
+ * of the four methods below. An initializer runs for every request this client issues, including one
  * added later, so a new call cannot be written that forgets it -- which is the failure the revision
- * above is an instance of.</p>
+ * above is an instance of, and which is why the display read added later needed no credential code of its
+ * own.</p>
  *
  * <p>Alternatives Considered: putting the card number in the request PATH, which is the shape a reader
  * expects for a lookup and which an earlier draft of this class used. Rejected because a path is
@@ -147,6 +160,34 @@ public class RestAccountContextClient implements AccountContextClient {
     public static final String PATH_CUSTOMER = "/api/v1/customers/lookup";
 
     /**
+     * The path of the customer DISPLAY read, which answers the nine stored fields this screen composes from.
+     *
+     * <p>Refactoring Rationale: {@link #customerDisplay(long)} used to issue {@value #PATH_CUSTOMER} and
+     * deserialise its response. That address is the EXISTENCE check: it answers 204 or 404 and carries no body
+     * at all by contract, deliberately, so that an absence cannot return a customer identifier inside a problem
+     * document that is itself logged. A bodiless 204 deserialises to nothing rather than to an error, so every
+     * display field on the pending-authorization screen rendered as absent on every request and nothing
+     * anywhere failed while they did. This address is body-bearing and exists for exactly this read.</p>
+     *
+     * <p>Assumptions: it needs NO new scope. It is a sibling of {@value #PATH_CUSTOMER} beneath the same
+     * {@code /api/v1/customers} parent, so {@link #CUSTOMER_PATH_PREFIX} already matches it and
+     * {@link #scopeFor(String)} already assigns it
+     * {@link InternalServiceToken#SCOPE_CUSTOMER_READ} -- the decision-read scope this client already holds.
+     * That is a property of the address the account context chose, not a coincidence: it published this
+     * projection beneath the decision-read prefix precisely so that a screen would not have to be granted
+     * {@link InternalServiceToken#SCOPE_CUSTOMER_MASTER_READ}.</p>
+     *
+     * <p>Alternatives Considered: pointing this read at {@code /api/v1/customers/record}, which is
+     * body-bearing and needed no new address anywhere. Rejected on least privilege: that operation answers
+     * with the WHOLE customer record and is gated on
+     * {@link InternalServiceToken#SCOPE_CUSTOMER_MASTER_READ}, an authority this system mints for no context
+     * because it reads a national identifier, a government-issued identifier and a credit score for any
+     * customer. Minting it so that four values could be shown on a screen is the escalation that scope split
+     * was introduced to prevent.</p>
+     */
+    public static final String PATH_CUSTOMER_DISPLAY = "/api/v1/customers/display";
+
+    /**
      * The address prefix of the cross-reference family, which the cross-reference read scope authorises.
      *
      * <p>Assumptions: each prefix is DERIVED from the path constant above it rather than written again, by
@@ -158,8 +199,74 @@ public class RestAccountContextClient implements AccountContextClient {
     /** The address prefix of the account family, which the account read scope authorises. */
     private static final String ACCOUNT_PATH_PREFIX = parentOf(PATH_ACCOUNT);
 
-    /** The address prefix of the customer family, which the customer read scope authorises. */
+    /**
+     * The address prefix of the customer family, which the customer read scope authorises.
+     *
+     * <p>Assumptions: it is derived from the EXISTENCE check's path and covers the display read beside it,
+     * because both are siblings beneath {@code /api/v1/customers}. Deriving it from either yields the same
+     * prefix, so the display read acquires the decision-read scope without a second entry being written --
+     * and a second entry is exactly what would let the two drift apart.</p>
+     */
     private static final String CUSTOMER_PATH_PREFIX = parentOf(PATH_CUSTOMER);
+
+    /**
+     * The width the pending-authorization map declares for the composed name and for each address line.
+     *
+     * <p>Assumptions: the composition TRUNCATES at this width rather than overflowing, because the reference
+     * composes with {@code STRING ... INTO} a fixed-width receiving field.
+     * {@code app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy} declares {@code CNAMEI PIC X(25)} at L66,
+     * {@code ADDR001I PIC X(25)} at L78 and {@code ADDR002I PIC X(25)} at L90, and a {@code STRING} that runs
+     * out of receiving positions stops there. Publishing an untruncated value would be a different value from
+     * the one the screen showed.</p>
+     */
+    private static final int SCREEN_TEXT_WIDTH = 25;
+
+    /**
+     * The width the pending-authorization map declares for the telephone number.
+     *
+     * <p>Assumptions: the stored value is FIFTEEN characters and narrows to thirteen HERE, in the consumer,
+     * rather than in the account context that published it. {@code CUST-PHONE-NUM-1 PIC X(15)} at L15 of
+     * {@code app/cpy/CVCUS01Y.cpy} reaches {@code PHONE1I PIC X(13)} at L96 of
+     * {@code app/app-authorization-ims-db2-mq/cpy-bms/COPAU00.cpy} through the plain {@code MOVE} at L779 of
+     * {@code COPAUS0C.cbl}, and an alphanumeric {@code MOVE} to a shorter field truncates on the right. The
+     * account context publishes the stored width for that reason: the narrowing belongs to this screen.</p>
+     */
+    private static final int SCREEN_PHONE_WIDTH = 13;
+
+    /**
+     * The number of leading postal-code characters the second address line renders.
+     *
+     * <p>Assumptions: the stored postal code is ten characters and the screen shows five, and the reference
+     * takes the leading five explicitly -- {@code CUST-ADDR-ZIP(1:5)} at L775 of {@code COPAUS0C.cbl}. The
+     * four-digit extension is therefore dropped at the point of display and is present in what the account
+     * context published, which is what lets a later reader see the whole stored value without this screen
+     * changing.</p>
+     */
+    private static final int POSTAL_CODE_SCREEN_LENGTH = 5;
+
+    /**
+     * The delimiter the reference composes each name component up to.
+     *
+     * <p>Assumptions: a SINGLE space, because {@code STRING CUST-FIRST-NAME DELIMITED BY SPACES} at L758 of
+     * {@code COPAUS0C.cbl} transfers up to the first space -- so a two-word given name contributes only its
+     * first word. That is the reference's behaviour and it is reproduced rather than corrected: the composed
+     * name is what the screen showed, and quietly widening it would make one screen disagree with its own
+     * golden output.</p>
+     */
+    private static final String NAME_COMPONENT_DELIMITER = " ";
+
+    /**
+     * The delimiter the reference composes each address line up to.
+     *
+     * <p>Assumptions: TWO spaces, because {@code STRING CUST-ADDR-LINE-1 DELIMITED BY '  '} at L766 of
+     * {@code COPAUS0C.cbl} transfers up to the first pair of spaces. On a fixed-width field that pair is the
+     * trailing pad, so an address containing single spaces transfers whole -- which is why the address lines
+     * use a two-space delimiter and the name components use one.</p>
+     */
+    private static final String ADDRESS_COMPONENT_DELIMITER = "  ";
+
+    /** The separator the reference writes between the components of each composed address line. */
+    private static final String ADDRESS_SEPARATOR = ",";
 
     /**
      * Removes the final segment of a path, yielding the family prefix its siblings share.
@@ -198,7 +305,14 @@ public class RestAccountContextClient implements AccountContextClient {
      * never admissible here regardless of environment -- including a local one, where a developer
      * pointing at a plain-HTTP stub would be exercising a transport the deployed system never uses.</p>
      */
-    private static final String REQUIRED_SCHEME = "https";
+    /**
+     * The configuration prefix this seam's two address properties sit under.
+     *
+     * <p>Assumptions: the prefix is named once and both the base address and the approved origin are
+     * read from it, so the two cannot come to sit under different prefixes. Every refusal the shared
+     * policy raises names its property from this value, which is why the messages are unchanged.</p>
+     */
+    private static final String PROPERTY_PREFIX = "carddemo.account-context";
 
     /**
      * The configured client, built once with a base address and both timeouts applied.
@@ -229,6 +343,23 @@ public class RestAccountContextClient implements AccountContextClient {
      * @throws IllegalStateException if the base address is absent, is not an absolute HTTPS address,
      *     carries user information, a path, a query or a fragment, or is not the approved origin
      */
+    // WHY : Assumptions: the annotation is REQUIRED here and its absence stopped this context from
+    //       starting at all. Spring's implicit constructor injection applies only to a class with
+    //       exactly ONE constructor; this class has two, the second being the package-private test
+    //       seam below. With two candidates and neither marked, the container stops looking for an
+    //       injectable constructor and falls back to a no-argument one, which this class does not
+    //       declare, so bean creation failed with "No default constructor found" and the whole
+    //       authorization context failed to refresh rather than degrading. The identical defect and
+    //       the identical remedy are recorded on
+    //       account-service RestReferenceAddressLookup's public constructor; this is the same fix
+    //       applied to the second occurrence rather than a new judgement.
+    // WHY : Alternatives Considered: withdrawing the test seam so one constructor would again be
+    //       implicit. Rejected for the reason recorded on the seam itself -- the public constructor
+    //       installs its own request factory to apply the two timeouts, and installing one REPLACES
+    //       whatever transport a test had bound, so the tests that drive the real client over a mock
+    //       transport would reach the network instead. Marking the injection point keeps the seam and
+    //       the timeouts both.
+    @Autowired
     public RestAccountContextClient(RestClient.Builder builder,
             InternalServiceToken machineIdentity,
             @Value("${carddemo.account-context.base-url}") String baseUrl,
@@ -379,32 +510,18 @@ public class RestAccountContextClient implements AccountContextClient {
     }
 
     /**
-     * Refuses a base address that is not an absolute HTTPS origin equal to the approved one.
+     * Refuses the configured address unless it is the approved absolute HTTPS origin.
      *
-     * <p>Assumptions: the shape checks run BEFORE the origin comparison, so a malformed value is
-     * reported as malformed rather than as unapproved. The two failures have different remedies -- one is
-     * a typo in a value, the other is a value pointing somewhere it should not -- and a single message
-     * covering both would name neither.</p>
+     * <p>Refactoring Rationale: the seven refusals this used to perform inline now come from the shared
+     * kernel's {@link ApprovedOriginPolicy}, and the messages are unchanged character for character because
+     * the prefix and the three risk clauses below are the ones this copy carried. Two modules held a
+     * structurally identical copy of the check and a third was about to add one; transformation rule T2 puts
+     * a shared concern in the kernel exactly once, and the failure mode of three copies is that one of them
+     * gets strengthened.</p>
      *
-     * <p>Assumptions: a path, a query and a fragment are each refused rather than trimmed. The client
-     * appends its own paths to this value, so a base address carrying any of the three would compose an
-     * address this class never declares: a base with a path silently re-roots every call, and a base with
-     * a query silently attaches a parameter to all three. Refusing is what keeps the three published path
-     * constants the complete description of what this client requests.</p>
-     *
-     * <p>Alternatives Considered: matching the address against a host suffix or a pattern instead of an
-     * exact origin. Rejected for the same reason the reply-queue allowlist is exact rather than a prefix:
-     * the legitimate value is a deployment fact published by a Terraform output, not a shape, and any
-     * pattern loose enough to cover a legitimate internal origin also covers a host an attacker could
-     * arrange to control. Alternatives Considered: a multi-value allowlist. Rejected because there is
-     * exactly one account context, so a set with room for a second entry would invite one.</p>
-     *
-     * <p>Trade-offs: the approved origin defaults to the base address itself, so a deployment that
-     * configures only the base address still starts and still gets every shape check. That is deliberate:
-     * the origin check defends against a base address CHANGED after review, and requiring two values to
-     * be configured identically in the ordinary case would be a step every operator learns to copy
-     * without reading. Both Terraform roots publish the two names from one expression, so in a deployed
-     * environment they are pinned to each other rather than to a default.</p>
+     * <p>Assumptions: the clauses stay HERE rather than moving into the kernel with the check, because they
+     * state what is at risk on THIS seam and no other seam shares it. A kernel-side default would have to be
+     * vague enough to fit every caller, and a vague reason is what the Explainability rule forbids.</p>
      *
      * @param baseUrl the configured base address; may be {@code null}
      * @param approvedOrigin the origin the base address must equal; may be {@code null}
@@ -412,56 +529,13 @@ public class RestAccountContextClient implements AccountContextClient {
      *     HTTPS origin, or it is not the approved origin
      */
     private static void requireApprovedOrigin(String baseUrl, String approvedOrigin) {
-        if (baseUrl == null || baseUrl.isBlank()) {
-            throw new IllegalStateException(
-                    "carddemo.account-context.base-url must be supplied: the cross-reference lookup this"
-                            + " client makes first carries a primary account number, so there is no safe"
-                            + " default address to fall back to");
-        }
-        if (approvedOrigin == null || approvedOrigin.isBlank()) {
-            throw new IllegalStateException(
-                    "carddemo.account-context.approved-origin must be supplied when it is set at all");
-        }
-        URI address;
-        try {
-            address = new URI(baseUrl.trim());
-        } catch (URISyntaxException malformed) {
-            // WHY : Assumptions: the offending value is NOT quoted into the message. It is configuration
-            // rather than cardholder data, so quoting it would be defensible -- and it is withheld
-            // anyway, because a misconfigured value has on occasion been a credential-bearing address
-            // and this message reaches a startup log that is retained. The property name locates the
-            // fault without the value.
-            throw new IllegalStateException(
-                    "carddemo.account-context.base-url is not a valid address", malformed);
-        }
-        if (!REQUIRED_SCHEME.equalsIgnoreCase(address.getScheme())) {
-            throw new IllegalStateException("carddemo.account-context.base-url must use the "
-                    + REQUIRED_SCHEME + " scheme, because the first request carries a primary account"
-                    + " number and plain HTTP would put it on the wire in clear text");
-        }
-        if (address.getHost() == null) {
-            throw new IllegalStateException(
-                    "carddemo.account-context.base-url must be absolute and name a host");
-        }
-        if (address.getUserInfo() != null) {
-            throw new IllegalStateException("carddemo.account-context.base-url must carry no user"
-                    + " information: it would place a credential in a header this client never declares");
-        }
-        if (address.getPath() != null && !address.getPath().isEmpty() && !"/".equals(address.getPath())) {
-            throw new IllegalStateException("carddemo.account-context.base-url must carry no path,"
-                    + " because this client appends its own and a base path would silently re-root every"
-                    + " call");
-        }
-        if (address.getQuery() != null || address.getFragment() != null) {
-            throw new IllegalStateException(
-                    "carddemo.account-context.base-url must carry no query and no fragment,"
-                            + " because either would be attached to all three published requests");
-        }
-        if (!normaliseOrigin(baseUrl).equals(normaliseOrigin(approvedOrigin))) {
-            throw new IllegalStateException("carddemo.account-context.base-url is not the approved"
-                    + " origin: the first request carries a primary account number, so an unapproved"
-                    + " destination exfiltrates cardholder data on the first authorization");
-        }
+        ApprovedOriginPolicy.require(PROPERTY_PREFIX, baseUrl, approvedOrigin,
+                new ApprovedOriginPolicy.Sensitivity(
+                        "the cross-reference lookup this client makes first carries a primary account"
+                                + " number, so there is no safe default address to fall back to",
+                        "the first request carries a primary account number",
+                        "the first request carries a primary account number, so an unapproved"
+                                + " destination exfiltrates cardholder data on the first authorization"));
     }
 
     /**
@@ -493,23 +567,6 @@ public class RestAccountContextClient implements AccountContextClient {
             return missing.append(firstName).append(" and ").append(secondName).toString();
         }
         return missing.append(firstMissing ? firstName : secondName).toString();
-    }
-
-    /**
-     * Reduces an address to a comparable origin.
-     *
-     * <p>Assumptions: only a trailing separator and surrounding blanks are removed, and the comparison is
-     * otherwise exact and case-sensitive on the host. Normalising more -- lower-casing the whole value,
-     * resolving a default port, following a redirect -- would make two addresses compare equal that a
-     * resolver may treat differently, and the point of the comparison is to be stricter than a resolver
-     * rather than more forgiving.</p>
-     *
-     * @param address the address to reduce; must not be {@code null}
-     * @return the comparable form, never {@code null}
-     */
-    private static String normaliseOrigin(String address) {
-        String trimmed = address.trim();
-        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
     }
 
     /**
@@ -588,8 +645,15 @@ public class RestAccountContextClient implements AccountContextClient {
                 // insufficient-funds reason; reporting not-found declined them with the account-not-found
                 // reason. Both read as business outcomes and both hide a broken contract behind a
                 // committed decision, which is exactly what makes them worse than a redelivery.
-                throw new AccountContextUnavailableException("the account context answered the read of"
-                        + " account " + accountId + " with " + describeIncomplete(view == null,
+                // WHY : Assumptions: the account identifier is ABSENT from this message even though it
+                // would name the failed read, for the same reason the card number is absent from the
+                // cross-reference sentence above: this message reaches a log at every level that records
+                // the cause, and the migration's security mapping keeps account identifiers out of durable
+                // diagnostics. Which components were missing IS named, because that is what tells an
+                // operator whether the dependency truncated a body or omitted a field, and the correlation
+                // identifier the shared filter carries is what ties the failure back to one request.
+                throw new AccountContextUnavailableException("the account context answered the account"
+                        + " read with " + describeIncomplete(view == null,
                         view == null || view.creditLimit() == null,
                         view == null || view.cashCreditLimit() == null || view.currentBalance() == null,
                         "creditLimit", "cashCreditLimit or currentBalance"));
@@ -599,8 +663,12 @@ public class RestAccountContextClient implements AccountContextClient {
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
+            // WHY : Assumptions: the identifier is absent here for the reason recorded on the partial-body
+            //       sentence above. Naming the operation is enough to locate the fault; naming the account
+            //       would put a key that identifies a cardholder's account into every log line that
+            //       records this cause.
             throw new AccountContextUnavailableException(
-                    "account " + accountId + " could not be read from the account context", failure);
+                    "the account could not be read from the account context", failure);
         }
     }
 
@@ -608,10 +676,12 @@ public class RestAccountContextClient implements AccountContextClient {
      * Reports whether the customer master holds the customer a card is cross-referenced to.
      *
      * <p>Assumptions: the answer is carried entirely by the STATUS and the exchange has no response body,
-     * which is a data-minimisation choice rather than a micro-optimisation. The baseline reads the whole
-     * customer record and uses none of its fields, so a read here would carry a name, an address and a
-     * national identifier across a context boundary in order to be discarded; this call answers the only
-     * question this context asks. Refactoring Rationale: the call was issued as a {@code HEAD} on a keyed
+     * which is a data-minimisation choice rather than a micro-optimisation. The DECIDING program reads the
+     * whole customer record and uses none of its fields, so a read here would carry a name, an address and
+     * a national identifier across a context boundary in order to be discarded; this call answers the only
+     * question the decision asks. The SCREEN does read customer fields, and it reads them through
+     * {@link #customerDisplay(long)} rather than through this method, which is why the two exist
+     * separately. Refactoring Rationale: the call was issued as a {@code HEAD} on a keyed
      * path and is now a {@code POST} on the fixed path above, so the identifier no longer travels in the
      * request line; the property that made {@code HEAD} attractive is retained, because the response still
      * has no body on either answer and the body is discarded here with {@code toBodilessEntity}.</p>
@@ -632,48 +702,182 @@ public class RestAccountContextClient implements AccountContextClient {
         } catch (HttpClientErrorException.NotFound absent) {
             return false;
         } catch (RestClientException failure) {
+            // WHY : Assumptions: the customer identifier is absent from this sentence for the same reason
+            //       the account identifier is absent from the read above. A customer identifier names a
+            //       person as directly as an account identifier names their account, and this sentence
+            //       reaches a log wherever the cause is recorded.
             throw new AccountContextUnavailableException(
-                    "customer " + customerId + " could not be read from the account context", failure);
+                    "the customer existence check could not be answered by the account context", failure);
         }
     }
 
     /**
-     * Reads the four customer display fields through the same lookup the existence check uses.
+     * Reads the nine stored customer fields and composes the four values the screen renders.
      *
-     * <p>Assumptions: the SAME endpoint answers both operations, and the difference is only whether the
-     * body is read. The existence check discards it because existence is all it needs; this one reads it
-     * because the screen needs four of its fields. Alternatives Considered: a second, narrower endpoint on
-     * the account context returning only these four; rejected because it would put a screen's field list
-     * into another service's public contract, so a change to this screen would require a change there.</p>
+     * <p>Refactoring Rationale: this call issued {@value #PATH_CUSTOMER} -- the EXISTENCE check, which
+     * answers 204 or 404 and carries no body at all by contract -- and deserialised the response into a
+     * record whose first member was a composed name that no operation on that contract publishes and no
+     * column exists for. A bodiless 204 deserialises to nothing rather than to an error, so all four display
+     * fields rendered as absent on every request and nothing anywhere failed while they did. It now issues
+     * {@value #PATH_CUSTOMER_DISPLAY}, which is body-bearing, requires the scope this client already holds,
+     * and publishes the stored columns.</p>
      *
-     * <p>Assumptions: only the four fields the screen renders are projected out of the response, and the
-     * projection record is private to this class. The account context's customer record also carries a
-     * national identifier, a government-issued identifier and a credit score; binding them into a type
-     * this class could return would make widening the screen's exposure a matter of nobody's decision.</p>
+     * <p>Refactoring Rationale: the COMPOSITION happens here rather than in the account context, and it is
+     * the whole reason nine fields are read to produce four. The account context published the columns as
+     * stored -- three name components, three address lines, a state code and an unnarrowed ten-character
+     * postal code -- because which separator joins a city to a state, whether an absent middle name collapses
+     * the spacing, and whether ten characters narrow to five are all decisions of the screen that shows them.
+     * Taking those decisions inside the context that owns the column would fix one consumer's presentation
+     * there, on behalf of a screen it cannot see. This adapter is the anti-corruption boundary, so this is
+     * where a foreign representation becomes this context's own.</p>
+     *
+     * <p>Assumptions: the composition reproduces {@code GATHER-ACCOUNT-DETAILS} of
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl} statement for statement -- the name at L758
+     * through L764, the first address line at L766 through L770, the second at L771 through L777 and the
+     * telephone number at L779 -- including three behaviours that look like defects and are not. A blank
+     * middle name still contributes its single position, so the name carries THREE spaces between the given
+     * and family names rather than one. A given or family name containing a space contributes only its first
+     * word, because the reference delimits by a single space. And every composed value truncates at the map
+     * width rather than overflowing. Each is what the screen showed, so each is what is produced.</p>
+     *
+     * <p>Assumptions: only the nine fields the screen composes from are declared on the wire record, and that
+     * record stays private to this class. The customer master also holds a national identifier, a
+     * government-issued identifier and a credit score, and the published projection carries none of the three
+     * -- so this class cannot materialise them even by accident, and a type it could return would make
+     * widening that exposure a matter of nobody's decision.</p>
      *
      * @param customerId the customer the summary's segment names
-     * @return the display fields, or an empty optional when no such customer exists
+     * @return the four composed screen values, or an empty optional when no such customer exists
      * @throws AccountContextUnavailableException if the account context cannot be reached
      */
     @Override
     public Optional<CustomerDisplay> customerDisplay(long customerId) {
         try {
-            CustomerView view = this.client.post()
-                    .uri(PATH_CUSTOMER)
+            CustomerDisplayWire wire = this.client.post()
+                    .uri(PATH_CUSTOMER_DISPLAY)
                     .body(Map.of(LOOKUP_FIELD_CUSTOMER_ID, customerId))
                     .retrieve()
-                    .body(CustomerView.class);
-            if (view == null) {
+                    .body(CustomerDisplayWire.class);
+            if (wire == null) {
                 return Optional.empty();
             }
-            return Optional.of(new CustomerDisplay(view.customerName(), view.addressLine1(),
-                    view.addressLine2(), view.phoneNumber1()));
+            return Optional.of(compose(wire));
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
+            // WHY : Assumptions: the sentence names the OPERATION and not the customer. The identifier used
+            //       to be interpolated here, and this sentence reaches a log at every level that records the
+            //       cause -- which the migration's sensitive-data contract forbids for a customer identifier
+            //       just as it does for an account identifier. The correlation identifier the shared filter
+            //       carries is what ties this failure back to one request, and it does so without putting a
+            //       key that names a person into a durable diagnostic.
             throw new AccountContextUnavailableException(
-                    "customer " + customerId + " could not be read from the account context", failure);
+                    "the customer display fields could not be read from the account context", failure);
         }
+    }
+
+    /**
+     * Composes the four screen values out of the nine stored fields, as the reference program does.
+     *
+     * <p>Assumptions: each of the four is composed by the statement of {@code COPAUS0C.cbl} named beside it,
+     * so that a reader can hold the two side by side. The reference receives into fixed-width map fields, so
+     * every result truncates at {@link #SCREEN_TEXT_WIDTH} -- or at {@link #SCREEN_PHONE_WIDTH} for the
+     * telephone number, which the reference narrows with a plain {@code MOVE} rather than a {@code STRING}.</p>
+     *
+     * @param wire the nine stored fields as the account context published them; must not be {@code null}
+     * @return the four values the map fields carry, never {@code null}
+     */
+    private static CustomerDisplay compose(CustomerDisplayWire wire) {
+        // WHY : Assumptions: this reproduces L758-L764 exactly, INCLUDING the blank middle position. The
+        //       reference concatenates the given name up to its first space, a literal space, the FIRST
+        //       CHARACTER of the middle name whatever that character is, another literal space, and the
+        //       family name up to its first space. When no middle name is stored that first character is a
+        //       space, so the composed name carries three spaces in the middle. Collapsing them would read
+        //       as tidier and would be a different value from the one the screen showed.
+        String composedName = truncate(upTo(wire.firstName(), NAME_COMPONENT_DELIMITER)
+                + NAME_COMPONENT_DELIMITER
+                + firstPosition(wire.middleName())
+                + NAME_COMPONENT_DELIMITER
+                + upTo(wire.lastName(), NAME_COMPONENT_DELIMITER), SCREEN_TEXT_WIDTH);
+
+        // WHY : Assumptions: L766-L770. Both address lines are delimited by TWO spaces rather than one, so an
+        //       address containing ordinary single spaces transfers whole and only the trailing pad delimits.
+        //       An absent second line contributes nothing after the separator, which leaves the trailing
+        //       comma the reference also leaves.
+        String composedLine1 = truncate(upTo(wire.addressLine1(), ADDRESS_COMPONENT_DELIMITER)
+                + ADDRESS_SEPARATOR
+                + upTo(wire.addressLine2(), ADDRESS_COMPONENT_DELIMITER), SCREEN_TEXT_WIDTH);
+
+        // WHY : Assumptions: L771-L777, which is why three of the nine fields exist on the wire record at
+        //       all. The screen's SECOND address line is not CUST-ADDR-LINE-2: it is the third line, the
+        //       state code and the leading five postal-code characters. The state code is taken whole
+        //       because the reference delimits it BY SIZE rather than by spaces.
+        String composedLine2 = truncate(upTo(wire.addressLine3(), ADDRESS_COMPONENT_DELIMITER)
+                + ADDRESS_SEPARATOR
+                + blankIfAbsent(wire.stateCode())
+                + ADDRESS_SEPARATOR
+                + truncate(blankIfAbsent(wire.zipCode()), POSTAL_CODE_SCREEN_LENGTH), SCREEN_TEXT_WIDTH);
+
+        // WHY : Assumptions: L779 is a plain MOVE from a fifteen-character field into a thirteen-character
+        //       one, and an alphanumeric MOVE to a shorter field truncates on the right. The account context
+        //       publishes the stored fifteen precisely so this narrowing happens where the map width is
+        //       known, rather than being adopted there as though it were the layout.
+        String screenPhone = truncate(blankIfAbsent(wire.phoneNumber1()), SCREEN_PHONE_WIDTH);
+
+        return new CustomerDisplay(composedName, composedLine1, composedLine2, screenPhone);
+    }
+
+    /**
+     * Returns the leading characters of a value up to its first occurrence of a delimiter.
+     *
+     * <p>Assumptions: an absent value yields the empty string rather than the word {@code null}, because the
+     * reference composes from a fixed-width field that is blank rather than from a value that is missing.</p>
+     *
+     * @param value the stored value, which may be {@code null} when the column holds nothing
+     * @param delimiter the delimiter the reference composes up to; must not be {@code null}
+     * @return the value up to but excluding the first delimiter, or the whole value when it contains none
+     */
+    private static String upTo(String value, String delimiter) {
+        String present = blankIfAbsent(value);
+        int boundary = present.indexOf(delimiter);
+        return boundary < 0 ? present : present.substring(0, boundary);
+    }
+
+    /**
+     * Returns the first character of a value, or a single space when it has none.
+     *
+     * <p>Assumptions: a space is returned rather than nothing, because {@code CUST-MIDDLE-NAME(1:1)} is a
+     * reference modification of a fixed-width field: it always yields exactly one character, and that
+     * character is a space when the field is blank. Returning nothing would close the gap the screen
+     * showed.</p>
+     *
+     * @param value the stored middle name, which may be {@code null} when the column holds nothing
+     * @return exactly one character, never {@code null}
+     */
+    private static String firstPosition(String value) {
+        String present = blankIfAbsent(value);
+        return present.isEmpty() ? NAME_COMPONENT_DELIMITER : present.substring(0, 1);
+    }
+
+    /**
+     * Truncates a value on the right at a width, leaving a shorter value alone.
+     *
+     * @param value the composed or stored value; must not be {@code null}
+     * @param width the receiving width; must be positive
+     * @return the value, truncated on the right when it exceeds the width, never {@code null}
+     */
+    private static String truncate(String value, int width) {
+        return value.length() <= width ? value : value.substring(0, width);
+    }
+
+    /**
+     * Substitutes the empty string for an absent value.
+     *
+     * @param value a stored value that may be {@code null} when its column holds nothing
+     * @return the value, or the empty string when it is {@code null}, never {@code null}
+     */
+    private static String blankIfAbsent(String value) {
+        return value == null ? "" : value;
     }
 
     /**
@@ -707,19 +911,37 @@ public class RestAccountContextClient implements AccountContextClient {
     }
 
     /**
-     * The four customer fields this class projects out of the account context's response.
+     * The nine stored customer fields the display read publishes, exactly as it publishes them.
      *
-     * <p>Assumptions: the record names FOUR properties and the response carries more, which is deliberate.
-     * The deserialiser ignores properties it has no component for, so declaring only these four is what
-     * keeps the customer master's national identifier, government-issued identifier and credit score from
-     * ever being materialised in this process.</p>
+     * <p>Assumptions: the component list matches the published {@code CustomerDisplayView} schema
+     * COMPONENT FOR COMPONENT rather than being a narrower selection out of a wider body. That projection is
+     * a closed schema -- it declares {@code additionalProperties: false} and carries no protected value of any
+     * kind -- so there is nothing here to leave out, and naming a member the schema does not publish is
+     * exactly the defect this record replaces: its predecessor declared a composed {@code customerName} that
+     * no operation published and no column held, and every field it fed rendered as absent.</p>
      *
-     * @param customerName the customer's name as the account context publishes it
-     * @param addressLine1 the first address line
-     * @param addressLine2 the second address line
-     * @param phoneNumber1 the customer's first telephone number
+     * <p>Assumptions: nothing here needs masking and nothing here is masked, which is a property of the
+     * published field list rather than of this record. The national identifier at L17 of
+     * {@code app/cpy/CVCUS01Y.cpy}, the government-issued identifier at L18 and the credit score are absent
+     * from the projection altogether, so they cannot reach this process to be masked or unmasked.</p>
+     *
+     * <p>Assumptions: the postal code arrives UNNARROWED at its stored ten characters and the telephone
+     * number at its stored fifteen. Both narrow in {@link #compose(CustomerDisplayWire)}, where the map
+     * widths are known. The country code the record declares at L13 is absent from the projection because no
+     * line of this screen renders it.</p>
+     *
+     * @param firstName the given name, {@code CUST-FIRST-NAME PIC X(25)}
+     * @param middleName the middle name, {@code CUST-MIDDLE-NAME PIC X(25)}, or {@code null} when blank
+     * @param lastName the family name, {@code CUST-LAST-NAME PIC X(25)}
+     * @param addressLine1 the first address line, {@code CUST-ADDR-LINE-1 PIC X(50)}
+     * @param addressLine2 the second address line, {@code CUST-ADDR-LINE-2 PIC X(50)}, or {@code null}
+     * @param addressLine3 the third address line, which carries the city, {@code CUST-ADDR-LINE-3 PIC X(50)}
+     * @param stateCode the state code, {@code CUST-ADDR-STATE-CD PIC X(02)}
+     * @param zipCode the postal code at its stored ten characters, {@code CUST-ADDR-ZIP PIC X(10)}
+     * @param phoneNumber1 the primary telephone number at its stored fifteen characters
      */
-    private record CustomerView(String customerName, String addressLine1, String addressLine2,
-            String phoneNumber1) {
+    private record CustomerDisplayWire(String firstName, String middleName, String lastName,
+            String addressLine1, String addressLine2, String addressLine3, String stateCode,
+            String zipCode, String phoneNumber1) {
     }
 }

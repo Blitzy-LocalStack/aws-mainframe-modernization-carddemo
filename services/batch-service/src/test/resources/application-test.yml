@@ -67,7 +67,7 @@
 #   failure that value prevents.
 #
 # WHY (non-obvious design decisions):
-#   - **Assumptions:** user-specified Rule 1 requires Purpose, Parameters, Return
+#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
 #     values and Exceptions on a module entry point. YAML has no docstring
 #     construct, so docs/CODE_DOCUMENTATION_STANDARD.md fixes the analogous
 #     obligation as this file-header block, shaped after
@@ -75,12 +75,12 @@
 #     `# WHAT:` / `# WHY :` idiom to fenced command blocks in prose and forbids a
 #     statement-level `WHAT:` in a .yml file, so every rationale below is a
 #     `# WHY :` line carrying one of the four category labels and nothing else.
-#   - **Assumptions:** config/checkstyle/checkstyle.xml sets fileExtensions to
+#   - Assumptions: config/checkstyle/checkstyle.xml sets fileExtensions to
 #     java at Checker level, so no linter reads this file at all. Rule 1 binds it
 #     in full through review instead, which is why every non-obvious value AND
 #     every deliberate absence is explained here rather than only the surprising
 #     ones.
-#   - **Trade-offs:** this module has no server.ssl block to disable, unlike every
+#   - Trade-offs: this module has no server.ssl block to disable, unlike every
 #     sibling test profile. A batch task is invoked by a Step Functions state
 #     through ecs:runTask.sync rather than registered behind a load balancer, so
 #     there is no HTTPS target group to agree with and no listener to encrypt.
@@ -91,12 +91,12 @@
 spring:
 
   main:
-    # WHY : **Assumptions:** spring-boot-starter-web is on this module's classpath
+    # WHY : Assumptions: spring-boot-starter-web is on this module's classpath
     #       only so the actuator health endpoint can answer the Dockerfile
     #       HEALTHCHECK; the module registers no controller, so a test context has
     #       nothing to serve. Pinning `none` states that, and no servlet container
     #       is created and no port bound for any context this key governs.
-    #       **Alternatives Considered:** repeating
+    #       Alternatives Considered: repeating
     #       @SpringBootTest(webEnvironment = NONE) on every test class instead, which
     #       is what the three integration classes do today. Declaring it once here is
     #       preferred because it also covers a class that forgets the attribute, and
@@ -112,14 +112,14 @@ spring:
   cloud:
     aws:
       region:
-        # WHY : **Assumptions:** a client cannot be built without a region and the
+        # WHY : Assumptions: a client cannot be built without a region and the
         #       base value is ${AWS_REGION} with no fallback, so a build host without
         #       that variable cannot resolve it. Measured: the placeholder survives
         #       into the client as literal text and the SDK rejects the endpoint it
         #       composes, `https://ssm.%24%7BAWS_REGION%7D.amazonaws.com`, so the
         #       failure is an invalid host name rather than a legible "region not
         #       set". Naming a region here is what keeps that out of the build.
-        #       **Trade-offs:** us-east-1 is an SDK region selector, not an endpoint,
+        #       Trade-offs: us-east-1 is an SDK region selector, not an endpoint,
         #       an account identifier or a credential, so naming it commits no secret
         #       to the repository. No request is sent to it: the listener flag below
         #       stays false and this module publishes nothing of its own, because a
@@ -127,7 +127,7 @@ spring:
         static: us-east-1
 
       parameterstore:
-        # WHY : **Assumptions:** the base document imports
+        # WHY : Assumptions: the base document imports
         #       `optional:aws-parameterstore:` so a deployed task reads its endpoints
         #       and identifiers from Parameter Store. `optional:` keeps a missing
         #       subtree from failing the import, but it does not stop the resolver
@@ -136,7 +136,7 @@ spring:
         #       credentials costs a container-credential and an instance-metadata
         #       probe per context. Setting the flag here disables that integration for
         #       every context this document reaches.
-        #       **Trade-offs:** it does NOT, however, suppress the import declared in
+        #       Trade-offs: it does NOT, however, suppress the import declared in
         #       the BASE document, and this key must not be mistaken for a guarantee
         #       that it does. Measured: Config Data resolves a non-profile document's
         #       `spring.config.import` in the pass that runs BEFORE any
@@ -155,21 +155,21 @@ spring:
 
       sqs:
         listener:
-          # WHY : **Assumptions:** this restates the base value rather than changing
+          # WHY : Assumptions: this restates the base value rather than changing
           #       it, and it is restated because it is one of the two flags that
           #       decide whether a test context does work of its own. This module
           #       declares the SQS starter for the client its error path uses, not
           #       for a listener; false keeps the client, the annotation processor
           #       and the default container factory in the context while no
           #       container starts and no queue lookup or receive is attempted.
-          #       **Alternatives Considered:** setting spring.cloud.aws.sqs.enabled
+          #       Alternatives Considered: setting spring.cloud.aws.sqs.enabled
           #       to false instead. Rejected because it removes the factory rather
           #       than stopping the poll, which changes the context SHAPE a future
           #       job test observes rather than only its behaviour.
           auto-startup: false
 
   datasource:
-    # WHY : **Alternatives Considered:** H2 or another in-process engine, rejected
+    # WHY : Alternatives Considered: H2 or another in-process engine, rejected
     #       more firmly for this module than for any sibling. The posting unit of
     #       work commits a transaction row, a category-balance row and an account
     #       row together -- transcribed from app/cbl/CBTRN02C.cbl L424-L444 -- across
@@ -179,7 +179,7 @@ spring:
     #       conflict resolution and NUMERIC arithmetic differently, so a passing
     #       assertion would say nothing about the engine the deployed task runs
     #       against.
-    #       **Assumptions:** url, username and password are deliberately ABSENT from
+    #       Assumptions: url, username and password are deliberately ABSENT from
     #       this file, and their absence resolves rather than conflicts. Each
     #       integration class starts its own PostgreSQLContainer on a
     #       digest-pinned image and registers the generated triple through
@@ -191,8 +191,8 @@ spring:
     #       that can be run against by accident, and for this module the accident is
     #       a posting run.
     hikari:
-      # WHY : **Assumptions:** this restates the base statement verbatim, INCLUDING
-      #       the order of the four schemas, because the order is the resolution
+      # WHY : Assumptions: this restates the base statement verbatim, INCLUDING
+      #       the order of the five schemas, because the order is the resolution
       #       order for an unqualified name. `batch` is deliberately first: the six
       #       Spring Batch job-repository tables and batch_run are the only objects
       #       this module creates, so an unqualified reference must find them before
@@ -200,14 +200,14 @@ spring:
       #       DataSourceConfig re-parses this statement and refuses it unless it is
       #       exactly one `SET search_path TO <list>` naming the same schemas in the
       #       same order as the key below, so the two cannot drift apart.
-      #       **Trade-offs:** the container generates its own JDBC URL, so this file
+      #       Trade-offs: the container generates its own JDBC URL, so this file
       #       cannot append a currentSchema parameter to it. The statement is applied
       #       as a per-connection session pin instead, and PostgreSQL resolves
       #       search-path entries lazily, so it succeeds on the connection Flyway
       #       uses before Flyway has created `batch`.
-      connection-init-sql: "SET search_path TO batch, ledger, account, reference"
+      connection-init-sql: "SET search_path TO batch, ledger, account, reference, card"
 
-      # WHY : **Assumptions:** restated from the base because the streaming
+      # WHY : Assumptions: restated from the base because the streaming
       #       behaviour it enables is what the repository tests assert. With
       #       auto-commit on, the driver ignores the fetch-size hint on this
       #       module's Stream-returning finders and materialises the whole result
@@ -216,7 +216,7 @@ spring:
       #       DataSourceConfig refuses true outright.
       auto-commit: false
 
-      # WHY : **Assumptions:** four, which is the base value and is above the floor
+      # WHY : Assumptions: four, which is the base value and is above the floor
       #       of three that DataSourceConfig enforces. A streaming cursor pins one
       #       connection for a whole step while execution state commits on a second,
       #       so a ceiling of one DEADLOCKS -- the chunk holds the only connection
@@ -226,13 +226,13 @@ spring:
       #       aborts context refresh, because that guard refuses the value outright
       #       and names the deadlock as its reason. The floor is therefore enforced
       #       in code and this value is what satisfies it.
-      #       **Trade-offs:** restating the production ceiling costs a duplicated
+      #       Trade-offs: restating the production ceiling costs a duplicated
       #       literal and buys a pool that behaves under test exactly as it does in
       #       the deployed task; lowering it to save container connections would
       #       change the concurrency the tests exercise.
       maximum-pool-size: 4
 
-      # WHY : **Trade-offs:** no idle floor, against the base document's one. The
+      # WHY : Trade-offs: no idle floor, against the base document's one. The
       #       base keeps a floor so the first step of a nightly chain does not pay a
       #       handshake; a test run has no nightly chain, and reactor test forks can
       #       hold several pools against one container at once, so draining to empty
@@ -241,7 +241,7 @@ spring:
       #       negative floor or a floor above the ceiling.
       minimum-idle: 0
 
-      # WHY : **Assumptions:** the base leaves this at the pool's own thirty-second
+      # WHY : Assumptions: the base leaves this at the pool's own thirty-second
       #       default because a deployed task may wait out an Aurora Serverless
       #       auto-pause resume, which takes roughly fifteen seconds. A local
       #       container has no resume window and answers in milliseconds, so a tight
@@ -251,7 +251,7 @@ spring:
       #       the wait unbounded.
       connection-timeout: 10000
 
-      # WHY : **Assumptions:** an unclosed Stream from a cursor finder pins its
+      # WHY : Assumptions: an unclosed Stream from a cursor finder pins its
       #       connection for the remainder of the step, and with the ceiling above
       #       that presents as an unexplained hang rather than as a leak. A bounded
       #       threshold turns it into a stack-trace-carrying warning naming the
@@ -259,32 +259,32 @@ spring:
       #       minimum, so the setting takes effect rather than being silently reset
       #       to disabled, and well under the base document's ten minutes, which is
       #       sized for a nightly step rather than for a test method.
-      #       **Trade-offs:** a legitimately long-held connection inside one test
+      #       Trade-offs: a legitimately long-held connection inside one test
       #       would be reported as a suspected leak. That false positive is accepted
       #       because it is visible and self-explaining, whereas the failure it
       #       replaces is a build that stops making progress for no stated reason.
       leak-detection-threshold: 30000
 
       data-source-properties:
-        # WHY : **Assumptions:** the base requires verify-full and a certificate
+        # WHY : Assumptions: the base requires verify-full and a certificate
         #       authority bundle because deployed PostgreSQL serves TLS and its
         #       parameter group forces it. The stock PostgreSQL container starts with
         #       TLS off, so inheriting that mode rejects every connection with "The
         #       server does not support SSL" before Flyway can run.
-        #       **Trade-offs:** `disable` makes the loopback hop to the container
+        #       Trade-offs: `disable` makes the loopback hop to the container
         #       cleartext. The container holds only fixture data and is discarded
         #       with the run, and deployed connections keep verify-full from the base
         #       profile, so the relaxation cannot travel beyond the test JVM.
         sslmode: disable
 
-        # WHY : **Assumptions:** restated identically to the base rather than
+        # WHY : Assumptions: restated identically to the base rather than
         #       inherited. `data-source-properties` is a map that merges per key, so
         #       inheritance would in fact preserve it -- but these two bounds are the
         #       guards that stop a wedged posting transaction from holding an account
         #       row for the length of a build, and restating them keeps the session
         #       posture the tests run under identical to the deployed one and visible
         #       in the file that governs the tests.
-        #       **Trade-offs:** statement_timeout is deliberately NOT named here, and
+        #       Trade-offs: statement_timeout is deliberately NOT named here, and
         #       DataSourceConfig refuses it if it ever is. A batch step's outer bound
         #       belongs to the Step Functions state that invoked it, and under test
         #       to the build's own timeout; a session-level bound would cancel a
@@ -293,7 +293,7 @@ spring:
         options: "-c lock_timeout=30000 -c idle_in_transaction_session_timeout=300000"
 
   flyway:
-    # WHY : **Assumptions:** Flyway stays enabled because this context IS the
+    # WHY : Assumptions: Flyway stays enabled because this context IS the
     #       executable check of db/migration/V1__batch.sql, which creates
     #       batch.batch_run together with the six Spring Batch job-repository
     #       tables at its L664-L729 and their three sequences at L737-L739.
@@ -303,8 +303,8 @@ spring:
     #       tables would prove nothing about the mechanism that replaced it.
     enabled: true
 
-    # WHY : **Assumptions:** identical to the base, and it names exactly one
-    #       location. The test-harness script that creates the three schemas this
+    # WHY : Assumptions: identical to the base, and it names exactly one
+    #       location. The test-harness script that creates the four schemas this
     #       module only reads lives at
     #       src/test/resources/db/testharness/test-harness-schemas-and-foreign-tables.sql,
     #       OUTSIDE db/migration and deliberately so: it is not a migration, it has
@@ -313,7 +313,7 @@ spring:
     #       that data-migration/sql/V0__schemas_and_roles.sql owns in a deployed
     #       environment, and would have this module's history table claim authorship
     #       of three bounded contexts it is forbidden to migrate.
-    #       **Trade-offs:** the harness therefore has to be applied by something
+    #       Trade-offs: the harness therefore has to be applied by something
     #       other than Flyway, and it is: each integration class hands it to its
     #       container as an init script, which runs once at container creation and
     #       so completes before any application code opens a connection. That
@@ -321,7 +321,7 @@ spring:
     #       to production instead of being widened for the convenience of the test.
     locations: classpath:db/migration
 
-    # WHY : **Assumptions:** `schemas` names every schema Flyway manages and
+    # WHY : Assumptions: `schemas` names every schema Flyway manages and
     #       `default-schema` decides where its history table and unqualified objects
     #       resolve. Both name `batch` ALONE, and that is the load-bearing part:
     #       this module reads ledger, account and reference through explicitly
@@ -330,13 +330,13 @@ spring:
     #       record history against, a bounded context it does not own, and
     #       DataSourceConfig refuses any value of `schemas` other than the single
     #       owned schema for exactly that reason.
-    #       **Trade-offs:** both restate the base. The duplication exposes the whole
+    #       Trade-offs: both restate the base. The duplication exposes the whole
     #       ownership boundary inside the test overlay and stops an edit to the base
     #       from changing what the suite proves without a visible diff here.
     schemas: batch
     default-schema: batch
 
-    # WHY : **Assumptions:** this is the ONE Flyway value that diverges from the
+    # WHY : Assumptions: this is the ONE Flyway value that diverges from the
     #       base document's `false`, and the divergence is required rather than
     #       convenient. In a deployed environment
     #       data-migration/sql/V0__schemas_and_roles.sql owns the schemas, the owner
@@ -344,7 +344,7 @@ spring:
     #       bare container runs no V0, and V1__batch.sql deliberately contains no
     #       CREATE SCHEMA, CREATE ROLE and no GRANT, so `false` makes its first
     #       qualified CREATE TABLE fail on an absent schema.
-    #       **Alternatives Considered:** creating `batch` in the harness script
+    #       Alternatives Considered: creating `batch` in the harness script
     #       beside the other three, which is the obvious fix and was MEASURED to
     #       break the production configuration. An init script runs as the
     #       container's own generated superuser, so a schema it creates is owned by
@@ -354,7 +354,7 @@ spring:
     #       denied, because the assumed role holds CREATE on the DATABASE but not on
     #       a schema another role owns. Every integration test in this module aborted
     #       at context load, naming the migration rather than the init script.
-    #       **Assumptions:** deferring to Flyway does not merely avoid that denial,
+    #       Assumptions: deferring to Flyway does not merely avoid that denial,
     #       it reproduces the deployed ownership exactly. V0 declares
     #       `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch_owner`,
     #       so in a provisioned environment the schema belongs to that role; here
@@ -363,13 +363,13 @@ spring:
     #       property that has to match, not merely the schema's existence, because
     #       every ALTER DEFAULT PRIVILEGES FOR ROLE clause in that bootstrap file is
     #       keyed on the CREATING role and is inert otherwise.
-    #       **Trade-offs:** this creates `batch` and nothing else, so it is not a
-    #       general escape from schema ownership -- the other three schemas still
+    #       Trade-offs: this creates `batch` and nothing else, so it is not a
+    #       general escape from schema ownership -- the other four schemas still
     #       have to exist before the context starts, which is the harness script's
     #       whole job.
     create-schemas: true
 
-    # WHY : **Assumptions:** a container starts empty, so there is no populated
+    # WHY : Assumptions: a container starts empty, so there is no populated
     #       schema to adopt as a baseline. Enabling baselining could mark an
     #       unexpected pre-existing schema as already migrated and skip V1
     #       altogether, leaving the context to fail against a job repository Flyway
@@ -377,7 +377,7 @@ spring:
     #       which points at the database rather than at the skipped migration.
     baseline-on-migrate: false
 
-    # WHY : **Assumptions:** restates the base. Checksum validation compares each
+    # WHY : Assumptions: restates the base. Checksum validation compares each
     #       applied migration against the file on the classpath, so an edit to an
     #       already-applied V1__batch.sql is reported rather than ignored. In a
     #       throwaway container this can only fire when a test reuses a database
@@ -385,7 +385,7 @@ spring:
     #       change would be hardest to notice.
     validate-on-migrate: true
 
-    # WHY : **Assumptions:** clean stays disabled, restating the base. No test calls
+    # WHY : Assumptions: clean stays disabled, restating the base. No test calls
     #       it and a container is discarded whole, so the control adds no coverage
     #       here; it is restated so that the test profile cannot become the place
     #       where a destructive operation is first normalised, because in a deployed
@@ -393,13 +393,13 @@ spring:
     #       depends on.
     clean-disabled: true
 
-    # WHY : **Refactoring Rationale:** init-sqls IS restated, and it has to be. The
+    # WHY : Refactoring Rationale: init-sqls IS restated, and it has to be. The
     #       base document's single statement is `SET ROLE carddemo_batch_owner`,
     #       naming a NOLOGIN role that V0 creates in a deployed environment and that
     #       a fresh container has never heard of; left inherited, all three
     #       integration classes failed context load with
     #       `role "carddemo_batch_owner" does not exist`.
-    #       **Alternatives Considered:** overriding this to an empty list or to a
+    #       Alternatives Considered: overriding this to an empty list or to a
     #       no-op so that the ownership split simply does not happen under test.
     #       Rejected because the split is the whole of the control -- objects a
     #       migration creates must belong to the NOLOGIN owner, since the bootstrap
@@ -410,7 +410,7 @@ spring:
     #       and then assumed, so Flyway creates the schema, the history table and
     #       every V1 object as carddemo_batch_owner exactly as it does when
     #       deployed.
-    #       **Assumptions:** the first statement must be idempotent because Flyway
+    #       Assumptions: the first statement must be idempotent because Flyway
     #       runs every string here on EACH connection it opens, not once per
     #       migration. The role test and the grant are both re-runnable, and the
     #       grant names its target through format() with %I over
@@ -419,7 +419,7 @@ spring:
     #       the database is required and is not implied by role creation: a fresh
     #       role holds only the PUBLIC grants, CONNECT and TEMPORARY, so without it
     #       CREATE SCHEMA fails the moment the SET ROLE takes effect.
-    #       **Trade-offs:** the container's own user is a superuser and could assume
+    #       Trade-offs: the container's own user is a superuser and could assume
     #       this role with no grant at all, which makes the GRANT look superfluous.
     #       It is kept because the grant is what the OWNER needs in order to create
     #       the schema, not what the connecting user needs in order to become it,
@@ -430,24 +430,24 @@ spring:
 
   jpa:
     hibernate:
-      # WHY : **Assumptions:** `validate` restates the base and is the strongest
+      # WHY : Assumptions: `validate` restates the base and is the strongest
       #       mode available here, because between them the harness script and V1
       #       supply every table this module maps: the harness creates
       #       account.accounts, account.card_xref, reference.disclosure_groups,
       #       ledger.transactions, ledger.daily_transactions,
       #       ledger.transaction_rejects and ledger.transaction_category_balances,
       #       and V1 creates batch.batch_run. The integration classes scan
-      #       com.carddemo.batch.domain whole, so validation checks all eight entity
+      #       com.carddemo.batch.domain whole, so validation checks all ten entity
       #       mappings against real tables and a mapping that drifts from an owning
       #       migration fails at context load rather than at the first query.
-      #       **Refactoring Rationale:** this was `none` while the harness supplied
+      #       Refactoring Rationale: this was `none` while the harness supplied
       #       only schemas, when validation could not have succeeded against the
-      #       seven tables this module is forbidden to create. The harness now
+      #       nine tables this module is forbidden to create. The harness now
       #       creates those tables, so `none` would silently give up the one check
       #       that catches a cross-schema mapping drift, and `none` is exactly the
       #       value under which such a drift survives until a query fails in
       #       production.
-      #       **Alternatives Considered:** any DDL-emitting mode -- create,
+      #       Alternatives Considered: any DDL-emitting mode -- create,
       #       create-drop, update -- rejected, and DataSourceConfig refuses each of
       #       them by name. Measured: forcing `create` has the provider rebuild the
       #       mapped tables without V1's CHECK constraints and indexes, and eight
@@ -455,7 +455,7 @@ spring:
       #       the migration they are meant to be testing is discarded.
       ddl-auto: validate
 
-    # WHY : **Assumptions:** restates the base so no repository test can depend on a
+    # WHY : Assumptions: restates the base so no repository test can depend on a
     #       persistence session outliving its transaction. It matters more here than
     #       in a request-scoped service: a chunk-oriented step commits per chunk, so
     #       a lazily-mapped association resolved outside that boundary would read a
@@ -464,7 +464,7 @@ spring:
     #       on would also emit a startup warning and hold a session open for nothing.
     open-in-view: false
 
-    # WHY : **Trade-offs:** provider SQL is not written to standard output. That
+    # WHY : Trade-offs: provider SQL is not written to standard output. That
     #       gives up the shortest way to inspect a generated statement, but this
     #       switch bypasses logger levels entirely, so once enabled no level can
     #       narrow it again -- and a posting run over a seeded fixture emits a
@@ -475,14 +475,14 @@ spring:
     properties:
       hibernate:
         jdbc:
-          # WHY : **Assumptions:** restated at the base value rather than reduced.
+          # WHY : Assumptions: restated at the base value rather than reduced.
           #       The fetch size is what keeps a cursor walk lazy: paired with
           #       auto-commit false above, it is the setting under which a
           #       Stream-returning finder opens a server-side cursor instead of
           #       materialising the result. Halving it under test would make a
           #       step's observable round-trip behaviour differ from the deployed
           #       one, which is the property a repository test exists to check.
-          #       **Trade-offs:** batch_size is deliberately not restated beside it.
+          #       Trade-offs: batch_size is deliberately not restated beside it.
           #       The base sets fifty and it governs how many inserts share a round
           #       trip, which the tests do not assert on; restating it would claim a
           #       decision this file has not made.
@@ -490,7 +490,7 @@ spring:
 
   batch:
     job:
-      # WHY : **Assumptions:** this is the single most important value in the file,
+      # WHY : Assumptions: this is the single most important value in the file,
       #       and it restates the base rather than changing it precisely so that no
       #       broader edit can flip it. Left at the framework default, Spring Batch
       #       runs every Job bean in the context as soon as the application is
@@ -499,20 +499,20 @@ spring:
       #       context resolved -- and the test would report success while having
       #       mutated state no assertion described. Verified: with this false, a
       #       context-loading test records no job execution.
-      #       **Assumptions:** false does NOT stop a test from running a job.
+      #       Assumptions: false does NOT stop a test from running a job.
       #       JobLauncher and JobOperator stay available, so a job test launches
       #       deliberately with its own parameters, which is also how the deployed
       #       task runs -- a Step Functions state passes the job name and the
       #       business date as container overrides rather than relying on
       #       auto-launch -- so the test and the deployment exercise one entry path.
-      #       **Trade-offs:** the accepted cost is that a job test must name the job
+      #       Trade-offs: the accepted cost is that a job test must name the job
       #       it wants. That is preferred to the alternative, in which the set of
       #       jobs a test runs is whatever happens to be on the classpath.
       enabled: false
 
   sql:
     init:
-      # WHY : **Assumptions:** restated from the base rather than inherited, because
+      # WHY : Assumptions: restated from the base rather than inherited, because
       #       the mechanism it disables is one that a test resource directory
       #       attracts. The framework runs schema.sql or data.sql automatically the
       #       moment either appears on the classpath, and this module owns a Flyway
@@ -526,20 +526,20 @@ spring:
 carddemo:
   batch:
     datasource:
-      # WHY : **Assumptions:** declared as a comma-separated SCALAR, not a YAML
+      # WHY : Assumptions: declared as a comma-separated SCALAR, not a YAML
       #       sequence. DataSourceConfig reads it through @Value, which resolves one
       #       placeholder and converts the resulting string; a sequence would be
       #       flattened to indexed keys, the placeholder would not resolve, and the
       #       class's own default would be used instead -- so the declaration would
       #       be an inert no-op that reads as a decision.
-      #       **Assumptions:** the order is the resolution order, `batch` must lead
+      #       Assumptions: the order is the resolution order, `batch` must lead
       #       because it is the schema this module migrates, and the list must equal
       #       the statement pinned in connection-init-sql above; DataSourceConfig
       #       cross-checks the two and refuses a mismatch, so this key is what stops
       #       the session pin and the declared ownership from drifting apart. It also
       #       refuses `public`, where an unqualified name could resolve against an
       #       object no migration in this repository created.
-      #       **Trade-offs:** the order encodes a grant asymmetry that the container
+      #       Trade-offs: the order encodes a grant asymmetry that the container
       #       CANNOT enforce. In a deployed environment `batch` is owned, ledger and
       #       account are reachable under narrowly-scoped cross-schema WRITE grants,
       #       and reference is SELECT-only; the container runs everything as one
@@ -550,13 +550,13 @@ carddemo:
       #       from its authority -- so the protection is that the reference mapping
       #       is read-only by construction, and that is asserted in code rather than
       #       by the database.
-      search-path: "batch,ledger,account,reference"
+      search-path: "batch,ledger,account,reference,card"
 
 management:
   endpoints:
     web:
       exposure:
-        # WHY : **Assumptions:** emptied, against the base document's `health`. The
+        # WHY : Assumptions: emptied, against the base document's `health`. The
         #       base exposes that one endpoint so the Dockerfile HEALTHCHECK and the
         #       load-balancer-free task probe have something to call; under test
         #       nothing calls it, and with the web application type set to none above
@@ -564,7 +564,7 @@ management:
         #       states that intent at the actuator rather than relying only on the
         #       absent servlet container, so the surface is closed by two independent
         #       settings and not by one.
-        #       **Trade-offs:** a future test that wants to assert on the health
+        #       Trade-offs: a future test that wants to assert on the health
         #       contributor must re-expose it for itself. That is preferred to
         #       leaving an endpoint published in a context whose whole purpose is to
         #       run jobs, where a health probe against a paused pool is one more way
@@ -574,7 +574,7 @@ management:
 
 logging:
   level:
-    # WHY : **Trade-offs:** framework narration is reduced to WARN, against the base
+    # WHY : Trade-offs: framework narration is reduced to WARN, against the base
     #       document's INFO, so that one assertion failure or one migration error
     #       stays visible in a build log that also carries several container starts.
     #       The cost is that a Spring lifecycle message which would have explained
@@ -583,7 +583,7 @@ logging:
     #       ones a batch failure is diagnosed from.
     root: WARN
 
-    # WHY : **Assumptions:** the project package stays at INFO because this is where
+    # WHY : Assumptions: the project package stays at INFO because this is where
     #       the reject reason a posting decision produced is recorded, and reject
     #       reasons 100 to 103 are the parity contract this module is judged against
     #       -- app/cbl/CBTRN02C.cbl L229-L230 turns any of them into the warn-tier
@@ -591,7 +591,7 @@ logging:
     #       line that says so.
     com.carddemo: INFO
 
-    # WHY : **Assumptions:** Spring Batch stays at INFO because that is the level at
+    # WHY : Assumptions: Spring Batch stays at INFO because that is the level at
     #       which step and chunk boundaries are reported, and a failing assertion
     #       about the transaction-category-balance create-versus-update branch is
     #       very hard to place without them: the branch is chosen per record, so
@@ -599,13 +599,13 @@ logging:
     #       between a diagnosable failure and a rerun.
     org.springframework.batch: INFO
 
-    # WHY : **Assumptions:** Flyway stays at INFO so the applied version is stated in
+    # WHY : Assumptions: Flyway stays at INFO so the applied version is stated in
     #       the log. With `validate` above, a missing table can mean either a mapping
     #       error or a migration that never ran, and the migration line is what
     #       separates the two on first reading.
     org.flywaydb: INFO
 
-    # WHY : **Assumptions:** the two statement categories stay OFF, restating the
+    # WHY : Assumptions: the two statement categories stay OFF, restating the
     #       base rather than the WARN a service module would use. A batch run emits a
     #       statement and a bound parameter set per record processed, and those
     #       parameters are card numbers and account balances, so at batch volumes
@@ -613,7 +613,7 @@ logging:
     org.hibernate.SQL: "OFF"
     org.hibernate.orm.jdbc.bind: "OFF"
 
-    # WHY : **Refactoring Rationale:** this third category was inheriting root and so
+    # WHY : Refactoring Rationale: this third category was inheriting root and so
     #       was reporting at WARN, and unlike the two above it echoes the FULL failing
     #       statement with its values inlined. The integration tests deliberately
     #       provoke SQLSTATE 22001 and 23505 to prove that a length bound and a
@@ -621,7 +621,7 @@ logging:
     #       printing a sixteen-digit card-number fixture value into the build log.
     #       Pinning ERROR silences the echo of an exception the test already asserts
     #       on, while leaving genuine provider errors at their own level.
-    #       **Trade-offs:** an unexpected batch-insert failure loses its
+    #       Trade-offs: an unexpected batch-insert failure loses its
     #       "Call getNextException" companion line. That is accepted because the
     #       exception itself still reaches the test report with its full chain, so
     #       the diagnostic survives where a reader actually looks, and it survives
@@ -638,7 +638,7 @@ logging:
 # -----------------------------------------------------------------------------
 #
 #   1. No spring.profiles.active.
-#      **Assumptions:** Spring derives the profile from this file's own
+#      Assumptions: Spring derives the profile from this file's own
 #      `application-<profile>` stem, and the three integration classes select it
 #      with @ActiveProfiles("test"). Declaring the key inside the document it
 #      names would activate this overlay under every other profile as well,
@@ -646,37 +646,37 @@ logging:
 #
 #   2. No spring.datasource url, username or password, and no
 #      spring.flyway.user or password.
-#      **Assumptions:** each integration class starts its own
+#      Assumptions: each integration class starts its own
 #      PostgreSQLContainer on the digest-pinned image
 #      postgres@sha256:742f40ea... and registers the generated values through
 #      @DynamicPropertySource, which outranks the base document's placeholders.
 #      This is stated explicitly because an unset datasource URL is otherwise
 #      indistinguishable from an omission.
-#      **Alternatives Considered:** a
+#      Alternatives Considered: a
 #      `jdbc:tc:postgresql:...?TC_INITSCRIPT=...` URL with the Testcontainers
 #      driver, which would start the container and run the harness from this
 #      file alone. Rejected because every context-loading test in this module
 #      already registers its container dynamically and would override the URL,
 #      so the declaration would be dead configuration in every existing test
 #      while silently starting a container for any future context-only test that
-#      wanted none. **Trade-offs:** the cost of the choice made is that the
+#      wanted none. Trade-offs: the cost of the choice made is that the
 #      container coordinates live in three test classes rather than one file;
 #      the compensating benefit is that a class owns the lifecycle of the
 #      container it seeds.
-#      **Assumptions:** no credential appears here in either case. A
+#      Assumptions: no credential appears here in either case. A
 #      Testcontainers-generated user and password are container-local values
 #      that exist only for the life of the run, and this file names neither them
 #      nor any endpoint, ARN, bucket or account identifier.
 #
 #   3. No spring.batch.jdbc.table-prefix and no
 #      spring.batch.jdbc.initialize-schema.
-#      **Assumptions:** at the pinned framework version NEITHER KEY EXISTS.
+#      Assumptions: at the pinned framework version NEITHER KEY EXISTS.
 #      BatchProperties declares exactly one nested type, Job, carrying one
 #      property, name, so the whole spring.batch namespace is job.enabled and
 #      job.name and there is no jdbc group beneath it. A key written here would
 #      bind to nothing, be accepted in silence, and leave a reader believing a
 #      prefix was pinned when it was not -- which is worse than the absence.
-#      **Assumptions:** both intents are nevertheless met by mechanisms that do
+#      Assumptions: both intents are nevertheless met by mechanisms that do
 #      exist. Job-repository tables resolve INTO `batch` because the framework's
 #      default prefix is unqualified and the search path above puts `batch`
 #      first, which is exactly where db/migration/V1__batch.sql L664-L739
@@ -686,25 +686,25 @@ logging:
 #      so no script initialiser can become a second creator.
 #
 #   4. No chunk-commit granularity property.
-#      **Assumptions:** the commit interval is not configurable. It is the
+#      Assumptions: the commit interval is not configurable. It is the
 #      compile-time constant BatchConfig.CHUNK_SIZE, consumed directly by
 #      PreflightDailyTransactionsJob and PostTransactionsJob as the page limit of
 #      their cursor reads, so there is no key to set and a carddemo.batch
 #      chunk-size property invented here would bind to nothing while reading as
 #      a tuned value.
-#      **Trade-offs:** a fixture smaller than that constant therefore commits as
+#      Trade-offs: a fixture smaller than that constant therefore commits as
 #      a single chunk, and the commit-interval path is exercised only by a
 #      fixture larger than it. Sizing that belongs to the fixture that a job
 #      test seeds, not to this profile, and stating it here as a property would
 #      create a second source of truth that can drift from the constant.
-#      **Assumptions:** no test in this module launches a job today -- the job
+#      Assumptions: no test in this module launches a job today -- the job
 #      classes are asserted on structurally rather than run -- so no chunk
 #      commit is observable from here yet, and a value invented now could not
 #      be checked against anything. The first test that launches a job is the
 #      one that has to seed past the constant to cross a boundary.
 #
 #   5. No default job name and no default business date.
-#      **Assumptions:** both arrive only as the command-line arguments
+#      Assumptions: both arrive only as the command-line arguments
 #      BatchApplication defines, --job= and --business-date=, which a Step
 #      Functions state supplies through ContainerOverrides.Command; neither is
 #      defaulted anywhere in the module. A default here would let a test pass
@@ -712,13 +712,13 @@ logging:
 #      it would additionally nominate one of seven jobs as implicit.
 #
 #   6. No canonical date format for the business-date token.
-#      **Assumptions:** the token is an OPAQUE ten-character passthrough, held
+#      Assumptions: the token is an OPAQUE ten-character passthrough, held
 #      character for character and never normalised on the way through. The
 #      baseline applies no formatting to it either: app/cbl/CBACT04C.cbl
 #      L473-L480 merely STRINGs a PIC X(10) parameter alongside a PIC 9(06)
 #      counter into a PIC X(16) transaction identifier, and app/jcl/INTCALC.jcl
 #      L22 passes PARM='2022071800'.
-#      **Alternatives Considered:** pinning a single pattern, so that a test
+#      Alternatives Considered: pinning a single pattern, so that a test
 #      could assert one rendering. Rejected on evidence: the committed goldens
 #      carry two otherwise byte-identical generated records whose only
 #      difference is a ten-character prefix in two different layouts, so forcing
@@ -727,12 +727,17 @@ logging:
 #      the base profile also declines to configure.
 #
 #   7. No carddemo.messaging.* key of any kind.
-#      **Assumptions:** SqsConfig gates its entire bean roster on
+#      Assumptions: SqsConfig gates its entire bean roster on
 #      @ConditionalOnProperty(name = "carddemo.messaging.error-queue-url"), so
-#      leaving that key unset keeps every queue client out of the context and a
-#      task that publishes nothing starts and exits cleanly. No queue URL, no
-#      emulator, no endpoint override.
-#      **Alternatives Considered:** wiring an SQS emulator into this profile so
+#      leaving that key unset keeps every queue client AND the failure reporter
+#      out of the context, and a task that publishes nothing starts and exits
+#      cleanly. No queue URL, no emulator, no endpoint override.
+#      Assumptions: an absent reporter is a SUPPORTED state and not a gap in
+#      this profile. BatchStepLedger takes the reporter as an Optional precisely
+#      so that a context without a sink is a running context; the cases that
+#      assert the reporting behaviour construct the ledger directly with a mock
+#      reporter, which needs no property, no client and no emulator.
+#      Alternatives Considered: wiring an SQS emulator into this profile so
 #      the error path could be exercised everywhere. Rejected because NO
 #      baseline batch program and NO batch JCL step contains an MQ verb at all
 #      -- the baseline's message producers are the ONLINE programs -- so the
@@ -742,7 +747,7 @@ logging:
 #      a test that wants the error path supplies the one key itself.
 #
 #   8. No springdoc.* and no spring.security.oauth2.* key.
-#      **Assumptions:** this module publishes no business route and hosts no
+#      Assumptions: this module publishes no business route and hosts no
 #      resource server. Its POM declares neither the API-documentation starter
 #      nor the security starters, it has no SecurityConfig class, and AAP 0.5.1.7
 #      is the one service row that omits an openapi contract, because the caller
@@ -752,7 +757,7 @@ logging:
 #      the opposite reason.
 #
 #   9. No spring.cloud.aws.secretsmanager key.
-#      **Assumptions:** unlike Parameter Store above, the Secrets Manager
+#      Assumptions: unlike Parameter Store above, the Secrets Manager
 #      integration is not on this module's classpath at all -- the POM declares
 #      the sqs, parameter-store and s3 starters and no secrets-manager starter
 #      -- so its autoconfiguration never applies and there is nothing for a
@@ -760,7 +765,7 @@ logging:
 #      integration this module does not have.
 #
 #  10. No spring.config.import override.
-#      **Assumptions:** the base list already names the shared defaults document
+#      Assumptions: the base list already names the shared defaults document
 #      first and the Parameter Store subtree second, and the resolver for the
 #      second is disabled above, so it costs nothing. Re-declaring the list to
 #      drop that entry would also mean re-naming the shared defaults document,
@@ -768,7 +773,7 @@ logging:
 #      the console pattern that carries the correlation identifier.
 #
 #  11. No server.port or server.address override, and no server.ssl block.
-#      **Assumptions:** the base declares a port and a loopback bind address for
+#      Assumptions: the base declares a port and a loopback bind address for
 #      the health probe and declares no TLS at all, and with the web application
 #      type set to none above no listener is created under test, so moving
 #      either value would change a deployment setting without solving a test
@@ -776,11 +781,10 @@ logging:
 #
 #  12. No cloud-service endpoint, ARN, bucket name, credential or account
 #      identifier, and no carddemo.dataset.bucket.
-#      **Assumptions:** the static region above is a routing selector rather than
+#      Assumptions: the static region above is a routing selector rather than
 #      a network location or a secret. The dataset bucket is deliberately left
 #      unresolved because a context that needs it is a context exercising the
 #      generation-staging path, and that test supplies its own coordinates; a
 #      value here would let such a test appear to pass against a bucket name
 #      nobody provisioned.
 # =============================================================================
-

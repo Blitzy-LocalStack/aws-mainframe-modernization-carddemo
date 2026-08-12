@@ -34,117 +34,97 @@ import org.springframework.transaction.annotation.Transactional;
  * Edits a submitted account and customer change and applies it under a concurrency precondition.
  *
  * <p>Purpose: this is the migrated form of the edit and write halves of {@code app/cbl/COACTUPC.cbl},
- * the CICS transaction {@code CAUP}. Three regions of that program land here. Its edit driver
- * {@code 1200-EDIT-MAP-INPUTS} at L1429, whose exit is L1678, becomes
- * {@link #editMapInputs(AccountUpdateRequest, Account, Customer)}. The edit routines spanning L1783 to
- * L2536 each become one named method so that a paragraph and a method can be cited as a pair. Its write
- * path {@code 9600-WRITE-PROCESSING} at L3888, whose exit is L4105, becomes
- * {@link #update(long, AccountUpdateRequest, String)}, and the change comparison
- * {@code 9700-CHECK-CHANGE-IN-REC} at L4109, whose body ends at L4192, becomes the precondition that
- * method enforces.</p>
+ * the CICS transaction {@code CAUP}. Its edit driver {@code 1200-EDIT-MAP-INPUTS} at L1429 becomes
+ * {@link #editMapInputs(AccountUpdateRequest, Account, Customer)}; the edit routines spanning L1783 to
+ * L2536 each become one named method, so that a paragraph and a method can be cited as a pair; its write
+ * path {@code 9600-WRITE-PROCESSING} at L3888 becomes
+ * {@link #update(long, AccountUpdateRequest, String)}; and the change comparison
+ * {@code 9700-CHECK-CHANGE-IN-REC} at L4109 becomes the precondition that method enforces. The
+ * paragraph-by-paragraph register, with the enclosing line range of each, is
+ * {@code docs/architecture/cobol-to-service-traceability.md}; it is not restated here, because a lineage
+ * table kept in two places drifts in one of them.</p>
  *
  * <h2>The edit routines are parameterised, not one method per field</h2>
  *
  * <p>Refactoring Rationale: the baseline passes arguments to its edit routines through a block of shared
- * {@code WORKING-STORAGE} declared as {@code 05 WS-GENERIC-EDITS.} at {@code app/cbl/COACTUPC.cbl} L52
- * and running to L80. The in-parameters are {@code WS-EDIT-VARIABLE-NAME PIC X(25)} at L53, the field
- * label; {@code WS-EDIT-ALPHANUM-ONLY PIC X(256)} at L61, the value; and
- * {@code WS-EDIT-ALPHANUM-LENGTH PIC S9(4) COMP-3} at L62, the width to examine. The out-parameters are
- * the marker bytes at L56 to L59 and L64 to L80. A caller moves the label, moves the value, moves the
- * length, performs the routine and then moves the marker into the field's own marker, which is visible
- * at L1605 to L1611 and again at L1615 to L1620. Twenty-seven such invocations reach those routines
- * across the program, so the routines are already generic and are already reused; what makes them read
- * as one-offs is only that their arguments live in shared storage rather than on the call. Here the
- * label, the value and the width become method parameters and the marker becomes the return value, so
- * the shared block disappears entirely. That is the concrete realisation of this migration's
- * constructor-injection-over-shared-storage design decision: two edits can no longer interfere by
- * leaving a value behind in a field the next one reads.</p>
+ * {@code WORKING-STORAGE}, {@code 05 WS-GENERIC-EDITS.} at {@code app/cbl/COACTUPC.cbl} L52 to L80. A
+ * caller moves the field label, the value and the width to examine into that block, performs the routine,
+ * then copies the marker byte the routine left behind into the field's own marker. Twenty-seven
+ * invocations reach those routines, so they are already generic and already reused; what makes them read
+ * as one-offs is only that their arguments live in shared storage rather than on the call. Here the label,
+ * the value and the width are method parameters and the marker is the return value, so the shared block
+ * disappears and two edits cannot interfere by leaving a value behind in a field the next one reads.</p>
  *
  * <h2>Where a verdict is reached, and where it is not</h2>
  *
  * <p>Assumptions: three families of edit are DELEGATED rather than restated. The date edits are
- * {@code EDIT-DATE-CCYYMMDD}, which the program obtains by {@code COPY 'CSUTLDWY'.} at
- * {@code app/cbl/COACTUPC.cbl} L166 and performs four times, at L1479 to L1482 for the open date, L1491
- * to L1494 for the expiry date, L1504 to L1507 for the reissue date and L1536 to L1538 for the date of
- * birth; they belong to {@link DateEditValidator} in the shared kernel because the copybook is shared.
- * The telephone, state-code and state-with-postal-prefix edits are {@code 1260-EDIT-US-PHONE-NUM} at
- * L2225 -- together with the three unnumbered parts it performs, {@code EDIT-AREA-CODE} at L2246,
- * {@code EDIT-US-PHONE-PREFIX} at L2316 and {@code EDIT-US-PHONE-LINENUM} at L2370, which fall through
- * to one another and reach the shared exit at L2424 ahead of the enclosing paragraph's own exit at
- * L2427 -- {@code 1270-EDIT-US-STATE-CD} at L2493 and {@code 1280-EDIT-US-STATE-ZIP-CD} at L2536; they
- * belong to {@link AddressValidationService} because they read the allow-lists the program obtains by
- * {@code COPY CSLKPCDY.} at L602, and the reference context owns those tables. Restating either family
+ * {@code EDIT-DATE-CCYYMMDD}, which the program obtains by {@code COPY 'CSUTLDWY'.} at L166 and performs
+ * for the open, expiry and reissue dates and the date of birth; they belong to {@link DateEditValidator}
+ * in the shared kernel because the copybook is shared. The telephone, state-code and
+ * state-with-postal-prefix edits -- {@code 1260-EDIT-US-PHONE-NUM} at L2225,
+ * {@code 1270-EDIT-US-STATE-CD} at L2493 and {@code 1280-EDIT-US-STATE-ZIP-CD} at L2536 -- belong to
+ * {@link AddressValidationService}, because they read the allow-lists the program obtains by
+ * {@code COPY CSLKPCDY.} at L602 and the reference context owns those tables. Restating either family
  * here would put one rule in two places.</p>
  *
- * <p>Assumptions: representation is NOT decided here. Whether a value arrived at all, whether it fits
- * the column it is stored in, whether an amount converts and whether three parts compose a real day are
- * settled by {@link AccountMapper} and {@link CustomerMapper}, which state that division on their own
- * members. What this class owns is the verdicts the baseline's edit paragraphs reach and the wording
- * they compose. Because the edits run BEFORE either mapper is asked to apply anything, the mappers'
- * own arrival checks are a backstop for a direct caller rather than a second opinion, and the wording a
- * user sees is the baseline's own.</p>
+ * <p>Assumptions: representation is NOT decided here. Whether a value arrived, whether it fits the column
+ * it is stored in, whether an amount converts and whether three parts compose a real day are settled by
+ * {@link AccountMapper} and {@link CustomerMapper}, which state that division on their own members. What
+ * this class owns is the verdicts the baseline's edit paragraphs reach and the wording they compose.
+ * Because the edits run BEFORE either mapper is asked to apply anything, the mappers' own arrival checks
+ * are a backstop for a direct caller rather than a second opinion, and the wording a user sees is the
+ * baseline's own.</p>
  *
  * <h2>Optimistic concurrency already exists in the baseline</h2>
  *
- * <p>Refactoring Rationale: the program implements a before-image comparison by hand, and this class
- * replaces the apparatus while keeping the behaviour. It copies the entire pre-edit record into
- * {@code 05 ACUP-OLD-DETAILS.} at {@code app/cbl/COACTUPC.cbl} L669, a block running to L756 with
- * {@code 05 ACUP-NEW-DETAILS.} beginning at L757, holding each amount twice -- as a display field and
- * as a numeric redefinition, for instance {@code ACUP-OLD-CURR-BAL PIC X(12)} at L675 redefined
- * {@code PIC S9(10)V99} at L676 and L677. It carries the change state in the conditions at L664 to
- * L668. Then, inside the write task, it takes both locks -- the account read for update at L3894 to
- * L3903 and the customer read for update at L3921 to L3930 -- asks its own question in a comment at
- * L3944 to L3946, performs the comparison at L3947 and L3948, and abandons the write at L3950 when the
- * comparison failed. The two locks being taken THERE, while the before-image was captured in an
- * earlier task, is the proof that the file lock was never held across the submitter's thinking time,
- * and that is exactly why the before-image exists at all. The target keeps that property and drops the
- * apparatus: {@link Account} and {@link Customer} each carry a version member the provider compares at
- * flush, so eleven duplicated fields are unnecessary and the comparison is made against a value a read
- * actually established. The commit boundary follows the same route -- {@code EXEC CICS SYNCPOINT} at
- * L952 to L954 becomes the {@link Transactional} boundary on
+ * <p>Refactoring Rationale: the program implements a before-image comparison by hand. It copies the whole
+ * pre-edit record into {@code 05 ACUP-OLD-DETAILS.} at {@code app/cbl/COACTUPC.cbl} L669, holding each
+ * amount twice -- as a display field and as a numeric redefinition -- then, inside the write task, takes
+ * both row locks, performs the field-by-field comparison at L3947 and abandons the write at L3950 when it
+ * failed. The locks being taken THERE, while the before-image was captured in an earlier task, is the
+ * proof that the file lock was never held across the submitter's thinking time, and that is exactly why
+ * the before-image exists at all. The target keeps that property and drops the apparatus:
+ * {@link Account} and {@link Customer} each carry a version member the provider compares at flush, so the
+ * duplicated fields are unnecessary and the comparison is made against a value a read actually
+ * established. {@code EXEC CICS SYNCPOINT} at L952 becomes the {@link Transactional} boundary on
  * {@link #update(long, AccountUpdateRequest, String)}.</p>
  *
- * <p>Refactoring Rationale: the baseline's own rollback discipline is ASYMMETRIC and the two arms
- * collapse into one here. The account rewrite's failure path at {@code app/cbl/COACTUPC.cbl} L4076 to
- * L4081 sets the failure state and leaves the paragraph with no rollback, because nothing had been
- * written yet. The customer rewrite at L4085 to L4091 has the same failure path at L4095 to L4103 but
- * WITH {@code EXEC CICS SYNCPOINT ROLLBACK} at L4099 to L4101, the verb itself on L4100, because by
- * then the account had been written. A single transaction subsumes both arms uniformly: an exception
- * propagates and the provider discards the unit of work, so neither arm needs a rollback statement and
- * neither can be forgotten. No manual rollback call appears in this class for that reason. The
- * collapse changes how the discipline is expressed and not what an observer sees, since neither
- * baseline arm leaves a partial write either, so it is recorded among the structural entries of
- * {@code docs/architecture/cobol-to-service-traceability.md} section 7.3 rather than as a behavioural
- * difference.</p>
+ * <p>Refactoring Rationale: the baseline's rollback discipline is ASYMMETRIC and the two arms collapse
+ * into one here. Its account-rewrite failure path at L4076 carries no rollback, because nothing had been
+ * written; its customer-rewrite failure path at L4095 carries {@code EXEC CICS SYNCPOINT ROLLBACK} at
+ * L4100, because by then the account had been. A single transaction subsumes both arms uniformly: an
+ * exception propagates, the provider discards the unit of work, so neither arm needs a rollback statement
+ * and neither can be forgotten. The collapse changes how the discipline is expressed and not what an
+ * observer sees, since neither baseline arm leaves a partial write either, so it is recorded among the
+ * structural entries of {@code docs/architecture/cobol-to-service-traceability.md} section 7.3 rather
+ * than as a behavioural difference.</p>
  *
  * <p>Trade-offs: the baseline's comparison is CASE-INSENSITIVE over part of the record and the version
  * member is not, so the target refuses a narrow class of concurrent change the baseline would have
- * allowed. Over {@code app/cbl/COACTUPC.cbl} L4109 to L4202 there are exactly two occurrences of the
- * lower-casing function, both at L4139 and L4140 and both wrapping {@code ACCT-GROUP-ID} against its
- * before-image, and eighteen occurrences of the upper-casing function forming nine field pairs at L4152
- * to L4173 -- the three name fields, the three address lines, the state code, the country code and the
- * government-issued identifier. A concurrent writer who changed only the letter case of one of those
- * ten fields would not have made the baseline's comparison fail, and does make the version member
- * advance. The target is therefore STRICTER than the baseline on that input and never looser, which is
- * a statement of which way the difference runs rather than a claim that being strict is desirable. The
- * divergence is registered as {@code D-UPDATE-CASE-SENSITIVE-COMPARE} in
+ * allowed. Ten fields are compared case-folded over {@code app/cbl/COACTUPC.cbl} L4109 to L4202: the
+ * group identifier folded down at L4139 and L4140, and the three name fields, the three address lines,
+ * the state code, the country code and the government-issued identifier folded up at L4152 to L4173. A
+ * concurrent writer who changed only the letter case of one of those ten fields would not have made the
+ * baseline's comparison fail, and does make the version member advance. The target is therefore STRICTER
+ * than the baseline on that input and never looser, which is a statement of which way the difference runs
+ * rather than a claim that being strict is desirable. The divergence is registered as
+ * {@code D-UPDATE-CASE-SENSITIVE-COMPARE} in
  * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
  * <h2>Statelessness</h2>
  *
  * <p>Refactoring Rationale: nothing in this class holds anything between requests, and the baseline's
  * session structure is what had to be decomposed to make that possible. {@code app/cpy/COCOM01Y.cpy}
- * declares a 160-byte {@code CARDDEMO-COMMAREA} at L19 in five groups at L20, L32, L37, L40 and L42.
- * Its navigation fields become the browser's own history; its identity fields, {@code CDEMO-USER-ID}
- * at L25 and {@code CDEMO-USER-TYPE} at L26 with its two conditions at L27 and L28, become validated
- * token claims that a client cannot assert for itself; its selection fields become the request path and
- * query; and its re-entry discriminator at L29, with the conditions at L30 and L31, disappears
- * altogether, because a handler that never holds a previous turn has no first-entry-versus-re-entry
- * distinction to make. The transaction definition corroborates that there was never any task-local
- * storage to carry either: {@code app/csd/CARDDEMO.CSD} L308 declares {@code TWASIZE(0)} for
- * {@code CAUP}. The consequence for this class is direct -- the per-field markers it produces travel in
- * the response body and nowhere else, so a control transfer becomes a client-side route change rather
- * than a server-side redirect, and there is no next-program field anywhere in the target.</p>
+ * declares a 160-byte {@code CARDDEMO-COMMAREA} at L19 in five groups. Its navigation fields become the
+ * browser's own history; its identity fields, {@code CDEMO-USER-ID} at L25 and {@code CDEMO-USER-TYPE} at
+ * L26, become validated token claims that a client cannot assert for itself; its selection fields become
+ * the request path and query; and its re-entry discriminator at L29 disappears altogether, because a
+ * handler that never holds a previous turn has no first-entry-versus-re-entry distinction to make. The
+ * transaction definition corroborates that there was never any task-local storage to carry either:
+ * {@code app/csd/CARDDEMO.CSD} L308 declares {@code TWASIZE(0)} for {@code CAUP}. The consequence for
+ * this class is direct -- the per-field markers it produces travel in the response body and nowhere else,
+ * so a control transfer becomes a client-side route change rather than a server-side redirect, and there
+ * is no next-program field anywhere in the target.</p>
  *
  * <h2>What this class deliberately does not carry</h2>
  *
@@ -244,6 +224,48 @@ public class AccountUpdateService {
      */
     public static final String MESSAGE_ACCOUNT_NOT_ELEVEN_DIGITS =
             "Account Number if supplied must be a 11 digit Non-Zero Number";
+
+    /**
+     * The sentence a submission gets when its account key names an account other than the addressed one.
+     *
+     * <p>Assumptions: this sentence is <b>TARGET-AUTHORED and is not reproduced from the baseline</b>,
+     * because the baseline has no wording for this event to borrow. It is not that the baseline cannot
+     * reach the event: its account-number control stays unprotected after the fetch --
+     * {@code ACCTSID DFHMDF ATTRB=(IC,UNPROT)} at {@code app/bms/COACTUP.bms} L84 -- and the fetched path
+     * does not re-edit it, so an operator who overtypes it reaches the write carrying a key that names
+     * another account. What the baseline does there is discover the disagreement at the FILE rather than
+     * at the field: the rewrite at {@code app/cbl/COACTUPC.cbl} L4066 rewrites the record the task read
+     * for update, so a {@code FROM} area whose prime key differs from that record's key fails instead of
+     * updating another row, and the program reports {@code LOCKED-BUT-UPDATE-FAILED},
+     * {@code 'Update of record failed'} at L523 and L524. That sentence names the operation and not the
+     * control, and the three baseline account-number wordings all describe the key's FORM -- absent, or
+     * not eleven non-zero digits -- so none of the four tells a caller which value to correct. This one
+     * does.</p>
+     *
+     * <p>Assumptions: the wording fits the seventy-five characters that {@code CCARD-ERROR-MSG} at
+     * {@code app/cpy/COCOM01Y.cpy} declares, because the shared message band renders this channel at
+     * that width and a longer sentence would be truncated by the presentation rather than by
+     * anything here.</p>
+     */
+    public static final String MESSAGE_ACCOUNT_KEY_NOT_ADDRESSED =
+            "Account number must match the account being updated";
+
+    /**
+     * The sentence a submission gets when its customer key names another customer, or names none.
+     *
+     * <p>Assumptions: this sentence is <b>TARGET-AUTHORED</b> for the same reason as the one above, and
+     * additionally it is the ONLY sentence this edit has -- one wording covers an absent key, a
+     * malformed one and one that names a different customer. The baseline has no wording for any of the
+     * three: its only customer-key message is a read diagnostic naming the identifier and the file
+     * response codes, composed at {@code app/cbl/COACTUPC.cbl} L3773 to L3783 when the customer master
+     * has no such row, which describes a different event entirely. Alternatives Considered: authoring
+     * three sentences shaped like the account key's, one per case. Rejected because it would invent a
+     * family of baseline-looking wordings that the baseline does not have, and the distinction between
+     * them carries nothing a caller can act on differently -- in all three cases the remedy is to submit
+     * the customer the account holds.</p>
+     */
+    public static final String MESSAGE_CUSTOMER_KEY_NOT_LOADED =
+            "Customer number must match the customer this account holds";
 
     /**
      * The sentence the driver latches when the submission changes nothing.
@@ -667,24 +689,30 @@ public class AccountUpdateService {
     }
 
     /**
-     * Reads the revision token a caller must return on its next update of this account.
+     * ⚠️ Refactoring Rationale: a public {@code currentRevision(long)} operation was REMOVED from this
+     * class and is not coming back. It read both rows in a read-only transaction of its own and returned
+     * the token they stood at, and {@code AccountController} called it TWICE -- once after the view had
+     * been composed by the read service, and once after this method had committed -- so the body a caller
+     * received and the entity tag beside it were read in two different transactions. At this datasource's
+     * read-committed isolation that is two snapshots: a concurrent edit committing between them published
+     * a body from before it beside a tag naming the state after it, and a caller echoing that tag on an
+     * {@code If-Match} was then told its precondition was current while holding a body that was not --
+     * exactly the silent overwrite the precondition exists to prevent. On the update path it was worse
+     * still, because the second read could observe a THIRD party's edit committed after this one, so a
+     * caller performing consecutive edits received a tag naming a state it had never been shown.
      *
-     * <p>Assumptions: the token is DERIVED from the two rows on every read and is never stored, so it
-     * cannot drift from the value the provider will compare at flush. Persisting one would create a
-     * second source of truth for the same fact, and the two could then disagree about whether a row had
-     * moved.</p>
+     * <p>Assumptions: both routes now obtain the token from the rows they have already read.
+     * {@link #update} answers with {@link RevisionedAccountUpdate}, whose token is derived from the
+     * managed rows after the flush, and the read service answers with its own carrier derived inside its
+     * single statement. {@link AccountRevision} owns the format so the two cannot disagree about it.
      *
-     * @param accountId the account whose revision is required
-     * @return the opaque revision token covering the account and its customer, never {@code null}
-     * @throws NoSuchElementException if the account has no row, has no cross-reference row, or names a
-     *     customer the customer master does not hold
+     * <p>Alternatives Considered: keeping the operation for a caller that holds no tag and needs a bare
+     * precondition. Rejected because no such caller exists -- both published routes now return the tag
+     * with the body -- and a production method whose only remaining callers are tests is dead weight that
+     * invites the two-transaction pattern back. The tests that needed a precondition now derive it from
+     * their own fixture rows through {@link AccountRevision#of}, which is a stronger arrangement: they no
+     * longer ask the object under test to supply the input it is being tested against.
      */
-    @Transactional(readOnly = true)
-    public String currentRevision(long accountId) {
-        Account account = loadAccount(accountId);
-        Customer customer = loadCustomer(accountId);
-        return revisionOf(account, customer);
-    }
 
     /**
      * Edits a submitted change, applies it to both rows and commits, or refuses it.
@@ -705,22 +733,20 @@ public class AccountUpdateService {
      * baseline would never have carried as far as the comparison.</p>
      *
      * <p>Refactoring Rationale: the WRITE is one transaction and no rollback is ever called by hand.
-     * {@code EXEC CICS SYNCPOINT} at {@code app/cbl/COACTUPC.cbl} L952 to L954 is the commit, and the
-     * baseline's two rewrite failure paths handle rollback asymmetrically -- the account arm at L4076 to
-     * L4081 has none because nothing had been written, the customer arm at L4095 to L4103 has one at L4099
-     * to L4101 with the verb on L4100 because the account had. A single boundary subsumes both: an
-     * exception propagates, the provider discards the unit of work, and there is no rollback statement to
-     * place correctly or to forget.</p>
+     * {@code EXEC CICS SYNCPOINT} at {@code app/cbl/COACTUPC.cbl} L952 is the commit, and the baseline's
+     * two rewrite failure paths handle rollback asymmetrically, so a single boundary subsumes both arms:
+     * an exception propagates, the provider discards the unit of work, and there is no rollback statement
+     * to place correctly or to forget.</p>
      *
-     * <p>Refactoring Rationale: what that boundary does NOT contain any more is the edits. This method was
-     * a single transaction spanning the reads, the edits and the write, and the edits issue up to four
-     * synchronous calls to {@code reference-service}, so a connection and two row locks were held across
-     * that many network round trips. It is now three phases -- a short read-only load, the edits with no
-     * transaction open, then a short write that re-reads both rows and re-checks the precondition against
-     * what it re-read. Trade-offs: the rows are read twice and a concurrent update committing between the
-     * two reads is answered as a conflict where it previously would have been answered as one too, by the
-     * version column; what is bought is that a slow or unreachable reference-service can no longer hold
-     * this service's connections or block another writer of the same two rows.</p>
+     * <p>Refactoring Rationale: that boundary excludes the EDITS. The work runs as three phases -- a short
+     * read-only load, the edits with no transaction open, then a short write that re-reads both rows and
+     * re-checks the precondition against what it re-read. Alternatives Considered: one transaction
+     * spanning the reads, the edits and the write. Rejected because the edits issue up to four synchronous
+     * calls to {@code reference-service}, so that arrangement holds a connection and two row locks across
+     * that many network round trips, and a slow or unreachable {@code reference-service} then consumes
+     * this service's connections and blocks every other writer of the same two rows. Trade-offs: the rows
+     * are read twice, and a concurrent update committing between the two reads is answered as a conflict
+     * -- which is the answer the version column reaches under either arrangement.</p>
      *
      * <p>Assumptions: both rows are written inside that one boundary because the baseline rewrites both
      * inside one unit of work and commits once. Splitting them would make a state observable that the
@@ -731,7 +757,8 @@ public class AccountUpdateService {
      * @param request the submitted change, an {@link AccountUpdateRequest}; must not be {@code null}
      * @param expectedRevision the revision token the caller was given, from a precondition header;
      *     must not be {@code null}
-     * @return the committed state with its aggregate message, an {@link AccountUpdateResponse}, never
+     * @return the committed state with its aggregate message and the revision the rows now stand at, a
+     *     {@link RevisionedAccountUpdate}, never
      *     {@code null}
      * @throws NullPointerException if {@code request} or {@code expectedRevision} is {@code null}
      * @throws NoSuchElementException if the account or its customer is absent
@@ -745,19 +772,17 @@ public class AccountUpdateService {
      * @throws org.springframework.dao.OptimisticLockingFailureException if either row moves between
      *     this transaction's read and its flush, which the shared advice renders as the same conflict
      */
-    public AccountUpdateResponse update(long accountId, AccountUpdateRequest request,
+    public RevisionedAccountUpdate update(long accountId, AccountUpdateRequest request,
             String expectedRevision) {
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(expectedRevision, "expectedRevision must not be null");
 
         // WHY : Refactoring Rationale: the rows the edits compare against are read in a short READ-ONLY
-        //       unit of work that ends before any remote validation is issued. This method was one
-        //       transaction spanning the reads, the edits and the write, and the edits issue up to four
+        //       unit of work that ends before any remote validation is issued. The edits issue up to four
         //       synchronous calls to reference-service -- the state allow-list, two telephone checks and
-        //       the state-with-postal-prefix pairing -- so a database connection and two row locks were
-        //       held across that many network round trips. A reference-service that answers slowly, or not
-        //       at all, therefore consumed this service's connection pool and blocked every other writer
-        //       of the same two rows for as long as it took to time out.
+        //       the state-with-postal-prefix pairing -- so holding this read open across them would pin a
+        //       database connection and two row locks for as long as the slowest of those calls takes to
+        //       answer or to time out.
         LoadedPair loaded = this.readTransaction.execute(status ->
                 new LoadedPair(loadAccount(accountId), loadCustomer(accountId)));
         LoadedPair before = Objects.requireNonNull(loaded,
@@ -769,7 +794,7 @@ public class AccountUpdateService {
         EditVerdict verdict = editMapInputs(request, before.account(), before.customer());
         refuseWhenAnyEditFailed(verdict);
 
-        AccountUpdateResponse written = this.writeTransaction.execute(status -> {
+        RevisionedAccountUpdate written = this.writeTransaction.execute(status -> {
 
             // WHY : Refactoring Rationale: both rows are RE-READ inside the write transaction rather than
             //       the rows read above being reattached, and the revision is checked against the re-read
@@ -802,14 +827,48 @@ public class AccountUpdateService {
             //       L1769 reaching the condition at L491 and L492, and the condition at L527 and L528.
             //       Emitting the accepted sentence on both paths would tell a user that a submission
             //       which changed nothing had changed something.
-            return this.accountMapper.toAccountUpdateResponse(account,
+            AccountUpdateResponse body = this.accountMapper.toAccountUpdateResponse(account,
                     this.customerMapper.toCustomerDetail(customer),
                     verdict.noChangesFound() ? MESSAGE_NO_CHANGES_DETECTED : MESSAGE_UPDATE_ACCEPTED,
                     List.of());
+
+            // WHY : ⚠️ Refactoring Rationale: the new revision is derived HERE, from the two managed rows
+            //       inside this same callback, and it is correct only because the two forced flushes above
+            //       have already run -- the provider advances each @Version column as it writes the row, so
+            //       reading them before the flush would publish the PRE-edit token and every caller's next
+            //       edit would be refused as stale. The caller used to obtain this token from a second
+            //       read-only transaction issued after this one had committed, which could observe a third
+            //       party's edit and hand back a state the caller had never been shown.
+            // WHY : Assumptions: the derivation goes through AccountRevision rather than being written out,
+            //       so this token and the one the read path publishes cannot differ in format. A caller
+            //       receives one from either route and returns it to this method, which compares it through
+            //       the same owner.
+            return new RevisionedAccountUpdate(body, AccountRevision.of(account, customer));
         });
 
         return Objects.requireNonNull(written,
                 "the write transaction returned no response, which its callback cannot do");
+    }
+
+    /**
+     * A committed update together with the revision its rows now stand at.
+     *
+     * <p>Purpose: the two members are produced by ONE transaction and travel together for that reason.
+     * The response is what the caller renders and the revision is what it must return on its next edit,
+     * and the whole point of pairing them is that a caller cannot be given one that describes a different
+     * state from the other.</p>
+     *
+     * <p>Assumptions: this is a service-layer carrier and NOT a published wire shape. It is declared here
+     * rather than in the transfer-object package because nothing serialises it -- the adapter unpacks it,
+     * putting the response in the body and the revision in an {@code ETag} header -- so adding it to the
+     * closed transfer-object inventory would describe it as something a client receives.</p>
+     *
+     * @param response the committed state and its aggregate message, as the caller renders it; never
+     *     {@code null}
+     * @param revision the token both rows stand at after the flush, which the caller returns on its next
+     *     edit of this account; never {@code null}
+     */
+    public record RevisionedAccountUpdate(AccountUpdateResponse response, String revision) {
     }
 
     /**
@@ -880,6 +939,30 @@ public class AccountUpdateService {
         if (fetchedAccount == null || fetchedCustomer == null) {
             latch.record("accountId", editAccountKey(request.accountId()));
             return latch.toVerdict(false);
+        }
+
+        // WHY : Refactoring Rationale: the two submitted KEY components are edited here, on the path
+        //       where rows WERE fetched, and they previously were not edited at all -- the only key
+        //       edit was the one above, on the branch an absent row selects, and the customer key was
+        //       never edited on any path. What that left was not a missing convenience but a wrong
+        //       outcome: both keys participate in compareOldNew below, so an omitted or mismatched key
+        //       made the comparison report a CHANGE, the edits then passed because every non-key field
+        //       matched, the mappers wrote the two rows back unchanged because neither assigns a key,
+        //       and the response carried the accepted sentence where the no-change sentence was the
+        //       true answer. A caller could therefore turn "nothing changed" into "update accepted" by
+        //       omitting one field.
+        // WHY : Assumptions: the edits are recorded BEFORE the comparison rather than alongside the
+        //       other field edits below, because the comparison is what a wrong key corrupts. Editing
+        //       them after it would leave the corrupted verdict already taken. Assumptions: they are
+        //       compared against the FETCHED ROWS rather than against a path parameter, because this
+        //       method is public and takes the rows -- the update path loads them by the addressed
+        //       identifier, so for that caller the two are the same value, and for any other caller the
+        //       rows are the only thing that can define what "the addressed account" means.
+        latch.record("accountId", editAccountKeyNamesRow(request.accountId(), fetchedAccount));
+        latch.record("customerId", editCustomerKeyNamesRow(request.customerId(), fetchedCustomer));
+        EditVerdict keyVerdict = latch.toVerdict(false);
+        if (keyVerdict.inputError()) {
+            return keyVerdict;
         }
 
         if (compareOldNew(request, fetchedAccount, fetchedCustomer)) {
@@ -994,11 +1077,10 @@ public class AccountUpdateService {
     /**
      * Edits the account key, as {@code 1210-EDIT-ACCOUNT} does at L1783 to L1820.
      *
-     * <p>Three verdicts in the paragraph's order. It initialises to not-acceptable at
-     * {@code app/cbl/COACTUPC.cbl} L1784. It tests for an absent value at L1787 and L1788, marks it
-     * absent at L1790 and latches the declared sentence at L1792. Otherwise it tests at L1802 and L1803
-     * that the value is numeric and is not zero, latching the built sentence at L1806 to L1810 when
-     * either fails, and marks the key acceptable at L1816.</p>
+     * <p>Three verdicts in the paragraph's order. It initialises to not-acceptable, tests for an absent
+     * value, marks it absent and latches the declared sentence. Otherwise it tests that the value is
+     * numeric and is not zero, latching the built sentence when either fails, and marks the key
+     * acceptable.</p>
      *
      * <p>Assumptions: a value WIDER than the eleven characters the field declares is refused here rather
      * than truncated to width, and this is the one edit where that decision is taken locally. The
@@ -1007,19 +1089,21 @@ public class AccountUpdateService {
      * it loaded. Since the sentence the paragraph composes names eleven digits, refusing the value is
      * the reading that keeps the sentence true.</p>
      *
-     * <p>Assumptions: the submitted key is edited but is NOT compared against the key the caller
-     * addressed. The baseline has one key and reads the record by it; the target addresses the row by
-     * path and the mapper does not assign the submitted value, so a disagreement between the two cannot
-     * relocate a row. Adding a comparison would introduce a refusal the baseline has no counterpart
-     * for.</p>
+     * <p>Refactoring Rationale: the submitted key is no longer compared against a second key, because
+     * there is no longer a second key to compare it with. This edit used to be documented as deliberately
+     * NOT comparing the submitted value against the one the caller addressed, on the ground that the
+     * mapper never assigns the submitted value so a disagreement could not relocate a row -- a true but
+     * uncomfortable position, since it left one operation with two spellings of its own subject. The
+     * update moved to {@code POST /api/v1/accounts/update} to keep the identifier out of the request
+     * line, and its adapter now derives the row it loads FROM this edit's input, so the target has one
+     * key exactly as the baseline does and the divergence is closed rather than reasoned about.</p>
      *
      * <p>Assumptions: this edit belongs to the FIRST of the program's two marker encodings, and the two
-     * are not interchangeable. Its own marker is declared at {@code app/cbl/COACTUPC.cbl} L183 with the
-     * acceptable byte a digit one at L184, the not-acceptable byte a digit zero at L185 and the absent
-     * byte a SPACE at L186; the customer key filter beside it repeats that spelling exactly at L187 to
-     * L190. Every non-key screen field instead sits in the group at L191 running to L352, where the
-     * absent byte is the letter B and the acceptable byte varies per field -- the two letters at L193 and
-     * L350, the low-value byte at L197 and L346. Returning a state rather than a byte is what lets both
+     * are not interchangeable. The two key filters spell acceptable as a digit one, not-acceptable as a
+     * digit zero and absent as a SPACE, declared at {@code app/cbl/COACTUPC.cbl} L183 to L190. Every
+     * non-key screen field instead sits in the group beginning at L191, where the absent byte is the
+     * letter B and the acceptable byte varies per field -- two of them a letter, the rest the low-value
+     * byte. Returning a state rather than a byte is what lets both
      * encodings survive in one type: the shared marker admits the digit one and the space as alternate
      * spellings of acceptable and absent, so neither regime has to be rewritten into the other and
      * neither is silently flattened.</p>
@@ -1044,11 +1128,108 @@ public class AccountUpdateService {
     }
 
     /**
+     * Edits the submitted account key for form and then requires it to name the fetched account.
+     *
+     * <p>Purpose: to restore, on the path where a row was fetched, the invariant the baseline holds
+     * structurally. Its screen has ONE account-number field: the value it fetched by and the value it
+     * submits are the same field, so "the account addressed" and "the account submitted" cannot disagree
+     * there without the user re-keying the field. A request body carrying a key beside a path parameter
+     * can disagree freely, and this edit is what closes that gap.</p>
+     *
+     * <p>Assumptions: the FORM edit runs first and its two baseline-verbatim sentences are preserved for
+     * the cases they describe -- an absent key and one that is not eleven non-zero digits. Only a
+     * well-formed key that names a different account reaches the target-authored sentence, so a caller
+     * who simply left the field out still sees the wording the baseline shows for that.</p>
+     *
+     * <p>Assumptions: the comparison is NUMERIC and not textual, so a key padded to its declared width
+     * and the same key typed without padding both name the same account. The baseline's own key field is
+     * {@code PIC X(11)} redefined as {@code PIC 9(11)} at {@code app/cbl/COACTUPC.cbl} L759 to L761, so
+     * both spellings are values of one field there too, and a textual comparison would refuse a
+     * submission the baseline accepts.</p>
+     *
+     * <p>Assumptions: the refusal runs in the SAME DIRECTION as the baseline's and differs only in when
+     * it happens and what it says. An overtyped key reaches the baseline's rewrite at
+     * {@code app/cbl/COACTUPC.cbl} L4066, which rewrites the record the task read for update and
+     * therefore fails rather than relocating the row, reporting {@code 'Update of record failed'} from
+     * L523 and L524 and rolling back at L4100 to L4102. Nothing is written in either system; the target
+     * simply names the control at the edit stage instead of naming the operation at the file, which is
+     * the whole of the difference registered as {@code D-UPDATE-BODY-KEY-MUST-NAME-ROW}. Assumptions: the
+     * target cannot reproduce the late discovery even if it wanted to, because its write is a rewrite of
+     * the rows the repository loaded and neither mapper assigns a key, so there is no key-change fault
+     * for the store to raise -- which is why the edit stage is the only place the disagreement can be
+     * answered at all.</p>
+     *
+     * <p>Assumptions: this edit is the reason the key comparison inside the old-versus-new test is now
+     * provably redundant on this path rather than load-bearing. It is nonetheless left in place, because
+     * that test is the transcription of the condition at {@code app/cbl/COACTUPC.cbl} L1684 to L1700 and
+     * dropping one of its eleven comparisons would make the transcription no longer readable against the
+     * paragraph it came from.</p>
+     *
+     * @param accountId the submitted account key as it arrived, which may be padded, short, over-wide,
+     *     blank or {@code null}
+     * @param fetchedAccount the account row the caller addressed and read; must not be {@code null}
+     * @return the verdict, carrying no wording when the key is well formed and names that row, an
+     *     {@link EditOutcome} that is never {@code null}
+     * @throws NullPointerException if {@code fetchedAccount} is {@code null}
+     */
+    public EditOutcome editAccountKeyNamesRow(String accountId, Account fetchedAccount) {
+        Objects.requireNonNull(fetchedAccount, "fetchedAccount must not be null");
+
+        EditOutcome form = editAccountKey(accountId);
+        if (!form.state().isValid()) {
+            return form;
+        }
+
+        return sameNumber(accountId, fetchedAccount.getAccountId())
+                ? EditOutcome.acceptable()
+                : EditOutcome.notAcceptable(MESSAGE_ACCOUNT_KEY_NOT_ADDRESSED);
+    }
+
+    /**
+     * Requires the submitted customer key to name the customer the addressed account holds.
+     *
+     * <p>Purpose: to close the same gap for the second key. The customer is not addressed by the caller
+     * at all -- it is reached from the account through the by-account cross-reference, the migrated form
+     * of the path the baseline reads as a file -- so the submitted customer key is the one component of
+     * the request that names a row the caller did not select. Left unedited it participated in the
+     * old-versus-new comparison and in nothing else.</p>
+     *
+     * <p>Assumptions: ONE sentence covers an absent key, a malformed one and one naming a different
+     * customer, and the absence case is reported with the ABSENT marker while the other two carry the
+     * not-acceptable marker. The two markers are the baseline's own two spellings for a key filter, at
+     * {@code app/cbl/COACTUPC.cbl} L187 to L190, so the distinction that survives is the one the
+     * baseline draws even though the wording is the target's.</p>
+     *
+     * <p>Assumptions: the comparison is numeric, for the reason recorded on the account key above --
+     * the baseline's field is {@code PIC X(09)} redefined as {@code PIC 9(09)} at
+     * {@code app/cbl/COACTUPC.cbl} L798 to L800, so a padded and an unpadded spelling are one value.</p>
+     *
+     * @param customerId the submitted customer key as it arrived, which may be padded, short, blank or
+     *     {@code null}
+     * @param fetchedCustomer the customer row the addressed account resolved to; must not be
+     *     {@code null}
+     * @return the verdict, carrying no wording when the key names that row, an {@link EditOutcome} that
+     *     is never {@code null}
+     * @throws NullPointerException if {@code fetchedCustomer} is {@code null}
+     */
+    public EditOutcome editCustomerKeyNamesRow(String customerId, Customer fetchedCustomer) {
+        Objects.requireNonNull(fetchedCustomer, "fetchedCustomer must not be null");
+
+        if (FieldValidationFlag.isNeverSupplied(customerId)) {
+            return EditOutcome.blank(MESSAGE_CUSTOMER_KEY_NOT_LOADED);
+        }
+
+        return sameNumber(customerId, fetchedCustomer.getCustomerId())
+                ? EditOutcome.acceptable()
+                : EditOutcome.notAcceptable(MESSAGE_CUSTOMER_KEY_NOT_LOADED);
+    }
+
+
+    /**
      * Edits a field that must merely be present, as {@code 1215-EDIT-MANDATORY} does at L1824 to L1852.
      *
-     * <p>The paragraph initialises to not-acceptable at {@code app/cbl/COACTUPC.cbl} L1826, applies the
-     * three-armed absence test at L1829 to L1834, marks the field absent at L1837 and composes the
-     * sentence at L1839 to L1844, and otherwise marks it acceptable at L1850. It examines no character
+     * <p>The paragraph initialises to not-acceptable, applies the three-armed absence test, marks the
+     * field absent and composes the sentence, and otherwise marks it acceptable. It examines no character
      * class at all, which is why it is the edit the first address line uses.</p>
      *
      * <p>Assumptions: the baseline's three arms collapse into the shared absence test, and the collapse
@@ -1077,10 +1258,9 @@ public class AccountUpdateService {
     /**
      * Edits a two-state marker, as {@code 1220-EDIT-YESNO} does at L1856 to L1894.
      *
-     * <p>The paragraph tests for an absent value at {@code app/cbl/COACTUPC.cbl} L1861 to L1863, marks
-     * it absent at L1865 and composes the shared absence sentence at L1867 to L1872. It then tests the
-     * value against its admitted set at L1878, marking it not-acceptable at L1882 and composing the
-     * sentence at L1884 to L1889.</p>
+     * <p>The paragraph tests for an absent value, marks it absent and composes the shared absence
+     * sentence. It then tests the value against its admitted set, marking it not-acceptable and composing
+     * its own sentence.</p>
      *
      * <p>Assumptions: the absence test has a THIRD arm the other edits do not have -- L1863 tests the
      * field against zeros, which for a one-character alphanumeric field means the digit zero -- so a
@@ -1089,11 +1269,12 @@ public class AccountUpdateService {
      *
      * <p>Assumptions: the marker this edit yields is the SEMANTIC state and not the byte the baseline
      * moves, and the difference matters for this edit alone. The baseline's marker field for a two-state
-     * value holds the VALUE itself -- the driver moves it at L1476 and again at L1662 -- which is why the
-     * acceptable condition for those two fields lists the two letters at L193 and L350 while every other
-     * field's lists the low-value byte at L197 and L346. That is also why the paragraph's own
-     * initialisation at L1858 is commented out: setting a not-acceptable byte would have destroyed the
-     * value the field was carrying. Returning a state rather than a byte removes the overloading, and the
+     * value holds the VALUE itself -- its driver moves the value into the marker -- which is why the
+     * acceptable condition for those two fields lists a letter where every other field's lists the
+     * low-value byte, and why the paragraph's own initialisation at
+     * {@code app/cbl/COACTUPC.cbl} L1858 is commented out: setting a not-acceptable byte would have
+     * destroyed the value the field was carrying. Returning a state rather than a byte removes the
+     * overloading, and the
      * shared marker type admits both spellings explicitly so neither regime is lost.</p>
      *
      * @param label the field label the sentence is prefixed with; must not be {@code null}
@@ -1119,11 +1300,10 @@ public class AccountUpdateService {
     /**
      * Edits a required letters-only field, as {@code 1225-EDIT-ALPHA-REQD} does at L1898 to L1951.
      *
-     * <p>The paragraph initialises to not-acceptable at {@code app/cbl/COACTUPC.cbl} L1900, applies the
-     * three-armed absence test at L1903 to L1908 and composes the shared absence sentence at L1913 to
-     * L1918. It then converts every acceptable character to a space at L1925 to L1928 and tests whether
-     * anything is left at L1930 to L1933, composing its own sentence at L1939 to L1944 when something
-     * is, and marks the field acceptable at L1949.</p>
+     * <p>The paragraph initialises to not-acceptable, applies the three-armed absence test and composes
+     * the shared absence sentence. It then converts every acceptable character to a space and tests
+     * whether anything is left, composing its own sentence when something is, and marks the field
+     * acceptable.</p>
      *
      * <p>Alternatives Considered: the character-class test is written as a direct membership test rather
      * than as the baseline's strip-and-measure. The baseline strips because it has no membership operator
@@ -1156,10 +1336,9 @@ public class AccountUpdateService {
      * Edits a required letters-or-digits field, as {@code 1230-EDIT-ALPHANUM-REQD} does at L1955 to
      * L2009.
      *
-     * <p>The paragraph is the letters-only edit with a wider admitted set: the absence test at
-     * {@code app/cbl/COACTUPC.cbl} L1960 to L1965, the conversion at L1982 to L1986 over the
-     * sixty-two characters declared at L586 to L593, the residue test at L1988 to L1991 and its own
-     * sentence at L1997 to L2002.</p>
+     * <p>The paragraph is the letters-only edit with a wider admitted set: the same absence test, then a
+     * conversion over the sixty-two characters declared at {@code app/cbl/COACTUPC.cbl} L586 to L593, the
+     * residue test and its own sentence.</p>
      *
      * <p>Assumptions: this edit is DEFINED in the baseline and performed nowhere in it -- no statement
      * anywhere in the program performs it, while the eight other generic edits are performed
@@ -1190,10 +1369,9 @@ public class AccountUpdateService {
      * Edits an optional letters-only field, as {@code 1235-EDIT-ALPHA-OPT} does at L2012 to L2057.
      *
      * <p>The paragraph differs from its required counterpart in one branch and one branch only: where
-     * the required edit reports an absent value, this one marks the field ACCEPTABLE at
-     * {@code app/cbl/COACTUPC.cbl} L2024 and leaves at L2025. Everything after that is identical -- the
-     * conversion at L2031 to L2034, the residue test at L2036 to L2039 and the same sentence at L2044 to
-     * L2050. It is the edit the middle name uses.</p>
+     * the required edit reports an absent value, this one marks the field ACCEPTABLE and leaves.
+     * Everything after that is identical -- the same conversion, the same residue test and the same
+     * sentence. It is the edit the middle name uses.</p>
      *
      * @param label the field label the sentence is prefixed with; must not be {@code null}
      * @param value the submitted value as it arrived, which may be padded, short, blank or {@code null}
@@ -1218,9 +1396,8 @@ public class AccountUpdateService {
      * Edits an optional letters-or-digits field, as {@code 1240-EDIT-ALPHANUM-OPT} does at L2061 to
      * L2105.
      *
-     * <p>The paragraph marks an absent field acceptable at {@code app/cbl/COACTUPC.cbl} L2072 and leaves
-     * at L2073, then applies the wider conversion at L2079 to L2082, the residue test at L2084 to L2087
-     * and its sentence at L2092 to L2098.</p>
+     * <p>The paragraph marks an absent field acceptable and leaves, then applies the wider conversion,
+     * the residue test and its sentence.</p>
      *
      * <p>Assumptions: like its required counterpart this edit is defined in the baseline and performed
      * nowhere in it, and it is migrated for the same reason -- so that the paragraph set maps one to one
@@ -1248,10 +1425,9 @@ public class AccountUpdateService {
     /**
      * Edits a required non-zero digits-only field, as {@code 1245-EDIT-NUM-REQD} does at L2109 to L2176.
      *
-     * <p>Three verdicts in the paragraph's order: the absence test at {@code app/cbl/COACTUPC.cbl} L2114
-     * to L2119 with the shared sentence at L2124 to L2129; the digits-only test at L2137 and L2138 with
-     * its own sentence at L2144 to L2149; and the non-zero test at L2156 and L2157 with its sentence at
-     * L2161 to L2166. It is the most reused of the eight generic edits: the driver performs it for the
+     * <p>Three verdicts in the paragraph's order: the absence test with the shared sentence, the
+     * digits-only test with its own sentence, and the non-zero test with its sentence. It is the most
+     * reused of the eight generic edits: the driver performs it for the
      * credit score, the postal code and the funds-transfer account, and the identifier edit performs it
      * three times more.</p>
      *
@@ -1290,9 +1466,8 @@ public class AccountUpdateService {
     /**
      * Edits a signed amount, as {@code 1250-EDIT-SIGNED-9V2} does at L2180 to L2221.
      *
-     * <p>Two verdicts in the paragraph's order: the absence test at {@code app/cbl/COACTUPC.cbl} L2184
-     * and L2185 with the shared sentence at L2189 to L2194, and the shape test at L2201 with its own
-     * sentence at L2207 to L2211. The driver performs it for all five amounts on the screen.</p>
+     * <p>Two verdicts in the paragraph's order: the absence test with the shared sentence, and the shape
+     * test with its own sentence. The driver performs it for all five amounts on the screen.</p>
      *
      * <p>Assumptions: the shape test is delegated to the account mapper's own accepted-amount predicate
      * rather than restated, because the shape an amount must have is a representation fact and that
@@ -1327,11 +1502,10 @@ public class AccountUpdateService {
      * Edits the three parts of the national identifier, as {@code 1265-EDIT-US-SSN} does at L2431 to
      * L2489.
      *
-     * <p>The paragraph edits each part with the required non-zero digits-only edit, performing it at
-     * {@code app/cbl/COACTUPC.cbl} L2442 for the first part at length three, L2472 for the second at
-     * length two and L2484 for the third at length four, each under its own label set at L2439, L2469
-     * and L2481. Those three are the only invocations of a generic edit anywhere outside the driver, and
-     * they are why the driver's own count of them is twenty-four rather than the file's twenty-seven.</p>
+     * <p>The paragraph edits each part with the required non-zero digits-only edit, at length three for
+     * the first part, two for the second and four for the third, each under its own field label. Those
+     * three are the only invocations of a generic edit anywhere outside the driver, and they are why the
+     * driver's own count of them is twenty-four rather than the program's twenty-seven.</p>
      *
      * <p>Assumptions: the FIRST part carries a second, value-domain test that the other two do not --
      * the refused-prefix condition declared at L121 to L123 -- and it is guarded on the digits-only edit
@@ -1370,9 +1544,9 @@ public class AccountUpdateService {
     /**
      * Edits the credit score's range, as {@code 1275-EDIT-FICO-SCORE} does at L2514 to L2531.
      *
-     * <p>The paragraph tests one condition at {@code app/cbl/COACTUPC.cbl} L2515 -- the range declared
-     * at L848 and L849 over the numeric redefinition at L846 and L847 -- marks the field
-     * not-acceptable at L2519 and composes its sentence at L2521 to L2526.</p>
+     * <p>The paragraph tests one condition -- the range declared at {@code app/cbl/COACTUPC.cbl} L848
+     * and L849 over the numeric redefinition beside it -- then marks the field not-acceptable and
+     * composes its sentence.</p>
      *
      * <p>Assumptions: this edit assumes the digits-only edit has already passed, which is the guard the
      * driver applies at L1553. A value that is not three digits therefore yields the not-acceptable
@@ -1521,16 +1695,14 @@ public class AccountUpdateService {
      * array is the migrated form of the per-field marker group declared at {@code app/cbl/COACTUPC.cbl}
      * L191 and running to L352, which the presentation template at {@code app/cpy/CSSETATY.cpy} L17 to
      * L27 renders onto the screen. That template is invoked THIRTY-NINE times in the program, each time
-     * with the three substitution placeholders filled for one screen field -- the pattern is visible at
-     * {@code app/cbl/COACTUPC.cbl} L3208 to L3211, where the marker, the screen field and the mapset are
-     * substituted in that order -- and thirty-nine exceeds the marker count because a decomposed date is
-     * highlighted one part at a time. An array carries all of them, so the entry count is not capped by
-     * anything here. The remaining three come from the program again: the sentence is the
+     * with the three substitution placeholders filled for one screen field -- the marker, the screen
+     * field and the mapset, in that order -- and thirty-nine exceeds the marker count because a
+     * decomposed date is highlighted one part at a time. An array carries all of them, so the entry count
+     * is not capped by anything here. The remaining three come from the program again: the sentence is the
      * seventy-five-character message field declared at {@code app/cbl/COACTUPC.cbl} L479; the failure
-     * switch is {@code WS-INPUT-FLAG} declared at L171 with its acceptable condition at L172, which the
-     * driver sets at L1431 and which its own tail tests at L1671; and the no-change marker is
-     * {@code WS-DATACHANGED-FLAG} declared at L168 with its two conditions at L169 and L170. Returning
-     * them together is what makes the driver testable without a screen.</p>
+     * switch is {@code WS-INPUT-FLAG} at L171, which the driver clears on entry and tests on its tail;
+     * and the no-change marker is {@code WS-DATACHANGED-FLAG} at L168. Returning them together is what
+     * makes the driver testable without a screen.</p>
      *
      * @param fieldErrors one entry per offending request property, in the order the driver encountered
      *     them; never {@code null}, always unmodifiable, and empty exactly when nothing failed
@@ -1702,14 +1874,6 @@ public class AccountUpdateService {
     }
 
     /**
-     * Separates the two version numbers inside one revision token.
-     *
-     * <p>Assumptions: a character that cannot occur in a decimal version, so the token stays unambiguous
-     * however large either version grows.</p>
-     */
-    private static final String REVISION_SEPARATOR = "-";
-
-    /**
      * The letters the baseline admits in a letters-only field.
      *
      * <p>Assumptions: the two halves are the values of the fields declared at
@@ -1754,9 +1918,8 @@ public class AccountUpdateService {
      *
      * <p>Assumptions: the date edits are the shared kernel's, because the baseline obtains them from a
      * shared copybook by {@code COPY 'CSUTLDWY'.} at {@code app/cbl/COACTUPC.cbl} L166 rather than
-     * declaring them, and it performs the same routine for all four of its date fields -- at L1479 to
-     * L1482, L1491 to L1494, L1504 to L1507 and L1536 to L1538. Restating the calendar rules here would
-     * put one shared routine in two places.</p>
+     * declaring them, and it performs that one routine for all four of its date fields. Restating the
+     * calendar rules here would put one shared routine in two places.</p>
      *
      * <p>Assumptions: the range edit runs only when the general edit has already passed, which is the
      * guard at L1539 immediately before the performance at L1540 and L1541. The shared validator states
@@ -2050,10 +2213,9 @@ public class AccountUpdateService {
      * Answers whether the submission changes nothing, as {@code 1205-COMPARE-OLD-NEW} decides at L1681
      * to L1777.
      *
-     * <p>The paragraph presets the no-change marker at {@code app/cbl/COACTUPC.cbl} L1682, compares the
-     * account region in one condition at L1684 to L1700 and the customer region in a second at L1708 to
-     * L1768, and sets the change marker at L1703 or L1771 the moment either condition fails, leaving by
-     * its own exit at L1704 or L1772 for the paragraph exit at L1777.</p>
+     * <p>The paragraph presets the no-change marker, compares the account region in one condition at
+     * {@code app/cbl/COACTUPC.cbl} L1684 to L1700 and the customer region in a second at L1708 to L1768,
+     * and sets the change marker the moment either condition fails.</p>
      *
      * <p>Assumptions: the split into two conditions is carried across as two predicates because the
      * split follows the two RECORDS. The baseline writes no comment saying so, but the boundary is
@@ -2137,8 +2299,7 @@ public class AccountUpdateService {
      * <p>Assumptions: the comparisons are the ones the second condition makes, at
      * {@code app/cbl/COACTUPC.cbl} L1708 to L1768, in that order. Ten of them disregard case and padding
      * because the baseline wraps them in its upper-casing and trimming functions; the funds-transfer
-     * account at L1761 and L1762 and the credit score at L1767 and L1768 do not, and are compared without
-     * either.</p>
+     * account and the credit score do not, and are compared without either.</p>
      *
      * @param request the submitted change; must not be {@code null}
      * @param customer the loaded customer row; must not be {@code null}
@@ -2340,20 +2501,25 @@ public class AccountUpdateService {
      */
     private Account loadAccount(long accountId) {
         return this.accounts.findById(accountId)
-                // WHY : Refactoring Rationale: the message used to end in the account identifier. It no
-                //       longer does, because the sensitive-data contract in
-                //       docs/architecture/observability.md names ACCOUNT AND CUSTOMER IDENTIFIERS
-                //       alongside the primary account number as values a durable diagnostic may not
-                //       carry, and states that a prohibited value is OMITTED rather than abbreviated.
-                //       This message is durable in two places at once: the shared advice writes it to
-                //       the operational record AND returns it in the response body.
-                // WHY : Assumptions: the identifier being present in this route's request line does not
-                //       license repeating it. This write IS keyed in the path -- PUT
-                //       /api/v1/accounts/{accountId} is an end-user route and stays that way, because a
-                //       caller updating one account addresses it -- so the load balancer records the
-                //       value whatever this message says. The contract governs what THIS system writes,
-                //       and an existing disclosure elsewhere is not an argument for adding another; the
-                //       correlation identifier the shared filter stamps already joins the two records.
+                // WHY : Assumptions: the message names no identifier, because the sensitive-data
+                //       contract in docs/architecture/observability.md names ACCOUNT AND CUSTOMER
+                //       IDENTIFIERS alongside the primary account number as values a durable diagnostic
+                //       may not carry, and states that a prohibited value is OMITTED rather than
+                //       abbreviated. This message is durable in two places at once: the shared advice
+                //       writes it to the operational record AND returns it in the response body.
+                // WHY : Refactoring Rationale: this note used to defend the omission while conceding that
+                //       the value was disclosed anyway, on the ground that "this write IS keyed in the
+                //       path -- PUT /api/v1/accounts/{accountId} is an end-user route and stays that
+                //       way". It did not stay that way, and the concession was the defect rather than
+                //       the omission: the write is now POST /api/v1/accounts/update and takes its key
+                //       from the submitted record, so NO request line on this route carries the
+                //       identifier and the load balancer's access record does not hold it either. The
+                //       omission here and the address there now say the same thing, which is what the
+                //       contract asked for and what an earlier reading had argued its way out of.
+                // WHY : Assumptions: a disclosure elsewhere would not have licensed this one in any case.
+                //       The contract governs what THIS system writes, and the correlation identifier the
+                //       shared filter stamps already joins this record to the access record without
+                //       either of them holding the account.
                 .orElseThrow(() -> new NoSuchElementException(
                         "no account master row exists for the requested account"));
     }
@@ -2366,12 +2532,12 @@ public class AccountUpdateService {
      * obtained earlier, at {@code app/cbl/COACTUPC.cbl} L3919, and the by-account index the target reads
      * is the migrated form of the alternate index the online programs read as a file.</p>
      *
-     * <p>Refactoring Rationale: the row is bounded in the STATEMENT. This previously read every
-     * cross-reference row the account holds and then took the first, which is the same answer reached by
-     * the more expensive route: the by-account index is not unique, so the row count is whatever the data
-     * holds, and every row carries a primary account number -- so a question about ONE row pulled all of
-     * an account's cardholder data into this process's heap. The bounded query already existed on the
-     * repository, declared for exactly this call.</p>
+     * <p>Refactoring Rationale: the row is bounded in the STATEMENT rather than in this method.
+     * Alternatives Considered: reading every cross-reference row the account holds and taking the first.
+     * Rejected because it reaches the same answer by the more expensive route -- the by-account index is
+     * not unique, so the row count is whatever the data holds, and every row carries a primary account
+     * number, so a question about ONE row would pull all of an account's cardholder data into this
+     * process's heap. The bounded query is declared on the repository for exactly this call.</p>
      *
      * <p>Assumptions: the tie-break is unchanged and is still the lowest card number, which the bounded
      * query names in its own ordering, so the row this resolves to is identical to the row the wider read
@@ -2419,26 +2585,10 @@ public class AccountUpdateService {
      */
     private static void requireCurrentRevision(Account account, Customer customer,
             String expectedRevision) {
-        if (expectedRevision.isBlank() || !revisionOf(account, customer).equals(expectedRevision)) {
+        if (expectedRevision.isBlank()
+                || !AccountRevision.of(account, customer).equals(expectedRevision)) {
             throw new RecordConflictException(RecordConflictException.Kind.STALE_VERSION,
                     customer.getVersion());
         }
-    }
-
-    /**
-     * Renders the revision token for a loaded pair of rows.
-     *
-     * <p>Trade-offs: one token covers BOTH rows, rendered as the two versions joined, rather than one
-     * token per row. The baseline's before-image spans both records and its comparison fails if either
-     * changed, so a single token reproduces that. What is accepted in exchange is that a concurrent edit
-     * to either row refuses an edit to the other; that is the baseline's behaviour, and the screen edits
-     * the two together in any case.</p>
-     *
-     * @param account the loaded account row; must not be {@code null}
-     * @param customer the loaded customer row; must not be {@code null}
-     * @return the opaque token, never {@code null}
-     */
-    private static String revisionOf(Account account, Customer customer) {
-        return account.getVersion() + REVISION_SEPARATOR + customer.getVersion();
     }
 }

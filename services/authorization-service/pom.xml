@@ -170,6 +170,38 @@
     </dependency>
 
     <!--
+      Assumptions: Boot 4 SPLIT the HTTP clients out of the web starter, and this
+      module needs the half that was removed. RestClient is an API in spring-web, so
+      service/RestAccountContextClient COMPILES without this entry; what spring-web
+      does not carry is RestClientAutoConfiguration, the only thing that publishes
+      the RestClient.Builder bean that adapter injects. The autoconfiguration lives
+      in org.springframework.boot:spring-boot-restclient, which this starter brings
+      along with its own AutoConfiguration.imports registration.
+      Refactoring Rationale: the omission was found by starting this module's own
+      bootable jar rather than by any test, and it was not a warning. The context
+      failed outright with no qualifying bean of type RestClient$Builder for the
+      constructor of restAccountContextClient, reached through
+      pendingAuthSummaryService and pendingAuthController, so a task built from this
+      module could never have turned healthy. No test caught it because the adapter's
+      own tests build it through its package private seam and pass a builder in, and
+      each of this module's five context loading tests defines its own narrow
+      configuration rather than the application, so the missing bean was invisible to
+      a green suite. account-service carried the identical omission and records the
+      identical remedy on its own copy of this entry; this is the same fix applied to
+      the second occurrence.
+      Alternatives Considered: declaring the plain spring-boot-restclient artifact,
+      and hand-constructing a RestClient inside the adapter. The plain artifact is
+      rejected for consistency, every other Boot dependency in this file being a
+      starter; hand construction is rejected because it would move transport
+      configuration out of the framework's autoconfiguration and duplicate it per
+      adapter.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-restclient</artifactId>
+    </dependency>
+
+    <!--
       Refactoring Rationale: the baseline reaches its data through IMS DL/I
       segment calls against two databases and an SQL cursor against a Db2
       table, coordinated by two-phase commit. Both stores collapse into one
@@ -318,6 +350,69 @@
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>sqs</artifactId>
+    </dependency>
+
+    <!--
+      Refactoring Rationale: the two maintenance extracts have to be readable and
+      writable at a location that OUTLIVES the container the task ran in.
+      com.carddemo.authorization.task.ExtractStore is that access path, and this
+      coordinate puts its client type on the compile classpath. A filesystem path
+      alone was the previous arrangement and it could not work: a Fargate volume is
+      shared only within one task definition and infra/modules/ecs-service creates
+      one per service, so an extract written inside this container was discarded
+      when the container exited and an extract read from inside it had never been
+      delivered there.
+
+      Alternatives Considered: keeping the export unreachable and documenting the
+      limitation instead. Rejected because the export is the transcription of two
+      reference programs, cbl/PAUDBUNL.CBL and cbl/DBUNLDGS.CBL, and a documented
+      limitation would leave both with no production caller at all, which is the
+      defect this dependency exists to remove rather than to describe.
+
+      Alternatives Considered: routing the extracts through batch-service, which
+      already holds this client and the dataset bucket. Rejected because the export
+      reads authorization.pending_auth_summary and authorization.pending_auth_detail,
+      and only this context's database role may read them; moving the capability
+      would mean widening that grant across a context boundary to avoid one
+      dependency.
+
+      Trade-offs: the export and the load now cost ephemeral task storage equal to
+      the extract they stage. That is accepted because the staged file is what makes
+      the transfer bounded in memory and the publication atomic, and neither
+      property is obtainable from a streaming upload without leaving an incomplete
+      multipart upload behind on failure.
+    -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+
+    <!--
+      Assumptions: the coordinate above contributes the client CLASS and no client
+      BEAN, so ExtractStore would compile and unit-test while failing at container
+      start on an unsatisfied constructor dependency. The evidence is the
+      autoconfiguration's own condition: io.awspring.cloud.autoconfigure.s3
+      .S3AutoConfiguration is annotated @ConditionalOnClass on BOTH
+      software.amazon.awssdk.services.s3.S3Client and
+      io.awspring.cloud.s3.S3OutputStreamProvider, and the second of those ships
+      only in io.awspring.cloud:spring-cloud-aws-s3, which only this starter brings.
+      batch-service records the same finding against the same pair.
+
+      Alternatives Considered: declaring the client on a configuration class of this
+      module. Rejected because the config package charter closes its roster at
+      exactly six @Configuration classes and states there is no seventh, and the
+      starter needs none: the client it defines reads the same spring.cloud.aws
+      region and credential properties the queue and parameter-store starters in
+      this module already resolve from the task role.
+
+      Trade-offs: the starter also brings a template, an output-stream provider and
+      a protocol resolver this module never references. That unused surface is the
+      accepted cost of one client configured from the settings already in force here
+      rather than a second, divergent place where they are interpreted.
+    -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-starter-s3</artifactId>
     </dependency>
 
     <!--
@@ -617,6 +712,33 @@
   </dependencies>
 
   <build>
+
+    <!--
+      WHY : ⚠️ Refactoring Rationale: the runtime stage of this module's Dockerfile used to copy
+            target/authorization-service-1.0.0-SNAPSHOT.jar, spelling out a version this file
+            inherits from services/pom.xml and does not declare. A version bump in the parent is a
+            routine edit that touches nothing here, and it broke this module's image build at its
+            LAST instruction, after the whole reactor had already compiled, reporting a missing
+            artifact rather than a stale literal. Pinning the final name makes target/
+            authorization-service.jar a deterministic path and a contract between this file and
+            that Dockerfile, so neither may change it alone. services/card-service/pom.xml and
+            services/account-service/pom.xml already did this for the same reason; this is the
+            third and last module the finding named.
+      WHY : Alternatives Considered: matching the jar with a wildcard in the Dockerfile. Rejected
+            because a wildcard keeps working right up until target/ holds two jars (after a
+            version change with no intervening clean, say) and then copies the wrong one with no
+            error at all, which is worse than the failure being fixed because it ships.
+      WHY : Alternatives Considered: passing the version in as a Docker build argument. Rejected
+            because it moves the coupling instead of removing it: CI, a local reactor build and an
+            ad hoc docker build are three callers that would each have to supply it correctly.
+      WHY : Trade-offs: the published artifact in a repository still carries the version, because
+            this element renames only the file in target/. Nothing in this repository resolves this
+            module as a dependency: it is an application, and the aggregator lists it as a module
+            rather than any module declaring it, so the renamed local artifact has no consumer to
+            confuse.
+    -->
+    <finalName>authorization-service</finalName>
+
     <plugins>
 
       <!--

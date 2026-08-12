@@ -42,7 +42,7 @@
 # Contract stability -- these output NAMES are a one-way contract:
 #   infra/envs/dev/main.tf and infra/envs/prod/main.tf reference them by name,
 #   and through those roots so does infra/modules/ecs-service (its
-#   `secret_sources` input, and the execution-role
+#   `secret_arns` input, and the task-execution-role
 #   statement scoped to those ARNs). Nothing in THIS module depends on any of
 #   those files, so nothing here breaks when they change -- the dependency runs
 #   one way only. Renaming an output below therefore breaks every caller while
@@ -120,23 +120,38 @@ output "service_credential_secrets" {
     that entry's base `arn` for IAM, its created `name` for by-name reads, and
     distinct `username_reference` / `password_reference` values in ECS's
     `<base-arn>:<json-key>::` syntax. One entry exists per element of that input,
-    so the map is empty only if the input is. The calling root projects the
-    `arn` fields into infra/modules/ecs-service's `secret_sources` input, keyed
-    by the container environment-variable name each service expects, and scopes
-    one `secretsmanager:GetSecretValue` statement per task role to the single
-    ARN that role is entitled to read. The `name` fields are what a by-name
-    reader passes as `SecretId`, matching the role name character for
-    character.
+    so the map is empty only if the input is. The calling root projects these
+    fields into infra/modules/ecs-service's `secret_arns` input, keyed by the
+    container environment-variable name each service expects and carrying both
+    members that input requires -- `value_from` in the `<base-arn>:<json-key>::`
+    form the container definition reads, and `resource_arn` for IAM. That module
+    then scopes one `secretsmanager:GetSecretValue` statement on the workload's
+    **task EXECUTION role** to the distinct ARNs that workload injects. The
+    `name` fields are what a by-name reader passes as `SecretId`, matching the
+    role name character for character.
+
+    The execution role and not the task role is the entitled principal, and the
+    distinction is load-bearing rather than pedantic: ECS resolves a container
+    definition's `secrets` block itself, before the container starts, using the
+    execution role, so a `GetSecretValue` grant placed on the task role leaves
+    the task unable to START -- the failure appears as a stopped task with a
+    ResourceInitializationError and never as an application error, which is a
+    considerably harder thing to diagnose from inside the service. The task role
+    is the identity the RUNNING process uses, and no service in this project reads
+    a secret from its own code, so it holds no secret grant at all.
 
     This module STORES each credential; it does not APPLY it. Binding a stored
     value to the matching PostgreSQL role -- the ALTER ROLE that lets the role
     authenticate with it -- belongs to whatever runs the schema bootstrap, and so
     does any later rotation. A caller therefore has three obligations, not one:
-    grant each task role read access to its own entry alone, grant the
-    bootstrapping identity read access to every entry in this map so it can bind
-    the values it finds, and -- if the deployment wants rotation -- supply a
-    rotation function through this module's `rotation_lambda_arn` input, because
-    this module deliberately creates none.
+    grant each workload's task EXECUTION role read access to the entries that
+    workload injects and no others, grant the bootstrapping identity read access
+    to every entry in this map so it can bind the values it finds, and -- if the
+    deployment wants rotation -- supply a rotation function through this module's
+    `rotation_lambda_arn` input, because this module deliberately creates none.
+    The second obligation is deliberately broader than the first and is the one
+    concentration this design accepts: a bootstrap step that applies every role's
+    credential must be able to read every one of them.
   EOT
 
   # WHY : Trade-offs: a MAP KEYED BY ROLE NAME rather than a list of objects, and

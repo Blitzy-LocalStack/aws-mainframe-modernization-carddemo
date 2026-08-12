@@ -47,7 +47,14 @@
  *       of controllers and installs its own message converter. Every constrained query parameter and
  *       path segment is sent a value that must be refused, and each refusal is paired with an accepted
  *       value on the same parameter, so the boundary is shown to sit where the contract puts it rather
- *       than merely somewhere.</li>
+ *       than merely somewhere. ⚠️ Refactoring Rationale: one nested group in that class asserts something
+ *       stronger than a constraint, and it is here rather than in a service test for a reason the review
+ *       that prompted it makes plain. All five list routes declared their paging-direction parameter as
+ *       the enumeration itself, which the framework binds through {@code Enum.valueOf} against the
+ *       constant name -- so the two lower-case values the contract publishes, and the only two the
+ *       browser client sends, were the two the binding refused. That is a defect no service test could
+ *       have caught, because the value never reached a service; it lives and dies in argument
+ *       resolution, which is exactly what a dispatcher class exists to exercise.</li>
  *   <li>{@code DateConversionRefusalTest} calls the collaborator directly, with the date validator
  *       replaced by a stand-in, and asserts the shape of the refusal itself. Assumptions: it is here
  *       rather than in the service test package because what it pins is the boundary contract of the
@@ -361,25 +368,36 @@
  *
  * <p>Alternatives Considered: the labels above could have been written in the singular, or wrapped in
  * parentheses after a leading marker, both of which occur in this repository. The plural, unwrapped
- * form is used instead because it is the form the rule itself lists at lines 31 to 34, and it is also
- * the form the repository overwhelmingly carries. Counting each label with its trailing colon, and
- * excluding this file from the count so the figures are reproducible against the rest of the tree: the
- * plural trade-offs label appears 4741 times across 927 files, against 80 times across 34 files for the
- * singular with a colon and 104 times across 35 files for the parenthesised form after a leading
- * marker; the alternatives label appears 4401 times across 977 files, the rationale label 4169 times
- * across 962, and the assumptions label 26657 times across 1250. The singular and the parenthesised
- * spellings carry the same meaning as the plural, unwrapped one and are simply not used here; that
- * equivalence is recorded in this sentence alone, and the forms are not mixed anywhere in this
- * file.</p>
+ * form is used instead because it is the form the rule itself lists at lines 31 to 34, and it is the
+ * form this repository's charters overwhelmingly carry. The singular and the parenthesised spellings
+ * mean the same thing as the plural, unwrapped one and are simply not used here; that equivalence is
+ * recorded in this sentence alone, and the forms are not mixed anywhere in this file.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph used to quote per-form occurrence and file counts across the
+ * whole repository -- so many occurrences of the plural label across so many files, against so many of
+ * each alternative spelling. Those figures were measured once and were false by the next commit,
+ * because every one of them changes when any file in any tree gains or loses a label, which is a thing
+ * that happens continuously and never touches this file. A rationale that is specific and wrong is
+ * worse than one that is general and right, because the specificity is what stops the next reader
+ * checking. The claim is therefore stated as a property that holds -- this is the form the rule
+ * document lists and the form the charters carry -- and the counting is left to whoever needs a number
+ * at the moment they need it, since a grep answers it in one command.</p>
  *
  * <p>Assumptions: this file is plain ASCII throughout, and the hyphen in the trade-offs label is the
- * ordinary hyphen-minus. That is worth stating because exactly two documents in this repository carry a
- * non-breaking hyphen, and one of them is {@code tests/README.md}, whose L548 is the very line listing
- * these four labels and which renders the trade-offs label with a non-breaking hyphen and follows it
- * with an em dash. Both characters are visually indistinguishable from their ASCII counterparts, so a
+ * ordinary hyphen-minus. That is worth stating because at least one document in this repository carries
+ * a non-breaking hyphen, and the significant one is {@code tests/README.md}, whose L548 is the very
+ * line listing these four labels and which renders the trade-offs label with a non-breaking hyphen and
+ * follows it with an em dash. Both characters are visually indistinguishable from their ASCII
+ * counterparts, so a
  * label copied from that line would look correct, would not match a search for the label, and would put
  * a byte outside ASCII into a source file whose audit is configured for one character set. The label
  * text here was taken from the rule document, which is ASCII throughout.</p>
+ *
+ * <p>Refactoring Rationale: the paragraph above said "exactly two documents in this repository carry a
+ * non-breaking hyphen", and a third had since acquired one. The count is not what the paragraph needs:
+ * the hazard is copying a label from that one line of {@code tests/README.md}, and it is a hazard
+ * whether one document or ten contain the character. Naming the source line and dropping the census is
+ * what makes the warning both true and durable.</p>
  *
  * <h2>Where this descriptor departs from the migration plan's projection of it</h2>
  *
@@ -398,8 +416,8 @@
  * service methods and refusal types that do not exist, and an enum name for the rate provenance that
  * does not exist. The projection stated a smaller dependency set and stated that the framework's
  * container support was absent when it is present and depended upon. And the projection stated that the
- * plural label form diverged from the repository's dominant idiom, when a fresh count shows it to be
- * the dominant idiom by better than an order of magnitude.</p>
+ * plural label form diverged from the repository's dominant idiom, when it is the form the rule
+ * document lists and the form the charters carry.</p>
  *
  * <p>Refactoring Rationale: the reason for recording all of that, rather than quietly writing the
  * accurate version, is a failure mode the sibling descriptor at {@code com.carddemo.reference} devotes

@@ -1,5 +1,7 @@
 package com.carddemo.batch.dto;
 
+import java.util.Objects;
+
 /**
  * The closed domain of the batch container's {@code --job=} argument: seven job tokens, and no
  * eighth.
@@ -230,6 +232,18 @@ public enum BatchJobName {
     private final String token;
 
     /**
+     * The suffix a job's step name carries above its job token, except for the two single-step jobs.
+     *
+     * <p>Assumptions: this is declared here rather than in each job class because it is the one fact
+     * {@link #forStepName} depends on, and a constant a step class spelled for itself could disagree
+     * with the derivation without failing anything. The five job classes that use it build their own
+     * {@code STEP_NAME} from their {@code JOB_NAME} and this suffix, so one declaration serves both
+     * directions of the relationship; the export and import jobs name their single step with the bare
+     * job token and so reference neither.</p>
+     */
+    public static final String STEP_NAME_SUFFIX = "-step";
+
+    /**
      * Binds one constant to the token it is asked for by.
      *
      * @param token the wire token for this constant, supplied as a literal in the constant's own
@@ -313,5 +327,60 @@ public enum BatchJobName {
         }
         throw new IllegalArgumentException("unrecognised batch job token: '" + candidateToken
                 + "'; expected exactly one of " + accepted);
+    }
+
+    /**
+     * Resolves the job a step belongs to from that step's own name.
+     *
+     * <p>Purpose: to declare, as code the tests can hold every constant to, the relationship between a
+     * job and the name of its step -- so that a component handed only a step name can name the job
+     * without the job name being threaded through a body that already knows it.</p>
+     *
+     * <p>Assumptions: nothing in production calls this today, and that is a statement about the
+     * delivered wiring rather than about the rule. The durable step ledger is the component that would
+     * need it, and {@code BatchStepLedger.runStep} is passed its {@code BatchJobName} explicitly by each
+     * job bean instead -- the alternative weighed below, which the delivered wiring took. The
+     * derivation is kept because it is the ONE place the job-to-step-name relationship is stated as a
+     * rule rather than repeated as seven constants, and because {@code BatchJobNameTest} exercises it
+     * for every constant under both spellings: a step renamed out of the rule fails there, whether or
+     * not anything calls this method.</p>
+     *
+     * <p>Assumptions: the derivation is a rule the job classes already follow and not a guess about
+     * them. Five of the seven jobs declare {@code STEP_NAME} as their own {@code JOB_NAME} followed by
+     * {@value #STEP_NAME_SUFFIX}; the export and import jobs name their single step with the bare
+     * {@code JOB_NAME} instead, because each is one step with nothing to distinguish it from its job.
+     * Stripping the suffix when it is present and resolving what remains therefore covers both
+     * spellings, and {@code BatchJobNameTest} asserts the round trip for every constant under both
+     * spellings so the rule cannot rot silently if a step is renamed.</p>
+     *
+     * <p>Alternatives Considered: this derivation against the ledger taking the job name as a parameter
+     * of its own entry point, which is what the delivered wiring does. The parameter won on directness:
+     * the caller already holds the value, so passing it cannot resolve to the wrong job and cannot raise
+     * on a step name that follows neither spelling. What it gives up is that the same fact is then
+     * stated in seven places as well as here, which is exactly the drift this method plus its test still
+     * catch -- each job's {@code STEP_NAME} is derived from its own token and this enumeration, so a
+     * step renamed away from the rule is caught by the test even though no production path resolves
+     * one.</p>
+     *
+     * <p>Trade-offs: a step name that follows neither spelling raises, and the caller on the failure path
+     * has to be prepared for that. It is accepted because raising is the only honest answer -- a step
+     * whose name resolves to no job cannot have its job named -- and because the alternative, returning
+     * some default job, would publish an event attributing a failure to a job that did not fail.</p>
+     *
+     * @param stepName the step's name, with or without the {@value #STEP_NAME_SUFFIX} suffix; must not be
+     *     {@code null}
+     * @return the job the step belongs to, never {@code null}
+     * @throws NullPointerException if {@code stepName} is {@code null}
+     * @throws IllegalArgumentException if what remains after removing the suffix is not one of the
+     *     declared tokens
+     */
+    public static BatchJobName forStepName(String stepName) {
+        Objects.requireNonNull(stepName, "stepName must not be null");
+
+        String candidate = stepName.endsWith(STEP_NAME_SUFFIX)
+                ? stepName.substring(0, stepName.length() - STEP_NAME_SUFFIX.length())
+                : stepName;
+
+        return resolve(candidate);
     }
 }

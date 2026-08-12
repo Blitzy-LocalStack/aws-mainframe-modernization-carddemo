@@ -199,10 +199,9 @@ final class MoneyTest {
      * DIFFERENT value. The third assertion is what makes this vector evidence -- without it the test
      * would pass under either mode and prove nothing about which one ran.
      *
-     * <p>Refactoring Rationale: this test required {@code 2.26} and named the difference divergence
-     * C-ROUNDING. It now requires the reference value, because the accrual truncates in production and
-     * the divergence is closed. The test was the load-bearing statement of the defect: as long as it
-     * demanded the half-up value, an implementation matching the reference would have failed it.
+     * <p>Assumptions: this expectation is the load-bearing statement of the accrual's mode. It demands
+     * the value the reference field receives, so an implementation reaching for the general half-up mode
+     * fails here rather than shipping a cent of drift.
      */
     @Test
     @DisplayName("1000.00 at 2.71 truncates to 2.25 as the reference does, where half up would give 2.26")
@@ -236,10 +235,10 @@ final class MoneyTest {
      * to. Two independent vectors are asserted because a single one could be satisfied by an
      * implementation that happened to be right at one input.
      *
-     * <p>Refactoring Rationale: this test required {@code 2.09} on the reading that the money path used
-     * one rounding mode everywhere. It now requires {@code 2.08}, which is the value the reference
-     * statement stores, because the accrual is one of the business rules the reference suite asserts
-     * verbatim and a cent of drift in it is a parity failure rather than a rounding preference.
+     * <p>Assumptions: the required value is {@code 2.08}, which is what the reference statement stores.
+     * The accrual is one of the business rules the reference suite asserts verbatim, so a cent of drift
+     * in it is a parity failure rather than a rounding preference -- which is why this vector requires
+     * the truncated value and not the half-up one.
      */
     @Test
     @DisplayName("1000.80 at 2.50 truncates the exact half cent to 2.08 as the reference does")
@@ -283,10 +282,10 @@ final class MoneyTest {
      * on magnitude and would give {@code -2.26}. Asserting only the positive vector would leave a
      * mode that rounded away from zero on negatives indistinguishable from this one.
      *
-     * <p>Refactoring Rationale: this test required {@code -2.26} while the accrual rounded half up. It
-     * now requires {@code -2.25}, and the sign case is the sharper of the two directions to state
-     * because "truncates toward zero" and "rounds toward negative infinity" agree on every positive
-     * input and part company here -- which is why the mode is {@code DOWN} and not {@code FLOOR}.
+     * <p>Assumptions: the sign case is the sharper of the two directions to state, because "truncates
+     * toward zero" and "rounds toward negative infinity" agree on every positive input and part company
+     * here -- which is why the mode is {@code DOWN} and not {@code FLOOR}, and why this vector requires
+     * {@code -2.25}.
      */
     @Test
     @DisplayName("a negative accrual truncates toward zero, not away from it")
@@ -363,11 +362,10 @@ final class MoneyTest {
         //   category's accrual is reduced BEFORE it joins the running total. The 1.00 rate is kept
         //   because its quotient, 0.8333..., loses a third of a cent per term, so three reduced terms
         //   fall a cent short of the once-reduced product and the order is visible in the result.
-        // WHY : Refactoring Rationale: the note here previously justified 1.00 by saying that at 2.71
-        //   "the two orders happen to agree under half up". That reason expired with the mode change --
-        //   under truncation 2.71 gives 2.25 per term for 6.75, against 6.77 for the once-reduced
-        //   product, so 2.71 now discriminates too. The rate is unchanged and only the reason is
-        //   corrected, because an obsolete reason is what leads a later reader to swap the input.
+        // WHY : Assumptions: 2.71 would discriminate here too -- under truncation it gives 2.25 per term
+        //   for 6.75, against 6.77 for the once-reduced product -- so the choice of 1.00 is about the
+        //   size of the gap rather than about whether one exists. The third-of-a-cent loss per term is
+        //   the clearest available demonstration of the reduction point.
         // WHY : Assumptions: the counterfactual's mode is BASELINE_INTEREST_ROUNDING, matching
         //   production, so the cent between the two is attributable to the reduction POINT alone. At
         //   this vector the quotient 2.5 is exact and every mode agrees on it, so the choice changes

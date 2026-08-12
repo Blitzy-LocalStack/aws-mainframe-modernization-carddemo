@@ -31,31 +31,38 @@
 #   values this file describes travel inward, from caller to module.
 #
 # Exceptions or errors:
-#   - Eleven variables declare no `default`, which makes each one a hard
+#   - Ten variables declare no `default`, which makes each one a hard
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Forty-nine variables carry sixty-one `validation` blocks between them, so a
+#   - Fifty-two variables carry sixty-four `validation` blocks between them, so a
 #     bad value is rejected before the AWS API sees it. The checks cover
 #     identifiers and ARN shapes, Fargate CPU/memory and network contracts,
 #     HTTPS health checks, deployment/autoscaling bounds, CloudWatch retention,
 #     the pinned telemetry image and sampling percentage, non-secret
-#     environment-variable namespaces, store-specific references and IAM policy
-#     document syntax.
+#     environment-variable namespaces, store-specific references, the container
+#     health-check argument vector and IAM policy document syntax.
 #   - WHEN a rule is checked is not uniform. A `validation` reading only its
 #     own variable is evaluated by `terraform validate`; one reading ANOTHER
 #     variable is deferred to `terraform plan`, because the context that lets
-#     one variable see another does not exist at validate time. Exactly one
-#     rule falls in the second group -- the writable_mount_paths rule that
-#     reads var.readonly_root_filesystem -- so `validate` alone does not
-#     report a read-only root paired with an empty mount list, and `plan`
-#     does. Both precede any resource, so no task definition is created from
-#     the broken pairing either way.
-#   - Four variables select the module's SHAPE rather than one of its values:
-#     create_service, attach_load_balancer, enable_autoscaling and
-#     enable_telemetry_collector. Disabling one is not an error; it removes the
-#     corresponding service/target/scaler or collector/policy resources. Each
-#     states its own coupling because none is inferable from the boolean type.
+#     one variable see another does not exist at validate time. Fifteen of the
+#     sixty-four rules fall in the second group -- among them
+#     writable_mount_paths reading readonly_root_filesystem, task_memory
+#     reading task_cpu, the four autoscaling and desired_count rules reading
+#     create_service, task_role_policy_json reading create_task_role_policy and
+#     create_online_write_gate_policy reading online_write_gate_parameter_arn --
+#     so `validate` alone reports none of those pairings and `plan` reports all
+#     of them. Both precede any resource, so no task definition is created from
+#     a broken pairing either way.
+#   - Six variables select the module's SHAPE rather than one of its values:
+#     create_service, attach_load_balancer, enable_autoscaling,
+#     enable_telemetry_collector, create_task_role_policy and
+#     create_online_write_gate_policy. Disabling one is not an error; it removes
+#     the corresponding service/target/scaler, collector or task-role policy
+#     resources. Each states its own coupling because none is inferable from the
+#     boolean type. container_health_check_command belongs to the same group
+#     without being a boolean: left null it removes the container healthCheck
+#     block rather than changing a value inside it.
 #
 # WHY (non-obvious design decisions):
 #   - Alternatives Considered: nine per-workload module copies, one per
@@ -109,10 +116,10 @@
 # -----------------------------------------------------------------------------
 # TIER 1 -- REQUIRED INPUTS. Every variable in this tier omits `default`.
 #
-# WHY : Alternatives Considered: ordering all fifty-eight variables strictly
+# WHY : Alternatives Considered: ordering all sixty-one variables strictly
 #       alphabetically, which is the obvious scheme and does help a reader
 #       hunting for one name already known. Rejected because it interleaves
-#       the eleven inputs a caller MUST supply with the forty-seven it may
+#       the ten inputs a caller MUST supply with the fifty-one it may
 #       ignore, so a new `module` block could only be written correctly by
 #       reading every block in the file to discover which ones lack a
 #       default. Required-first answers the question a caller actually
@@ -829,9 +836,10 @@ variable "attach_load_balancer" {
   description = <<-EOT
     Whether to create an ALB target group for this service and register the
     service with it. True for the seven online services the internal load
-    balancer fronts. Set false for the batch instance, which Step Functions
-    invokes rather than anything reaching it over HTTP; that also suppresses
-    the health-check grace period and turns the target-group output null.
+    balancer fronts. Set false for the TWO task-only workloads, batch and
+    data-migration, which Step Functions invokes rather than anything reaching
+    them over HTTP; that also suppresses the health-check grace period and turns
+    the target-group output null.
   EOT
   type        = bool
   default     = true
@@ -864,6 +872,57 @@ variable "attach_load_balancer" {
 #       listener rules that send traffic to the group belong to the alb
 #       module. Keeping that boundary explicit is why no listener or
 #       listener-rule input appears anywhere in this file.
+# WHY : Refactoring Rationale: this input exists because the estate had NO
+#       container-health signal at all and a comment in main.tf asserted the
+#       opposite. That comment left the ECS healthCheck out on the reasoning that
+#       "each Dockerfile therefore owns its HEALTHCHECK", which is true of `docker
+#       run` and false of ECS: the agent monitors only the healthCheck declared in
+#       the task definition and never reads the image's HEALTHCHECK instruction, so
+#       the eight probes those Dockerfiles carry were never evaluated in the
+#       deployed estate. The seven request-serving workloads still had the target
+#       group's own check, but batch had no health signal of any kind.
+# WHY : Assumptions: the COMMAND is an input rather than composed here, and the
+#       original comment's objection is the reason -- only the image knows which
+#       binaries its base layer ships, and the two schemes differ across this
+#       estate: seven services answer HTTPS with a self-signed leaf and need
+#       --insecure, while batch answers plain HTTP. Taking it as an input keeps that
+#       knowledge with the root that also chooses the image, and leaving it null is
+#       how a workload with no in-container probe -- the ETL image, whose own
+#       Dockerfile records that orchestration judges it by exit code -- declines one.
+# WHY : Trade-offs: the four durations are the module's own and are not per-workload
+#       inputs, because the values in every Dockerfile of this estate already agree
+#       apart from reporting's longer start period, and a task-definition check has a
+#       separate startPeriod that ECS applies before the first failure counts. A
+#       workload needing its own schedule would need three more inputs for a
+#       difference no image currently has.
+variable "container_health_check_command" {
+  description = <<-EOT
+    The exact command ECS runs inside the application container to judge its
+    health, as the argv list the container's own entry point can execute. ECS
+    monitors ONLY this; it never reads the image's HEALTHCHECK instruction, so a
+    workload that supplies null has no container-level health signal and is judged
+    by its target group if it has one and by its exit status otherwise. Supply the
+    same command that workload's Dockerfile declares, so the two cannot disagree.
+  EOT
+  type        = list(string)
+  default     = null
+
+  # WHY : Assumptions: a non-null value must be non-empty and must open with an
+  #       absolute path or the CMD-SHELL sentinel ECS defines, because those are the
+  #       only two forms the agent can execute. An empty list type-checks and
+  #       produces a task definition ECS rejects at registration.
+  validation {
+    condition = var.container_health_check_command == null || (
+      length(var.container_health_check_command) > 0 &&
+      (
+        startswith(try(var.container_health_check_command[0], ""), "/") ||
+        try(var.container_health_check_command[0], "") == "CMD-SHELL"
+      )
+    )
+    error_message = "container_health_check_command must be null or a non-empty argv list whose first element is an absolute path inside the image or the literal CMD-SHELL. A relative command name depends on a PATH the agent does not guarantee."
+  }
+}
+
 variable "health_check_path" {
   description = <<-EOT
     Path the target-group health check requests on container_port, over HTTPS
@@ -1177,11 +1236,13 @@ variable "health_check_grace_period_seconds" {
 variable "create_service" {
   description = <<-EOT
     Whether to create a long-running ECS service around the task definition.
-    True for the seven online services. Set false for the batch instance,
-    whose tasks Step Functions starts one at a time; that leaves the task
-    definition, both IAM roles and the log group in place for
-    step-functions-batch to reference, and suppresses the service, the
-    autoscaling target and the outputs describing them.
+    True for the seven online services. Set false for the TWO task-only
+    workloads, batch and data-migration, whose tasks Step Functions starts one at
+    a time; that leaves the task definition, both IAM roles and the log group in
+    place for step-functions-batch to reference, and suppresses the service, the
+    autoscaling target and the outputs describing them. It also selects the
+    metrics path: a task-only workload has nothing to scrape, so the module
+    enables Micrometer's OTLP push instead.
   EOT
   type        = bool
   default     = true
@@ -1764,17 +1825,41 @@ variable "allow_service_managed_log_encryption" {
 variable "enable_telemetry_collector" {
   description = <<-EOT
     Whether to add the AWS Distro for OpenTelemetry collector sidecar that
-    scrapes the service's Actuator Prometheus endpoint, receives OTLP traces,
-    exports metrics through CloudWatch EMF and exports traces to X-Ray.
+    receives this workload's telemetry and exports it: traces over OTLP to
+    X-Ray, and metrics to CloudWatch EMF. Metrics reach it one of two ways,
+    selected by create_service so that no meter is exported twice -- a serving
+    workload's Actuator Prometheus endpoint is scraped over loopback, while a
+    task-only workload pushes through Micrometer's OTLP registry.
   EOT
   type        = bool
   default     = true
 }
 
-# WHY : Assumptions: v0.48.0 was verified as a published multi-architecture
-#       Linux image, and the explicit tag is part of the reproducible runtime
-#       contract. A floating tag would let an unrelated task-definition apply
-#       pull different collector code without a repository diff.
+# WHY : Refactoring Rationale: the default was v0.48.0 named by TAG, and both
+#       halves of that changed. v0.48.0 has been superseded upstream -- verified
+#       against the publishing registry, whose tag list for this repository carries
+#       84 entries of which the highest semantic version is v0.49.0 and `latest` is
+#       the only non-semver one -- and a tag is not a pin. A tag is a label the
+#       publisher can move, so "pinned by tag" means "pinned to whatever that label
+#       resolves to on the day of the pull", which for the one container attached to
+#       every workload in the estate is the weakest place in the supply chain.
+#       The default is now the v0.49.0 OCI INDEX digest, read two independent ways
+#       that agree: the registry's own Docker-Content-Digest header and
+#       `docker buildx imagetools inspect`, which also confirms the index carries
+#       linux/amd64 and linux/arm64 manifests.
+# WHY : Trade-offs: the digest form drops the human-readable version from the
+#       value, so the version is stated here and in the description instead. That
+#       is accepted for the same reason the base-image pins in every Dockerfile take
+#       the same shape: the digest is what is enforced and the version is what is
+#       read. Refreshing it is a two-line change -- this default and the mirror pull
+#       in .github/workflows/deploy.yml -- and a gate in
+#       .github/workflows/infra-ci.yml keeps the two roots' tag from drifting from
+#       the workflow's.
+# WHY : Assumptions: the pure `@sha256:` form is used rather than `:tag@sha256:`.
+#       Both are accepted by container tooling, but the ECS container-definition
+#       `image` field is documented for the tag form OR the digest form, so the
+#       combined spelling would rest on an undocumented acceptance for the sake of
+#       carrying a version string that a comment carries instead.
 # WHY : Refactoring Rationale: the validation REQUIRED a `public.ecr.aws`
 #       reference, and that requirement made every task unstartable rather than
 #       merely public. infra/modules/network enumerates the application tier's
@@ -1800,21 +1885,37 @@ variable "telemetry_collector_image" {
     environment roots pass, from the mirror repository the ecr module provisions,
     because the application tier's egress is enumerated and admits no public
     registry -- or the upstream public reference for a caller whose egress
-    reaches it. The value must carry an explicit non-latest tag or an image
-    digest so collector upgrades remain reviewed task-definition changes.
+    reaches it. A private reference must carry an explicit non-latest tag or a
+    digest; the public reference must carry a digest, because only the private
+    registry is configured for immutable tags. The default is the upstream
+    v0.49.0 index digest. Collector upgrades therefore stay reviewed
+    task-definition changes rather than something a moved label delivers.
   EOT
   type        = string
-  default     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.48.0"
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector@sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
 
+  # WHY : Refactoring Rationale: the public form must now be DIGEST-pinned, where it
+  #       previously accepted a tag. The two registries do not offer the same
+  #       guarantee: infra/modules/ecr sets image_tag_mutability to IMMUTABLE, so a
+  #       tag in the private form cannot be moved onto different bytes and is a pin
+  #       in practice, while nothing constrains a tag in a public registry this
+  #       repository does not control. Admitting a public tag therefore admitted a
+  #       reference whose meaning can change with no diff anywhere -- which is
+  #       exactly what a pin is supposed to prevent, and which the previous comment
+  #       claimed the explicit tag already prevented.
+  #       Trade-offs: a caller keeping the upstream reference now has to look up a
+  #       digest, which is one registry query. Accepted: that caller is bypassing
+  #       the mirror and so has no immutability from the registry either, which is
+  #       the case that needs the digest most.
   validation {
     condition = (
       (
-        can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector:[A-Za-z0-9._-]+$", var.telemetry_collector_image)) ||
+        can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector@sha256:[a-f0-9]{64}$", var.telemetry_collector_image)) ||
         can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.telemetry_collector_image))
       ) &&
       !endswith(lower(var.telemetry_collector_image), ":latest")
     )
-    error_message = "telemetry_collector_image must be either the public AWS observability collector image or a private Amazon ECR reference, in both cases with an explicit tag other than latest or with an image digest."
+    error_message = "telemetry_collector_image must be either the upstream public AWS observability collector image pinned by @sha256 digest, or a private Amazon ECR reference carrying an explicit non-latest tag or a digest. A public TAG is refused because only the private registry is configured for immutable tags, so only there is a tag a pin."
   }
 }
 
@@ -2152,8 +2253,23 @@ variable "task_role_policy_json" {
     and read parameters.
   EOT
   type        = string
-  nullable    = false
+  default     = null
 
+  # WHY : Refactoring Rationale: this input carried `nullable = false` with no
+  #       default while its own description and the validation below both
+  #       required null for a service that needs no business policy. Those three
+  #       statements cannot all hold: `nullable = false` makes an explicit null a
+  #       hard "required variable may not be set to null", so the state the
+  #       validation demanded was unrepresentable and the documented state was
+  #       unreachable. Both roots pass `lookup(local.task_role_policy_json,
+  #       each.key, null)`, so transaction-service -- the one workload with no
+  #       business policy -- failed the plan outright. Declaring `default = null`
+  #       (which also makes the variable nullable) is what makes the null state
+  #       the description promises actually representable.
+  # WHY : Assumptions: the relationship validation below is KEPT rather than
+  #       replaced by the type change. Nullability makes null legal; the
+  #       validation is what keeps null and create_task_role_policy consistent,
+  #       so a caller cannot ask for the policy resource and hand it nothing.
   # WHY : Refactoring Rationale: resource cardinality must be known during plan.
   #       A document assembled from sibling-module outputs is unknown until
   #       apply, so main.tf gates on create_task_role_policy and validates the
@@ -2258,6 +2374,50 @@ variable "online_write_gate_parameter_arn" {
     error_message = "online_write_gate_parameter_arn must be a full SSM parameter ARN of the form arn:<partition>:ssm:<region>:<account>:parameter/<name>. A bare parameter name, a wildcard and a partial ARN are all refused because this value becomes an IAM Resource element."
   }
 }
+
+# WHY : Refactoring Rationale: the write-gate policy's cardinality used to be
+#       selected by testing the ARN above against null, and that could not be
+#       decided during plan. Both roots pass
+#       `aws_ssm_parameter.online_writes_enabled.arn` for an online workload, and
+#       on a first apply that parameter does not exist yet, so the ARN is
+#       unknown; `unknown == null` is itself unknown, and Terraform refused the
+#       plan with `Invalid count argument` once for every one of the seven
+#       request-serving workloads. Selecting on a boolean the root already knows
+#       -- whether the workload serves requests -- makes the same decision at
+#       plan time. This is the identical remedy create_task_role_policy applies
+#       to the same class of problem, and it is deliberately spelled the same way
+#       so a reader meets one idiom rather than two.
+# WHY : Alternatives Considered: assembling the parameter ARN in the root from
+#       the partition, region, account and the parameter NAME, all of which are
+#       known before the parameter exists. Rejected because it puts ARN
+#       construction in a second place and would silently keep planning after a
+#       rename that moved the real parameter elsewhere; a boolean states the
+#       topology fact directly and leaves the ARN the resource's own attribute.
+variable "create_online_write_gate_policy" {
+  description = <<-EOT
+    Whether to attach the inline task-role policy that reads the environment's
+    online-writes flag. Set from root-owned topology -- true for the workloads
+    that serve requests and honour a quiesce, false for the batch and
+    data-migration workloads -- rather than inferred from
+    online_write_gate_parameter_arn, whose value is unknown until the parameter
+    exists. Must travel with that ARN: the flag's name without permission to read
+    it denies every gated request, and permission without the name grants
+    something the task cannot use.
+  EOT
+  type        = bool
+  default     = false
+
+  # WHY : Assumptions: this checks the pairing in the direction that can be
+  #       decided from the inputs alone. A literal null ARN with the flag set is
+  #       refused here; an ARN that is merely unknown leaves the condition
+  #       unknown, which Terraform defers, and the task definition's own
+  #       precondition then asserts the same pairing against the environment
+  #       variable names, which are always known.
+  validation {
+    condition     = !var.create_online_write_gate_policy || var.online_write_gate_parameter_arn != null
+    error_message = "create_online_write_gate_policy is true, so online_write_gate_parameter_arn must also be supplied; the policy has no resource to name without it."
+  }
+}
 # WHY : Assumptions: a resource-scoped parameter-read or secret-read permission
 #       is not sufficient on its own. When a parameter is a SecureString or a
 #       secret is encrypted with a customer-managed key, reading it also
@@ -2273,10 +2433,14 @@ variable "online_write_gate_parameter_arn" {
 #       exact ARNs keeps every statement in both roles resource-scoped.
 variable "execution_secret_kms_key_arns" {
   description = <<-EOT
-    Exact KMS key ARNs protecting the Secrets Manager entries in
-    secret_sources. Used only by the ECS execution role with Secrets Manager
-    ViaService and SecretARN encryption-context conditions. Application key use
-    belongs in task_kms_key_arns instead.
+    Exact KMS key ARNs protecting the Secrets Manager entries in secret_arns.
+    Used only by the ECS EXECUTION role, and only through a statement carrying
+    the Secrets Manager ViaService and SecretARN encryption-context conditions,
+    so the key cannot be used against unrelated ciphertext. A key the
+    APPLICATION itself must use -- to read an object, decrypt a queue message or
+    open a database connection -- belongs in a statement of
+    task_role_policy_json, which is attached to the task role; this module
+    composes no key permission for that role.
   EOT
   type        = list(string)
   default     = []
@@ -2286,9 +2450,16 @@ variable "execution_secret_kms_key_arns" {
   #       IAM statement whose resource matches no key, so the decrypt permission
   #       the caller believes it granted is absent. That failure appears when a
   #       secret or a queue message is first decrypted, not when this applies.
-  #       Trade-offs: an empty list is permitted, because a service that touches
-  #       none of the customer-managed keys needs no decrypt grant, and the batch
-  #       and reporting shapes differ from the online ones in exactly that way.
+  #       Trade-offs: an empty list is permitted, because a workload that injects
+  #       no Secrets Manager entry needs no execution-role decrypt grant at all.
+  #       Refactoring Rationale: this note used to name the batch and reporting
+  #       shapes as the workloads that "differ from the online ones in exactly
+  #       that way", which was wrong on the measured wiring. Both roots gate this
+  #       input on `length(secret_sources_by_workload[each.key]) > 0`, and every
+  #       one of the nine workloads -- batch and reporting included -- injects at
+  #       least the database credential, so every one receives the secrets key.
+  #       The empty case is the shape of a FUTURE workload that reads no secret,
+  #       not of any workload this repository deploys today.
   validation {
     condition = alltrue([
       for arn in var.execution_secret_kms_key_arns :

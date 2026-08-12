@@ -72,12 +72,22 @@
 --   - FIFTEEN credentials are applied by section 6: the eight runtime roles and
 --     the seven migrators. The eight owners get none, by construction.
 --   - CREATE on schema public is revoked from PUBLIC.
---   - carddemo_batch holds USAGE on ledger, account, card and reference, and
+--   - carddemo_batch holds USAGE on ledger, account and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
---     USAGE/SELECT on ledger sequences, SELECT/UPDATE on account tables, and
---     SELECT on card and reference tables.
---   - carddemo_reporting holds USAGE on those same four schemas, and default
---     privileges granting SELECT and nothing else on their tables.
+--     USAGE/SELECT on ledger sequences, SELECT on account tables with UPDATE on
+--     account.accounts by name, SELECT on reference tables, and SELECT and
+--     nothing else on card tables. It holds NO WRITE PRIVILEGE on card, account
+--     beyond account.accounts, or reference -- see the rationale in section 4,
+--     which records that the card grant was withdrawn on one reading of the
+--     reference and reinstated on another.
+--   - carddemo_ledger holds USAGE on account and, by name, SELECT and UPDATE on
+--     account.accounts and no other table in it. That one grant is what lets bill
+--     payment settle a balance and record its ledger row in a single transaction,
+--     as the baseline's one CICS task does.
+--   - carddemo_reporting holds USAGE and SELECT on the reporting schema, whose
+--     masked security-barrier views are the whole of its read surface, and every
+--     privilege it might otherwise inherit on ledger, account, card and reference
+--     is explicitly revoked in section 5.
 --   - No table, index, view, constraint or seed row is created.
 --
 -- Fails when:
@@ -1005,7 +1015,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 
 -- =============================================================================
--- 4. Cross-schema privileges for the batch role
+-- 4. Cross-schema privileges for the batch role and the ledger role
 --
 -- WHY : Refactoring Rationale: all FOURTEEN ALTER DEFAULT PRIVILEGES clauses in this
 -- section and in section 5 now name carddemo_<context>_owner where they previously
@@ -1021,8 +1031,12 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 -- would have been invisible on an already-migrated database and total on a fresh
 -- one.
 --
--- This section is the ONE documented exception to database-per-service purity in
--- the whole design, so it carries the most reasoning.
+-- This section holds the TWO documented exceptions to database-per-service purity
+-- in the whole design, so it carries the most reasoning. The first is the nightly
+-- posting unit of work, whose three writes span two schemas; the second is the
+-- online bill payment, whose two writes span the same two schemas for the same
+-- reason. Both are argued below, the batch one immediately and the ledger one in
+-- the block headed "4b" at the end of this section.
 --
 -- WHY : Assumptions: the nightly posting job commits three writes as a single
 -- unit of work. In app/cbl/CBTRN02C.cbl the paragraph 2000-POST-TRANSACTION. at
@@ -1085,12 +1099,45 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- WHY : Assumptions: USAGE on a schema is what makes its objects nameable at
 -- all; without it a table-level privilege on an object inside the schema is
--- unreachable and the error names the schema, not the table. The four schemas
--- are exactly the ones the three nightly programs open: ledger and account for
--- posting and interest, reference because CBACT04C L47 opens DISCGRP for the
--- disclosure-group rate, and card because CBTRN01C L46 opens CARDFILE while
--- validating the daily file.
-GRANT USAGE ON SCHEMA ledger, account, card, reference TO carddemo_batch;
+-- unreachable and the error names the schema, not the table. The three schemas
+-- are exactly the ones this module's code reaches: ledger and account for
+-- posting and interest, and reference because CBACT04C L47 opens DISCGRP for the
+-- disclosure-group rate.
+--
+-- WHY : Refactoring Rationale: a fourth schema, card, was withdrawn from this
+-- list and is REINSTATED, and both movements are recorded so that the second does
+-- not read as a silent reversal of the first. The withdrawal was right about the
+-- justification it removed. That justification was that CBTRN01C validates the
+-- daily feed against the card master, and the source contradicts it:
+-- app/cbl/CBTRN01C.cbl OPENs CARD-FILE at L309 and CLOSEs it at L417 without ever
+-- issuing a READ against it -- its only three reads are the daily feed at L203,
+-- the cross-reference at L229 and the account at L243 -- and the cross-reference
+-- it does read is the CVACT03Y record, which batch-service maps to
+-- account.card_xref rather than to a card table. All of that still holds and the
+-- grant is NOT reinstated on it.
+--
+-- WHY : Refactoring Rationale: what has changed is the second half of the
+-- withdrawal's argument, which was that no entity in the batch module declares a
+-- card schema, so nothing in the migrated code could use the grant. There is now
+-- a declared mapping and a real read. app/cbl/CBEXPORT.cbl opens the card master
+-- at L513 and writes one export record per card at L527-L545, and that program is
+-- ExportJob; the phase was emitting nothing and reporting a count of zero because
+-- the entity behind it did not exist. com.carddemo.batch.domain.Card now maps
+-- card.cards and com.carddemo.batch.repository.CardRepository walks it in key
+-- order, so the grant is reinstated on a real call site rather than on the
+-- incorrect reading it originally carried. The batch service's session posture
+-- agrees: its connection-init statement names card last on the search path.
+--
+-- WHY : Trade-offs: the reinstated privilege is SELECT and nothing more, and the
+-- narrowness is the point rather than a courtesy. Every card row holds a primary
+-- account number and an enciphered verification value, so a write privilege here
+-- would let a job that only ever reads the master alter or destroy it, and an
+-- unexercised privilege is one no test can notice the loss of. The agreement
+-- between this grant list, the service's search path and that module's mapped
+-- schemas is asserted in all three directions by CrossSchemaPrivilegeContractTest
+-- in the shared kernel, so a grant without a call site and a call site without a
+-- grant both fail the build rather than passing review.
+GRANT USAGE ON SCHEMA ledger, account, reference, card TO carddemo_batch;
 
 -- WHY : Assumptions: read, insert and update on ledger, and nothing beyond
 -- them. The posting job writes the posted transaction (app/cbl/CBTRN02C.cbl
@@ -1196,10 +1243,25 @@ BEGIN
 END
 $$;
 
--- Assumptions: read-only on card. app/cbl/CBTRN01C.cbl opens CARDFILE at
--- L46 to validate the daily file against the card master and declares no write
--- verb at all, so any write privilege here would exceed what every batch step
--- put together performs.
+-- WHY : Assumptions: read-only on card, in two statements -- one default
+-- privilege so a table the card context's migration creates later is readable
+-- without a second provisioning pass, and one grant over the tables that exist
+-- when this script runs. app/cbl/CBEXPORT.cbl:513 opens the card master
+-- ACCESS MODE IS SEQUENTIAL and L527-L545 writes one export record per card,
+-- declaring no write verb against it, so SELECT is the whole of what the nightly
+-- and operator-invoked steps put together perform on this schema.
+--
+-- WHY : Refactoring Rationale: these two statements were removed by an earlier
+-- revision and are reinstated, on a different justification from the one they
+-- originally carried. The removal correctly rejected the claim that CBTRN01C
+-- validates the daily feed against the card master -- that program opens
+-- CARD-FILE and never reads it, as the rationale on the USAGE grant above sets
+-- out line by line -- and it also observed that no batch entity mapped the card
+-- schema, which was true of the tree it was made against. It no longer is:
+-- com.carddemo.batch.domain.Card maps card.cards for the export's card phase.
+-- The privilege is therefore justified by a mapped entity and a named read, which
+-- is the standard CrossSchemaPrivilegeContractTest holds every entry on this
+-- list to, in both directions.
 ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card
     GRANT SELECT ON TABLES TO carddemo_batch;
 
@@ -1213,6 +1275,222 @@ ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_reference_owner IN SCHEMA reference
     GRANT SELECT ON TABLES TO carddemo_batch;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_batch;
+
+
+-- -----------------------------------------------------------------------------
+-- 4b. The ledger role's narrow reach into account.accounts, for bill payment
+--
+-- WHY : Assumptions: the online bill-payment screen commits TWO writes as a
+-- single unit of work, and they land in two schemas. app/cbl/COBIL00C.cbl reads
+-- the account master for update at L343 to L351, writes the payment transaction
+-- at L233 (WRITE-TRANSACT-FILE at L510), computes the reduced balance at L234 and
+-- rewrites the account master at L235 (UPDATE-ACCTDAT-FILE at L377, whose
+-- EXEC CICS REWRITE is at L379 to L382). All three statements sit inside one CICS
+-- syncpoint, so the baseline has no state in which a payment is recorded against
+-- an unchanged balance, nor one in which a balance is reduced with no payment to
+-- show for it. The transaction lands in ledger and the account master in account,
+-- so keeping that commit atomic requires the ledger role to reach one table in
+-- the account schema. This is the same argument section 4 makes for the nightly
+-- chain, applied to the one online screen that moves money.
+--
+-- WHY : Alternatives Considered: reaching the account master over the account
+-- context's REST API, which is what an earlier revision of
+-- services/transaction-service/.../service/BillPaymentService.java did through a
+-- seam operation named applyPayment. Rejected on two independent grounds. It was
+-- not atomic -- a separate connection is a separate transaction, so a balance
+-- reduced by the owner and a local commit that then failed would leave exactly
+-- the state the baseline cannot produce -- and the endpoint it called,
+-- POST /api/v1/accounts/payments, was never published by account-service at all,
+-- so every confirmed payment failed. Publishing that endpoint would have fixed
+-- the second problem and left the first.
+--
+-- WHY : Alternatives Considered: a saga, or a transactional outbox with a
+-- compensating reversal. Rejected for the reason section 4 records for the
+-- posting job and which applies here verbatim: both replace one atomic commit
+-- with a sequence of committed steps, which makes a partly-applied payment
+-- observable where the baseline has no such state.
+--
+-- WHY : Assumptions: the grant is ONE table and TWO privileges, and every
+-- narrowing is deliberate. SELECT and UPDATE on account.accounts: the SELECT is
+-- the read-for-update at L349 to L351 and the UPDATE is the rewrite at L379.
+-- INSERT is withheld because an account row originates in account-service and
+-- this screen creates none; DELETE and TRUNCATE are withheld because
+-- app/cbl/COBIL00C.cbl declares neither verb. account.customers and
+-- account.card_xref are not granted at all: the payment screen's cross-reference
+-- read at L408 stays on the REST seam, because it is a lookup whose answer this
+-- side merely decides on rather than a write that must stand or fall with the
+-- ledger row, so it needs no shared transaction and therefore no grant.
+--
+-- WHY : Refactoring Rationale: the UPDATE is granted BY NAME through the guarded
+-- block below rather than through ALTER DEFAULT PRIVILEGES, for the reason
+-- section 4 records at length for carddemo_batch: a default privilege cannot name
+-- a table, so the default-privilege form would grant UPDATE on every table the
+-- account owner ever creates -- including account.customers, which carries the
+-- encrypted national identifier and the encrypted government-issued identifier.
+-- One write site exists in the whole screen, so one named table is the exact
+-- privilege. The SELECT is likewise named rather than schema-wide, which is
+-- NARROWER than the batch role's schema-wide read: the batch chain opens all
+-- three account records and this screen opens one.
+--
+-- WHY : Trade-offs: a named grant has to be issued after the table exists, so on
+-- a first bootstrap run the block reports the grants as outstanding instead of
+-- applying them, and this script must be re-run once the per-service migrations
+-- have created their tables. It is idempotent by construction, so the re-run is
+-- the documented bootstrap sequence rather than a workaround, and an outstanding
+-- grant named in the output is the right direction to fail in: an over-broad one
+-- would be invisible.
+-- -----------------------------------------------------------------------------
+
+-- WHY : Assumptions: USAGE on the account schema is what makes account.accounts
+-- nameable at all. Without it the table-level grants below are unreachable and
+-- the run-time error names the schema rather than the table, which is the harder
+-- of the two failures to diagnose.
+GRANT USAGE ON SCHEMA account TO carddemo_ledger;
+
+DO $$
+BEGIN
+    -- WHY : Assumptions: to_regclass returns NULL rather than raising when the
+    -- relation is absent, which is what lets one statement tell "not yet created"
+    -- from "created" without a catalogue join. The schema is named explicitly
+    -- because this script sets no search_path for any role.
+    IF to_regclass('account.accounts') IS NOT NULL THEN
+        GRANT SELECT, UPDATE ON account.accounts TO carddemo_ledger;
+    ELSE
+        -- WHY : Trade-offs: a NOTICE rather than an EXCEPTION, matching the batch
+        -- block above. On a first bootstrap run no per-service migration has run,
+        -- so the table is legitimately absent and raising here would make the
+        -- documented sequence fail. Saying nothing is worse: every confirmed bill
+        -- payment would then fail at run time with a permission error naming a
+        -- table rather than a provisioning step.
+        RAISE NOTICE
+            'account.accounts does not exist yet, so SELECT and UPDATE were not '
+            'granted to carddemo_ledger. Re-run this script after the '
+            'per-service Flyway migrations have created it; the bill-payment '
+            'screen cannot read or reduce an account balance until those grants '
+            'are present.';
+    END IF;
+END
+$$;
+
+
+-- =============================================================================
+-- 4b. Cross-schema privileges for the ledger role: one table, two privileges
+--
+-- This is the SECOND -- and last -- instance of the exception section 4 opens,
+-- and it is deliberately expressed as its own block rather than folded into the
+-- batch grants above, because it is justified by a different program and a
+-- different unit of work. Section 4's exception is the nightly posting chain;
+-- this one is the online bill-payment screen.
+--
+-- WHY : Assumptions: the bill-payment program commits TWO writes as a single
+-- unit of work, in two schemas. app/cbl/COBIL00C.cbl PROCESS-ENTER-KEY at L154
+-- performs WRITE-TRANSACT-FILE at L233 (the payment transaction, written at
+-- L510 into ledger), then COMPUTE ACCT-CURR-BAL = ACCT-CURR-BAL - TRAN-AMT at
+-- L234, then UPDATE-ACCTDAT-FILE at L235 (the account master, rewritten at L379
+-- into account). Both statements run inside ONE CICS task, and the task-end
+-- syncpoint is what makes them indivisible: the reference cannot produce a
+-- recorded payment beside an unchanged balance, nor a reduced balance with no
+-- payment row. Granting the ledger role narrowly scoped access across the two
+-- schemas is what keeps that commit a single ACID transaction, exactly as the
+-- baseline has it, and it is the same reasoning section 4 records for posting.
+--
+-- WHY : Refactoring Rationale: an earlier revision granted NOTHING here and had
+-- transaction-service reach the account master over HTTP instead, reading the
+-- balance from the account context's published lookup and asking it to apply the
+-- balance change through a second address. That arrangement had two defects, and
+-- the second is the reason this block exists rather than a widening of the first.
+-- The address it posted the balance change to was never declared by the callee at
+-- all, so a deployed payment had no handler and no write authority to reach one
+-- with. And even had it been declared, an HTTP call cannot be enlisted in this
+-- side's database transaction: the sequence was insert-locally, debit-remotely,
+-- commit-locally, so a failure of the local commit left the remote balance
+-- reduced with no payment row recorded against it -- a half-applied payment,
+-- which is precisely the state the reference's single syncpoint makes
+-- unreachable. No arrangement of retries or ordering closes that window from one
+-- side of an HTTP hop; only one transaction does.
+--
+-- WHY : Alternatives Considered: a saga, or a transactional outbox with a
+-- compensating reversal, on the same terms section 4 rejects them and for the
+-- same concrete reason. Both replace one atomic commit with a sequence of
+-- separately committed steps, so a payment recorded against an unreduced balance
+-- becomes a state a reader can observe -- and unlike the nightly chain, this one
+-- is an interactive screen, so the observer is the cardholder who has just been
+-- told the payment succeeded. Keeping one database and narrowing the grant is
+-- both the lower-risk and the lower-cost option.
+--
+-- WHY : Alternatives Considered: publishing an event and letting the account
+-- context apply the balance change asynchronously. Rejected because the
+-- reference answers the operator with the balance ALREADY changed -- L193 and
+-- L194 move it onto the screen -- so an asynchronous application would either
+-- report a balance that is not yet true or make the screen wait for a callback,
+-- and the second is a synchronous call written the long way.
+--
+-- WHY : Trade-offs: this is a genuinely wider privilege graph than the design's
+-- ideal, and there are now two roles holding write access outside their own
+-- schema rather than one. That cost is bounded three ways and each bound is
+-- checkable: the privilege names ONE table rather than a schema, it conveys
+-- SELECT and UPDATE and not INSERT, DELETE or TRUNCATE, and the only code that
+-- exercises it is one service method whose reads and whose write sit inside one
+-- transactional boundary. What is bought is that the most sensitive invariant in
+-- the online system -- money moved exactly once -- is enforced by the database
+-- rather than by an ordering convention between two services.
+-- =============================================================================
+
+-- WHY : Assumptions: USAGE on the account schema, and on no other schema. Without
+-- it a table-level privilege on an object inside the schema is unreachable and
+-- the error names the schema rather than the table, which is the same trap
+-- section 4 records. transaction-service reads the card cross-reference over the
+-- account context's published lookup and NOT through this grant, because that
+-- read is not part of the unit of work -- so this grant covers the account master
+-- alone and the cross-reference stays behind its owner's API.
+GRANT USAGE ON SCHEMA account TO carddemo_ledger;
+
+-- WHY : Assumptions: NO default privilege is declared for this role on the
+-- account schema, and the omission is deliberate rather than an oversight. A
+-- default privilege cannot name a table, so "GRANT SELECT, UPDATE ON TABLES"
+-- would convey both on EVERY table the account owner ever creates -- including
+-- account.customers, which carries the encrypted national identifier, the
+-- encrypted government-issued identifier and the address. Section 4 records the
+-- same reasoning for the batch role and had to withdraw an earlier over-broad
+-- form to reach it; this block is authored narrow from the outset, so it needs no
+-- repair statement and no revoke.
+--
+-- WHY : Trade-offs: the consequence of naming the table is that the grant can
+-- only be issued AFTER account-service's own migration has created it, which is
+-- why the guarded block below reports rather than applies on a first bootstrap.
+-- The documented sequence re-runs this script once the per-service migrations
+-- have run -- it is idempotent by construction -- so a clean re-run is what
+-- confirms the graph is complete. That is the right direction to fail in: an
+-- outstanding grant is named in the output, whereas an over-broad one is
+-- invisible.
+DO $$
+BEGIN
+    IF to_regclass('account.accounts') IS NOT NULL THEN
+        -- WHY : Assumptions: SELECT is granted alongside UPDATE because the
+        -- balance the payment subtracts is READ first, under a row lock, inside
+        -- the same transaction that writes it -- which is what
+        -- app/cbl/COBIL00C.cbl READ-ACCTDAT-FILE does at L343, carrying the
+        -- UPDATE option at L351 so the rewrite at L379 consumes the lock it took.
+        -- A grant of UPDATE alone would let the write through and refuse the
+        -- read, so the screen could not report what it was about to pay.
+        GRANT SELECT, UPDATE ON account.accounts TO carddemo_ledger;
+    ELSE
+        -- WHY : Trade-offs: a NOTICE rather than an EXCEPTION, matching the
+        -- account grant in section 4 and the reporting key revoke in section 5.
+        -- On a first bootstrap the table is legitimately absent and raising here
+        -- would make the documented sequence fail. Saying nothing is worse: bill
+        -- payment would then fail at run time with a permission error naming a
+        -- table rather than a provisioning step, and it would fail for a
+        -- cardholder mid-payment.
+        RAISE NOTICE
+            'account.accounts does not exist yet, so SELECT and UPDATE were not '
+            'granted to carddemo_ledger. Re-run this script after the '
+            'per-service Flyway migrations have created it; the bill-payment '
+            'screen cannot read or reduce an account balance until that grant '
+            'is present.';
+    END IF;
+END
+$$;
 
 
 -- =============================================================================
@@ -1249,7 +1527,7 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reference TO carddemo_batch;
 -- scope for that reason, and reporting reads the writer through these grants
 -- instead.
 --
--- Beyond sections 4 and 5 there is no cross-schema grant anywhere: no other
+-- Beyond sections 4, 4b and 5 there is no cross-schema grant anywhere: no other
 -- service role may read or write another context's schema. A caller needing
 -- another context's data goes through that context's REST API, not through the
 -- database.

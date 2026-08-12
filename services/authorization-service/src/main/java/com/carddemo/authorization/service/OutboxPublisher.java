@@ -8,6 +8,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -734,17 +736,24 @@ public class OutboxPublisher {
      * program passes any of them to a data-language call, and both unload views run get-only at
      * {@code ims/PAUTBUNL.PSB} L18 and {@code ims/DLIGSAMP.PSB} L18.</p>
      *
-     * <p>Trade-offs: the whole pass is ONE unit of work and the sends happen inside it, so the claiming
-     * update's row locks AND the database connection are both held from the first claim until after the
-     * last send of the pass returns. That is the cost, and it is stated plainly because it is what sizes
-     * a connection pool: a publisher with a slow or unreachable queue occupies one connection for the
-     * whole of its retry budget. What it buys is that a second publisher BLOCKS on the row and then
-     * finds the claim token stale and skips it, instead of observing the row as pending and sending a
-     * reply that is already in flight. The second exposure is that a send which succeeds in a pass that
-     * then fails to commit leaves the row pending and it is sent again; the deduplication identity makes
-     * that a suppressed duplicate ONLY within the queue's five-minute deduplication interval, so a
-     * retried send after a longer outage reaches the requester twice and the requester suppresses it by
-     * the transaction identifier the reply carries.</p>
+     * <p>Refactoring Rationale: the pass is NOT one unit of work, and this paragraph said it was. Every
+     * database touch here runs in its OWN short transaction -- the head claim, each follower claim, each
+     * publication record and each retirement -- so no row lock and no connection is held across a send. The
+     * withdrawn sentence went on to size a connection pool from a claim that was false, which is worse than
+     * saying nothing: a reader would have provisioned for one connection per publisher for the whole of a
+     * retry budget, and would have believed a second publisher blocks on the row.</p>
+     *
+     * <p>Assumptions: single delivery therefore rests entirely on the token comparison and the lease, not on
+     * anything held. A concurrent pass that observed the same candidate finds the attempt count already moved
+     * and receives the row not at all, and a publisher killed mid-send strands its group only until the lease
+     * lapses.</p>
+     *
+     * <p>Trade-offs: because each row commits on its own, a send that succeeds and whose recording then fails
+     * leaves that row pending and it is sent again. The deduplication identity makes that a suppressed
+     * duplicate ONLY within the queue's five-minute deduplication interval, so a retried send after a longer
+     * outage reaches the requester twice and the requester suppresses it by the transaction identifier the
+     * reply carries. What the per-row boundary buys is that one unreachable queue costs one row's progress
+     * rather than the whole pass's, and that the connection is free between rows.</p>
      *
      * <p>Assumptions: the claim is per ORDERING GROUP -- one head row per group -- and that is what
      * preserves per-card order rather than an incidental effect of grouping. A first-in-first-out
@@ -759,24 +768,28 @@ public class OutboxPublisher {
      * reply queue would erase the evidence of every other group's progress; advancing the failed
      * group would be the reordering this method exists to prevent.</p>
      *
-     * <p>Assumptions: the configured batch size bounds the ROWS this pass handles in total, not merely
-     * the groups it starts from. The head claim consumes one unit of that budget per group it takes, and
-     * whatever remains is shared across the follow-on claims of those groups in the order they were
-     * claimed; when as many groups are pending as the budget allows, no follower is claimed at all and
-     * each of those groups advances by one reply this pass. Refactoring Rationale: the budget is threaded
-     * through because the follow-on loop had NONE. Its own documentation stated that the follow-on claim
-     * was "bounded by the same batch size as the head claim", and nothing bounded it: the loop advanced
-     * one group for as long as that group had pending rows, so a single card with a large backlog drained
-     * all of it inside one transaction -- holding the connection and the row locks of the whole backlog
-     * for however long it took, which is the opposite of the bounded-batch shape the reference works in
-     * and the opposite of what the sentence promised.</p>
+     * <p>Assumptions: the pass budget bounds the ROWS this pass handles in total, not merely the groups it
+     * starts from, and it is spent one unit per row-turn whatever that turn produced. The head round spends
+     * one unit per claimed group; whatever remains is then spent by the follower rotation.</p>
      *
-     * <p>Trade-offs: spending the budget on BREADTH first -- one row of every pending group before any
-     * second row of any group -- rather than draining each group fully in turn. Draining fully in turn
-     * was the alternative and it starves: one busy card would take the entire budget and the replies of
-     * every other card would wait however many passes that took, while the requester of each is holding
-     * a five-second deadline. Breadth-first bounds the wait of every group by the drain interval and
-     * costs a busy group more passes to clear, which is the direction the deadline argues for.</p>
+     * <p>Refactoring Rationale: the handling is BREADTH-first and it previously was not, although this
+     * paragraph described it as though it were. Every claimed head is now handled once, in claim order,
+     * before any group advances a second time; the withdrawn shape reached the first head and drained that
+     * group up to a per-group share before touching the second head at all. With the shipped defaults --
+     * twenty-five groups per claim and five hundred rows per pass, giving a share of twenty -- the last head
+     * of a saturated pass waited behind up to four hundred and eighty row-turns, each a claim, a send and a
+     * short transaction, while its requester held a five-second deadline. A dead {@code followerBudget}
+     * local sat beside the loop as the only surviving trace of the intended shape.</p>
+     *
+     * <p>Assumptions: the followers spend a GLOBAL remainder round-robin -- one row per surviving group per
+     * round -- rather than each group spending a private share. A private share both starves the later groups
+     * of a saturated pass and wastes the shares of groups that turned out to hold a single row.</p>
+     *
+     * <p>Trade-offs: breadth-first costs a busy group more passes to clear, and that is the direction the
+     * deadline argues for. Draining each group fully in turn was the alternative and it starves: one busy
+     * card would take the entire budget and the replies of every other card would wait however many passes
+     * that took. The per-group ceiling is retained on top of the rotation, so one very long backlog cannot
+     * hold the rotation open against a group arriving in a later claim.</p>
      *
      * @return how many replies were published in this pass, which a caller may use to decide whether
      *     to drain again immediately
@@ -793,11 +806,23 @@ public class OutboxPublisher {
         }
         int passBudget = this.maxRowsPerDrain;
         int published = 0;
-        // WHY : Assumptions: the heads already claimed count against the pass budget, so the remainder
-        //       is what the follow-on claims may spend. A saturated pass -- as many pending groups as the
-        //       budget allows -- therefore leaves nothing for followers, which is the correct answer
-        //       rather than a degenerate one: every pending group has already been advanced by one.
-        int followerBudget = this.batchSize - heads.size();
+
+        // WHY : Refactoring Rationale: the pass handles every claimed HEAD before it advances any group a
+        //       second time, and it previously drained each group in turn up to a per-group budget before
+        //       reaching the next head. The documentation described breadth-first handling and the code was
+        //       depth-first: with the shipped defaults -- twenty-five groups per claim and five hundred rows
+        //       per pass, giving a per-group share of twenty -- the FIRST claimed group could reach a decision
+        //       about twenty rows before the second claimed head was touched at all. Each of those decisions
+        //       is a claim, a send and a short transaction, so the last head of a saturated pass waited behind
+        //       the whole of that work while its requester held a five-second deadline. A dead
+        //       `followerBudget` local sat beside the loop as the only trace of the intended shape; it is
+        //       gone, and the shape is now in the loop.
+        // WHY : Assumptions: the head round spends ONE unit of the pass budget per claimed group, in claim
+        //       order, and a group only enters the follower rotation once its head has been handled and it
+        //       still has a row to offer. That is what makes the first row of the last claimed group arrive
+        //       no later than the number of claimed groups, rather than no later than that number times the
+        //       per-group share.
+        Deque<GroupCursor> rotation = new ArrayDeque<>();
         for (AuthReplyOutbox head : heads) {
             if (passBudget <= 0) {
                 // WHY : Assumptions: the remaining heads of this pass are already CLAIMED and their
@@ -808,30 +833,93 @@ public class OutboxPublisher {
                         this.maxRowsPerDrain);
                 break;
             }
-            GroupProgress progress = publishGroupFrom(head,
-                    Math.min(this.perGroupRowBudget, passBudget));
-            published += progress.published();
-            passBudget -= progress.handled();
+            RowOutcome outcome = handleRow(head);
+            passBudget--;
+            if (outcome.published()) {
+                published++;
+            }
+            if (outcome.groupContinues()) {
+                AuthReplyOutbox follower = nextInGroup(head);
+                if (follower != null) {
+                    rotation.add(new GroupCursor(follower, 1));
+                }
+            }
+        }
+
+        // WHY : Assumptions: the followers spend a GLOBAL remainder round-robin -- one row per surviving
+        //       group per round -- rather than each group spending a private share. A private share is what
+        //       the withdrawn shape had, and it both starves the later groups of a saturated pass and wastes
+        //       the shares of groups that turned out to hold a single row. One rotation over one remainder
+        //       gives every surviving group its next row before any of them gets the row after that, which
+        //       is the property the five-second reply deadline argues for.
+        // WHY : Assumptions: the per-group cap still applies, as a CEILING on how much of one pass a single
+        //       group may consume rather than as its allowance. Round-robin already bounds the wait of every
+        //       group, so the cap is now only there to stop one very long backlog holding the rotation open
+        //       against a group that arrives in a later claim.
+        while (passBudget > 0 && !rotation.isEmpty()) {
+            GroupCursor cursor = rotation.poll();
+            RowOutcome outcome = handleRow(cursor.row());
+            passBudget--;
+            if (outcome.published()) {
+                published++;
+            }
+            if (!outcome.groupContinues()) {
+                continue;
+            }
+            int handledInGroup = cursor.handledInGroup() + 1;
+            if (handledInGroup >= this.perGroupRowBudget) {
+                // WHY : Assumptions: the group leaves the rotation with rows still pending and the next pass
+                // resumes it from its own head. Yielding costs a hot group some latency and buys a pass
+                // whose duration is bounded by configuration rather than by the backlog it happens to meet.
+                LOG.info("event=auth.reply.group-budget-reached handled={} groupBudget={}",
+                        handledInGroup, this.perGroupRowBudget);
+                continue;
+            }
+            AuthReplyOutbox follower = nextInGroup(cursor.row());
+            if (follower != null) {
+                rotation.add(new GroupCursor(follower, handledInGroup));
+            }
         }
         return published;
     }
 
     /**
-     * How much of one ordering group a single drain pass got through.
+     * What one row's turn produced: whether it reached the wire, and whether its group may advance.
      *
-     * <p>Assumptions: HANDLED and PUBLISHED are separate counts because they answer different
-     * questions, and collapsing them would break one of the two. Handled is every row this pass reached
-     * a decision about -- sent, retired, abandoned or failed -- and is what the pass budget is spent
-     * from, because each of those cost a claim and a transaction. Published is only what reached the
-     * wire, and is what the caller returns so a scheduler can tell whether the queue is moving. A
-     * budget spent from the published count alone would let a group of expiring or failing rows consume
-     * an unbounded number of claims while reporting no progress, which is the exact shape of the
-     * unboundedness this record exists to close.</p>
+     * <p>Assumptions: PUBLISHED and GROUP-CONTINUES are separate answers because they are independent, and
+     * collapsing them would break one of the two. A row that EXPIRED is retired rather than sent, so it did
+     * not reach the wire and yet its group is perfectly free to advance -- the deadline belonged to that
+     * reply, not to the card. A row whose SEND FAILED did not reach the wire either and its group must stop,
+     * because the only reply that may follow it is the one still waiting for it. Reading one flag from the
+     * other would either reorder a card's replies or strand a group behind an expiry.</p>
      *
-     * @param handled how many rows of the group this pass reached a decision about
-     * @param published how many of those were put on the wire
+     * <p>Assumptions: every turn costs exactly ONE unit of the pass budget whatever it produced, so the
+     * budget is spent from the turns taken rather than from the rows published. A budget spent from
+     * publications alone would let a group of expiring or failing rows consume an unbounded number of claims,
+     * sends and short transactions while reporting no progress at all.</p>
+     *
+     * @param published whether the row was put on the wire, which an expired or failed row was not
+     * @param groupContinues whether this row's group may be advanced again, which a failed send forbids
      */
-    private record GroupProgress(int handled, int published) {
+    private record RowOutcome(boolean published, boolean groupContinues) {
+    }
+
+    /**
+     * One surviving ordering group's position in the follower rotation.
+     *
+     * <p>Assumptions: the ROW is carried rather than only the group identity, because it is already claimed
+     * and leased by this pass -- re-deriving it from the group would claim a second row and spend a second
+     * transaction for a row this pass already owns.</p>
+     *
+     * <p>Assumptions: the count of rows already handled travels WITH the cursor rather than being held in a
+     * map beside the rotation. The rotation is the only place a group exists during a pass, so keeping the
+     * two together is what makes it impossible for a group to be re-queued while its count is left
+     * behind.</p>
+     *
+     * @param row the claimed, leased row whose turn is next for this group; never {@code null}
+     * @param handledInGroup how many rows of this group this pass has already reached a decision about
+     */
+    private record GroupCursor(AuthReplyOutbox row, int handledInGroup) {
     }
 
     /**
@@ -869,79 +957,28 @@ public class OutboxPublisher {
     }
 
     /**
-     * Publishes one ordering group in order, starting at its head row and stopping at the first
-     * failure.
+     * Takes one row's turn: judges its deadline, acts on it, and reports what that produced.
      *
-     * <p>Assumptions: the group is advanced only while rows reach a terminal state. The loop
-     * re-claims the group's next row after each success, so a group with a backlog drains within one
-     * pass rather than one reply per poll interval, while a failure leaves every row behind the
-     * failed one untouched and still pending -- the next pass starts at the same head, so the group's
-     * order cannot be broken by a retry.</p>
+     * <p>Assumptions: staleness is judged against an instant sampled HERE, once per row, rather than once
+     * per pass. A pass that publishes many rows takes real time, so a row whose deadline falls part-way
+     * through it must be judged against the clock as it stands when its turn comes -- otherwise it is sent
+     * to a requester that has already stopped waiting and its deduplication identifier is spent on an answer
+     * nobody reads.</p>
      *
-     * <p>Assumptions: an EXPIRED row is retired rather than sent, and the group still advances past
-     * it, because retiring it is terminal for that row: the requester has stopped waiting, so nothing
-     * about the replies behind it is made out of order by moving past it. A retired row is not
-     * counted as published, because nothing was put on the wire.</p>
+     * <p>Assumptions: a FAILED send stops its group and an EXPIRED row does not. The ordering guarantee the
+     * group identity exists to provide is that the only reply which may follow this one is the one still
+     * waiting for it, so a group whose send failed must not advance; an expiry is a decision reached ABOUT
+     * that reply and says nothing about the next one, so the group is free to continue.</p>
      *
-     * <p>Trade-offs: the follow-on claim is bounded by the same batch size as the head claim, so one
-     * busy card cannot monopolise a pass indefinitely and its remaining rows are taken by the next
-     * drain. A larger bound would drain a hot group sooner while holding that group's rows leased for
-     * longer.</p>
-     *
-     * <p>Assumptions: the current instant is read ONCE PER ROW, immediately before that row's deadline is
-     * judged, and it used to be read once for the whole pass and passed to every row. Refactoring
-     * Rationale: a pass is not instantaneous -- each row costs a network send, and a failing send costs a
-     * retry with a delay -- so one instant captured at the start becomes progressively staler as the pass
-     * runs. Two consequences followed. A reply whose five-second deadline passed WHILE the pass was
-     * working was judged live against the stale instant and sent to a requester that had stopped waiting,
-     * consuming its deduplication identity so that a legitimate retry would be suppressed. And the
-     * publication instant stamped on a successful row was the pass's start rather than the send's
-     * completion, so the durable record of when a reply was published was wrong by the length of the
-     * pass -- which is precisely the interval an operator reconstructing a latency complaint measures.</p>
-     *
-     * @param head the already-claimed head row of the group; must not be {@code null}
-     * @param groupBudget the greatest number of rows of this group this pass may reach a decision
-     *     about, already reduced to whatever remains of the pass budget
-     * @return how many rows of this group this pass handled and how many of those reached the wire
-     * @throws org.springframework.dao.DataAccessException if a follow-on claim cannot be executed
+     * @param row the claimed, leased row whose turn it is; must not be {@code null}
+     * @return whether the row reached the wire and whether its group may advance, never {@code null}
      */
-    private GroupProgress publishGroupFrom(AuthReplyOutbox head, int groupBudget) {
-        int published = 0;
-        int handled = 0;
-        AuthReplyOutbox row = head;
-        while (row != null) {
-            // WHY : Assumptions: staleness is judged against an instant sampled HERE, once per row,
-            // rather than once per pass. A pass that publishes many rows takes real time, so a row
-            // whose deadline falls part-way through it must be judged against the clock as it stands
-            // when its turn comes -- otherwise it is sent to a requester that has already stopped
-            // waiting and its deduplication identifier is spent on an answer nobody reads.
-            boolean expired = row.isExpiredAsOf(now());
-            handled++;
-            if (!handleOne(row, expired)) {
-                // WHY : Assumptions: the group stops HERE and its later rows are left pending.
-                // Returning rather than continuing is what makes the ordering guarantee hold under
-                // failure: the only reply that may follow this one is the one still waiting for it.
-                return new GroupProgress(handled, published);
-            }
-            if (!expired) {
-                published++;
-            }
-            if (handled >= groupBudget) {
-                // WHY : Assumptions: the group yields at its budget with rows still pending, and the
-                // next pass resumes it from the same head. Refactoring Rationale: an earlier revision
-                // had no such stop -- it re-claimed the group's next row until the group ran dry -- so
-                // the configured batch size bounded only how many GROUPS a pass opened and not how
-                // much work it did, and one card with a large backlog held the publisher for an
-                // unbounded number of claims and sends while every other claimed head waited behind
-                // it. Yielding costs a hot group some latency and buys a pass whose duration is
-                // bounded by configuration rather than by the backlog it happens to meet.
-                LOG.info("event=auth.reply.group-budget-reached handled={} groupBudget={}",
-                        handled, groupBudget);
-                return new GroupProgress(handled, published);
-            }
-            row = nextInGroup(row);
+    private RowOutcome handleRow(AuthReplyOutbox row) {
+        boolean expired = row.isExpiredAsOf(now());
+        if (!handleOne(row, expired)) {
+            return new RowOutcome(false, false);
         }
-        return new GroupProgress(handled, published);
+        return new RowOutcome(!expired, true);
     }
 
     /**

@@ -185,4 +185,60 @@ class BatchJobNameTest {
                 .isEqualTo("preflight-daily-transactions")
                 .isNotEqualTo(BatchJobName.PREFLIGHT_DAILY_TRANSACTIONS.name().toLowerCase());
     }
+
+    /**
+     * Verifies that every constant's suffixed step name round-trips back to that constant.
+     */
+    @Test
+    void forStepNameRoundTripsEverySuffixedStepName() {
+        // WHY : Assumptions: the round trip is asserted for EVERY constant rather than for a sample,
+        //       because the derivation is what a failure path depends on: the durable step ledger is
+        //       handed a step name and has to name the job to publish an event. A constant whose step
+        //       name did not round-trip would make that publish fail for exactly one job, on exactly
+        //       the runs that failed, which is the least observable place for a gap to sit.
+        for (BatchJobName job : BatchJobName.values()) {
+            assertThat(BatchJobName.forStepName(job.token() + BatchJobName.STEP_NAME_SUFFIX))
+                    .as("step name derived from %s", job.token())
+                    .isEqualTo(job);
+        }
+    }
+
+    /**
+     * Verifies that a bare token with no step suffix resolves to its own constant.
+     */
+    @Test
+    void forStepNameAcceptsABareTokenWithNoSuffix() {
+        // WHY : Assumptions: this is not a convenience. The export and import jobs name their step
+        //       with the job token itself and no suffix, because each is a single step with nothing to
+        //       distinguish, so a derivation that required the suffix would fail for two of the seven
+        //       jobs -- and would fail while reporting a failure.
+        for (BatchJobName job : BatchJobName.values()) {
+            assertThat(BatchJobName.forStepName(job.token())).isEqualTo(job);
+        }
+    }
+
+    /**
+     * Verifies that a step name resolving to no job is refused rather than defaulted.
+     */
+    @Test
+    void forStepNameRefusesAStepNameNoJobDeclares() {
+        // WHY : Assumptions: refusal rather than a default is the whole point. Returning some job for
+        //       an unrecognised step would publish an event attributing a failure to a job that did
+        //       not fail, and a wrong attribution on a failure path is worse than a missing event --
+        //       the caller catches this and records the skip instead.
+        assertThatThrownBy(() -> BatchJobName.forStepName("a-step-no-job-declares"))
+                .isExactlyInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> BatchJobName.forStepName("post-transactions-step-step"))
+                .as("the suffix is removed once, not repeatedly")
+                .isExactlyInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Verifies that a null step name is a null-pointer failure rather than an argument failure.
+     */
+    @Test
+    void forStepNameRejectsNull() {
+        assertThatThrownBy(() -> BatchJobName.forStepName(null))
+                .isExactlyInstanceOf(NullPointerException.class);
+    }
 }

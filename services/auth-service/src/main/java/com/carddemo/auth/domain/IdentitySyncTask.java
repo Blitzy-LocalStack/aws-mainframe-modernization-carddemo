@@ -57,10 +57,17 @@ public class IdentitySyncTask {
     /** The status of a task that reached the attempt ceiling and awaits an operator. */
     public static final String STATUS_ABANDONED = "ABANDONED";
 
-    /** The operation that creates a pool account and returns its subject. */
-    public static final String OPERATION_PROVISION = "PROVISION";
-
-    /** The operation that brings a pool account's projection and group in line with the row. */
+    /**
+     * The operation that brings a pool account's projection and group in line with the row.
+     *
+     * <p>Refactoring Rationale: a third constant, {@code OPERATION_PROVISION}, stood beside these two and
+     * has been withdrawn together with the value the column's own constraint admitted, by
+     * {@code V3__auth_identity_sync_operations.sql}. No write path could record it: {@code cognito_sub}
+     * is not nullable and the subject it holds is minted when the pool account is created, so the create
+     * path has to provision BEFORE it can write the row and therefore cannot record an intention first.
+     * What the constant cost was a branch on the applier that no deployment could reach and a column
+     * comment naming a verb an operator could not produce.</p>
+     */
     public static final String OPERATION_SYNCHRONISE = "SYNCHRONISE";
 
     /** The operation that removes a pool account. */
@@ -162,7 +169,7 @@ public class IdentitySyncTask {
      * Records one intended change against one user.
      *
      * @param userId the user the change concerns; must not be {@code null}
-     * @param operation one of {@link #OPERATION_PROVISION}, {@link #OPERATION_SYNCHRONISE} or
+     * @param operation one of {@link #OPERATION_SYNCHRONISE} or
      *     {@link #OPERATION_WITHDRAW}; must not be {@code null}
      * @param firstName the given name the provider is to hold, or {@code null} for a withdrawal
      * @param lastName the family name the provider is to hold, or {@code null} for a withdrawal

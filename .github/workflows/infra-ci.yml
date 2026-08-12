@@ -396,6 +396,28 @@ jobs:
           tflint --init --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
           tflint --recursive --config="$GITHUB_WORKSPACE/infra/.tflint.hcl"
 
+      # Assumptions: this gate decides what TFLint cannot. TFLint asserts that a
+      # variable and an output carry a `description`; it reads no comment, so a
+      # rationale label written in a parenthesised, singular or emphasis-wrapped form
+      # and a statement-level WHAT comment both pass it. HCL has no docstring
+      # construct, so those comments ARE the rule's surface here -- which makes this
+      # the language where a lexical gate is worth the most.
+      # GATING and FAIL-CLOSED: the script exposes no tolerance flag, no `--fix` and
+      # no allow-list argument, and this step adds none. Its `consistency` check
+      # additionally holds docs/CODE_DOCUMENTATION_STANDARD.md's claims about the
+      # TFLint and terraform-docs gates to this file, so a claim whose step was
+      # deleted or renamed fails here rather than being believed.
+      # Assumptions: the interpreter is the one the step above this job's tool
+      # install already configured -- the same pinned setup-python release -- so no
+      # second interpreter is introduced for a script that imports only the standard
+      # library.
+      - name: Run the Rule 1 lexical and consistency gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -V
+          python config/rule1/rule1_gate.py
+
       # Alternatives Considered: regenerating README tables in CI. Rejected
       # because silent mutation would hide the documentation drift this gate is
       # intended to make reviewable.
@@ -613,6 +635,48 @@ jobs:
                   "Logs service can assume this role on behalf of a flow log in another "
                   "account."
               )
+
+          # WHY : Assumptions: this is a CROSS-FILE agreement check rather than a count, and
+          #       it is in this step because the values it compares are Terraform prose and
+          #       workflow literals that no other gate reads together. The telemetry sidecar
+          #       is attached to every workload, and three files have to describe the same
+          #       upstream release: both environment roots carry the tag the mirror is
+          #       labelled with, and deploy.yml carries the tag plus the digest it pulls. A
+          #       version advanced in one place and not another mirrors one release and
+          #       registers another, and nothing about that fails -- the tasks start on
+          #       whichever image the mirror happens to hold.
+          # WHY : Trade-offs: the digest is NOT compared to anything, because only one file
+          #       holds it and a second copy would be the drift this check exists to stop.
+          #       What is asserted is that a digest is present and well-formed, so the pull
+          #       cannot silently fall back to a tag.
+          dev_root = Path("infra/envs/dev/main.tf").read_text()
+          prod_root = Path("infra/envs/prod/main.tf").read_text()
+          deploy = Path(".github/workflows/deploy.yml").read_text()
+
+          collector_tags = set()
+          for label, body in (("dev", dev_root), ("prod", prod_root)):
+              found = re.search(r'telemetry_collector_image_tag\s*=\s*"([^"]+)"', body)
+              assert found, f"infra/envs/{label}/main.tf: no telemetry_collector_image_tag"
+              collector_tags.add(found.group(1))
+          assert len(collector_tags) == 1, (
+              f"the two roots pin different telemetry collector tags: {sorted(collector_tags)}"
+          )
+          root_tag = collector_tags.pop()
+
+          workflow_tags = set(re.findall(r'collector_tag="([^"]+)"', deploy))
+          assert workflow_tags, ".github/workflows/deploy.yml: no collector_tag assignment"
+          assert workflow_tags == {root_tag}, (
+              "the deployment workflow and the environment roots name different telemetry "
+              f"collector releases: workflow {sorted(workflow_tags)} versus roots {root_tag}. "
+              "The mirror would hold one release while the task definitions named another."
+          )
+          assert re.search(
+              r'collector_digest="sha256:[0-9a-f]{64}"', deploy
+          ), (
+              ".github/workflows/deploy.yml: the collector mirror must pull by @sha256 digest. "
+              "A tag in a public registry can be moved onto different bytes, so a tag-only "
+              "pull is not a pin."
+          )
 
           print("Terraform prose counts: PASS")
           PROSE

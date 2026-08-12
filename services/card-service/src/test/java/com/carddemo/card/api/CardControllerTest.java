@@ -428,13 +428,14 @@ class CardControllerTest {
     /**
      * The member names the shared page envelope publishes.
      *
-     * <p>Assumptions: the envelope declares FIVE members and this set is all of them. Positioning by a
+     * <p>Assumptions: the envelope declares FOUR members and this set is all of them. Positioning by a
      * row ordinal, a page ordinal or a set total is published nowhere, so no name of that kind appears
-     * here or anywhere below; backward availability is a keyset property the envelope reports directly
-     * rather than a count of anything.
+     * here or anywhere below; the backward direction contributes the leading boundary token and no
+     * availability answer, because that answer is the page ordinal the reference keeps on the terminal
+     * at {@code app/cbl/COCRDLIC.cbl:237-238} and the SPA now keeps for itself.
      */
     private static final Set<String> PAGE_ENVELOPE_MEMBERS =
-            Set.of("items", "firstKey", "lastKey", "hasNext", "hasPrevious");
+            Set.of("items", "firstKey", "lastKey", "hasNext");
 
     /**
      * Serialises request bodies and reads response bodies back for whole-set assertions.
@@ -890,7 +891,6 @@ class CardControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items.length()").value(CardListService.PAGE_SIZE))
                 .andExpect(jsonPath("$.hasNext").value(true))
-                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andExpect(jsonPath("$.firstKey").isNotEmpty())
                 .andExpect(jsonPath("$.lastKey").isNotEmpty())
                 .andExpect(jsonPath("$.items[0].displayCardNumber")
@@ -921,7 +921,6 @@ class CardControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.items").isEmpty())
                 .andExpect(jsonPath("$.hasNext").value(false))
-                .andExpect(jsonPath("$.hasPrevious").value(false))
                 .andExpect(jsonPath("$.firstKey").doesNotExist())
                 .andExpect(jsonPath("$.lastKey").doesNotExist());
     }
@@ -1494,7 +1493,7 @@ class CardControllerTest {
         return PageResponse.ofRows(rows,
                 CURSOR_SEALER.seal(CURSOR_BINDING, cardNumber(1)),
                 CURSOR_SEALER.seal(CURSOR_BINDING, cardNumber(CardListService.PAGE_SIZE)),
-                true, false);
+                true);
     }
 
     /**

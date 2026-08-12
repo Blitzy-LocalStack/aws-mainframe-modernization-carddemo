@@ -1,35 +1,43 @@
 package com.carddemo.account.dto;
 
 /**
- * The request body of the account update endpoint, and the only request body this bounded context has.
+ * The request body of the account update endpoint, and the only EDITING request body this context has.
  *
- * <h2>What is not yet wired, stated before the contract</h2>
+ * <h2>Where this body is accepted</h2>
  *
- * <p>Assumptions: this is a PENDING TARGET contract, not a live surface, and the distinction is
- * declared first so that nothing below is read as describing a reachable endpoint. No route accepts
- * this body today: {@code com.carddemo.account.api.AccountController} declares no writing mapping at
- * all, {@code src/main/resources/openapi/account-api.yaml} publishes no update operation and names no
- * schema for this shape, and {@code com.carddemo.account.service.AccountUpdateService} -- named by the
- * service package charter as the eventual consumer -- does not exist. What DOES hold is that the shape
- * itself is settled and already consumed inbound: {@code com.carddemo.account.mapper.CustomerMapper}
- * converts it to a customer row and derives its per-field errors from it, so the component set, the
- * splitting of dates and identifiers, and the error granularity are all exercised. What does not hold
- * is that anything serves it over HTTP.</p>
+ * <p>Assumptions: this is a LIVE contract, and the route, the published operation and the consuming
+ * service all exist. {@code com.carddemo.account.api.AccountController#update} binds it as a
+ * {@code @Valid @RequestBody} on {@code PUT /api/v1/accounts/{accountId}} beneath a required
+ * {@code If-Match} precondition; {@code src/main/resources/openapi/account-api.yaml} publishes that
+ * operation and names the {@code AccountUpdateRequest} schema for this shape, component for component;
+ * and {@code com.carddemo.account.service.AccountUpdateService} edits it, applies both halves of it and
+ * answers with the committed state and the new revision.</p>
  *
- * <p>Trade-offs: publishing the shape before the route exists is deliberate, and it is the same choice
- * {@code com.carddemo.batch.BatchApplication} records for its own not-yet-authored job beans. It lets
- * the mapper and the response shape be authored and tested against one settled contract instead of
- * against a moving one, and it lets a reviewer hold a proposed component against a stated set. The cost
- * is exactly this section, which a reader needs in order to tell a not-yet-wired contract from a
- * broken one -- and without it, a reader tracing the named endpoint would conclude the route had been
- * deleted rather than never written.</p>
+ * <p>Refactoring Rationale: this section said the opposite. It opened "What is not yet wired, stated
+ * before the contract" and declared this a PENDING TARGET contract that no route accepted, that the
+ * published document named no schema for, and whose consuming service "does not exist". Every one of
+ * those three statements was true of the tree it was written against and is now false, and the section
+ * is REPLACED rather than amended because its framing was the problem: a reader who trusted it would
+ * conclude the account update was unreachable and would go looking for the missing route, and a reviewer
+ * would take an authored, tested and published write path for an unimplemented one. The obligation the
+ * old section discharged -- letting a reader tell a not-yet-wired contract from a broken one -- has no
+ * subject any more, because nothing here is unwired.</p>
  *
  * <p>Every component below is one editable field of the baseline account-update screen, carried across
  * field for field from that screen's BMS symbolic map at {@code app/cpy-bms/COACTUP.CPY} and from the
  * program that receives it, {@code app/cbl/COACTUPC.cbl}. The record is transport representation and
- * nothing else: it holds no business rule, reads no row, and performs no conversion. The account view,
- * the customer read paths and the card cross-reference lookups take their selection context from the
- * request path and from query parameters instead, so no other endpoint in this context needs a body.</p>
+ * nothing else: it holds no business rule, reads no row, and performs no conversion.</p>
+ *
+ * <p>Refactoring Rationale: the sentence that stood here said the account view, the customer reads and the
+ * cross-reference lookups "take their selection context from the request path and from query parameters
+ * instead, so no other endpoint in this context needs a body", and that is no longer true of any of them.
+ * Every machine-facing read on this context now carries its key in a body -- {@link AccountLookupRequest},
+ * {@link CardXrefLookupRequest} and {@link CustomerLookupRequest} -- because an identifier in a request line
+ * is composed into the load balancer's access record before any application code runs, and nothing inside a
+ * service can withdraw it. Those three records are SELECTION bodies carrying one key each; this one is an
+ * EDITING body carrying forty-three submitted values, which is the distinction the opening sentence now
+ * draws. The end-user account view and update keep their identifier in the path deliberately, and the reason
+ * is recorded on {@code AccountController} rather than repeated here.</p>
  *
  * <p>The components are also the keys of the per-field error array the update response carries. That
  * array is keyed at this granularity and not at record granularity, which means the individual year,

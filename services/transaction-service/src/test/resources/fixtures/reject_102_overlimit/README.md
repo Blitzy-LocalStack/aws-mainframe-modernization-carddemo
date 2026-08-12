@@ -91,7 +91,7 @@ than intended -- `cmp` between the two `dailytran.txt` files reports a single
 differing position, 143, and nothing else. Any further divergence destroys the
 discriminator outright. If the transaction type code, the category, the source,
 the card number, the originating timestamp or the trailing `FILLER` also differed
-between the two records, a failure in either scenario would no longer be
+between the two records, a failure in either scenario would cease to be
 attributable to the comparison operator, because any of those fields could have
 caused it. The pair would still contain one posting record and one rejecting
 record and would still look like a boundary test, while proving nothing about the
@@ -249,7 +249,7 @@ were verified by reading that file.
 
 ### 3.1 The reject row
 
-Exactly **one** row in `ledger.transaction_rejects`, created at line 579, carrying:
+Exactly **one** row in `ledger.transaction_rejects`, carrying:
 
 | Column | Declared at | Expected value |
 |---|---|---|
@@ -492,7 +492,7 @@ The discipline chosen instead is exact fixed point at every hop, and this folder
 the sharpest argument for it in the module: `NUMERIC(11,2)` in the `ledger` schema,
 which
 [`V1__ledger.sql`](../../../../main/resources/db/migration/V1__ledger.sql)
-declares for the feed amount at line 449 and for the posted amount at line 198;
+declares on `ledger.daily_transactions.amount` and on `ledger.transactions.amount`;
 `BigDecimal` at scale 2 with `HALF_UP` rounding in Java; and a JSON **string** on
 the wire, so that no client parses the value into a double on the way in. Every
 money figure in this document is written as a decimal string with two decimal
@@ -708,35 +708,45 @@ rule by name instead.
 
 ## 9. What consumes this scenario
 
-Annotated `[present]` or `[planned]` per master section 9.3, whose purpose is to
-stop a document describing a future artifact as though it already existed. Paths
-that do not yet exist appear as plain code spans rather than links, so that no link
-in this tree resolves to nothing.
-
 - [`TransactionFixtureContractTest`](../../../java/com/carddemo/transaction/fixtures/TransactionFixtureContractTest.java)
-  -- **[present]**, and it reads these bytes. It resolves fixtures from the
-  classpath root `fixtures/` declared at its line 32, and its
-  `theOverLimitBoundaryIsAOneCentPair` case at lines 128 to 144 decodes
+  reads these bytes. Its `theOverLimitBoundaryIsAOneCentPair` case decodes
   `DALYTRAN-AMT` from both members of the pair and asserts +2065.00, +2065.01 and a
-  difference of 0.01 -- asserting the difference, so that moving both files by the
+  difference of 0.01 -- asserting the DIFFERENCE, so that moving both files by the
   same amount fails rather than passing two independent checks. Its
-  `theCategoryBalanceRowsCarryTheComposedKey` case at lines 238 to 276 asserts this
-  folder's composed key and its +100.00 balance, and its
-  `everyScenarioCarriesItsThreeFiles` case asserts the record widths and the absence
-  of carriage returns.
+  `theCategoryBalanceRowsCarryTheComposedKey` case asserts this folder's composed key
+  and its +100.00 balance, and its `everyScenarioCarriesItsThreeFiles` case asserts
+  the record widths and the absence of carriage returns.
 - [`TransactionRejectRepositoryIT`](../../../java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java)
   -- **[present]**. It resolves a scenario's `dailytran.txt` from this tree at its
-  line 1488 and exercises the reject-row columns of section 3.1 against a real
+  line 1514 and exercises the reject-row columns of section 3.1 against a real
   PostgreSQL instance through Testcontainers.
-- A test asserting **this scenario's reject outcome end to end** -- **[planned]**.
-  Nothing today drives the reason-102 path from these bytes and asserts
-  `reason_code` 102, `reason_desc` `OVERLIMIT TRANSACTION`, the 350-byte
-  `raw_record`, and the two untouched-row claims of section 3.2. That is the gap this
-  folder exists to be filled against, and section 6.1 constrains how the
-  posted-ledger half of it may be written. The module's naming shape for such a class
-  is `*ControllerTest` for the web layer, `*ServiceTest` for a unit-level rule and
-  `*RepositoryIT` for a Testcontainers-backed integration test, and it would run
-  under the `test` Spring profile supplied by
+- A test asserting **this scenario's reject outcome** -- **[present]**. The case
+  `aProjectedBalanceOneCentBeyondTheCreditLimitYieldsReasonOneHundredAndTwo` of
+  `TransactionRejectRepositoryIT`, at its line 1065, reads this folder's
+  `dailytran.txt`, stores the reject row it produces and asserts `reason_code` 102 and
+  `reason_desc` `OVERLIMIT TRANSACTION`. The read itself asserts the 350-character
+  image width, so a truncated or carriage-return-bearing fixture fails at the read
+  rather than as a puzzling comparison later. Its paired case
+  `aProjectedBalanceExactlyOnTheCreditLimitProducesNoRejectStreamRow`, at line 1034,
+  drives `boundary_exact_limit` through the same path and asserts an empty reject
+  table, so the two cases straddle the inclusive guard from this folder's bytes and
+  from its pair's.
+- The **decision** that these bytes are over limit -- **[present]**, and deliberately
+  asserted elsewhere rather than here. It belongs to `PostingValidationService` in the
+  batch deployable, the module `app/cbl/CBTRN02C.cbl` migrates to, and
+  `PostingValidationServiceTest` there reports reason 102 with this same verbatim text
+  one cent beyond the limit. A test that both performed and asserted the decision
+  could only agree with itself and would pass unchanged were the production dispatch
+  absent or inverted, which is why the integration test above asserts the persistence
+  contract and nothing more.
+- The **untouched-row claims of section 3.2** -- **[planned]**. No test yet asserts
+  that a rejected record leaves `ledger.transactions` and
+  `ledger.transaction_category_balances` as this folder stages them; the integration
+  test above clears and inspects `ledger.transaction_rejects` alone. Section 6.1
+  constrains how the posted-ledger half of that assertion may be written. The module's
+  naming shape for such a class is `*ControllerTest` for the web layer, `*ServiceTest`
+  for a unit-level rule and `*RepositoryIT` for a Testcontainers-backed integration
+  test, and it would run under the `test` Spring profile supplied by
   [`../../application-test.yml`](../../application-test.yml), which pins schema resolution
   to `ledger` for the connection at its line 131 and for the migration tool at its
   lines 165 and 172, and points the migration tool at this module's own migration at
@@ -746,15 +756,13 @@ in this tree resolves to nothing.
 - [`tests/fixtures/README.md`](../../../../../../../tests/fixtures/README.md) --
   **[present]**, the authoritative byte contract.
 
-Refactoring Rationale: this section previously would have read `[planned]` in full,
-and the folder index still describes the test tree as holding no consumer of these
-fixtures. That description no longer matches the branch: the tree now holds a
-fixture-loading contract test that asserts this very pair's decoded values, so
-recording it as absent would understate the coverage and, worse, would leave a
-future author re-deriving a decode that is already asserted in code. The annotation
-is therefore stated per artifact and as a measurement, with the genuinely missing
-piece named narrowly as the reject-outcome assertion rather than as the whole
-consumer.
+Assumptions: availability is annotated per artifact rather than per section,
+because the reject-outcome assertion is split across two modules -- the
+persistence half here and the decision half in the batch deployable -- so only
+one half of the untouched-row claim is genuinely open. Trade-offs: a coarser
+annotation covering the section as a whole would read as though the outcome
+assertion were absent, which understates the coverage and leaves a future author
+re-deriving a reason code and a description that are already asserted in code.
 
 ---
 
@@ -791,15 +799,12 @@ is not one defeats a literal search for a hyphenated COBOL field name such as
 `ACCT-EXPIRAION-DATE` or `TRAN-PROC-TS`, which is the main way anyone navigates
 between these fixtures and the copybooks.
 
-Refactoring Rationale: every line number cited above was re-derived by reading the
-file it cites rather than inherited from a neighbouring document, and that is
-load-bearing here rather than merely diligent. Several citations into
-`V1__ledger.sql`, `application-test.yml` and the test tree that appear in
-neighbouring documents no longer resolve to the lines they name -- those files have
-grown since, and a line number is the one kind of reference that goes wrong silently
-while continuing to look precise. Carrying such a number across would have produced
-a document that reads as verified and is not. An invented or stale citation is worse
-than no citation, because it costs the next reader the time to discover it is wrong
-and, being unverifiable, is itself the vague rationale the rule forbids. Folder
+Assumptions: a citation into a live target file names the COLUMN, CONSTRAINT or
+CASE it means rather than a line number, and that is load-bearing here rather than
+merely tidy. A line number into a file that is still being edited goes wrong
+silently while continuing to look precise, so carrying one across produces a
+document that reads as verified and is not -- and being unverifiable, a stale
+citation is itself the vague rationale the rule forbids. Citations into `app/**`
+carry line numbers because that tree is reference-only and never changes. Folder
 section 8 makes re-reading before writing the closing requirement of this tree for
 exactly that reason.

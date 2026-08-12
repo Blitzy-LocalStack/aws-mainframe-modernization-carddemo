@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from carddemo_migration.loaders.aurora import target_for
 from carddemo_migration.verify.checksum import (
     DIGEST_NAME,
     FIELD_SEPARATOR,
@@ -70,9 +71,17 @@ from carddemo_migration.verify.money_parity import (
     total_target_money,
 )
 from carddemo_migration.verify.row_counts import (
+    NO_DATASET_LABEL,
+    SEED_DATASET_BASELINES,
+    UNSEEDED_LAYOUT_NAME,
+    RowCountVerificationError,
     compare_counts,
     count_source_records,
     count_target_rows,
+    fetch_row_count_rows,
+    reporting_role,
+    require_reporting_session,
+    verify_row_counts,
 )
 
 if TYPE_CHECKING:
@@ -432,6 +441,200 @@ def test_compare_counts_reports_agreement(fake_aurora: FakeAuroraDatabase) -> No
     #   test above and be useless.
     assert outcome.matched
     assert outcome.describe().startswith("MATCH ")
+
+
+def _reporting_connection(fake_aurora: FakeAuroraDatabase) -> object:
+    """Open a double connection whose live session answers as the reporting role.
+
+    Purpose
+    -------
+    Give the session-guarded entry points a connection they accept, by arranging the one probe
+    they make before executing anything.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double, on which the ``current_user`` probe is arranged.
+
+    Returns
+    -------
+    object
+        An open connection from the double.
+
+    Raises
+    ------
+    None
+        Arranging a result set and acquiring a connection cannot fail.
+    """
+    # WHY : Assumptions: the role is read from `reporting_role()` rather than spelled literally,
+    #   so this helper follows a rename of the role in the configuration module instead of pinning
+    #   a name whose only authority is this file. The name itself is asserted against the bootstrap
+    #   SQL by test_config_name_contract, which is where that claim belongs.
+    fake_aurora.arrange_rows("current_user", [(reporting_role(),)])
+    return fake_aurora.connect(**{**_CONNECTION_PARAMS, "user": reporting_role()})
+
+
+def test_the_session_guard_admits_a_reporting_session(fake_aurora: FakeAuroraDatabase) -> None:
+    """Admit a session that authenticates as the reporting role, and report the role it saw.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the ``current_user`` probe.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the guard refuses a conforming session, or probes with something other than
+        ``current_user``.
+    """
+    connection = _reporting_connection(fake_aurora)
+    assert require_reporting_session(connection) == reporting_role()
+    # WHY : the PROBE is asserted, not just its verdict. `session_user` answers the same question
+    #   for an unremarkable session and a different one after SET ROLE, so a guard built on it
+    #   would admit a session that authenticated as the reporting role and then assumed a writable
+    #   one -- which is the whole failure mode this guard exists to deny.
+    statement = fake_aurora.executed_sql()[-1]
+    assert "current_user" in statement
+    assert "session_user" not in statement
+
+
+def test_the_session_guard_refuses_a_writable_session(fake_aurora: FakeAuroraDatabase) -> None:
+    """Refuse a session on any role but the reporting one, naming both roles and nothing else.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the probe with a schema-owner role.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the guard admits the session, or the message discloses a connection detail.
+    """
+    # WHY : the role arranged is `carddemo_reference`, which is exactly what the command-line
+    #   verification path used to connect as: a role holding named DML on the tables being
+    #   certified. Arranging an obviously wrong value such as "postgres" would pass this test while
+    #   leaving the real regression -- a plausible service role -- undetected.
+    fake_aurora.arrange_rows("current_user", [("carddemo_reference",)])
+    connection = fake_aurora.connect(**_CONNECTION_PARAMS)
+    with pytest.raises(RowCountVerificationError) as refusal:
+        require_reporting_session(connection)
+    message = str(refusal.value)
+    assert reporting_role() in message
+    assert "carddemo_reference" in message
+    # WHY : Assumptions: the host and the trust anchor's path are asserted ABSENT and the database
+    #   name deliberately is not. Both role names in this message begin with the product name, so a
+    #   substring check for the database `carddemo` would fail on a correct message -- it would be
+    #   measuring the role names it is supposed to carry. The host and the anchor path are the two
+    #   values that identify a deployment, and neither has an innocent reason to appear.
+    assert str(_CONNECTION_PARAMS["host"]) not in message
+    assert str(_CONNECTION_PARAMS["sslrootcert"]) not in message
+
+
+def test_no_supplied_query_runs_on_a_writable_session(fake_aurora: FakeAuroraDatabase) -> None:
+    """Refuse a writable session BEFORE executing the query text a caller supplied.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the probe with a schema-owner role.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the refusal is raised after the supplied text reached the server.
+    """
+    fake_aurora.arrange_rows("current_user", [("carddemo_reference",)])
+    connection = fake_aurora.connect(**_CONNECTION_PARAMS)
+    with pytest.raises(RowCountVerificationError):
+        fetch_row_count_rows(connection, "select 1 as sentinel_query")
+    # WHY : the ABSENCE of the supplied text from the executed log is the assertion that matters.
+    #   A guard that refused after running the query would satisfy an exception-only test while
+    #   still having executed arbitrary text under an authority that can write.
+    assert not any("sentinel_query" in sql for sql in fake_aurora.executed_sql())
+
+
+def test_the_whole_report_runs_on_the_reporting_session(fake_aurora: FakeAuroraDatabase) -> None:
+    """Judge a whole-migration report read over a reporting session, end to end.
+
+    Parameters
+    ----------
+    fake_aurora : FakeAuroraDatabase
+        Recording double answering the probe and then the report.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the report is not reached, or its verdict does not follow from the arranged rows.
+    """
+    connection = _reporting_connection(fake_aurora)
+    # WHY : Assumptions: the report is built from the module's OWN declared pairs rather than from
+    #   a hand-written row set, because the pass refuses a report that omits any declared dataset
+    #   -- a partial fixture would fail for that reason and prove nothing about the session. One
+    #   line is then made short, so the verdict is a MISMATCH: a clean report is also what an empty
+    #   result set produces if the plumbing silently returns nothing, and the two would be
+    #   indistinguishable.
+    # WHY : Assumptions: the pairs are composed from the PUBLISHED declarations --
+    #   SEED_DATASET_BASELINES for the ten seeded lines and target_for(UNSEEDED_LAYOUT_NAME) for
+    #   the one line that has no seed extract -- rather than from the module's private pair
+    #   builder. Reaching into a private name here would make this test the thing that keeps that
+    #   name alive, which is the coupling the promotion of config.error_code just removed.
+    short_dataset = "acctdata"
+    unseeded_target = target_for(UNSEEDED_LAYOUT_NAME)
+    rows = [
+        (
+            NO_DATASET_LABEL,
+            f"{unseeded_target.schema}.{unseeded_target.table}",
+            None,
+            7,
+            None,
+            "NO_BASELINE",
+        )
+    ]
+    for baseline in SEED_DATASET_BASELINES.values():
+        if baseline.target_table is None:
+            continue
+        actual = (
+            baseline.expected_rows - 1
+            if baseline.dataset == short_dataset
+            else baseline.expected_rows
+        )
+        delta = actual - baseline.expected_rows
+        rows.append(
+            (
+                baseline.dataset,
+                baseline.target_table,
+                baseline.expected_rows,
+                actual,
+                delta,
+                "MISMATCH" if delta else "MATCH",
+            )
+        )
+    fake_aurora.arrange_rows("sentinel_report", rows)
+    report = verify_row_counts(connection, query="select 1 -- sentinel_report")
+    assert not report.verified
+    assert [row.dataset for row in report.mismatches] == [short_dataset]
 
 
 def test_the_digest_distinguishes_two_decimals_of_the_same_value() -> None:
@@ -1042,7 +1245,7 @@ def test_both_verification_queries_stop_on_the_first_error() -> None:
     #   rejects outright. Keeping the old assertion would have forced the file to carry syntax
     #   that bars it from the money_parity.py pass it belongs to, so the two files are now held
     #   to ONE convention rather than two. Pure SQL is the settled convention for this
-    #   directory, recorded at V0__schemas_and_roles.sql L130-L135.
+    #   directory, recorded at V0__schemas_and_roles.sql L139-L144.
     #
     # WHY : Assumptions: both files are checked in the same test, and by an identical pair of
     #   assertions, so neither can drift back to psql-only syntax on its own. A per-file test

@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 import com.carddemo.auth.domain.IdentitySyncTask;
 import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.CreateUserRequest;
+import com.carddemo.auth.dto.CreatedUserResponse;
 import com.carddemo.auth.dto.UpdateUserRequest;
 import com.carddemo.auth.dto.UserResponse;
 import com.carddemo.auth.dto.UserSummary;
@@ -129,6 +130,21 @@ class UserServiceTest {
     //   It is stated here by value rather than read from the service, so a change to the service's
     //   own constant fails these cases instead of moving silently with them.
     private static final int PAGE_SIZE = 10;
+
+    /** The subject every substituted provisioning call mints, stated by value so a row binds to it. */
+    private static final UUID SUBJECT_MINTED =
+            UUID.fromString("11111111-2222-3333-4444-555555555555");
+
+    // Assumptions: one shared provisioned identity, carrying BOTH halves the provisioning collaborator
+    //   now answers with -- the subject the row binds to and the one-time credential the account was
+    //   created with. Stating it once here rather than per case is what makes the create assertions
+    //   below able to compare the credential the service returns against the credential provisioning
+    //   supplied, which is the property that would regress silently if the service dropped the value
+    //   on the floor again. The credential text is a literal rather than a generated draw, because a
+    //   substituted collaborator is not the generator and a per-run value would make the comparison
+    //   unreproducible from the source.
+    private static final ProvisionedIdentity PROVISIONED =
+            new ProvisionedIdentity(SUBJECT_MINTED, "Aa1!aaaaaaaaaaaaaaaaaaaa");
 
     private UserRepository users;
 
@@ -391,10 +407,10 @@ class UserServiceTest {
     void aCreateBodyCarryingNoCredentialIsValid() {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+                .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
-        UserResponse created = service.create(
+        CreatedUserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
 
         // Assumptions: the reference chain has a FIFTH arm this request cannot fail, and its absence is
@@ -483,10 +499,10 @@ class UserServiceTest {
     void bothAdmittedReferenceTypesAreAccepted(String submitted) {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", submitted))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+                .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
-        UserResponse created = service.create(
+        CreatedUserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", submitted));
 
         assertThat(created.userType()).isEqualTo(submitted);
@@ -502,10 +518,11 @@ class UserServiceTest {
     void aCreateProvisionsThenWrites() {
         UUID subject = UUID.fromString("11111111-2222-3333-4444-555555555555");
         when(users.existsById("USER0042")).thenReturn(false);
-        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(subject);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenReturn(new ProvisionedIdentity(subject, PROVISIONED.credentialSecretName()));
         when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
-        UserResponse created = service.create(
+        CreatedUserResponse created = service.create(
                 new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
 
         // Alternatives Considered: accepting the subject reference as a fifth request component, so a
@@ -573,7 +590,7 @@ class UserServiceTest {
     void aRaceLostToTheConstraintWithdrawsTheAccount() {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+                .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
 
@@ -604,7 +621,7 @@ class UserServiceTest {
     void aFailedInsertReportsTheReferenceSentence() {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+                .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any()))
                 .thenThrow(new QueryTimeoutException("statement timed out"));
 
@@ -1014,7 +1031,7 @@ class UserServiceTest {
     void aFailedCompensationIsRecordedDurably() {
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
+                .thenReturn(PROVISIONED);
         when(users.insertUser(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("constraint refused the row"));
         doThrow(InternalErrorException.builder().message("the pool is unavailable").build())

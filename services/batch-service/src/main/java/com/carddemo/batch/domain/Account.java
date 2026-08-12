@@ -177,7 +177,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 //       hold a table of this
 //       name. It is declined for THIS mapping because account.accounts is a table this module
 //       writes in a schema it does NOT own, and the grant is narrower than the schema:
-//       data-migration/sql/V0__schemas_and_roles.sql line 779 grants UPDATE on this table by
+//       data-migration/sql/V0__schemas_and_roles.sql line 1226 grants UPDATE on this table by
 //       name while SELECT is granted schema-wide. Naming the schema on the annotation puts that
 //       boundary where a reader of the entity finds it, instead of requiring a trip to the
 //       connection configuration to discover that this write crosses a context. The search path
@@ -201,20 +201,14 @@ import org.hibernate.annotations.JdbcTypeCode;
 //       against that migration applied to a live database, including the BIGINT NOT NULL claim
 //       on the version column: the migration declares version BIGINT NOT NULL DEFAULT 0, and the
 //       DEFAULT is what lets the bulk load insert a seed row that carries no version field.
-// WHY : Refactoring Rationale: this block formerly recorded an UNSATISFIED sequencing dependency
-//       -- that V1__account.sql was not yet authored, that account-service held no db/migration
-//       directory, that every mapping here was therefore described but unverifiable, and that
-//       the conditional grant in data-migration/sql/V0__schemas_and_roles.sql took its ELSE
-//       branch and only raised a notice. All four statements were true when written and none is
-//       true now. The migration was authored in the OWNING module, which is the direction of
-//       authority the note insisted on: it was explicit that writing the migration from THIS
-//       module would fix the columns by inference from a consumer's read of them, and that
-//       objection is why the file lives under account-service rather than here. The grant is
-//       applied: re-running the bootstrap after the migration takes the IF branch, and
-//       carddemo_batch now holds SELECT and UPDATE on account.accounts and SELECT alone on
-//       account.customers -- the narrowly scoped privilege the posting and interest jobs need to
-//       rewrite an account master. The same dependency, and its resolution, is recorded once
-//       more from the schema's own side in
+// WHY : Alternatives Considered: authoring that migration HERE, in the module that reads the
+//       table. Rejected, because it would fix the columns by inference from a consumer's read of
+//       them rather than from the owner's declaration, which is the wrong direction of authority
+//       and is why the file lives under account-service. The consequence carried here instead is
+//       the grant: data-migration/sql/V0__schemas_and_roles.sql gives carddemo_batch SELECT and
+//       UPDATE on account.accounts and SELECT alone on account.customers, which is the narrowly
+//       scoped privilege the posting and interest jobs need to rewrite an account master and
+//       nothing wider. The same boundary is recorded from the schema's own side in
 //       docs/architecture/data-model-and-schema-mapping.md.
 @Table(name = "accounts", schema = "account")
 public class Account {
@@ -330,7 +324,7 @@ public class Account {
     //       docs/architecture/data-model-and-schema-mapping.md alongside the two other renames the
     //       migration makes. The baseline name is carried verbatim into every citation of that
     //       line, including citations sitting beside the target column name, because a citation
-    //       whose text has been tidied no longer locates the byte range it claims to. Nothing
+    //       whose text has been tidied stops locating the byte range it claims to. Nothing
     //       under app/** is altered: the baseline declares one name, the target column is another,
     //       and the divergence is documented.
     // WHY : Assumptions: the same transposition occurs a second time in the baseline, at
@@ -858,15 +852,14 @@ public class Account {
     /**
      * Renders a short diagnostic summary of this account for a log line or an assertion message.
      *
-     * <p>Refactoring Rationale: THE ACCOUNT IDENTIFIER, THE CURRENT BALANCE AND THE CREDIT LIMIT ARE
-     * OMITTED, and an earlier revision rendered all three. It argued that "no member of this record
-     * is a primary account number, a card verification value or a national identifier", and
-     * concluded that nothing here needed protecting. The premise is true and the conclusion does not
-     * follow from it. The sensitive-data logging contract in
+     * <p>Alternatives Considered: rendering THE ACCOUNT IDENTIFIER, THE CURRENT BALANCE AND THE CREDIT
+     * LIMIT, on the reasoning that no member of this record is a primary account number, a card
+     * verification value or a national identifier and so nothing here needs protecting. Rejected: the
+     * premise is true and the conclusion does not follow from it. The sensitive-data logging contract in
      * {@code docs/architecture/observability.md} names account identifiers explicitly, alongside
-     * persistence-bound values as a class, so a balance and a credit limit are covered by that
-     * second clause whether or not either is a card number. The rendering was reasoning from a list
-     * of three examples rather than from the contract.</p>
+     * persistence-bound values as a class, so a balance and a credit limit are covered by that second
+     * clause whether or not either is a card number. Reasoning from three examples is not the same as
+     * reasoning from the contract, so all three are omitted.</p>
      *
      * <p>Trade-offs: the omission is total rather than partial, and abbreviating the identifier was
      * considered and declined. Abbreviating a protected value IS masking, and masking has one owner

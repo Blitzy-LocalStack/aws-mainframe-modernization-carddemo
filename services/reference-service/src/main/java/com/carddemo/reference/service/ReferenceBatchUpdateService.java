@@ -43,8 +43,9 @@ import java.util.Objects;
 import java.util.Optional;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The transaction-type maintenance run, transcribed from the baseline batch program.
@@ -347,19 +348,57 @@ public class ReferenceBatchUpdateService {
     private final TransactionTypeRepository types;
 
     /**
-     * Builds the service over the repository it writes.
+     * The boundary each single record's or action's write is applied inside, one transaction per unit.
      *
-     * <p>Assumptions: the repository is the only collaborator, and the record codec is reached
-     * statically rather than injected. That codec is a utility class with a private constructor and no
-     * instance state, so there is no instance to hand in; declaring a parameter for it would advertise a
-     * substitutable collaborator that cannot be substituted.</p>
+     * <p>⚠️ Refactoring Rationale: this field exists because the annotation it replaces never took
+     * effect, and the way it failed was silent. {@code applyOne} carried
+     * {@code @Transactional(propagation = REQUIRES_NEW)} and was reached only by
+     * {@link #apply(MaintenanceActionBatchRequest)} calling it on {@code this} -- a self-invocation,
+     * which does not pass through the transactional proxy -- while the enclosing entry point declared no
+     * transaction of its own. So every action ran with NO transaction while the source appeared to
+     * declare one per action. The record-stream path had the identical shape and not even the appearance:
+     * {@link #apply(InputStream)} calls {@link #applyRecord(byte[])} on {@code this} and neither was
+     * annotated at all. The observable consequence was that the very first ADD of either path failed,
+     * because {@code TransactionTypeRepository.insertType} is a modifying native statement and the
+     * persistence layer refuses to execute one outside a transaction. A template needs no proxy, so it
+     * is correct from every call path -- including the two tests that call {@code applyRecord} directly,
+     * which no annotation on it could ever have covered.</p>
+     *
+     * <p>Assumptions: {@code PROPAGATION_REQUIRES_NEW} and not {@code REQUIRED}, which preserves the
+     * property both entry points document: one unit of work per record or action, so a refusal rolls back
+     * only the record that caused it and the outcome list cannot describe applied work that no longer
+     * exists. Under {@code REQUIRED} a caller that already held a transaction would enclose the whole run
+     * in it, and one refusal would undo every record before it.</p>
+     *
+     * <p>Trade-offs: a new transaction per unit means one commit per record, where a single enclosing
+     * transaction would commit once for a whole stream. That cost is accepted deliberately: the baseline
+     * driver's behaviour on a refused record is to report it and read the next one, and reproducing that
+     * requires the applied records to survive the refusal -- which is only true if each has already
+     * committed.</p>
+     */
+    private final TransactionTemplate writes;
+
+    /**
+     * Builds the service over the repository it writes and the manager each write unit opens against.
+     *
+     * <p>Assumptions: the record codec is reached statically rather than injected. That codec is a
+     * utility class with a private constructor and no instance state, so there is no instance to hand in;
+     * declaring a parameter for it would advertise a substitutable collaborator that cannot be
+     * substituted.</p>
      *
      * @param types the {@link TransactionTypeRepository} this run reads and writes; must not be
      *     {@code null}
-     * @throws NullPointerException if {@code types} is {@code null}
+     * @param transactionManager the manager each per-record and per-action unit of work is opened
+     *     against; must not be {@code null}
+     * @throws NullPointerException if either argument is {@code null}
      */
-    public ReferenceBatchUpdateService(TransactionTypeRepository types) {
+    public ReferenceBatchUpdateService(TransactionTypeRepository types,
+            PlatformTransactionManager transactionManager) {
         this.types = Objects.requireNonNull(types, "types");
+        Objects.requireNonNull(transactionManager, "transactionManager");
+
+        this.writes = new TransactionTemplate(transactionManager);
+        this.writes.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /**
@@ -446,11 +485,13 @@ public class ReferenceBatchUpdateService {
      * on lines 85 and 87 and is a property of the whole file rather than of a record. There is no
      * per-record branch to transcribe, so the failure is raised rather than invented as an outcome.</p>
      *
-     * <p>Assumptions: this member carries no transaction of its own, so each record's write commits at
-     * its own boundary and a refused record cannot roll back a record that already applied. That is what
+     * <p>Assumptions: this member opens no transaction of its own, so each record's write commits at its
+     * own boundary and a refused record cannot roll back a record that already applied. That is what
      * makes the soft reject observable at all: a single enclosing transaction would undo the applied
      * records alongside the refused one, and the outcome list would then describe work that no longer
-     * existed.</p>
+     * existed. The per-record boundary is opened by the {@code writes} template documented on its own
+     * field, one unit per write, which is what turns that intention into a mechanism that actually
+     * runs.</p>
      *
      * @param maintenanceRecords the {@link InputStream} of contiguous fixed-length maintenance records,
      *     read to its end; must not be {@code null}
@@ -578,9 +619,18 @@ public class ReferenceBatchUpdateService {
      * @return the {@link RecordOutcome} of the insert, never {@code null}
      */
     private RecordOutcome insertRecord(String typeCode, String description) {
+        // WHY : ⚠️ Refactoring Rationale: the statement runs inside this record's OWN transaction, opened
+        //       here rather than declared by an annotation. The insert is a modifying native statement
+        //       and the persistence layer refuses to execute one with no transaction open, so before this
+        //       boundary existed the first ADD of any stream failed outright -- the whole of finding C3.
+        //       The refusal is caught OUTSIDE the boundary as well as inside it, because a constraint
+        //       violation can surface either as the statement executes or as the unit commits, and the
+        //       classification below has to reach it in both cases.
         try {
-            this.types.insertType(typeCode, description);
-            return RecordOutcome.applied(RecordAction.ADD, typeCode, MESSAGE_RECORD_INSERTED);
+            return this.writes.execute(status -> {
+                this.types.insertType(typeCode, description);
+                return RecordOutcome.applied(RecordAction.ADD, typeCode, MESSAGE_RECORD_INSERTED);
+            });
         } catch (DataIntegrityViolationException failure) {
             return integrityRejection(RecordAction.ADD, typeCode, failure);
         }
@@ -608,16 +658,23 @@ public class ReferenceBatchUpdateService {
      * @return the {@link RecordOutcome} of the update, never {@code null}
      */
     private RecordOutcome updateRecord(String typeCode, String description) {
-        Optional<TransactionType> stored = this.types.findByTypeCd(typeCode);
-        if (stored.isEmpty()) {
-            return RecordOutcome.rejected(RecordAction.UPDATE, typeCode, RejectReason.NOT_FOUND,
-                    MESSAGE_NO_RECORDS_FOUND, null);
-        }
+        // WHY : Assumptions: the read and the write share ONE transaction, which is why the read is
+        //       inside the boundary rather than before it. Outside a transaction each repository call
+        //       opens and commits its own, so the instance the read returns is detached and the write
+        //       becomes a merge against whatever the row holds by then; inside one boundary the instance
+        //       stays managed and the change is written against the row that was read.
         try {
-            TransactionType target = stored.get();
-            target.setDescription(description);
-            this.types.saveAndFlush(target);
-            return RecordOutcome.applied(RecordAction.UPDATE, typeCode, MESSAGE_RECORD_UPDATED);
+            return this.writes.execute(status -> {
+                Optional<TransactionType> stored = this.types.findByTypeCd(typeCode);
+                if (stored.isEmpty()) {
+                    return RecordOutcome.rejected(RecordAction.UPDATE, typeCode,
+                            RejectReason.NOT_FOUND, MESSAGE_NO_RECORDS_FOUND, null);
+                }
+                TransactionType target = stored.get();
+                target.setDescription(description);
+                this.types.saveAndFlush(target);
+                return RecordOutcome.applied(RecordAction.UPDATE, typeCode, MESSAGE_RECORD_UPDATED);
+            });
         } catch (DataIntegrityViolationException failure) {
             return integrityRejection(RecordAction.UPDATE, typeCode, failure);
         }
@@ -643,15 +700,22 @@ public class ReferenceBatchUpdateService {
      * @return the {@link RecordOutcome} of the removal, never {@code null}
      */
     private RecordOutcome deleteRecord(String typeCode) {
-        Optional<TransactionType> stored = this.types.findByTypeCd(typeCode);
-        if (stored.isEmpty()) {
-            return RecordOutcome.rejected(RecordAction.DELETE, typeCode, RejectReason.NOT_FOUND,
-                    MESSAGE_NO_RECORDS_FOUND, null);
-        }
+        // WHY : Assumptions: the read, the removal and the flush share ONE transaction, and here that is
+        //       what makes the declared foreign key reachable as a caught refusal rather than as an
+        //       abandoned run. The flush inside the boundary raises the key's refusal while this method is
+        //       still on the stack; the same removal spread over three self-opened transactions would have
+        //       nothing left to flush and would report a forbidden removal as applied.
         try {
-            this.types.delete(stored.get());
-            this.types.flush();
-            return RecordOutcome.applied(RecordAction.DELETE, typeCode, MESSAGE_RECORD_DELETED);
+            return this.writes.execute(status -> {
+                Optional<TransactionType> stored = this.types.findByTypeCd(typeCode);
+                if (stored.isEmpty()) {
+                    return RecordOutcome.rejected(RecordAction.DELETE, typeCode,
+                            RejectReason.NOT_FOUND, MESSAGE_NO_RECORDS_FOUND, null);
+                }
+                this.types.delete(stored.get());
+                this.types.flush();
+                return RecordOutcome.applied(RecordAction.DELETE, typeCode, MESSAGE_RECORD_DELETED);
+            });
         } catch (DataIntegrityViolationException failure) {
             return integrityRejection(RecordAction.DELETE, typeCode, failure);
         }
@@ -780,9 +844,9 @@ public class ReferenceBatchUpdateService {
      * part of a shape its consumers and its schema already agree on. Rewriting either vocabulary into
      * the other would break one of those two agreements.</p>
      *
-     * <p>Assumptions: this member carries no transaction of its own. Each action is applied by the
-     * member below, so a refusal rolls back that action alone; a transaction here would enclose them all
-     * and undo the applied ones alongside the refused one.</p>
+     * <p>Assumptions: this member opens no transaction of its own. Each action is applied inside a new
+     * one opened by the member below, so a refusal rolls back that action alone; a transaction here would
+     * enclose them all and undo the applied ones alongside the refused one.</p>
      *
      * <p>Assumptions: the order of the submitted array is honoured, because two actions in one run can
      * address the same row -- an insert followed by an update of the same type is a sequence the baseline
@@ -827,14 +891,50 @@ public class ReferenceBatchUpdateService {
      * and the write are two statements and the authority on the key is the constraint; letting that
      * refusal escape would abandon a run the baseline completes.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the transaction is opened by the template held on this class and NOT
+     * by an annotation on this method, which is what makes the sentence above true. This method carried
+     * {@code @Transactional(propagation = REQUIRES_NEW)} and was reached only from
+     * {@link #apply(MaintenanceActionBatchRequest)} calling it on {@code this}; a self-invocation does not
+     * pass through the transactional proxy, so no transaction was ever opened and the first insert of any
+     * batch failed on a modifying statement executed outside one. The annotation is removed rather than
+     * kept alongside the template, because keeping both would open two nested units of work for any
+     * caller that did reach this method through the proxy.</p>
+     *
      * @param position the one-based index of the action within the submitted array
      * @param action the {@link MaintenanceActionRequest} to apply; must not be {@code null}
      * @return the {@link MaintenanceActionOutcomeResponse} for that action, never {@code null}
      * @throws NullPointerException if {@code action} is {@code null}
      */
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public MaintenanceActionOutcomeResponse applyOne(int position, MaintenanceActionRequest action) {
         Objects.requireNonNull(action, "action");
+        // WHY : ⚠️ Refactoring Rationale: the refusal is caught OUTSIDE the transaction boundary, not
+        //       inside the three write members it can be raised by. A constraint violation leaves the
+        //       unit of work marked rollback-only, so a member that caught it and returned a value would
+        //       leave the template to commit a doomed transaction -- which raises
+        //       UnexpectedRollbackException and loses the classified outcome the caught exception was
+        //       there to produce. Catching here lets the boundary roll back first and classify second,
+        //       which is also why the three members below no longer carry a catch of their own.
+        try {
+            return this.writes.execute(status -> applyOneWithin(position, action));
+        } catch (DataIntegrityViolationException failure) {
+            return refusalOutcome(position, action, failure);
+        }
+    }
+
+    /**
+     * Dispatches one published action, with a transaction already open around it.
+     *
+     * <p>Assumptions: this member is separated from {@link #applyOne(int, MaintenanceActionRequest)} for
+     * legibility only -- the boundary is opened by its caller and this one assumes it is open. It is
+     * private and is reached from exactly one place, so there is no path on which that assumption can be
+     * false.</p>
+     *
+     * @param position the one-based index of the action within the submitted array
+     * @param action the {@link MaintenanceActionRequest} to apply, already checked non-null
+     * @return the {@link MaintenanceActionOutcomeResponse} for that action, never {@code null}
+     */
+    private MaintenanceActionOutcomeResponse applyOneWithin(int position,
+            MaintenanceActionRequest action) {
         Optional<TransactionType> stored = this.types.findByTypeCd(action.typeCd());
 
         if (ACTION_DELETE.equals(action.action())) {
@@ -870,8 +970,13 @@ public class ReferenceBatchUpdateService {
      * Inserts for the published path, reporting a duplicate code as this action's own outcome.
      *
      * <p>Assumptions: the explicit insert member is used for the same reason the record-stream path uses
-     * it -- a save of this entity reaches a merge and cannot insert it, so the refusal being caught here
-     * would otherwise never be raised.</p>
+     * it -- a save of this entity reaches a merge and cannot insert it, so the refusal this action's
+     * outcome depends on would otherwise never be raised at all.</p>
+     *
+     * <p>Assumptions: a refusal is NOT caught here. It propagates out of the enclosing transaction
+     * boundary and is classified by the caller, because a constraint violation leaves the unit of work
+     * marked rollback-only and a value returned from inside it would be discarded by the failing commit.
+     * The reasoning is recorded once, on the caller that opens the boundary.</p>
      *
      * @param position the one-based index of the action within the submitted array
      * @param action the action being applied, carried through onto the outcome
@@ -880,12 +985,8 @@ public class ReferenceBatchUpdateService {
      */
     private MaintenanceActionOutcomeResponse insertFor(int position, MaintenanceActionRequest action,
             String description) {
-        try {
-            this.types.insertType(action.typeCd(), description);
-            return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
-        } catch (DataIntegrityViolationException failure) {
-            return refusalOutcome(position, action, failure);
-        }
+        this.types.insertType(action.typeCd(), description);
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
     }
 
     /**
@@ -899,21 +1000,21 @@ public class ReferenceBatchUpdateService {
      */
     private MaintenanceActionOutcomeResponse replaceFor(int position, MaintenanceActionRequest action,
             TransactionType target, String description) {
-        try {
-            target.setDescription(description);
-            this.types.saveAndFlush(target);
-            return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
-        } catch (DataIntegrityViolationException failure) {
-            return refusalOutcome(position, action, failure);
-        }
+        target.setDescription(description);
+        this.types.saveAndFlush(target);
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
     }
 
     /**
      * Removes a row for the published path, reporting a restricted removal as this action's outcome.
      *
      * <p>Assumptions: the removal is flushed here for the same reason the record-stream path flushes it.
-     * The declared foreign key refuses a removal whose code a category still references, and a refusal
-     * deferred to the enclosing commit would arrive after this outcome had been reported.</p>
+     * The declared foreign key refuses a removal whose code a category still references, and the flush is
+     * what raises that refusal while this action is still the one being applied -- rather than at the
+     * boundary's commit, by which time the run has moved on to the next action.</p>
+     *
+     * <p>Assumptions: the refusal is not caught here either, for the reason recorded on the insert member
+     * above and argued in full on the caller that opens the boundary.</p>
      *
      * @param position the one-based index of the action within the submitted array
      * @param action the action being applied, carried through onto the outcome
@@ -922,13 +1023,9 @@ public class ReferenceBatchUpdateService {
      */
     private MaintenanceActionOutcomeResponse removeFor(int position, MaintenanceActionRequest action,
             TransactionType target) {
-        try {
-            this.types.delete(target);
-            this.types.flush();
-            return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
-        } catch (DataIntegrityViolationException failure) {
-            return refusalOutcome(position, action, failure);
-        }
+        this.types.delete(target);
+        this.types.flush();
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
     }
 
     /**

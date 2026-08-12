@@ -1028,9 +1028,10 @@ request/response bodies carrying credentials, and persistence bound values. It i
 held by a combination of controls rather than by one: `LogSafeText` and
 `CardNumberMasker` in the shared kernel decide what a rendered value may contain,
 `ThrowableDigest` decides what a caught failure may contribute to a log line,
-`GlobalExceptionHandler` decides what a failure body may carry, and per-service
-serialization tests assert the outcome. The prohibition is a contract every one of
-those has to satisfy, and no single one of them establishes it alone.
+`GlobalExceptionHandler` decides what a failure body may carry,
+`RethrowingDigestErrorHandler` decides the same for a failed queue delivery, and
+per-service serialization tests assert the outcome. The prohibition is a contract every
+one of those has to satisfy, and no single one of them establishes it alone.
 
 **No appender configuration exists, and that is what `ThrowableDigest` answers.** This
 repository ships no `logback.xml`, `logback-spring.xml` or `log4j2.xml` anywhere, and the
@@ -1047,6 +1048,26 @@ link was raised at, with every message dropped — and
 `GlobalExceptionHandlerTest.unexpectedFailureAttachesNoThrowableToItsEvent` asserts the
 logging event carries no throwable proxy at all, which makes the guarantee structural
 rather than dependent on the pattern a deployment happens to configure.
+
+**The same exposure exists on the queue side, and it needed a different mechanism.** The
+generic 500 handler is code this repository calls; the queue starter's failure record is not.
+`io.awspring.cloud.sqs.listener.sink.AbstractMessageProcessingPipelineSink` logs
+`error("Error processing message {}.", id, throwable)` — a trailing throwable argument, so the
+facade renders the whole chain including every message — and it does so from inside the
+framework whether or not a listener registers an error handler, which means no handler can
+suppress it. With no appender configuration there is no filter to install either, so the only
+mechanism that reaches it is a declarative level: `carddemo-common-defaults.yml` sets that one
+logger to `off`. A suppression with no replacement would make a failed delivery invisible, so
+the three queue-consuming contexts — `account-service`, `authorization-service` and
+`reference-service` — each publish `RethrowingDigestErrorHandler` as an `ErrorHandler` bean,
+which the starter installs on the container factory it builds. It writes the digest, the
+broker's own message identifier and the queue name, and then **rethrows**; the rethrow is not
+cosmetic, because the starter installs its error-handler stage as a recovery step, so a handler
+that returned normally would leave the pipeline result successful and the acknowledgement stage
+that runs after it would delete the message instead of letting it be redelivered and
+dead-lettered. `MessageSinkSuppressionTest` holds the suppression to that exact logger name and
+demonstrates the exposure it withholds; `RethrowingDigestErrorHandlerTest` holds the
+replacement to writing no message text and to rethrowing.
 
 Refactoring Rationale: an earlier revision of this section credited the appender
 configuration with that redaction, and the handler's own comment named it as the owner.
@@ -1195,49 +1216,52 @@ The controls that **are authored** are narrower and measurable:
    prohibited value never enters a target, and it is now applied to **both** values the
    prohibition names rather than to the primary account number alone.
 
-   No **machine-called** operation carries an account or customer identifier in a path or a
-   query string. Seven moved to reach that: `listCards` and `listPendingAuthorizations` take
-   their account narrowing in a request body at `/api/v1/cards/search` and
+   **No published operation carries an account or customer identifier in a path or a query
+   string** — machine-called or otherwise. Nine moved to reach that, in two rounds. The six
+   machine-called ones went first: `listCards` and `listPendingAuthorizations` take their
+   account narrowing in a request body at `/api/v1/cards/search` and
    `/api/v1/authorizations/search`; `readAccountContext` and `customerExists` replaced keyed
    `GET`s — and, for the customer probe, a `HEAD` and a `GET` served by one handler — with
    `POST /api/v1/accounts/lookup` and `POST /api/v1/customers/lookup`; `readCustomerRecord`
    replaced a keyed `GET` with `POST /api/v1/customers/record`; and the account-keyed
    cross-reference read and the bill-payment write moved their identifier into the body each
-   already carried.
+   already carried. The three END-USER account operations followed: `readAccountView` became
+   `POST /api/v1/accounts/view`, `updateAccount` became `POST /api/v1/accounts/update`, and
+   `listAccountCardCrossReferences` became
+   `POST /api/v1/accounts/card-cross-references/search`.
 
-   Refactoring Rationale: this paragraph claimed that **no** published operation carried
-   either identifier, and that was measurably false in two directions at once. Understating
-   the count — it named six moves where the seventh, the keyed customer record read, had not
-   in fact moved — was the smaller error. The larger one is that three END-USER account
-   operations legitimately keep the identifier in the path and always did:
-   `GET /api/v1/accounts/{accountId}/view`, `PUT /api/v1/accounts/{accountId}` and
-   `GET /api/v1/accounts/{accountId}/card-cross-references`. A claim of "no published
-   operation" therefore told a reader that this edge held a property it did not hold, in the
-   one direction a disclosure statement must never err in. Worse, the three moves the
-   paragraph did describe had not landed on the server at the time it was written: two of the
-   addresses it named as published — `/api/v1/accounts/lookup` and `/api/v1/customers/lookup`
-   — existed only in the calling clients, so the document asserted a control that no handler
-   implemented. The claim is now scoped to what is enforced and the residue is named below.
+   Refactoring Rationale: this item has now been wrong in both directions and is stated with a
+   standing guarantee rather than a count. It first claimed that **no** published operation
+   carried either identifier while seven still did, which is the direction a disclosure
+   statement must never err in. The correction then scoped the claim to machine-called
+   operations and recorded the three end-user ones as accepted residue, defending them as
+   migrated SCREENS — `app/cbl/COACTVWC.cbl` and `app/cbl/COACTUPC.cbl`, keyed by the account
+   identifier the user types into the map — on the ground that the identifier "is a value the
+   caller already holds and just typed" and that the keyed address was "the shape the plan
+   publishes for them". Neither half of that survives inspection: a caller already holding a
+   value is not a reason to persist it in a durable record the caller cannot reach, the plan
+   publishes screens rather than addresses, and the paragraph's own closing sentence conceded
+   the point by recording the move as an OPEN item. It is closed here. The three operations
+   moved, and the guarantee is no longer a sentence in this document: `account-service`'s
+   contract test sweeps every published path template and every declared path or query
+   parameter for either identifier and fails the build on a hit, which is the same standing
+   guarantee `card-service` already had for a card number.
 
-   The residue, stated rather than absorbed. Those three operations are migrated SCREENS —
-   `app/cbl/COACTVWC.cbl` and `app/cbl/COACTUPC.cbl`, keyed by the account identifier the user
-   types into the map — so the identifier is a value the caller already holds and just typed,
-   and the keyed address is the shape the plan publishes for them. What is accepted is that
-   the load balancer's access record holds those identifiers for the retention configured on
-   the log bucket. Three things bound it and none of them is masking, which cannot reach this
-   record: the operations are reachable only through the public edge behind the identity
-   provider's authorizer, so an entry exists only for a request an authenticated user made;
-   the log bucket is server-side encrypted with a customer-managed key and carries the same
-   lifecycle expiry as the rest of the tier; and no card number, verification value, national
-   identifier or government-issued identifier can appear in any of the three targets, so what
-   the record holds is the join key and not the data it joins. The alternative — moving three
-   screen reads to `POST` bodies — was considered and not taken here: it would trade the
-   cacheability and addressability of a screen read for a property the two bounds above
-   already supply, and no finding in this checkpoint asks for it. It is recorded as an open
-   item rather than as a closed one.
+   Trade-offs: two of the three end-user operations are READS expressed as `POST`, which gives
+   up cacheability by method semantics, and the edit gives up idempotence by method semantics.
+   Both costs are nominal rather than real. Each read answers with the revision a caller
+   submits back as `If-Match`, so a cached body would produce a conflict that did not exist;
+   and the edit was never idempotent in effect, because that same precondition refuses a
+   repeated submission rather than applying it twice. Alternatives Considered: sealing each
+   identifier into an opaque selector and keeping the `GET`, as the card contract does.
+   Rejected because a selector must be minted by the service and handed to the caller, and the
+   account view is the ENTRY point — the user types the identifier into a filter field, so
+   there is no prior response for a token to come from, a selector scheme would still need a
+   body-carrying operation to issue one, and it would add a deployment secret to a service
+   that needs none.
 
-   What remains in the clear beyond those three is a transaction identifier and a user
-   identifier, neither of which the prohibition enumerates.
+   What remains in the clear is a transaction identifier and a user identifier, neither of
+   which the prohibition enumerates.
 
    - Refactoring Rationale: this item did not exist, and its absence was the gap. Three edges
      were listed here with an authored control each while the fourth — the one edge whose

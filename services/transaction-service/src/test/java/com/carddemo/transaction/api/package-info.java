@@ -9,12 +9,6 @@
  * {@code service} package and the queries behind them in the sibling {@code repository} package, so a
  * failure raised here points at the edge and nowhere else.
  *
- * <p>Assumptions: a package declaration accepts no parameter, returns no value and raises nothing, so
- * this charter carries no parameter, return or exception at-clause. The inapplicability is stated rather
- * than left silent so a reader can tell it from an oversight, and no at-clause is invented to fill the
- * gap: {@code NonEmptyAtclauseDescription} is active in {@code config/checkstyle/checkstyle.xml}, so a
- * fabricated tag would be reported as empty rather than read as thorough.
- *
  * <h2>The three test classes in this directory</h2>
  *
  * <dl>
@@ -37,6 +31,25 @@
  *       published operation with no route fails it and a delivered route with no published operation
  *       fails it too. It is named here because a charter that states a closed set while a file sits
  *       outside that set reads as governance over a directory it does not actually govern.</dd>
+ *
+ *   <dt>{@code TransactionCaptureWireContractTest}</dt>
+ *   <dd>Covers the two properties of the capture payload that exist ONLY at the wire: which combinations
+ *       of the two key fields are admitted, and which lexical forms of the amount are.
+ *       ⚠️ Refactoring Rationale: it is a fourth class in a directory this charter describes as a closed
+ *       set, and the addition is deliberate rather than an oversight in the set. Both properties are
+ *       unholdable anywhere else. A service test constructs its submission as a Java object, so a
+ *       class-level key constraint the framework applies to a DESERIALISED body is never triggered and
+ *       every such test passes whatever the constraint says; and the characters a producer sent for the
+ *       amount do not survive into the object at all, so a service test cannot tell {@code "1234.5"}
+ *       from {@code "1234.50"} because both arrive as one value. Both were in fact wrong -- a submission
+ *       carrying both keys was refused where the baseline captures it, and four forms the published
+ *       {@code TransactionAmount} pattern excludes were accepted and silently rewritten -- and no class
+ *       in this package or in the service package could have detected either.
+ *       Alternatives Considered: folding the cases into {@code TransactionControllerTest}. Rejected
+ *       because that class holds the three FAILURE contracts of the browse and the detail read, so a
+ *       failure in it currently means a published sentence has drifted; adding admitted-submission cases
+ *       to it would make its name no longer distinguish those two diagnoses, which is the same division
+ *       the service package draws between its two payment classes.</dd>
  * </dl>
  *
  * <h2>The four baseline programs these tests are answerable to</h2>
@@ -62,12 +75,11 @@
  * table; a test method named for a screen the inventory does not list cannot be found by an operator
  * searching for the screen they are debugging.
  *
- * <p>Alternatives Considered: citing those five rows by line number alone. Rejected because the heading
- * named above is the durable half of the citation and the numbers are the perishable half. The root
- * {@code README.md} is one of only three pre-existing files this migration modifies at all, and the
- * migration section it gained moved this table down by twenty lines, so a bare line number here ages by
- * exactly as much as that section grows. A reader who finds a number stale should search the heading and
- * the transaction identifier, neither of which moves.
+ * <p>Alternatives Considered: citing those rows by line number alone. Rejected because the heading named
+ * above is the durable half of the citation and the numbers are the perishable half -- the root
+ * {@code README.md} is one of only three pre-existing files this migration modifies at all, so its line
+ * numbers move as its migration section grows. A reader who finds a number stale should search the
+ * heading and the transaction identifier, neither of which moves.
  *
  * <p>One nearby program is deliberately absent from that list, and the absence is recorded so that nobody
  * later completes the set: {@code CR00} / {@code CORPT00} / {@code CORPT00C}, "Transaction Reports" at
@@ -144,41 +156,6 @@
  * {@code TransactionLayeringRulesTest} in the sibling {@code architecture} test package, and it must never
  * be authored as a second class named {@code LayeringRulesTest}; the charter cited below owns that naming
  * ruling and the reason a literal simple name is load-bearing there.
- *
- * <h2>Why this charter exists as a file of its own</h2>
- *
- * <p>Refactoring Rationale: what this replaces is a directory of test classes carrying no stated
- * contract, and that state fails a build outright rather than merely reading thin. Two checks in
- * {@code config/checkstyle/checkstyle.xml} interlock over it. {@code JavadocPackage} is declared at the
- * top level of that configuration rather than inside its syntax-tree container, which makes it a file-set
- * check firing for any directory holding a Java source the audit processed, so the FILE has to exist.
- * {@code MissingJavadocPackage} is declared inside that container, so the file has to CARRY Javadoc. An
- * empty charter satisfies the first and fails the second. This directory is inside the audit because
- * {@code config/checkstyle/suppressions.xml} exempts only generated sources and the fixture resources,
- * never {@code src/test/java}. Above the linter, the user-specified Explainability rule attaches its
- * docstring obligation at line 15 to every module entry point, and in Java that entry point is the
- * package declaration, which no other file can document.
- *
- * <p>Refactoring Rationale: the second thing wrong with holding no charter is duplication. Without one,
- * the hand-registration requirement and the no-golden-master boundary stated above would each have to be
- * restated in every class in this directory, and a fact restated per class drifts per class. Stating it
- * once is the discipline the repository already applies to record layouts at {@code tests/README.md} lines
- * 540 to 542, which resolve a layout through a single include path instead of copying it, applied here to
- * a package's contract instead of to a copybook.
- *
- * <p>Assumptions: no in-source escape hatch exists for either check. That configuration wires no
- * suppression filter of any kind, so neither a magic comment nor an annotation can exempt this file, and
- * the gate runs at the Maven {@code validate} phase ahead of compilation on every local build rather than
- * only in the pipeline. Weakening the gate is therefore not available as a way of satisfying it.
- *
- * <h2>What this charter deliberately does not restate</h2>
- *
- * <p>The subtree charter at
- * {@code services/transaction-service/src/test/java/com/carddemo/transaction/package-info.java} already
- * owns the runner split that class-name suffixes carry, the ruling on the layering class's name, the count
- * of charter files this subtree admits and the additive relationship to the COBOL oracle, and this file
- * cites it rather than repeating any of it, because two statements of one convention drift apart and a
- * reader then cannot tell which of them is current.
  *
  * <h2>What a green run of this package proves, and what it does not</h2>
  *

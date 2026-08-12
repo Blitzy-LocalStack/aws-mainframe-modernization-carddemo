@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.carddemo.common.web.CorrelationIdFilter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Asserts the canonical encoding a queue correlation identity must satisfy, and that its log rendering is
@@ -157,5 +159,113 @@ class MessagingCorrelationIdTest {
     void theLogRenderingIsBounded() {
         assertThat(MessagingCorrelationId.logSafe("z".repeat(500)))
                 .hasSize(MessagingCorrelationId.MAX_LENGTH);
+    }
+
+    /**
+     * A requester-supplied identifier is echoed in full and never reaches a log.
+     *
+     * <p>Purpose: this is the asymmetry the class exists for, asserted on the one input where getting it
+     * wrong costs something. A correlation attribute is chosen by the requester, so it can BE a primary
+     * account number; the value has to be echoed exactly, because the requester pairs its answer on it,
+     * and it must not reach the mapped diagnostic context, because everything there lands on every log
+     * line the message produces.</p>
+     *
+     * <p>Assumptions: each specimen is one of the four identifier widths the baseline declares, so the
+     * bound is exercised at the narrowest of them rather than only at a card number. Nine is
+     * {@code CUST-ID PIC 9(09)}, eleven is {@code ACCT-ID PIC 9(11)} and sixteen is both
+     * {@code CARD-NUM PIC X(16)} and {@code TRAN-ID PIC X(16)}.</p>
+     *
+     * <p>Assumptions: the rendering is asserted to contain no digit of the value at all, not merely to
+     * differ from it. A masked rendering would differ and would still disclose four digits, so an
+     * assertion of inequality alone would pass on the weaker outcome this case exists to rule out.</p>
+     *
+     * @param identifier the bare-numeric value a requester supplied, of type {@code String}
+     */
+    @ParameterizedTest(name = "{0} is echoed and never logged")
+    @ValueSource(strings = {"123456789", "00000000011", "4111111111111111",
+        "9999999999999999999999"})
+    void aBareNumericIdentityIsEchoedInFullAndNeverLogged(String identifier) {
+        assertThat(MessagingCorrelationId.isCanonical(identifier))
+                .as("the echo must carry the requester's own bytes, whatever they are")
+                .isTrue();
+
+        String rendered = MessagingCorrelationId.logSafe(identifier);
+
+        assertThat(rendered)
+                .as("the log rendering names the shape and the digit count, and no digit of the value")
+                .isEqualTo(MessagingCorrelationId.NUMERIC_IDENTITY_MARKER + identifier.length())
+                .doesNotContain(identifier);
+        assertThat(rendered.chars().filter(Character::isDigit).count())
+                .as("only the digit COUNT is numeric in the rendering")
+                .isEqualTo(String.valueOf(identifier.length()).length());
+    }
+
+    /**
+     * A separated card number is redacted too, which is the case a bare-digit rule misses.
+     *
+     * <p>Assumptions: separators are counted as belonging to the number rather than disqualifying it,
+     * because {@code 4111-1111-1111-1111} is a card number written the way a human writes one. This is
+     * the same correction {@code com.carddemo.common.web.CorrelationIdFilter} carries for the servlet
+     * transport, and asserting it here is what stops the two transports from disagreeing about it.</p>
+     */
+    @Test
+    @DisplayName("a separated card number is redacted, and its digit count is what is reported")
+    void aSeparatedCardNumberIsRedacted() {
+        assertThat(MessagingCorrelationId.logSafe("4111-1111-1111-1111"))
+                .as("sixteen digits and three separators: the digits are what is counted")
+                .isEqualTo(MessagingCorrelationId.NUMERIC_IDENTITY_MARKER + 16);
+        // WHY : Assumptions: the two redaction layers use DIFFERENT separator sets and this specimen is
+        //       where that shows, so the outcome is asserted rather than assumed to match the line above.
+        //       A space is not an identity separator here -- an identity round-trips through a
+        //       declared-width character field that pads with spaces, so a space inside one could not be
+        //       told from padding -- which means this value is not bare-numeric and the wholesale
+        //       replacement does not fire. CardNumberMasker's own separator set DOES admit the space, so
+        //       the masking layer catches it instead, and the space is then neutralised by the character
+        //       filter. The value is redacted either way, which is the property that matters; the two
+        //       layers overlap deliberately rather than partitioning the input.
+        assertThat(MessagingCorrelationId.logSafe("4111 1111 1111 1111"))
+                .as("caught by the masking layer rather than the bare-numeric one, and still redacted")
+                .isEqualTo("****.****.****.1111")
+                .doesNotContain("4111 1111 1111 1111");
+    }
+
+    /**
+     * A card number embedded in an otherwise diagnostic value is masked, and the context survives.
+     *
+     * <p>Assumptions: this is the case the whole-value rule cannot see, because one letter disqualifies
+     * the bare-numeric shape, and it is the case where the surrounding characters ARE the diagnostic
+     * content -- a prefix naming the requester's own scheme is exactly what an operator correlates on.
+     * Masking rather than replacing wholesale is therefore right here and wrong for a bare number, which
+     * is why the two redactions are separate and ordered.</p>
+     */
+    @Test
+    @DisplayName("an embedded card number is masked while the surrounding value survives")
+    void anEmbeddedCardNumberIsMaskedAndTheContextSurvives() {
+        String rendered = MessagingCorrelationId.logSafe("req-4111111111111111");
+
+        assertThat(rendered)
+                .as("the prefix is diagnostic and is kept; the number is masked to its last four")
+                .isEqualTo("req-************1111")
+                .doesNotContain("4111111111111111");
+        assertThat(MessagingCorrelationId.isCanonical("req-4111111111111111"))
+                .as("and the echo still carries the value the requester sent")
+                .isTrue();
+    }
+
+    /**
+     * A short bare number is left alone, so the bound is a bound rather than a blanket rule.
+     *
+     * <p>Assumptions: this is asserted because a redaction that fired on every numeric value would
+     * satisfy every case above while destroying the log rendering of legitimate identities. The
+     * specimens sit one digit below {@link MessagingCorrelationId#NUMERIC_IDENTITY_MIN_DIGITS}, so they
+     * pin the boundary itself and not merely the interior of the admitted range.</p>
+     */
+    @Test
+    @DisplayName("a bare number shorter than the narrowest identifier is logged as itself")
+    void aShortBareNumberIsLoggedAsItself() {
+        String justUnder = "1".repeat(MessagingCorrelationId.NUMERIC_IDENTITY_MIN_DIGITS - 1);
+
+        assertThat(MessagingCorrelationId.logSafe(justUnder)).isEqualTo(justUnder);
+        assertThat(MessagingCorrelationId.logSafe("42")).isEqualTo("42");
     }
 }

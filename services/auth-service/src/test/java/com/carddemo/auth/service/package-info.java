@@ -20,24 +20,25 @@
  *       line 655 and closes at line 689; the write at {@code app/cbl/COUSR01C.cbl} line 240; the
  *       read and the rewrite at {@code app/cbl/COUSR02C.cbl} lines 322 and 360; and the read and the
  *       delete at {@code app/cbl/COUSR03C.cbl} lines 269 and 307.</li>
- *   <li>{@code CognitoUserProvisioningService}, four public methods, {@code provision},
- *       {@code reassignGroup}, {@code withdraw} and {@code synchronise}. No single reference
+ *   <li>{@code CognitoUserProvisioningService}, three public methods, {@code provision},
+ *       {@code withdraw} and {@code synchronise}. No single reference
  *       paragraph answers for it, because the baseline keeps its users in one file and has no
- *       separate identity store to provision into.</li>
- *   <li>{@code UserAuthorityService}, one public method, {@code reassign}, which moves a user
- *       between the only two authority values the baseline admits, declared as the condition names
- *       on {@code CDEMO-USER-TYPE} at {@code app/cpy/COCOM01Y.cpy} lines 27 and 28.</li>
+ *       separate identity store to provision into. Refactoring Rationale: it declared a fourth,
+ *       {@code reassignGroup}, whose only caller was a service that itself had no production
+ *       caller; the group move a user-type change needs is performed by {@code synchronise},
+ *       which the durable task ledger applies after the row change commits.</li>
  *   <li>{@code IdentitySyncService}, four public methods, {@code record}, {@code applyOwed},
  *       {@code reconcile} and {@code reconcileOnSchedule}. No reference paragraph answers for it either,
  *       and for a sharper reason than the provisioner: the baseline keeps its users in ONE file, so a user
  *       change there is a single write that cannot be half done. This class exists because the migrated
  *       context writes to two stores and the second is not a transaction participant.</li>
- *   <li>{@code AuthorityReassignment} carries the outcome of a reassignment between two of the services
- *       above and declares no behaviour of its own for a test to assert.</li>
  * </ul>
  *
- * <p>Those counts are why this package holds the five test types below and no others: one per
- * service, none for the carrier.</p>
+ * <p>Those counts are why this package holds the four test types below and no others: one per
+ * service. Refactoring Rationale: there were five, and a carrier record beside them. The fifth
+ * covered {@code UserAuthorityService} and the carrier was its return type; both were withdrawn
+ * with that service, because a class no production path reaches is a second mechanism for the
+ * ledger's own job and a test over it asserts behaviour no deployment can exercise.</p>
  *
  * <h2>What this package holds</h2>
  *
@@ -48,8 +49,6 @@
  *       sentences they report.</li>
  *   <li>{@code CognitoUserProvisioningServiceTest}, over the identity a new user row is bound to and
  *       who is permitted to choose it.</li>
- *   <li>{@code UserAuthorityServiceTest}, over authority movement and its restoration when the
- *       surrounding transaction does not commit.</li>
  *   <li>{@code IdentitySyncServiceTest}, over the ledger that carries a committed user change to the
  *       managed user pool -- which provider call each intention issues, what a provider fault records,
  *       what a second applier sees, and that the provider is called only after the transaction that

@@ -395,15 +395,21 @@ paths:
       summary: Read one pending authorization in the screen shape
       description: >-
         Returns the same authorization as the member path, projected onto the
-        27-component shape cbl/COPAUS1C.cbl renders, together with the six
-        components of screen chrome no segment holds -- the transaction name,
-        the two title lines, the program name, the rendered instant and the
-        message line. Every chrome value is derived by this service from
-        constants and its own clock and none is accepted from the caller: the
-        first four identify the reference screen the response reproduces, so a
-        caller able to set them could label a response as having come from a
-        screen that never produced it, and the instant is evidence of when the
-        response was produced.
+        shape cbl/COPAUS1C.cbl renders, together with the six components of
+        screen chrome no segment holds -- the transaction name, the two title
+        lines, the program name, the rendered instant and the message line.
+        Every chrome value is derived by this service from constants and its own
+        clock and none is accepted from the caller: the first four identify the
+        reference screen the response reproduces, so a caller able to set them
+        could label a response as having come from a screen that never produced
+        it, and the instant is evidence of when the response was produced.
+
+
+        The body is the PendingAuthScreen schema: twenty-seven members, thirteen
+        of them always present and fourteen nullable, with no undeclared member
+        admitted. It was previously published as an unconstrained object, which
+        described nothing a client could generate a type from or validate
+        against.
       x-required-authority: carddemo-user
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
@@ -419,12 +425,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                description: >-
-                  The screen projection. Its properties are those of
-                  dto/PendingAuthDetailResponse, which is the record of what the
-                  terminal displayed rather than of what is stored.
-                additionalProperties: true
+                $ref: '#/components/schemas/PendingAuthScreen'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -473,8 +474,23 @@ paths:
               $ref: '#/components/headers/XCorrelationId'
           content:
             application/json:
+              # WHY : Refactoring Rationale: the message member declared `nullable: true`,
+              #       which is OpenAPI 3.0's keyword and was REMOVED by 3.1 -- and this
+              #       document declares openapi: 3.1.x. A 3.1 reader treats it as an
+              #       unrecognised extension keyword and ignores it, so the member was
+              #       published as a NON-nullable string while the server answers null
+              #       for it on every non-exhausted move. A conforming client validating
+              #       responses therefore rejected the ordinary success body. The 3.1
+              #       form is a type union, and it is used here.
+              # WHY : Refactoring Rationale: the shape is CLOSED and the message is bounded,
+              #       where this schema was an open `type: object` with an unbounded string.
+              #       An open shape lets a member added on the server reach a client that was
+              #       never told about it, and an unbounded message publishes no width at all
+              #       for a value the reference holds in a fixed-width screen field. Both are
+              #       the same defect the summary schema beside it was corrected for.
               schema:
                 type: object
+                additionalProperties: false
                 properties:
                   authorization:
                     allOf:
@@ -488,15 +504,26 @@ paths:
                       True when the authorization named is the oldest beneath its
                       account, so no forward move is available.
                   message:
-                    type: string
-                    nullable: true
+                    type:
+                      - string
+                      - 'null'
+                    maxLength: 78
                     description: >-
                       The verbatim message the reference screen shows on
-                      exhaustion, present only when endOfData is true. It is
+                      exhaustion, present only when endOfData is true; null on
+                      every move that has a following authorization. It is
                       declared because a client cannot otherwise know that the
                       boundary carries display text of its own, and would either
                       invent a message of its own wording or show none where the
                       reference showed one.
+
+
+                      The width is the seventy-eight ScreenMessage carries, which
+                      is this context's own screen-line regime rather than the
+                      shared error shape's narrower sentence bound. The bound is
+                      restated here rather than referenced, because a $ref cannot
+                      be combined with the type union above without an allOf that
+                      would then have to repeat the union anyway.
                 required:
                   - endOfData
         '400':
@@ -1565,6 +1592,27 @@ components:
     #   all across its twenty-six columns, so a domain published below is
     #   attributed to the condition names that close it and never to the
     #   reference table.
+    # WHY : Refactoring Rationale: this schema declares FOUR MORE properties than it
+    #       did, and the addition closes a contract break rather than widening a
+    #       contract. PendingAuthSummaryView emitted customerName, addressLine1,
+    #       addressLine2 and phoneNumber1 while this schema declared sixteen
+    #       properties and additionalProperties: false -- so every response this
+    #       service produced was rejected by its own published document, and a client
+    #       validating against it rejected a body the server considered correct. The
+    #       four are published rather than removed because the reference screen
+    #       genuinely renders them: cpy-bms/COPAU00.cpy declares CNAMEI at L66,
+    #       ADDR001I at L78, ADDR002I at L90 and PHONE1I at L96, and
+    #       cbl/COPAUS0C.cbl composes all four at L757 through L779. Removing them
+    #       would have made the document agree with a screen that had lost four
+    #       fields.
+    # WHY : Assumptions: the four are OPTIONAL and nullable while the sixteen above
+    #       them are not, and the asymmetry is a property of where they come from.
+    #       The sixteen are columns of the summary row this service owns; the four
+    #       are read from the account context over HTTP for display only, so a
+    #       customer the master no longer holds yields a summary whose sixteen
+    #       members are all present and whose four display members are absent. A
+    #       required display member would turn a neighbouring context's missing row
+    #       into a failure of this response.
     PendingAuthSummary:
       type: object
       description: >-
@@ -1573,6 +1621,13 @@ components:
         pending-authorization row and is keyed on the account identifier alone.
         Its two counter members and four amount members are what the reference
         screen shows above the row list.
+
+
+        Four further members carry the CUSTOMER display values the same screen
+        renders beside those amounts. They are not columns of this segment: they
+        are composed by cbl/COPAUS0C.cbl L757 to L779 out of nine customer fields
+        read from the context that owns the customer master, so they are published
+        as optional and nullable while every segment column is required.
       required:
         - accountId
         - customerId
@@ -1721,6 +1776,72 @@ components:
             subtracts an expiring authorization's TRANSACTION amount from this
             one at cbl/CBPAUP0C.cbl L292, not its approved amount, because a
             declined authorization has no approved amount to subtract.
+        customerName:
+          type:
+            - string
+            - 'null'
+          maxLength: 25
+          description: >-
+            The cardholder's name as the reference screen composes it, or null when
+            the account context holds no such customer. It is NOT a stored column:
+            cbl/COPAUS0C.cbl L758 to L764 concatenates CUST-FIRST-NAME up to its
+            first space, a space, the FIRST CHARACTER of CUST-MIDDLE-NAME whatever
+            that character is, another space, and CUST-LAST-NAME up to its first
+            space, into CNAMEO.
+
+
+            Two consequences of that composition are contract, not defect. A
+            customer with no stored middle name yields THREE spaces between the
+            given and family names, because the single middle position is a space.
+            And a given or family name containing a space contributes only its first
+            word, because the reference delimits by a single space. The width is the
+            25 that cpy-bms/COPAU00.cpy L66 declares for CNAMEI, and a longer
+            composition truncates there rather than overflowing.
+          example: JOHN Q PUBLIC
+        addressLine1:
+          type:
+            - string
+            - 'null'
+          maxLength: 25
+          description: >-
+            The first composed address line, or null when the account context holds
+            no such customer. cbl/COPAUS0C.cbl L766 to L770 concatenates
+            CUST-ADDR-LINE-1, a comma and CUST-ADDR-LINE-2 into ADDR001O, each
+            component delimited by TWO spaces so an address containing ordinary
+            single spaces transfers whole. An absent second line leaves the trailing
+            comma the reference also leaves. The width is the 25 that
+            cpy-bms/COPAU00.cpy L78 declares for ADDR001I.
+          example: 1 SYNTHETIC WAY,APT 2
+        addressLine2:
+          type:
+            - string
+            - 'null'
+          maxLength: 25
+          description: >-
+            The second composed address line, or null when the account context holds
+            no such customer. It is NOT CUST-ADDR-LINE-2, which belongs to the line
+            above: cbl/COPAUS0C.cbl L771 to L777 concatenates CUST-ADDR-LINE-3 --
+            the city -- a comma, CUST-ADDR-STATE-CD, a comma and the LEADING FIVE
+            characters of CUST-ADDR-ZIP into ADDR002O. The postal code's four-digit
+            extension is dropped at that point of display and is present in what the
+            account context publishes. The width is the 25 that
+            cpy-bms/COPAU00.cpy L90 declares for ADDR002I.
+          example: METROPOLIS,NY,10001
+        phoneNumber1:
+          type:
+            - string
+            - 'null'
+          maxLength: 13
+          description: >-
+            The cardholder's primary telephone number at the SCREEN width of
+            thirteen characters, or null when the account context holds no such
+            customer. cbl/COPAUS0C.cbl L779 moves CUST-PHONE-NUM-1 PIC X(15) into
+            PHONE1O, and cpy-bms/COPAU00.cpy L96 declares PHONE1I PIC X(13) -- an
+            alphanumeric MOVE into a shorter field truncates on the right, so the
+            stored fifteen narrows to thirteen here. The account context publishes
+            the stored fifteen, because the narrowing belongs to this screen rather
+            than to the record.
+          example: (212)555-0100
 
     # Assumptions: the row carries SEVEN data members and no more, because
     #   that is what the reference row projects. cbl/COPAUS0C.cbl L547-L553
@@ -1929,7 +2050,6 @@ components:
         - firstKey
         - lastKey
         - hasNext
-        - hasPrevious
       additionalProperties: false
       properties:
         # Assumptions: a full page carries FIVE rows, and the figure is not
@@ -1991,18 +2111,6 @@ components:
             only forward availability statement this envelope makes; the row count
             is not one, because a full page and a final page can both carry five
             rows. When it is true, lastKey is present.
-        hasPrevious:
-          type: boolean
-          description: >-
-            Whether a page precedes this one. False on the OPENING page even though
-            that page carries a firstKey, because firstKey answers where a backward
-            request would be issued from while this member answers whether anything
-            waits there. Establishing it from the read rather than from firstKey is
-            what stops the first page advertising an earlier page and answering a
-            client that follows the advertisement with an empty page; the reference
-            redisplays the page it is on instead, at app/cbl/COCRDLIC.cbl lines 1301
-            and 1302. A caller binds the backward paging control to this value, and
-            it is never true without a firstKey to step back from.
 
     # Alternatives Considered: folding the summary members into the page envelope so
     #   that one flat object was returned. Rejected because PageResponse in common-lib
@@ -2070,6 +2178,291 @@ components:
     #   screen composes several of these fields for display, and each
     #   composition is described beside the field it applies to instead of
     #   being baked into the value.
+    # WHY : Refactoring Rationale: this schema is NEW and the operation it serves
+    #   published an unconstrained `type: object` with `additionalProperties: true`
+    #   and no property at all -- so the document said nothing whatever about the
+    #   twenty-seven-member body the service actually returns. A client could not
+    #   generate a type from it, could not validate a response against it, and had
+    #   no way to know which members are always present; and a member added or
+    #   renamed on the server would have satisfied that schema exactly as well as
+    #   the correct body did. Describing a body by saying it is an object is the
+    #   same as not describing it.
+    # WHY : Assumptions: the member list is the record's, COMPONENT FOR COMPONENT,
+    #   and dto/PendingAuthDetailResponse declares twenty-seven of them -- six of
+    #   screen chrome and twenty-one projected from the stored row. The 3270 map it
+    #   mirrors, cpy-bms/COPAU01.cpy, declares far more DFHMDF fields than that,
+    #   because a map declares a label and an attribute position for every value it
+    #   shows; this schema publishes the VALUES the response carries, not the cells
+    #   the terminal drew them in.
+    # WHY : Assumptions: thirteen members are REQUIRED and fourteen are nullable,
+    #   and the split is derived from the columns rather than chosen. The six chrome
+    #   members are produced by this service from constants and its own clock. The
+    #   masked card number, the transaction identifier and the match status come
+    #   from columns the migration declares NOT NULL. The approval character is
+    #   derived by comparison and is 'A' or 'D' whatever the stored code is; the
+    #   composed reason always resolves, falling back to the '9999' pair; the
+    #   approved amount substitutes an explicit zero for an absent one; and the
+    #   fraud mark always carries at least its lone separator. Every remaining
+    #   member is projected from a NULLABLE column and renders as null when that
+    #   column holds nothing.
+    # WHY : Assumptions: the message line is nullable and is null on THIS route in
+    #   practice, because the controller passes no message when it composes the
+    #   screen context for a successful read. It is published as a member anyway,
+    #   because the shape is the reference screen's and the field exists on it;
+    #   omitting it would make a client unable to render the line the terminal
+    #   reserved.
+    # WHY : Assumptions: nullability is expressed as a 3.1 TYPE UNION and never as
+    #   the 3.0 `nullable` keyword, which 3.1 removed. A 3.1 reader ignores that
+    #   keyword as an unrecognised extension, so a member declared nullable the 3.0
+    #   way is published as non-nullable -- which is precisely the defect corrected
+    #   on the following-authorization response in this same document.
+    PendingAuthScreen:
+      type: object
+      additionalProperties: false
+      description: >-
+        One pending authorization projected onto the shape cbl/COPAUS1C.cbl renders,
+        together with the six components of screen chrome no segment holds. This is a
+        SECOND representation of the same resource the member path returns; it is the
+        record of what the terminal displayed rather than of what is stored, so several
+        of its members are composed rather than read and their composition is stated on
+        each one.
+
+
+        Every chrome value is derived by this service from constants and its own clock
+        and none is accepted from the caller: the first four identify the reference
+        screen the response reproduces, so a caller able to set them could label a
+        response as having come from a screen that never produced it, and the instant is
+        evidence of when the response was produced.
+      required:
+        - transactionName
+        - title01
+        - currentDate
+        - programName
+        - title02
+        - currentTime
+        - cardNumber
+        - authResponse
+        - authResponseReason
+        - approvedAmount
+        - transactionId
+        - matchStatus
+        - fraudMark
+      properties:
+        transactionName:
+          type: string
+          maxLength: 4
+          description: >-
+            The four-character transaction name the reference screen shows, derived
+            from a constant in this service and never accepted from the caller.
+          example: CPVD
+        title01:
+          type: string
+          maxLength: 40
+          description: The first forty-character title band, verbatim from the reference screen.
+        currentDate:
+          type: string
+          maxLength: 8
+          description: >-
+            The instant the response was produced, rendered month-first as the screen
+            renders it. It is evidence of when this response was made, so it comes from
+            this service's clock rather than from the request.
+          example: 07/18/22
+        programName:
+          type: string
+          maxLength: 8
+          description: >-
+            The eight-character name of the reference program this representation
+            reproduces, from a constant in this service.
+          example: COPAUS1C
+        title02:
+          type: string
+          maxLength: 40
+          description: The second forty-character title band, verbatim from the reference screen.
+        currentTime:
+          type: string
+          maxLength: 8
+          description: The same instant as currentDate, rendered as hours, minutes and seconds.
+          example: '14:32:07'
+        cardNumber:
+          allOf:
+            - $ref: '#/components/schemas/MaskedCardNumber'
+          description: >-
+            The primary account number rendered to its last four digits. The column is
+            NOT NULL, so this member is always present, and no operation in this
+            document returns the value unmasked.
+        authDate:
+          type:
+            - string
+            - 'null'
+          maxLength: 8
+          description: >-
+            The originating date the requester sent, rendered from the stored six
+            characters with separators, or null when the column holds nothing.
+          example: 07/18/22
+        authTime:
+          type:
+            - string
+            - 'null'
+          maxLength: 8
+          description: >-
+            The originating time the requester sent, rendered from the stored six
+            characters with separators, or null when the column holds nothing.
+          example: '14:32:07'
+        authResponse:
+          type: string
+          maxLength: 1
+          pattern: '^[AD]$'
+          description: >-
+            The single approval character the screen shows. cbl/COPAUS1C.cbl L311 tests
+            the stored response code against '00' and moves 'A' at L312 or 'D' at L315,
+            so the two-character code itself never reaches the screen and this member is
+            never null whatever that column holds.
+          example: A
+        authResponseReason:
+          type: string
+          maxLength: 20
+          description: >-
+            The composed twenty-character reason: the four-character code, a separator at
+            position five and the description from position six, assembled by
+            cbl/COPAUS1C.cbl L325 to L327. When the ten-entry table resolves no stored
+            code, L321 to L323 write the '9999' and 'ERROR' pair instead -- which
+            replaces the stored code as well as the description -- so this member always
+            resolves and is never null.
+
+
+            The width is twenty and not twenty-one: the MOVE at L327 targets a
+            reference-modified receiver of exactly fifteen positions, so a sixteenth
+            description character is truncated on the way in and does not exist anywhere
+            in the baseline. That truncation is registered as D-AUTH-REASON-WIDTH in
+            docs/architecture/cobol-to-service-traceability.md.
+          example: 4100/INSUFFICIENT FU
+        processingCode:
+          type:
+            - string
+            - 'null'
+          maxLength: 6
+          pattern: '^[0-9]+$'
+          description: The six-digit processing code, or null when the column holds nothing.
+        approvedAmount:
+          allOf:
+            - $ref: '#/components/schemas/DetailAmount'
+          description: >-
+            The amount approved, at DETAIL precision of ten integer digits. An absent
+            stored amount becomes an explicit zero rather than null, so this member is
+            always present -- a screen showing a blank amount where the reference showed
+            0.00 would be a different screen.
+        posEntryMode:
+          type:
+            - string
+            - 'null'
+          maxLength: 2
+          pattern: '^[0-9]+$'
+          description: >-
+            The two-digit point-of-sale entry mode, zero-padded from the stored small
+            integer, or null when the column holds nothing.
+        messageSource:
+          type:
+            - string
+            - 'null'
+          maxLength: 6
+          description: The six-character message source, or null when the column holds nothing.
+        merchantCategoryCode:
+          type:
+            - string
+            - 'null'
+          maxLength: 4
+          description: >-
+            The four-character merchant category code, or null when the column holds
+            nothing. The stored field is PA-MERCHANT-CATAGORY-CODE; the misspelling is
+            corrected in every target name and the correction is recorded in
+            docs/architecture/data-model-and-schema-mapping.md.
+        cardExpiry:
+          type:
+            - string
+            - 'null'
+          maxLength: 5
+          description: >-
+            The card expiry as FIVE characters, or null when the column holds nothing.
+            cbl/COPAUS1C.cbl L336 to L338 moves the first two stored characters, overlays
+            a solidus at position three and moves the remaining two, so four stored
+            characters reach the screen as five. The separator is part of the value.
+          example: 12/27
+        authType:
+          type:
+            - string
+            - 'null'
+          maxLength: 4
+          description: The four-character authorization type, or null when the column holds nothing.
+        transactionId:
+          type: string
+          maxLength: 15
+          description: >-
+            The fifteen-character transaction identifier the requester sent. The column is
+            NOT NULL, so this member is always present.
+        matchStatus:
+          type: string
+          maxLength: 1
+          pattern: '^[PDEM]$'
+          description: >-
+            The single-character match status. The column is NOT NULL and constrained to
+            the same four characters, so this member is always present and within the
+            domain.
+        fraudMark:
+          type: string
+          maxLength: 10
+          description: >-
+            The composed fraud mark. When a mark exists, cbl/COPAUS1C.cbl L345 to L347
+            assemble the status character, a separator at position two and the
+            eight-character report date from position three; when none exists, L349 moves
+            a lone separator over the whole field. It is therefore never null -- an
+            unmarked authorization carries the separator alone.
+
+
+            No pattern is published for it, because PA-FRAUD-RPT-DATE is declared
+            PIC X(08) at cpy/CIPAUDTY.cpy L53 and a character picture does not guarantee
+            digits, so a digit pattern would refuse values the persistent field admits.
+          example: F-20220718
+        merchantName:
+          type:
+            - string
+            - 'null'
+          maxLength: 22
+          description: The merchant name, or null when the column holds nothing.
+        merchantId:
+          type:
+            - string
+            - 'null'
+          maxLength: 15
+          description: The merchant identifier, or null when the column holds nothing.
+        merchantCity:
+          type:
+            - string
+            - 'null'
+          maxLength: 13
+          description: The merchant city, or null when the column holds nothing.
+        merchantState:
+          type:
+            - string
+            - 'null'
+          maxLength: 2
+          description: The merchant state code, or null when the column holds nothing.
+        merchantZip:
+          type:
+            - string
+            - 'null'
+          maxLength: 9
+          description: The merchant postal code, or null when the column holds nothing.
+        message:
+          type:
+            - string
+            - 'null'
+          maxLength: 78
+          description: >-
+            The screen message line, at the seventy-eight characters ScreenMessage
+            carries. This route composes its screen context with no message on a
+            successful read, so the member is null in practice; it is published because
+            the shape is the reference screen's and the line exists on it.
+
     PendingAuthDetail:
       type: object
       description: >-
@@ -2453,17 +2846,26 @@ components:
             pending, D authorization declined, E pending expired, M matched with a
             transaction. The domain is the four condition names at
             cpy/CIPAUDTY.cpy L46-L49 declared on the one-character field at L45.
-        # Assumptions: the domain admits BLANK and NULL as well as the two
-        #   tagged values, and omitting them would refuse rows the reference
-        #   system routinely produces. cpy/CIPAUDTY.cpy L50 declares the
-        #   one-character field and L51-L52 declare only the confirmed and
-        #   removed condition names, so an untagged authorization satisfies
-        #   neither -- and cbl/COPAUS1C.cbl proves that is the normal state
-        #   rather than an edge case: L344 tests for either condition and L349
-        #   renders a lone separator when neither holds, which is the path
-        #   every authorization takes until somebody tags it. The migrated
-        #   column's CHECK admits the two values, the blank and the null for
-        #   exactly this reason.
+        # Assumptions: the WIRE domain is the two tagged values and null, and
+        #   untagged is the ordinary state rather than an edge case.
+        #   cpy/CIPAUDTY.cpy L50 declares the one-character field and L51-L52
+        #   declare only the confirmed and removed condition names, so an
+        #   untagged authorization satisfies neither -- and cbl/COPAUS1C.cbl
+        #   proves that is the normal state: L344 tests for either condition
+        #   and L349 renders a lone separator when neither holds, which is the
+        #   path every authorization takes until somebody tags it.
+        # WHY : Refactoring Rationale: a single BLANK was withdrawn from this
+        #   enum. The STORED column still admits one, and V1__authorization.sql
+        #   keeps that tolerance deliberately, because a blank is what the ETL
+        #   lands for an untagged segment and refusing it at the column would
+        #   make a faithful load fail. It is normalised away one layer out
+        #   instead: the compact constructor of
+        #   dto/PendingAuthDetailView.java maps a blank to null before any
+        #   instance exists, so no response can carry it. Publishing both
+        #   spellings obliged every client to test for two values for one
+        #   state, and a client that tested for only one of them rendered an
+        #   untagged authorization as tagged -- which is the reading a fraud
+        #   indicator must never get wrong.
         authFraud:
           type:
             - string
@@ -2472,15 +2874,15 @@ components:
           enum:
             - F
             - R
-            - ' '
             - null
           description: >-
-            The fraud tag: F reported as fraud, R the report removed, a single
-            blank or null when the authorization was never tagged. Untagged is the
-            ordinary state. When a tag is present the reference detail screen
-            renders the tag character, a separator and the report date together at
-            cbl/COPAUS1C.cbl L345-L347; that composition is a rendering and the
-            two values are published separately here.
+            The fraud tag: F reported as fraud, R the report removed, null when the
+            authorization was never tagged. Untagged is the ordinary state, and it
+            has exactly one spelling on the wire -- a stored blank is normalised to
+            null before serialisation. When a tag is present the reference detail
+            screen renders the tag character, a separator and the report date
+            together at cbl/COPAUS1C.cbl L345-L347; that composition is a rendering
+            and the two values are published separately here.
         # Assumptions: no pattern is published for this member even though it
         #   holds a date, and the omission follows the reference declaration.
         #   PA-FRAUD-RPT-DATE is PIC X(08) at cpy/CIPAUDTY.cpy L53 and a
@@ -3176,9 +3578,25 @@ components:
         every status. It carries two independent channels: one aggregate sentence
         for a person to read, latched to the first failure detected, and one array
         of per-field entries that accumulates every offending field.
+      # WHY : Refactoring Rationale: `message` and `abend` are REQUIRED and NULLABLE, which is a
+      #       different statement from optional and is the one this shape has to make. Both are record
+      #       components of ApiError in
+      #       services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java, and a record
+      #       component is always written, so the key is present with a null value on every response --
+      #       `ApiErrorWireShapeTest` asserts exactly that, emitting `"message":null` and `"abend":null`.
+      #       An earlier revision omitted them from this list, which told a generated client the keys
+      #       might be missing and left it unable to distinguish "not supplied" from "nothing to
+      #       report"; a strict validator reading `additionalProperties: false` alongside the omission
+      #       had no member to bind the emitted keys to at all.
+      # WHY : Alternatives Considered: suppressing the two keys when null, with an inclusion setting, so
+      #       the omission became true. Rejected because the aggregate sentence is the reference's own
+      #       75-character message field and a client renders the band from it unconditionally, so a
+      #       key that comes and goes moves that decision into every client; and because the services
+      #       set `default-property-inclusion: always`, which the money contract depends on.
       required:
         - code
         - secondaryCode
+        - message
         - severity
         - subsystem
         - status
@@ -3186,6 +3604,7 @@ components:
         - path
         - timestamp
         - fieldErrors
+        - abend
       additionalProperties: false
       properties:
         # Alternatives Considered: a closed enum of the seven codes the kernel

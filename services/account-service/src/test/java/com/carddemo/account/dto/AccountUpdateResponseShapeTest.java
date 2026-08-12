@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
  * <h2>Purpose</h2>
  *
  * <p>This class asserts a property of a TYPE rather than a behaviour of a method: that the shape
- * {@code PUT /api/v1/accounts/{accountId}} answers with declares no component able to carry a whole
+ * {@code POST /api/v1/accounts/update} answers with declares no component able to carry a whole
  * national identifier or a whole government-issued identifier, and that it still mirrors every
  * submitted value a client has to be able to read back. The subject is the shape of a record, so the
  * assertions read declared components reflectively rather than calling accessors by name -- a

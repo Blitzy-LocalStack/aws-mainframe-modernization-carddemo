@@ -1,4 +1,9 @@
-# `batch_reference_update/invalid_type_soft_reject` -- an unrecognised action byte is rejected and the run continues
+# `batch_reference_update/invalid_type_abend` -- an unrecognised action byte performs `9999-ABEND`, which rejects the record and lets the run continue
+
+The directory is named for the PARAGRAPH the invalid byte performs, `9999-ABEND`, and
+not for an outcome. That paragraph does not end the run; section 2 transcribes its
+three statements and section 8 records why the name is kept and read this way rather
+than renamed.
 
 Why this file exists: `trtype-update.txt` is fixed-width, so every byte position is
 data and a `#` comment would be a wrong-length row the loader rejects outright. A
@@ -234,30 +239,54 @@ reason is written down beside it.
 
 ---
 
-## 8. Refactoring Rationale: why this directory was renamed
+## 8. Refactoring Rationale: why the directory keeps the paragraph's name
 
-This scenario was named `invalid_type_abend` and this document previously stated
-that the run "abends on record 1", that "record 2 is never processed", and that the
-fixture's row order proved "processing stops at the offending record". All three were
-read from the NAME of the `9999-ABEND` paragraph rather than from its body, and the
-body -- three statements at lines 230 to 233 -- does not stop anything. The
-directory is renamed to `invalid_type_soft_reject` and the outcome restated, because
-a fixture whose directory name asserts a halt teaches every later reader the wrong
-control flow, and the consuming test would have been written to assert it.
+This document previously stated that the run "abends on record 1", that "record 2 is
+never processed", and that the fixture's row order proved "processing stops at the
+offending record". All three were read from the NAME of the `9999-ABEND` paragraph
+rather than from its body, and the body -- three statements at lines 230 to 233 --
+does not stop anything. Those three claims are the defect, and sections 2, 3 and 7
+now state the control flow the body actually has.
 
-The former name is not present in this tree and is not to be re-created. Both fixture
-test classes resolve this scenario as
-`batch_reference_update/invalid_type_soft_reject/trtype-update.txt` by that path, and
-the charter's section 10 inventory counts three scenarios in this domain, so a
-directory under the old name would be read by nothing and would put that inventory out
-of step with the directory it is measured from. A reader who arrives here from an
-earlier reference to the old name is in the right place.
+An intermediate edit went further and renamed the directory to
+`invalid_type_soft_reject`. That rename is WITHDRAWN and the frozen name is restored.
+The reason is a scoping one rather than an editorial one: this fixture is an
+enumerated in-scope artifact of the Agent Action Plan, which names it at the exact
+scoped path
+`services/reference-service/src/test/resources/fixtures/batch_reference_update/invalid_type_abend/trtype-update.txt`,
+so renaming the directory did not correct a document -- it removed a planned artifact
+from the tree and put a second, unplanned path in its place. The plan is frozen and
+code is aligned to it, so a name it fixes is not a name a later refactor may choose.
 
-Assumptions: the reject is not silent either, which is why "soft" and not "ignored"
-is the word. The return code becomes 4, and the repository's own suite treats a
+Alternatives Considered: keeping the renamed directory and amending the plan to match.
+Rejected, because the plan is the authority the tree is measured against; editing it
+to ratify a change made against it would leave nothing able to detect the next such
+change. Alternatives Considered: keeping the renamed directory and adding the frozen
+path as a second copy of the same two rows. Rejected outright -- charter section 5.8
+forbids duplicated fixture bytes precisely because two copies drift, and the copies
+here would be the input to the same assertions.
+
+Trade-offs: the restored name is the one that misled three earlier statements, so the
+cost of restoring it is that the name still has to be read correctly. That cost is
+paid where it is incurred rather than by renaming: the title of this document says in
+its own first line that the name is the paragraph's and not an outcome's, the sentence
+under it points at the transcription, and section 2 gives the three statements the
+paragraph is made of together with the `9999-ABEND-PROGRAM` paragraph at the opposite
+severity tier that it is most often confused with. A name plus a correction beside it
+is legible; a name with nothing beside it is what produced the defect.
+
+Assumptions: the reject is not silent, and "abend" in this directory's name does not
+mean it is. The return code becomes 4, and the repository's own suite treats a
 warning-level aggregate return code as its green state, so a run of this fixture is
-expected to end at 4 rather than at 0. A consumer asserting 0 would be asserting
-that the invalid record was accepted.
+expected to end at 4 rather than at 0. A consumer asserting 0 would be asserting that
+the invalid record was accepted; a consumer asserting a halted run or an unapplied
+record 2 would be asserting the paragraph's name over its body.
+
+Both fixture test classes and `ReferenceBatchUpdateServiceTest` resolve this scenario
+as `batch_reference_update/invalid_type_abend/trtype-update.txt` by that path, and the
+tree charter's scenario table names this directory once under that name, so the
+directory on disk, the three classpath references and that row all read the same. A
+reader who arrives here from a reference to the withdrawn name is in the right place.
 
 ---
 

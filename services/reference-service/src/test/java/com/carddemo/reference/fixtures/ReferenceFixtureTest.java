@@ -8,6 +8,10 @@ import com.carddemo.common.codec.CopybookLayout.RecordSpec;
 import com.carddemo.common.codec.FixedWidthCodec;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -80,6 +84,65 @@ class ReferenceFixtureTest {
         List<byte[]> decoded = records(path, reclen);
         assertThat(decoded).as("%s must yield exactly %d records", path, records).hasSize(records);
         assertThat(decoded).allSatisfy(record -> assertThat(record).hasSize(reclen));
+    }
+
+    /**
+     * Every record file in the packaged tree is enrolled in the geometry list above.
+     *
+     * <p>Purpose: the geometry list is the only place every fixture receives a width, a record-count and
+     * a line-ending assertion, so a file left out of it receives none of them -- and a record file that
+     * nothing loads by its own path can be edited into something wrong with the whole suite staying
+     * green. That is not hypothetical: three files sat committed and unenrolled while this list's own
+     * documentation claimed to name every file in the tree, and each of their scenario READMEs recorded
+     * the consequence honestly rather than the list catching it. This case closes the list against that
+     * happening again, by comparing it with what is actually on the class path rather than with a
+     * remembered count.</p>
+     *
+     * <p>Alternatives Considered: asserting the list's SIZE against a committed number, which is what the
+     * list's documentation previously invited by naming a count. Rejected because a number has to be
+     * updated by the same edit that adds a file, so it fails exactly when someone remembers -- and the
+     * failure it must catch is someone forgetting. Comparing the two SETS names the missing path instead
+     * of reporting an arithmetic mismatch.</p>
+     *
+     * <p>Assumptions: the tree is walked on the CLASS PATH rather than in {@code src/test/resources}, for
+     * the reason this class's own header gives: the packaged copy is the one a consumer sees, and a file
+     * present in the source tree but absent from the artifact must fail rather than pass.</p>
+     *
+     * @throws IOException if the packaged fixture tree cannot be walked
+     * @throws AssertionError if the tree root resolves to a location that cannot be walked as a path,
+     *     which is a packaging fault rather than a fixture fault and is raised as such
+     */
+    @Test
+    @DisplayName("every record file on the class path is enrolled in the geometry list")
+    void everyPackagedRecordFileIsEnrolled() throws IOException {
+        URL root = ReferenceFixtureTest.class.getResource(ROOT);
+        assertThat(root).as("the packaged fixture tree must be on the test class path").isNotNull();
+
+        Path treeRoot;
+        try {
+            treeRoot = Path.of(root.toURI());
+        } catch (URISyntaxException malformed) {
+            throw new AssertionError("the fixture tree resolved to a path that cannot be walked: "
+                    + root, malformed);
+        }
+
+        List<String> packaged;
+        try (Stream<Path> walk = Files.walk(treeRoot)) {
+            packaged = walk.filter(Files::isRegularFile)
+                    .filter(file -> file.getFileName().toString().endsWith(".txt"))
+                    .map(file -> treeRoot.relativize(file).toString().replace('\\', '/'))
+                    .sorted()
+                    .toList();
+        }
+
+        List<String> enrolled = fixtureGeometry()
+                .map(argument -> (String) argument.get()[0])
+                .sorted()
+                .toList();
+
+        assertThat(enrolled)
+                .as("a fixture absent from the geometry list receives no assertion of any kind")
+                .containsExactlyElementsOf(packaged);
     }
 
     /**
@@ -383,7 +446,7 @@ class ReferenceFixtureTest {
         assertThat(added.get(1).get("INPUT-REC-NUMBER")).isEqualTo("09");
 
         List<Map<String, Object>> softRejected =
-                decodeAll("batch_reference_update/invalid_type_soft_reject/trtype-update.txt", layout);
+                decodeAll("batch_reference_update/invalid_type_abend/trtype-update.txt", layout);
         assertThat(softRejected).hasSize(2);
         assertThat(softRejected.get(0).get("INPUT-REC-TYPE"))
                 .as("a byte outside A, U, D and * is REJECTED, and lower case is outside it")
@@ -457,8 +520,11 @@ class ReferenceFixtureTest {
     private static Stream<Arguments> fixtureGeometry() {
         return Stream.of(
                 Arguments.of("batch_reference_update/add_record/trtype-update.txt", 53, 2),
+                Arguments.of("batch_reference_update/commented_line/trtype-update.txt", 53, 2),
+                Arguments.of("batch_reference_update/delete_record/trtype-update.txt", 53, 2),
                 Arguments.of("batch_reference_update/empty_input/trtype-update.txt", 53, 0),
-                Arguments.of("batch_reference_update/invalid_type_soft_reject/trtype-update.txt", 53, 2),
+                Arguments.of("batch_reference_update/invalid_type_abend/trtype-update.txt", 53, 2),
+                Arguments.of("batch_reference_update/update_record/trtype-update.txt", 53, 1),
                 Arguments.of("date_conversion/empty_input/date-request.txt", 1000, 0),
                 Arguments.of("date_conversion/happy_path/date-request.txt", 1000, 1),
                 Arguments.of("date_conversion/invalid_date_rejected/date-request.txt", 1000, 1),

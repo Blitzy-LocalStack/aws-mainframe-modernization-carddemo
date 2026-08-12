@@ -47,8 +47,8 @@
 # =============================================================================
 
 terraform {
-  # WHY `~> 1.15.0` rather than an open `>= 1.15.0` floor (Refactoring
-  #       Rationale): the pessimistic operator on the patch component accepts
+  # Refactoring Rationale: `~> 1.15.0` replaces an open `>= 1.15.0` floor.
+  #       The pessimistic operator on the patch component accepts
   #       1.15.0 through 1.15.x and refuses 1.16.0 as well as 2.x. That is the
   #       toolchain this package is actually reviewed under: it is validated on
   #       1.15.8, and the environment contract states the constraint in those

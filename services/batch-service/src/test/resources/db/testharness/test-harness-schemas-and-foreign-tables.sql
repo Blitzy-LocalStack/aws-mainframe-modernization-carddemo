@@ -3,11 +3,11 @@
 --   test-harness-schemas-and-foreign-tables.sql
 -- -----------------------------------------------------------------------------
 -- Purpose:
---   Bootstraps the three FOREIGN PostgreSQL schemas -- ledger, account and
---   reference -- and the seven foreign tables that the batch-service
+--   Bootstraps the four FOREIGN PostgreSQL schemas -- ledger, account, reference
+--   and card -- and the nine foreign tables that the batch-service
 --   integration-test suite reads and writes, so that a throwaway Testcontainers
 --   database reaches the state a provisioned environment is already in before
---   any service migration runs. The fourth schema this module connects to,
+--   any service migration runs. The fifth schema this module connects to,
 --   `batch`, is created by Flyway rather than here, for the ownership reason
 --   recorded in Section 1.
 --
@@ -58,6 +58,14 @@
 --                                          account_id
 --   account.card_xref                      3 columns, primary key on card_num,
 --                                          plus idx_card_xref_account_id
+--   account.customers                      19 columns, primary key on
+--                                          customer_id
+--   card.cards                             7 columns, primary key on card_num,
+--                                          plus idx_cards_account_id
+--   account.customers                      19 columns, primary key on
+--                                          customer_id
+--   card.cards                             7 columns, primary key on card_num,
+--                                          plus idx_cards_account_id
 --   reference.disclosure_groups            4 columns, three-part primary key,
 --                                          seeded with the 17 DEFAULT rows
 --
@@ -118,20 +126,20 @@
 
 
 -- -----------------------------------------------------------------------------
--- Section 1 of 4 -- schemas
+-- Section 1 of 5 -- schemas
 -- -----------------------------------------------------------------------------
 
--- WHAT: create the three FOREIGN schemas this module connects across, ahead of
---       any table. `batch` is deliberately NOT among them; see the note that
---       follows this statement group.
--- WHY : two independent reasons, neither of which alone would be sufficient.
+-- Assumptions: the three schemas created below are the FOREIGN ones this module
+--       connects across, and `batch` is deliberately NOT among them -- see the note
+--       that follows this statement group. Two independent reasons require the three,
+--       neither of which alone would be sufficient.
 --       (1) Flyway here is scoped to a single schema, so it can never provision
---           these three. Both profiles set `schemas: batch` and
+--           these four. Both profiles set `schemas: batch` and
 --           `default-schema: batch` -- application.yml L590-L591 and
 --           application-test.yml L192-L193 -- so `batch` is the only schema
 --           Flyway addresses at all, and V1__batch.sql creates tables and
 --           nothing else. Nothing else on this module's test classpath creates
---           `ledger`, `account` or `reference`. Note that `create-schemas`
+--           `ledger`, `account`, `card` or `reference`. Note that `create-schemas`
 --           differs between the two profiles, false at application.yml L602 and
 --           true at application-test.yml L214, and the difference does not
 --           reach this decision: that setting governs only whether Flyway
@@ -141,30 +149,48 @@
 --           stylistic: `CREATE TABLE ledger.transactions` issued against a
 --           missing `ledger` fails with SQLSTATE 3F000 invalid_schema_name, so
 --           the schemas have to be established before the tables that name them.
--- WHY : **Assumptions:** the connection `search_path` must not be mistaken for a
+-- WHY : Assumptions: the connection `search_path` must not be mistaken for a
 --       safety net covering reason (2). The datasource sets `search_path` to
---       `batch, ledger, account, reference`, but PostgreSQL resolves that list
+--       `batch, ledger, account, reference, card`, but PostgreSQL resolves that list
 --       lazily and accepts a name that does not exist, so `SET search_path` over
 --       a missing schema returns SET rather than raising -- verified directly
 --       against PostgreSQL 17.10 on an empty database. A missing schema
 --       therefore produces no diagnostic at connection time and resurfaces later
 --       as 42P01 undefined_table inside whichever repository call happens to
 --       touch it first.
--- WHY : **Trade-offs:** IF NOT EXISTS is used here and throughout this file
+-- WHY : Trade-offs: IF NOT EXISTS is used here and throughout this file
 --       rather than a bare CREATE. It gives up the ability to notice a
 --       pre-existing object, and buys a script that is safe to execute twice --
 --       which matters because both a reused container and a retried container
 --       start re-execute it, and a bare CREATE would abort the second run with
 --       42P06 duplicate_schema before reaching a single table.
+-- WHY : Refactoring Rationale: `card` joins the list, and it joins it because
+--       the export job now reads the card master. That job re-expresses
+--       app/cbl/CBEXPORT.cbl, which reads five masters and writes five record
+--       types; this module held an entity for three of them, so its customer and
+--       card phases emitted nothing. Both seams now exist, and Hibernate
+--       validates every mapped table at context start -- so without this schema
+--       and the table in section 5 every repository test in this module fails at
+--       start-up with `missing table [card.cards]`, before a single assertion
+--       runs. `account.customers` needs no new schema, only a new table, because
+--       `account` was already here for the account master.
 CREATE SCHEMA IF NOT EXISTS ledger;
 CREATE SCHEMA IF NOT EXISTS account;
 CREATE SCHEMA IF NOT EXISTS reference;
 
--- WHAT: `batch` is NOT created here, and its absence from the three statements
---       above is required rather than an oversight. Flyway creates it, under
---       `create-schemas: true` at application-test.yml L214.
--- WHY : **Refactoring Rationale:** this file did carry
---       `CREATE SCHEMA IF NOT EXISTS batch;` alongside the three above, and that
+-- WHY : Assumptions: `card` is a FOREIGN schema on the same footing as the three
+--       above -- it belongs to card-service, and this module's grant on it is
+--       SELECT only, at data-migration/sql/V0__schemas_and_roles.sql L1268. It is
+--       created here rather than by Flyway for the same reason they are: nothing
+--       in this module's migration set creates it, and a provisioned environment
+--       already has it before Flyway opens a connection.
+CREATE SCHEMA IF NOT EXISTS card;
+
+-- Assumptions: `batch` is NOT created here, and its absence from the three
+--       statements above is required rather than an oversight. Flyway creates it,
+--       under `create-schemas: true` at application-test.yml L214.
+-- Refactoring Rationale: this file did carry
+--       `CREATE SCHEMA IF NOT EXISTS batch;` alongside the four above, and that
 --       statement made the production Flyway configuration FAIL. The mechanism is
 --       ownership, and it was measured against PostgreSQL 17.10 rather than
 --       reasoned about. An init script runs as the container's own generated
@@ -179,9 +205,9 @@ CREATE SCHEMA IF NOT EXISTS reference;
 --       this module aborted on context load, and the reported cause named the
 --       migration rather than this file -- exactly the misdirection the note below
 --       warns about, arriving by a different route.
--- WHY : **Assumptions:** deferring to Flyway does not merely avoid the denial, it
+-- WHY : Assumptions: deferring to Flyway does not merely avoid the denial, it
 --       reproduces the deployed ownership exactly.
---       data-migration/sql/V0__schemas_and_roles.sql L713 declares
+--       data-migration/sql/V0__schemas_and_roles.sql L723 declares
 --       `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch_owner`, so
 --       in a provisioned environment the schema belongs to that role. With the
 --       statement removed, `create-schemas: true` has Flyway issue the CREATE
@@ -190,7 +216,7 @@ CREATE SCHEMA IF NOT EXISTS reference;
 --       `ALTER DEFAULT PRIVILEGES FOR ROLE` clause in that bootstrap file is keyed
 --       on the CREATING role and is inert otherwise, which is why the ownership is
 --       the property that has to match and not merely the schema's existence.
--- WHY : **Alternatives Considered:** three ways to keep the statement were
+-- WHY : Alternatives Considered: three ways to keep the statement were
 --       evaluated and all three were rejected. (a) Creating the role here and
 --       writing `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION
 --       carddemo_batch_owner`, mirroring V0 literally. Rejected because it would
@@ -205,7 +231,7 @@ CREATE SCHEMA IF NOT EXISTS reference;
 --       Rejected because the ownership split is the mechanism the deployed
 --       configuration depends on, and a suite that stopped exercising it would
 --       leave it asserted by nothing.
--- WHY : **Assumptions:** V1__batch.sql is the sole owner of every object in
+-- WHY : Assumptions: V1__batch.sql is the sole owner of every object in
 --       `batch` -- batch.batch_run at its L271, the six Spring Batch
 --       JobRepository tables at L664-L729 and their three sequences at
 --       L737-L739 -- and Flyway applies it into the schema it has itself created.
@@ -215,14 +241,14 @@ CREATE SCHEMA IF NOT EXISTS reference;
 --       build. In both cases the reported failure would point at the migration
 --       rather than at this file. `flyway_schema_history` is likewise not created
 --       here; Flyway creates and owns it inside `batch`.
--- WHY : **Assumptions:** no schema beyond these three is created. The mapped
+-- WHY : Assumptions: no schema beyond these three is created. The mapped
 --       entity set of this module spans these three plus `batch`, so a fifth
 --       schema would be structure no test can reach and drift no owner would
 --       notice.
 
 
 -- -----------------------------------------------------------------------------
--- Section 2 of 4 -- account context, mirroring
+-- Section 2 of 5 -- account context, mirroring
 -- services/account-service/src/main/resources/db/migration/V1__account.sql
 -- -----------------------------------------------------------------------------
 
@@ -276,8 +302,50 @@ CREATE INDEX IF NOT EXISTS idx_card_xref_account_id
     ON account.card_xref (account_id);
 
 
+-- WHY : Refactoring Rationale: the customer master joins the harness because
+--       the export job now reads it. Mirroring is the same discipline the account
+--       master above follows and for the same stated reason -- this module may not
+--       depend on account-service, so its authored migration cannot be reused
+--       here and the shape is restated instead.
+-- WHY : Assumptions: the two protected columns are mirrored even though the
+--       entity in this module maps NEITHER of them. ssn_encrypted is NOT NULL in
+--       the owning migration, so a harness that omitted it would let an insert
+--       succeed here that the owning schema refuses -- and the omission would
+--       hide exactly the property worth keeping visible, that this module can read
+--       every other column of this table and not these two.
+-- WHY : Assumptions: addr_line_3 is NOT NULL and addr_line_2 is nullable, which
+--       reads backwards and is the owning migration's shape rather than a
+--       transcription error: CUST-ADDR-LINE-3 carries the city and state in the
+--       reference layout at app/cpy/CVCUS01Y.cpy L11, so it is always populated,
+--       while the second line is a genuine optional street continuation.
+CREATE TABLE IF NOT EXISTS account.customers (
+    customer_id                 BIGINT          NOT NULL,
+    first_name                  VARCHAR(25)     NOT NULL,
+    middle_name                 VARCHAR(25),
+    last_name                   VARCHAR(25)     NOT NULL,
+    addr_line_1                 VARCHAR(50)     NOT NULL,
+    addr_line_2                 VARCHAR(50),
+    addr_line_3                 VARCHAR(50)     NOT NULL,
+    addr_state_cd               CHAR(2)         NOT NULL,
+    addr_country_cd             CHAR(3)         NOT NULL,
+    addr_zip                    CHAR(10)        NOT NULL,
+    phone_num_1                 VARCHAR(15),
+    phone_num_2                 VARCHAR(15),
+    ssn_encrypted               BYTEA           NOT NULL,
+    govt_issued_id_encrypted    BYTEA,
+    dob                         DATE            NOT NULL,
+    eft_account_id              CHAR(10)        NOT NULL,
+    pri_card_holder_ind         CHAR(1)         NOT NULL,
+    fico_credit_score           SMALLINT        NOT NULL,
+    version                     BIGINT          NOT NULL DEFAULT 0,
+    CONSTRAINT pk_customers PRIMARY KEY (customer_id),
+    CONSTRAINT ck_customers_pri_card_holder_ind
+        CHECK (pri_card_holder_ind IN ('Y', 'N'))
+);
+
+
 -- -----------------------------------------------------------------------------
--- Section 3 of 4 -- reference context, mirroring
+-- Section 3 of 5 -- reference context, mirroring
 -- services/reference-service/src/main/resources/db/migration/V1__reference.sql
 -- and its seed at V2__seed_reference.sql
 -- -----------------------------------------------------------------------------
@@ -352,7 +420,7 @@ ON CONFLICT (acct_group_id, tran_type_cd, tran_cat_cd) DO NOTHING;
 
 
 -- -----------------------------------------------------------------------------
--- Section 4 of 4 -- ledger context, mirroring
+-- Section 4 of 5 -- ledger context, mirroring
 -- services/transaction-service/src/main/resources/db/migration/V1__ledger.sql
 -- -----------------------------------------------------------------------------
 
@@ -451,3 +519,50 @@ CREATE TABLE IF NOT EXISTS ledger.transaction_category_balances (
 --       module owns, so Flyway creates them from V1__batch.sql under the very
 --       configuration production uses. Creating them here would replace the thing
 --       the integration suite exists to exercise with a copy of it.
+
+
+-- -----------------------------------------------------------------------------
+-- Section 5 of 5 -- card context, mirroring
+-- services/card-service/src/main/resources/db/migration/V1__card.sql
+-- -----------------------------------------------------------------------------
+
+-- WHY : Refactoring Rationale: the card master joins the harness because the
+--       export job now reads it, for the reason section 1 records against the
+--       `card` schema. This is the FOURTH foreign context this module's tests
+--       stand up, and the count is worth stating plainly: the batch role's read
+--       privileges on it already existed --
+--       data-migration/sql/V0__schemas_and_roles.sql L1140 grants usage and L1268
+--       grants SELECT on every table in `card` -- so only the Java seam and this
+--       harness table were outstanding.
+-- WHY : Assumptions: card_num is CHAR(16) and never a numeric type, which the
+--       owning migration argues at length and which matters here too: five of the
+--       fifty records in app/data/ASCII/carddata.txt begin with a zero digit, and
+--       a numeric column would discard it, so a fixture loaded through a numeric
+--       column would come back as a different card.
+-- WHY : Assumptions: cvv_encrypted is mirrored and NULLABLE, matching the owning
+--       migration. The entity in this module deliberately does not map it -- the
+--       export writes an encoded zero in its place through the absent opaque
+--       carrier -- and mirroring the column anyway keeps an insert that succeeds
+--       here succeeding there.
+-- WHY : Assumptions: version is INTEGER here and BIGINT on account.accounts, and
+--       the asymmetry is the owning migrations' rather than an inconsistency
+--       introduced by this harness. Widening it would let a value be stored here
+--       that the owning schema refuses.
+CREATE TABLE IF NOT EXISTS card.cards (
+    card_num          CHAR(16)     NOT NULL,
+    account_id        BIGINT       NOT NULL,
+    cvv_encrypted     BYTEA,
+    embossed_name     VARCHAR(50)  NOT NULL,
+    expiration_date   DATE         NOT NULL,
+    active_status     CHAR(1)      NOT NULL,
+    version           INTEGER      NOT NULL DEFAULT 0,
+    CONSTRAINT pk_cards PRIMARY KEY (card_num),
+    CONSTRAINT ck_cards_active_status CHECK (active_status IN ('Y', 'N'))
+);
+
+-- WHY : Assumptions: NON-UNIQUE, replacing the CARDAIX alternate index whose key
+--       is the account identifier while the base cluster keys on the card number.
+--       An account legitimately holds several cards, so a unique index would
+--       refuse the second one.
+CREATE INDEX IF NOT EXISTS idx_cards_account_id
+    ON card.cards (account_id);

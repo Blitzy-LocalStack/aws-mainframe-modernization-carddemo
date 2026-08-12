@@ -237,7 +237,7 @@ public class BackupTransactionsJob {
     public static final String JOB_NAME = BatchJobName.BACKUP_TRANSACTIONS.token();
 
     /** The step name the durable ledger records this job's progress under. */
-    public static final String STEP_NAME = "backup-transactions-step";
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /** The name of the single object each staged generation of this family holds. */
     public static final String DATASET_OBJECT_NAME = "transact.bkup";
@@ -332,7 +332,8 @@ public class BackupTransactionsJob {
         //       generation for the same business date, and because the retained window is five, that
         //       spends one of five archival slots on a duplicate and ages out a genuinely older
         //       backup a generation early. The wasted slot is the harm, not the wasted work.
-        this.ledgerOfSteps.runStep(runId, STEP_NAME, () -> copyToNewGeneration(runId, businessDate));
+        this.ledgerOfSteps.runStep(runId, STEP_NAME, BatchJobName.BACKUP_TRANSACTIONS,
+                () -> copyToNewGeneration(runId, businessDate));
         return RepeatStatus.FINISHED;
     }
 
@@ -375,7 +376,7 @@ public class BackupTransactionsJob {
             // WHY : Assumptions: the temporary file is removed on every path, including a failed
             //       upload, because a batch task's ephemeral disk is finite and a failed step is
             //       retried. Leaving it would let a sequence of retries fill the volume and turn a
-            //       transient upload failure into a task that can no longer start.
+            //       transient upload failure into a task that cannot start at all.
             deleteQuietly(staged);
         }
 

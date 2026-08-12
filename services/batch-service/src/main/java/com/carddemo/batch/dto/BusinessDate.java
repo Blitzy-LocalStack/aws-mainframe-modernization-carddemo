@@ -214,11 +214,12 @@ public record BusinessDate(String token) {
      *   <li>It exists <b>only</b> so that a job can compare a business date against a range. It
      *       has no other sanctioned use.</li>
      *   <li>Its result is <b>never</b> the value used to build a generated transaction identifier.
-     *       Identifier construction reads {@link #identifierPrefix()}, which returns the compact
-     *       numeric ten characters that {@code app/cbl/CBACT04C.cbl:476-480} concatenates with its
-     *       six-digit suffix. This note previously said construction reads {@link #token()} and
-     *       nothing else; that was corrected when {@link #identifierPrefix()} was introduced, because
-     *       reading the raw token let a separated token produce a non-numeric identifier.</li>
+     *       Identifier construction reads {@link #token()} verbatim, because
+     *       {@code app/cbl/CBACT04C.cbl:476-480} concatenates {@code PARM-DATE} with its six-digit
+     *       suffix {@code DELIMITED BY SIZE} -- whatever ten characters were supplied -- and the parity
+     *       oracle pins the result: {@code tests/golden/interest/happy_path/transact.expected} opens
+     *       with {@code 2024-01-15000001}, hyphens included. {@link #identifierPrefix()} normalises for
+     *       the DATASET PARTITION prefix and not for identifiers; see its own note.</li>
      *   <li>It <b>throws</b> when the token is not in the separated ISO layout, and a caller must
      *       expect that for a compact {@code YYYYMMDDnn} token. The baseline's own driver supplies
      *       exactly such a token: {@code app/jcl/INTCALC.jcl:22} injects
@@ -247,54 +248,56 @@ public record BusinessDate(String token) {
     }
 
     /**
-     * Returns the ten characters that lead a generated transaction identifier, always numeric.
+     * Returns the ten numeric characters that identify this business date in a dataset key.
      *
-     * <p>This is the value a job concatenates with its six-digit run suffix to form
-     * {@code TRAN-ID PIC X(16)}, reproducing what {@code app/cbl/CBACT04C.cbl} does at lines 474 to 480
-     * -- it adds one to {@code WS-TRANID-SUFFIX PIC 9(06)} declared at line 173 and strings the
-     * parameter and the suffix together into the identifier.</p>
+     * <p>This is the value the export and import jobs place in an object key so one run's staged
+     * dataset is addressable by the day it was produced for, in a form that is the same ten characters
+     * whichever of the two accepted token layouts the operator supplied.</p>
      *
      * <p>This operation accepts no parameters.</p>
      *
-     * <h2>Why this exists rather than callers reading {@link #token()}</h2>
+     * <h2>⚠️ Refactoring Rationale: this is NOT the transaction-identifier prefix</h2>
      *
-     * <p>Refactoring Rationale: identifier construction previously read {@link #token()} directly, on
-     * the stated ground that the baseline concatenates its parameter as supplied and any re-rendering
-     * would change the identifier bytes. That reasoning is correct for the baseline and was wrong here,
-     * because it assumed the two tokens are the same. The baseline's token is COMPACT and NUMERIC --
-     * {@code app/jcl/INTCALC.jcl} line 22 injects {@code PARM='2022071800'} -- so its identifier is
-     * sixteen digits. This module's entry point additionally accepts a SEPARATED token of the same
-     * width, since {@code DatasetGeneration.partitionDate()} resolves both layouts, and a separated
-     * token concatenated as supplied yields an identifier like {@code 2024-01-15000001}: sixteen
-     * characters, but not a number.</p>
-     *
-     * <p>Assumptions: that identifier is storable and is not detectably wrong until something reads it
-     * back arithmetically, which is exactly what the interactive add and bill-payment paths used to do
-     * when they derived their own next key from the stored maximum. The column is {@code CHAR(16)} and
-     * orders lexicographically, so a date-prefixed identifier sorts above every sequence-format one and
-     * became the maximum after a single night's interest run -- at which point the next add and the next
-     * payment failed on a numeric parse. Those two paths now allocate from a database sequence and parse
-     * nothing, and this method closes the other half: it guarantees that the value entering an
-     * identifier is numeric whichever layout the operator supplied.</p>
-     *
-     * <p>Assumptions: normalisation is to the COMPACT layout and not to the separated one, because the
-     * compact layout is what the baseline's own production parameter carries. For a token already in the
-     * compact layout this method returns it byte-for-byte, so the reference's identifiers are reproduced
-     * exactly; only a separated token is rewritten, and a separated token has no baseline counterpart to
-     * diverge from.</p>
+     * <p>Assumptions: an object key is compared and listed as text, so two spellings of one day would
+     * be two different prefixes and a run started as {@code 2024-01-15} would not find the generation a
+     * run started as {@code 2024011500} wrote. {@code DatasetGeneration.partitionDate()} accepts both
+     * layouts and documents both as supported, so both reach this module and the key has to be
+     * single-valued across them. Normalising is to the COMPACT layout because that is what the
+     * baseline's own production parameter carries -- {@code app/jcl/INTCALC.jcl} line 22 injects
+     * {@code PARM='2022071800'} -- and for a token already compact this method returns it byte for byte,
+     * so a run started the baseline's way takes the shortest path and is provably unmodified.</p>
      *
      * <p>Assumptions: a separated token normalises by dropping its two hyphens and appending two zero
      * digits, so {@code 2024-01-15} becomes {@code 2024011500}. The two trailing zeros are what the
      * baseline's own parameter carries in those positions, so the normalised form is the token the
      * baseline would have been given for the same day rather than an invented shape.</p>
      *
-     * <p>Alternatives Considered: refusing a separated token at the entry point instead, so that only
-     * the compact layout ever exists and no normalisation is needed. Rejected because
-     * {@code DatasetGeneration.partitionDate()} already accepts both and documents the separated layout
-     * as supported, so refusing it here would make one module's two components disagree about what a
-     * valid invocation is -- and the failure would appear as a rejected command line for an operator
-     * following the dataset documentation. Normalising at the one point where the layout actually
-     * matters keeps both layouts usable and keeps every stored identifier numeric.</p>
+     * <h2>What this is NOT for, and why</h2>
+     *
+     * <p>Refactoring Rationale: this method's own documentation stated that it was for constructing the
+     * GENERATED TRANSACTION IDENTIFIER, and required that identifier construction go through it rather
+     * than through {@link #token()}. That requirement was wrong and is withdrawn. It rested on the claim
+     * that "a separated token has no baseline counterpart to diverge from", and the baseline has one:
+     * {@code app/cbl/CBACT04C.cbl} lines 476 to 480 string the parameter and the suffix
+     * {@code DELIMITED BY SIZE}, which copies all ten characters of {@code PARM-DATE PIC X(10)}
+     * verbatim with no normalisation anywhere in the program, and the committed golden master for a
+     * separated parameter is exactly the concatenation that produces --
+     * {@code tests/golden/interest/happy_path/transact.expected} carries {@code TRAN-ID} =
+     * {@code 2024-01-15000001} at bytes 1 to 16, which that scenario's own README documents at its line
+     * 161 as {@code PARM-DATE} plus {@code WS-TRANID-SUFFIX}. Normalising the identifier would therefore
+     * have broken golden-master parity on the one job whose output the oracle pins byte for byte, which
+     * is the migration's first non-negotiable constraint. {@code InterestCalculationService} reads
+     * {@link #token()} for that reason and must keep doing so.</p>
+     *
+     * <p>Assumptions: the hazard the withdrawn requirement was reaching for is real and is closed
+     * elsewhere, entirely. A date-prefixed identifier is not a number, the column is {@code CHAR(16)}
+     * and orders lexicographically, so such an identifier sorts above every sequence-format one and
+     * became the stored maximum after a single night's interest run -- at which point the interactive
+     * add and bill-payment paths, which derived their next key from that maximum, failed on a numeric
+     * parse. Those two paths now allocate from {@code ledger.transaction_id_seq} and parse no stored
+     * value at all, so the format of a stored identifier is no longer load-bearing for anything. That is
+     * the whole fix; there is no "other half" for this method to close, and attributing one to it is
+     * what put a parity-breaking requirement into a docstring.</p>
      *
      * @return exactly {@link #TOKEN_LENGTH} characters, every one an ASCII digit; never {@code null}
      * @throws IllegalStateException if the token is in neither the compact nor the separated layout, so

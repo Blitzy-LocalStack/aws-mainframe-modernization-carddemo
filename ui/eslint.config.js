@@ -21,10 +21,8 @@
  * tolerance -- no `continue-on-error`, no `|| true`. Nothing configured here is
  * advisory in either caller.
  *
- * Refactoring Rationale: the workflow was described here as "later-index" work
- * that "is required to invoke" the script -- a forward-looking form written before
- * it existed. It exists and it runs, so the statement is written in the present
- * tense; a gate documented as pending is one a reader assumes they may still be
+ * Assumptions: both callers are stated in the present tense because both exist and
+ * both run. A gate documented as pending is one a reader assumes they may still be
  * ahead of.
  *
  * Rule 1's four docstring elements, and the rule that decides each
@@ -39,21 +37,18 @@
  *   BOTH languages.
  * - Exceptions or errors -- `jsdoc/require-throws`.
  *
- * Refactoring Rationale: the two type entries above are stated as covering both
- * languages because that is what this file configures, and an earlier version of
- * this list said "in plain JavaScript only" -- which described a superseded
- * arrangement and contradicted the TypeScript block, where `jsdoc/no-types` is
- * off and `jsdoc/require-param-type`, `jsdoc/require-returns-type` and
- * `jsdoc/require-property-type` are all set to error. A header that describes a
- * gate more narrowly than the gate is configured is worse than no header: a
- * reader auditing coverage stops at the summary and concludes a clause is
- * unenforced when it is enforced, or removes the entries as inconsistent with the
- * documented intent. The mechanism differs by language -- the TypeScript block
- * switches the preset's type prohibition off to make the requirement satisfiable,
- * while the JavaScript block inherits the requirement from its preset -- and that
- * difference is argued in full beside `jsdoc/require-param` below. What does not
- * differ is the obligation, which AAP section 0.8.1 states for every language it
- * names, TypeScript included.
+ * Assumptions: the two type entries above say BOTH languages because that is what
+ * this file configures -- in the TypeScript block `jsdoc/no-types` is off and
+ * `jsdoc/require-param-type`, `jsdoc/require-returns-type` and
+ * `jsdoc/require-property-type` are all set to error. Describing the gate more
+ * narrowly than it is configured is worse than no header at all: a reader auditing
+ * coverage stops at the summary and either concludes a clause is unenforced when it
+ * is enforced, or removes the entries as inconsistent with the documented intent.
+ * The MECHANISM differs by language -- the TypeScript block switches the preset's
+ * type prohibition off to make the requirement satisfiable, while the JavaScript
+ * block inherits the requirement from its preset -- and that difference is argued in
+ * full beside `jsdoc/require-param` below. What does not differ is the obligation,
+ * which AAP section 0.8.1 states for every language it names, TypeScript included.
  *
  * Three more rules guard the block itself rather than one of its elements.
  * `jsdoc/require-jsdoc` decides whether a block is present at all on a function or
@@ -62,13 +57,11 @@
  * from the signature it documents -- which is worse than a missing block, because a
  * reader who trusts it is actively misled.
  *
- * Refactoring Rationale: the module-entry rule is named here because Rule 1 names
- * three kinds of subject and this list previously covered two of them. It was for a
- * time deliberately unconfigured, and the header said so; both statements changed
- * together when the tree was measured and found to carry the tag in every module.
- * Splitting them -- enabling the rule and leaving the header describing it as absent
- * -- would have been the worse of the two possible inconsistencies, since a reader
- * auditing coverage reads the header first.
+ * Assumptions: the module-entry rule is named here because Rule 1 names three kinds
+ * of subject and a list covering only two of them reads as complete. Enabling the
+ * rule while leaving this header describing it as absent would be the worse of the
+ * two possible inconsistencies, since a reader auditing coverage reads the header
+ * first.
  *
  * What this gate does not decide
  * ------------------------------
@@ -79,12 +72,10 @@
  * is left to review. What this gate decides is PRESENCE and tag coverage, for all
  * three kinds of subject Rule 1 names -- function, class and module entry point.
  *
- * Refactoring Rationale: the module-entry clause was listed here as a fourth limit
- * left to review, and it no longer is: `jsdoc/require-file-overview` decides it,
- * configured in JSDOC_DOCUMENTATION_RULES with the argument that changed the answer.
- * The correction matters in the direction this section is read -- an audit that
- * trusted the old sentence would have gone looking for a review obligation that is
- * now mechanical, and would have found no reviewer carrying it.
+ * Assumptions: the module-entry clause is NOT among the limits left to review,
+ * because `jsdoc/require-file-overview` decides it in JSDOC_DOCUMENTATION_RULES
+ * below. Listing it here would send an audit looking for a review obligation that is
+ * mechanical, and it would find no reviewer carrying it.
  *
  * These limits are stated rather than left implied, because a configuration that
  * appears to decide everything teaches reviewers to stop reading, and that
@@ -111,12 +102,11 @@
  * the rules below rather than by an exemption written for it, which is what keeps
  * the gate from being narrowed to fit whatever it is pointed at.
  *
- * Refactoring Rationale: this statement named two root modules and omitted
- * `documentationGate.test.ts`. The omission was the wrong one to leave: that file
- * is the only committed check that this configuration has not been relaxed, so a
- * reader taking the surface statement literally would have concluded the probe sat
+ * Assumptions: `documentationGate.test.ts` is named explicitly in that surface
+ * because it is the only committed check that this configuration has not been
+ * relaxed, and a surface statement that omitted it would read as putting the probe
  * outside the gate it guards. It is governed by `TYPESCRIPT_FILES` like every other
- * module, and always was -- only the description was short.
+ * module.
  */
 
 // Alternatives Considered: the conventional first line of a flat config is
@@ -204,12 +194,11 @@ const TYPESCRIPT_FILES = ['**/*.ts', '**/*.tsx'];
 //       four explicitly -- `jsdoc/no-types` off plus `require-param-type`,
 //       `require-returns-type` and `require-property-type` at error -- because that
 //       preset forbids type expressions outright. Both languages end up requiring
-//       the type. Refactoring Rationale: this note previously said each language's
-//       "own preset decides them", which was true of an earlier arrangement and is
-//       not true of the TypeScript block as configured; leaving it would have told
-//       a reader the type half was unenforced in `.ts`. See the note under
-//       `jsdoc/require-param` below for the argument, and the TypeScript block for
-//       the four entries.
+//       the type. Assumptions: it is stated this way rather than as "each language's
+//       own preset decides them", because that is not true of the TypeScript block as
+//       configured and would tell a reader the type half is unenforced in `.ts`. See
+//       the note under `jsdoc/require-param` below for the argument, and the
+//       TypeScript block for the four entries.
 const JSDOC_DOCUMENTATION_RULES = {
   // Rule 1, block presence: "Every new or modified function, class, and module
   // entry point must include a docstring."
@@ -285,13 +274,12 @@ const JSDOC_DOCUMENTATION_RULES = {
         MethodDefinition: true,
       },
 
-      // Refactoring Rationale: this list previously carried four POSITIONAL
-      // selectors -- `VariableDeclarator >` and `ExportDefaultDeclaration >`
-      // against each expression kind -- and those were the reason an anonymous
-      // callback escaped the gate. Each required the expression to be the direct
-      // child of a NAME, so `[...].map((part) => { ... })`, whose arrow is a child
-      // of a CallExpression, matched none of them. The two entries below match the
-      // node under any parent, which is what closes the gap.
+      // Alternatives Considered: POSITIONAL selectors -- `VariableDeclarator >` and
+      // `ExportDefaultDeclaration >` against each expression kind. Rejected, and
+      // this is the gap they leave: each requires the expression to be the direct
+      // child of a NAME, so `[...].map((part) => { ... })`, whose arrow is a child of
+      // a CallExpression, matches none of them and escapes the gate. The two entries
+      // below match the node under any parent.
       // Assumptions: the leading `* > ` is load-bearing and is not decoration. A
       // BARE `ArrowFunctionExpression` selector is short-circuited by the plugin
       // into the same declaration-position-only check as the `require` setting
@@ -1020,14 +1008,12 @@ export default defineConfig([
       // which is exactly what the five reversals above restore, so the arithmetic
       // favours it: zero type-tag entries against the four below, with
       // `check-tag-names` needing its `typed: true` option under either base.
-      // Refactoring Rationale: this paragraph used to argue the opposite -- that the
-      // plain variant was "the WRONG base here in three of the five" because it
-      // "would require the duplicated types this file deliberately does not". That
-      // was true of the superseded arrangement in which those three rules were left
-      // off, and it inverted once they were raised to error; keeping it would have
-      // left the file arguing for its base on a ground its own rules contradict.
-      // The TypeScript variant is nevertheless kept, for two reasons that survive
-      // the correction. This is the TypeScript block, so a future plugin release
+      // Assumptions: the arithmetic above depends on those three rules being at
+      // error rather than off. Under a configuration that left them off the argument
+      // inverts and the plain variant becomes the wrong base, so the reasoning is
+      // stated against the rules as configured rather than in the abstract.
+      // The TypeScript variant is nevertheless kept, for two further reasons.
+      // This is the TypeScript block, so a future plugin release
       // that adds a genuinely TypeScript-specific adjustment will add it to the
       // TypeScript preset, and the plain variant would not inherit it. And the four
       // entries the TypeScript base makes necessary are worth having on their own
@@ -1176,11 +1162,11 @@ export default defineConfig([
       // route in each: inherited from this preset here, and obtained in the
       // TypeScript block by switching `jsdoc/no-types` off so that
       // `jsdoc/require-param-type` and `jsdoc/require-returns-type` can be set to
-      // error. Refactoring Rationale: this sentence previously read "satisfied by
-      // the signature in TypeScript", which described the superseded arrangement
-      // and disagreed with both the TypeScript block and the note beside
-      // `jsdoc/require-param`; a reader who trusted it would have concluded the
-      // type half was unenforced in `.ts` and removed the entries that enforce it.
+      // error. Assumptions: it is satisfied by the DOCSTRING and not by the
+      // signature, in TypeScript as well. Saying otherwise would disagree with both
+      // the TypeScript block and the note beside `jsdoc/require-param`, and a reader
+      // who trusted it would conclude the type half was unenforced in `.ts` and
+      // remove the entries that enforce it.
       // Assumptions: no `typescript-eslint` config is extended in this block. This
       // file belongs to no TypeScript project by design, so a type-aware rule
       // would have no program to consult; the type-aware pass is scoped to the

@@ -49,11 +49,14 @@ public class ContainerCyclingWindowBoundary implements RequestWindowBoundary, Di
     /**
      * The identifier the request listener container is registered under.
      *
-     * <p>Assumptions: the same literal is set as the {@code id} of the {@code @SqsListener} on
-     * {@link AuthorizationRequestListener}. It is a constant here because a mismatch between the two would
-     * not fail at startup -- the registry would simply return nothing and every window would run long
-     * without the bound ever taking effect -- and a silent loss of a bound is the failure mode this whole
-     * class exists to prevent.</p>
+     * <p>Assumptions: this constant IS the {@code id} of the {@code @SqsListener} on
+     * {@link AuthorizationRequestListener} -- that annotation references this field rather than repeating
+     * its text, so the two cannot drift apart while the reference stands. The value lives here rather than
+     * there because a mismatch between the two would not fail at startup: the registry would simply return
+     * nothing and every window would run long without the bound ever taking effect, and a silent loss of a
+     * bound is the failure mode this whole class exists to prevent. That agreement is asserted from the
+     * annotation by {@code ContainerCyclingWindowBoundaryTest}, so a later edit replacing the reference with
+     * a literal fails a test rather than passing quietly.</p>
      */
     public static final String REQUEST_CONTAINER_ID = "carddemo-pauth-request-listener";
 
@@ -110,14 +113,37 @@ public class ContainerCyclingWindowBoundary implements RequestWindowBoundary, Di
      * are a defect in the admission accounting; two lines carrying consecutive generations are two windows
      * doing exactly what they should.</p>
      *
+     * <p>Refactoring Rationale: the reopen action is run on the cycling thread in a {@code finally}, and
+     * the admission accounting used to reopen the next window itself in the same atomic step that fired
+     * this call. That made one physical run able to exceed the allowance -- the next generation was already
+     * open while this container was still being stopped, so every message it had already dispatched was
+     * admitted into it. Reopening HERE, after the cycle, is what confines the over-admission window to
+     * nothing.</p>
+     *
+     * <p>Assumptions: the {@code finally} is load-bearing and is not defensive style. Admission is closed
+     * from the moment this method is called, so a cycle that threw and skipped the reopen would leave this
+     * service refusing every authorization for as long as it ran. Both halves of the cycle already swallow
+     * their own failures, so the guard covers only what neither anticipated -- an interruption, or a failure
+     * of the registry lookup itself.</p>
+     *
      * @param generation which window is closing, counting from zero
      * @param admittedInWindow how many requests the closing window admitted
+     * @param reopenAdmission the action that opens the next window, run once the cycle has finished
+     * @throws NullPointerException if {@code reopenAdmission} is {@code null}, because admission is already
+     *     closed by the time this method is entered and there would then be nothing able to reopen it
      */
     @Override
-    public void onWindowComplete(long generation, int admittedInWindow) {
+    public void onWindowComplete(long generation, int admittedInWindow, Runnable reopenAdmission) {
+        Objects.requireNonNull(reopenAdmission, "reopenAdmission must not be null");
         LOG.info("event=auth.window.closed generation={} admitted={} containerId={}",
                 generation, admittedInWindow, REQUEST_CONTAINER_ID);
-        this.cycler.execute(this::cycleContainer);
+        this.cycler.execute(() -> {
+            try {
+                cycleContainer();
+            } finally {
+                reopenAdmission.run();
+            }
+        });
     }
 
     /**

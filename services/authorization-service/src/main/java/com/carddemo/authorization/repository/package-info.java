@@ -46,8 +46,9 @@
  *
  * <p>Assumptions: a keyset method here returns {@code java.util.List} of the entity holding up to
  * one row MORE than the caller's page size, and that extra look-ahead row is <b>included in the
- * returned list and is not removed here</b>. The service layer discards it, reads has-next from
- * whether it arrived, encodes the first and last cursor tokens, and assembles
+ * returned list and is not removed here</b>. The service layer discards it, reads the availability
+ * flag for the direction it walked from whether that row arrived, encodes the first and last cursor
+ * tokens, and assembles
  * {@code com.carddemo.common.web.PageResponse}. Anything written against this boundary that assumes
  * a list of exactly the page size will silently drop a row, so the extra row is the contract rather
  * than an implementation detail.
@@ -58,8 +59,12 @@
  * issues one further retrieval purely as a probe and sets its next-page indicator from whether that
  * retrieval succeeded, at L448 and L450. It keeps the page's last key at L434 and L435 and the
  * page's first key at L439 and L440, and it resumes a page by key rather than by position, through
- * the qualified re-seek at L493 to L497. Those are the same four values the page envelope carries,
- * so the probe read is preserved and only its placement moves.
+ * the qualified re-seek at L493 to L497. Those are four of the five values the page envelope
+ * carries, so the probe read is preserved and only its placement moves. Assumptions: the fifth
+ * component, whether an EARLIER page exists, has no counterpart in this program at all -- it never
+ * computes backward availability -- so it is settled the same way forward availability is, by a
+ * probe row read in the other direction, and never inferred from the page's first key being
+ * present.
  *
  * <p>Alternatives Considered: having a repository method return the assembled
  * {@code PageResponse} directly, so that the extra row never leaves this package. Rejected for two
@@ -74,8 +79,9 @@
  * plain query methods.
  *
  * <p>Assumptions: {@code com.carddemo.common.web.PageResponse} is imported and is never
- * re-declared, extended or shadowed by a local page type in this module. It carries the rows of one
- * page, the key of the first row, the key of the last row and whether a further page exists, and
+ * re-declared, extended or shadowed by a local page type in this module. It carries five components
+ * -- the rows of one page, the key of the first row, the key of the last row, whether a further page
+ * follows and whether an earlier page exists -- and
  * the two cursors are opaque string tokens that may be absent. It carries no page size, no page
  * number, no row offset and no total count, so nothing on this boundary accepts or returns one of
  * those, and a caller navigates by cursor rather than by index.
@@ -119,8 +125,11 @@
  * orders by those two columns in that direction matches the declared index, and one that orders
  * ascending on the second column does not.
  *
- * <p>Alternatives Considered: no method on this boundary declares a lock mode. The alternative was
- * to reproduce DL/I get-hold retrieval, whose Java spelling is
+ * <p>Alternatives Considered: exactly one method in this package declares a lock mode -- the
+ * detail boundary's {@code findWithLockById}, which holds one authorization for the fraud marking
+ * that assigns two of its fields -- and no method reached by the authorization consumer declares
+ * one. The alternative was to reproduce DL/I get-hold retrieval on the CONSUMER's path too, whose
+ * Java spelling is
  * {@code @Lock(LockModeType.PESSIMISTIC_WRITE)} and whose SQL spelling is
  * {@code SELECT ... FOR UPDATE}, on the reading that a read followed by a write ought to hold the
  * row in between. The source does not read that way. {@code cpy/IMSFUNCS.cpy} declares all three
@@ -133,9 +142,12 @@
  * the rejected path is lock-wait queueing and deadlock-victim rollback on a path that today has
  * neither, which is new behaviour rather than preserved behaviour; and because a deadlock surfaces
  * only under concurrency, it would be new behaviour that testing a single caller would not reveal.
- * Where a write genuinely needs protecting from a concurrent write, that is the service layer's
- * transaction and the entity's own version column, and neither of those is declared in this
- * package.
+ * Where a write on the consumer's path genuinely needs protecting from a concurrent write, the
+ * protection is carried by the modifying statement itself: the summary's four accumulating members
+ * are moved by arithmetic computed in the database, and the statement that records an approval
+ * carries the remaining-headroom test in its own {@code where} clause so that two cards of one
+ * account cannot both be admitted against the same headroom. That is declared in this package, on
+ * the summary boundary, and it is why no caller of it needs a lock.
  *
  * <p>Refactoring Rationale: the DL/I and Db2 verbs become typed interfaces, and what that changes
  * is where knowledge of an access path lives. In the source it lives at each call site: a program

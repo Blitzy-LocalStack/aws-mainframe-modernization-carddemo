@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
@@ -49,6 +50,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1282,14 +1285,11 @@ class UnloadServiceTest {
             //       children. Emptying the last account instead would leave a service that stopped at the
             //       first empty child answer indistinguishable from a correct one, because there would be
             //       nothing after it to fail to export.
-            when(UnloadServiceTest.this.details
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
-                    .thenAnswer(invocation -> ACCOUNT_ONE.equals(invocation.getArgument(0))
-                            ? List.of()
-                            : UnloadServiceTest.this.storedChildren.stream()
-                                    .filter(child -> child.getId().getAccountId()
-                                            .equals(invocation.<Long>getArgument(0)))
-                                    .toList());
+            answerChildChunks(UnloadServiceTest.this.details,
+                    () -> UnloadServiceTest.this.storedChildren.stream()
+                            .filter(child -> !ACCOUNT_ONE.equals(child.getId().getAccountId()))
+                            .toList(),
+                    () -> { });
 
             UnloadService.UnloadOutcome outcome = exporter()
                     .unload(UnloadServiceTest.this.rootFile, UnloadServiceTest.this.childFile);
@@ -1366,6 +1366,234 @@ class UnloadServiceTest {
             assertThat(UnloadServiceTest.this.rootFile.size()).isZero();
             assertThat(UnloadServiceTest.this.childFile.size()).isZero();
         }
+
+        /**
+         * The ended walk is reported by what the run had done, not by the key it stopped on.
+         *
+         * <p>Assumptions: the key this walk stops on is an account identifier, so the line reports the
+         * run's two counters instead. The case asserts both that the counters are there and that neither
+         * identifier the offending row carries appears anywhere in the captured stream -- the account
+         * identifier is absent by construction in this fixture, so the customer identifier is the value
+         * a well-meaning correction would reach for and the one worth pinning as forbidden.
+         */
+        @Test
+        @Timeout(value = TERMINATION_TIMEOUT_SECONDS, unit = TimeUnit.SECONDS)
+        @DisplayName("the ended walk is reported by its counters and never by the key it stopped on")
+        void theEndedWalkIsReportedWithoutTheKeyItStoppedOn() {
+            List<PendingAuthSummary> unattributable = List.of(summaryWithNoAccountIdentifier());
+            when(UnloadServiceTest.this.summaries
+                    .findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any()))
+                    .thenReturn(unattributable);
+
+            exporter().unload(UnloadServiceTest.this.rootFile, UnloadServiceTest.this.childFile);
+
+            // WHY : ⚠️ Assumptions: the line is matched by its structured EVENT TOKEN rather than by the
+            //       prose it once carried. Every operational record in this service is keyed by an
+            //       event= token so a log query can match one field instead of a sentence, and matching
+            //       prose would fail the moment the wording of a message changed without its meaning
+            //       changing. What the case is about is unaffected: the counters are asserted, and the
+            //       absence of the key the walk stopped on is asserted, because that key is an account
+            //       identifier and this migration's logging contract withholds it from a durable record.
+            assertThat(capturedMessages())
+                    .anySatisfy(line -> assertThat(line)
+                            .contains("event=authorization.unload.walk-ended-without-resume-key")
+                            .contains("rootsWritten=0")
+                            .contains("rootsSkipped=1")
+                            .doesNotContain("resumeKey"));
+            assertThat(capturedMessages())
+                    .allSatisfy(line ->
+                            assertThat(line).doesNotContain(ORPHAN_CUSTOMER.toString()));
+        }
+    }
+
+    /**
+     * The inner walk reads one account's authorizations in bounded keyset chunks.
+     *
+     * <p>Purpose: the exporter's memory footprint must be set by its chunk size and not by an account's
+     * history. Before this set existed the inner read was a single unbounded query, so the outer page cap
+     * bounded only how many summaries were resident while one account with a large history was still
+     * loaded whole -- and no case here could tell the difference, because every fixture holds two
+     * authorizations per account. These cases drive an account whose history exceeds one chunk, which is
+     * the only shape in which the bound is observable at all.
+     *
+     * <p>Assumptions: the properties asserted are the ones a reader of the OUTPUT depends on -- every
+     * authorization written exactly once, in one descending sequence, with no boundary visible in the file
+     * -- plus the one an operator depends on, that more than one query is issued. The chunk FIGURE is
+     * asserted only as the limit the walk asks for, because the class documents it as a batch size rather
+     * than a contract; asserting a record count against it would turn a tuning value into a fixed
+     * expectation.
+     */
+    @Nested
+    @DisplayName("the child walk is bounded, and its chunk boundary is invisible in the output")
+    class ChildWalkChunking {
+
+        /**
+         * The chunk the service asks for, mirrored here so a change to it fails loudly rather than quietly.
+         *
+         * <p>Assumptions: this restates {@code UnloadService.CHILD_CHUNK_SIZE}, which is private, and the
+         * first case below asserts the limit the walk actually requests EQUALS it. Widening that constant
+         * to package scope so a test could read it would change the production surface to suit a test;
+         * mirroring it and asserting the mirror is the same protection without that cost, and a divergence
+         * fails with a message naming both figures.
+         */
+        private static final int CHUNK = 500;
+
+        /**
+         * Builds one account's authorizations, descending in key, of the requested size.
+         *
+         * @param howMany how many authorizations to build; must not be negative
+         * @return the authorizations, newest first; never {@code null}
+         */
+        private List<PendingAuthDetail> historyOf(int howMany) {
+            // WHY : Alternatives Considered: composing each row from literal field values, which is what
+            //       the sibling purge-job cases do. Rejected here because every non-key field would then
+            //       be a width this class restated -- and the first attempt got one of them wrong,
+            //       failing on a fifteen-character merchant identifier given seventeen characters. Copying
+            //       every non-key field from a DECODED FIXTURE row instead means the only values this
+            //       method chooses are the two that make up the key, which are the two the walk turns on.
+            PendingAuthDetail template = UnloadServiceTest.this.storedChildren.getFirst();
+            // WHY : Assumptions: the keys descend by TIME within one shared date rather than by date, so
+            //       every row shares a boundary date with its neighbours. That is the shape a composite
+            //       resumption is most easily got wrong on -- comparing the two components independently
+            //       drops or repeats exactly the rows that share the boundary date -- so it is the shape
+            //       worth generating.
+            List<PendingAuthDetail> built = new ArrayList<>(howMany);
+            for (int ordinal = 0; ordinal < howMany; ordinal++) {
+                built.add(PendingAuthDetail.rehydrated(
+                        new PendingAuthDetailKey(ACCOUNT_ONE,
+                                template.getId().getAuthDate(),
+                                Integer.valueOf(235_959 - ordinal)),
+                        template.getAuthOrigDate(), template.getAuthOrigTime(),
+                        template.getCardNum(), template.getAuthType(),
+                        template.getCardExpiryDate(), template.getMessageType(),
+                        template.getMessageSource(), template.getAuthIdCode(),
+                        template.getAuthRespCode(), template.getAuthRespReason(),
+                        template.getProcessingCode(), template.getTransactionAmount(),
+                        template.getApprovedAmount(), template.getMerchantCategoryCode(),
+                        template.getAcqrCountryCode(), template.getPosEntryMode(),
+                        template.getMerchantId(), template.getMerchantName(),
+                        template.getMerchantCity(), template.getMerchantState(),
+                        template.getMerchantZip(), template.getTransactionId(),
+                        template.getMatchStatus()));
+            }
+            return List.copyOf(built);
+        }
+
+        /**
+         * Exports one account carrying the supplied history, over doubles built for this case alone.
+         *
+         * @param history the authorizations beneath the one account; must not be {@code null}
+         * @param detailDouble the repository double to drive and later verify; must not be {@code null}
+         * @return the child file the export wrote; never {@code null}
+         */
+        private byte[] exportHistory(List<PendingAuthDetail> history,
+                PendingAuthDetailRepository detailDouble) {
+            PendingAuthSummaryRepository summaryDouble = mock(PendingAuthSummaryRepository.class);
+            PendingAuthSummary onlyRoot = UnloadServiceTest.this.storedRoots.stream()
+                    .filter(root -> ACCOUNT_ONE.equals(root.getAccountId()))
+                    .findFirst()
+                    .orElseThrow();
+            when(summaryDouble.findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any()))
+                    .thenAnswer(invocation -> invocation.<Long>getArgument(0).longValue()
+                            < ACCOUNT_ONE.longValue() ? List.of(onlyRoot) : List.of());
+            answerChildChunks(detailDouble, () -> history, () -> { });
+            ByteArrayOutputStream roots = new ByteArrayOutputStream();
+            ByteArrayOutputStream children = new ByteArrayOutputStream();
+            new UnloadService(summaryDouble, detailDouble)
+                    .unload(UnloadService.UnloadForm.PREFIXED, roots, children);
+            return children.toByteArray();
+        }
+
+        /**
+         * A history longer than one chunk is read in more than one query, and asks for the chunk size.
+         */
+        @Test
+        @DisplayName("a history longer than one chunk is read in two bounded queries, not one unbounded one")
+        void aLongHistoryIsReadInBoundedChunks() {
+            PendingAuthDetailRepository detailDouble = mock(PendingAuthDetailRepository.class);
+
+            byte[] childFile = exportHistory(historyOf(CHUNK + 1), detailDouble);
+
+            ArgumentCaptor<Limit> firstLimit = ArgumentCaptor.forClass(Limit.class);
+            verify(detailDouble).findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(
+                    eq(ACCOUNT_ONE), firstLimit.capture());
+            assertThat(firstLimit.getValue().max())
+                    .as("the walk asks for UnloadService.CHILD_CHUNK_SIZE rows; if that constant moved,"
+                            + " move CHUNK in this class to match it")
+                    .isEqualTo(CHUNK);
+            // WHY : Assumptions: the resumption is verified as having happened AT LEAST once rather than
+            //       exactly once, because the count follows from the chunk size and the history length
+            //       and would have to be recomputed every time either moved. What matters is that the
+            //       walk resumed at all -- an unbounded read never does -- and that the file is whole,
+            //       which the next assertion states.
+            verify(detailDouble, atLeastOnce()).findOlderThan(eq(ACCOUNT_ONE), any(), any(), any());
+            assertThat(childFile.length)
+                    .as("every authorization was written exactly once across the chunk boundary")
+                    .isEqualTo((CHUNK + 1) * PendingAuthDetailMapper.unloadRecordLength());
+        }
+
+        /**
+         * The records cross the chunk boundary in one unbroken descending sequence.
+         */
+        @Test
+        @DisplayName("the written order is one descending sequence with no boundary in it")
+        void theOrderIsUnbrokenAcrossTheChunkBoundary() {
+            List<PendingAuthDetail> history = historyOf(CHUNK + 5);
+
+            byte[] childFile = exportHistory(history, mock(PendingAuthDetailRepository.class));
+
+            List<Integer> writtenTimes = new ArrayList<>();
+            for (byte[] record : split(childFile, PendingAuthDetailMapper.unloadRecordLength())) {
+                writtenTimes.add(PendingAuthDetailMapper.fromUnloadRecord(record)
+                        .getId().getAuthTime());
+            }
+            // WHY : Assumptions: the file is decoded back and compared against the source order rather
+            //       than merely checked for descent. Descent alone would hold for a file that repeated
+            //       the boundary row or dropped it, since a repeat is not an ascent; comparing the whole
+            //       sequence element for element is what catches both, which are precisely the two
+            //       failures a mis-stated composite boundary produces.
+            assertThat(writtenTimes).containsExactlyElementsOf(
+                    history.stream().map(child -> child.getId().getAuthTime()).toList());
+        }
+
+        /**
+         * A history that is an exact multiple of the chunk asks once more and is told nothing remains.
+         */
+        @Test
+        @DisplayName("a history of exactly one chunk asks a second time and stops on the empty answer")
+        void anExactMultipleAsksOnceMoreAndStops() {
+            PendingAuthDetailRepository detailDouble = mock(PendingAuthDetailRepository.class);
+
+            byte[] childFile = exportHistory(historyOf(CHUNK), detailDouble);
+
+            // WHY : Assumptions: this is the case the short-chunk break alone cannot end. A full final
+            //       chunk is indistinguishable from a chunk with more behind it, so the walk MUST ask
+            //       again and rely on the empty answer -- which is why both break conditions exist and
+            //       neither is redundant. A walk that stopped only on a short chunk would loop forever
+            //       here, and one that stopped only on an empty chunk would still be correct but slower.
+            verify(detailDouble, times(1)).findOlderThan(eq(ACCOUNT_ONE), any(), any(), any());
+            assertThat(childFile.length)
+                    .isEqualTo(CHUNK * PendingAuthDetailMapper.unloadRecordLength());
+        }
+
+        /**
+         * A history shorter than one chunk never asks to resume.
+         */
+        @Test
+        @DisplayName("a history shorter than one chunk issues no resumption query at all")
+        void aShortHistoryNeverResumes() {
+            PendingAuthDetailRepository detailDouble = mock(PendingAuthDetailRepository.class);
+
+            byte[] childFile = exportHistory(historyOf(3), detailDouble);
+
+            // WHY : Assumptions: this is the common case and it is asserted because the chunking must not
+            //       cost a query per account on an estate of small histories. A short first chunk ends
+            //       the walk without a second round trip, so the ordinary case pays exactly what the
+            //       unbounded read paid.
+            verify(detailDouble, never()).findOlderThan(any(), any(), any(), any());
+            assertThat(childFile.length)
+                    .isEqualTo(3 * PendingAuthDetailMapper.unloadRecordLength());
+        }
     }
 
     /**
@@ -1413,15 +1641,9 @@ class UnloadServiceTest {
                                 .limit(1L)
                                 .toList();
                     });
-            when(UnloadServiceTest.this.details
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
-                    .thenAnswer(invocation -> {
-                        callOrder.add("children");
-                        return UnloadServiceTest.this.storedChildren.stream()
-                                .filter(child -> child.getId().getAccountId()
-                                        .equals(invocation.<Long>getArgument(0)))
-                                .toList();
-                    });
+            answerChildChunks(UnloadServiceTest.this.details,
+                    () -> UnloadServiceTest.this.storedChildren,
+                    () -> callOrder.add("children"));
 
             exporter().unload(UnloadServiceTest.this.rootFile, UnloadServiceTest.this.childFile);
 
@@ -1499,26 +1721,29 @@ class UnloadServiceTest {
             assertThat(UnloadServiceTest.this.childFile.size())
                     .isEqualTo(CHILD_COUNT * PendingAuthDetailMapper.unloadRecordLength());
             verify(UnloadServiceTest.this.details, never())
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(null);
+                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(eq(null), any());
             verify(UnloadServiceTest.this.details, times(ROOT_COUNT))
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any());
+                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any());
         }
 
         /**
-         * The skip is named on the log, so a completed run says which row it passed over.
+         * The skip is reported on the log by POSITION, and the row's own identifiers are withheld.
          *
-         * <p>Assumptions: the report names the CUSTOMER identifier and not the account, because the
-         * account is exactly the value that is absent. It is the only other identifier the summary segment
-         * carries -- {@code cpy/CIPAUSMY.cpy} declares it at <strong>L20</strong> -- so it is the one
-         * handle an operator has on which row was passed over.
+         * <p>Refactoring Rationale: this case asserted that the report NAMED the customer identifier, and
+         * the diagnostic did. Both were wrong in the same way. The withdrawn rationale argued that the
+         * customer identifier was admissible because "the account is exactly the value that is absent" and
+         * it was therefore "the one handle an operator has" -- but a customer identifier is a subject
+         * identifier on a diagnostic path, and this service's two sibling walks were already held to
+         * naming none. The run-local ordinal answers the operator's real question, which is how far into
+         * the run the skip happened and how many there were, and it identifies nobody.
          *
-         * <p>Assumptions: the log is asserted as well as the count because the two serve different
-         * readers. A caller reconciling a run reads the count; an operator investigating a shortfall reads
-         * the line, and a count with no line would leave them nothing to look at.
+         * <p>Assumptions: the case now asserts BOTH directions -- that the position IS reported and that
+         * the customer identifier is NOT. Asserting only the first would pass against a line that reported
+         * the ordinal and the identifier side by side, which is the state this change moved away from.
          */
         @Test
-        @DisplayName("the skipped row is named on the log as well as counted on the outcome")
-        void theSkippedRowIsNamedOnTheLog() {
+        @DisplayName("the skipped row is reported by run-local position and names no subject")
+        void theSkippedRowIsReportedByPositionAndNamesNoSubject() {
             UnloadServiceTest.this.storedRoots.add(0, summaryWithNoAccountIdentifier());
             givenTheWalksAnswerFromTheDecodedRows();
 
@@ -1529,7 +1754,12 @@ class UnloadServiceTest {
                             + " what the divergence adds")
                     .anySatisfy(line -> assertThat(line)
                             .contains("skipped")
-                            .contains(ORPHAN_CUSTOMER.toString()));
+                            .contains("skippedOrdinal=1"));
+            assertThat(capturedMessages())
+                    .as("no line may carry an identifier of the row that was passed over, even though"
+                            + " the row the walk saw carries one")
+                    .noneSatisfy(line ->
+                            assertThat(line).contains(ORPHAN_CUSTOMER.toString()));
         }
 
         /**
@@ -1985,7 +2215,7 @@ class UnloadServiceTest {
             verify(UnloadServiceTest.this.summaries, times(PAGE_QUERIES_FOR_ONE_PAGE))
                     .findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any());
             verify(UnloadServiceTest.this.details, times(ROOT_COUNT))
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any());
+                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any());
             verifyNoMoreInteractions(UnloadServiceTest.this.summaries,
                     UnloadServiceTest.this.details);
         }
@@ -2009,7 +2239,7 @@ class UnloadServiceTest {
             verify(UnloadServiceTest.this.summaries, times(PAGE_QUERIES_FOR_ONE_PAGE))
                     .findByAccountIdGreaterThanOrderByAccountIdAsc(any(), any());
             verify(UnloadServiceTest.this.details, times(ROOT_COUNT))
-                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any());
+                    .findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any());
             verifyNoMoreInteractions(UnloadServiceTest.this.summaries,
                     UnloadServiceTest.this.details);
         }
@@ -2089,14 +2319,7 @@ class UnloadServiceTest {
      * alternates its parents, so its order is not a per-account order at all.
      */
     private void givenTheChildWalkAnswers() {
-        when(this.details.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
-                .thenAnswer(invocation -> {
-                    Long accountId = invocation.getArgument(0);
-                    return this.storedChildren.stream()
-                            .filter(child -> accountId.equals(child.getId().getAccountId()))
-                            .sorted(UnloadServiceTest::newestFirst)
-                            .toList();
-                });
+        answerChildChunks(this.details, () -> this.storedChildren, () -> { });
     }
 
     /**
@@ -2128,14 +2351,7 @@ class UnloadServiceTest {
                             .limit(limit.max())
                             .toList();
                 });
-        when(detailDouble.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any()))
-                .thenAnswer(invocation -> {
-                    Long accountId = invocation.getArgument(0);
-                    return children.stream()
-                            .filter(child -> accountId.equals(child.getId().getAccountId()))
-                            .sorted(UnloadServiceTest::newestFirst)
-                            .toList();
-                });
+        answerChildChunks(detailDouble, () -> children, () -> { });
         ByteArrayOutputStream roundRoots = new ByteArrayOutputStream();
         ByteArrayOutputStream roundChildren = new ByteArrayOutputStream();
         new UnloadService(summaryDouble, detailDouble).unload(form, roundRoots, roundChildren);
@@ -2249,6 +2465,67 @@ class UnloadServiceTest {
     }
 
     /**
+     * Answers both bounded child reads from one row source, honouring the limit and the keyset boundary.
+     *
+     * <p>Purpose: the exporter walks an account's authorizations in keyset chunks, so a double has to
+     * answer two methods consistently -- the account-only read for the first chunk and the
+     * strictly-older read for every later one -- and has to respect the limit each is given. Every case
+     * that drives the inner walk routes through here so that no case can pass against a double that
+     * returns everything regardless of the limit it was handed.
+     *
+     * <p>Assumptions: the older-than answer applies the SAME composite predicate the query declares --
+     * a row qualifies when its date is earlier, or its date is equal and its time is earlier -- rather
+     * than comparing the two components independently. A double that compared them independently would
+     * either drop or repeat rows sharing the boundary date, and it would do so in the double rather
+     * than in the code under test, which is the way a test lies about a walk it appears to cover.
+     *
+     * @param repository the double to stub; must not be {@code null}
+     * @param perAccount every stored authorization, from which each answer is filtered and ordered; must
+     *     not be {@code null}
+     * @param onCall invoked once per answered call, for cases that record call ordering; must not be
+     *     {@code null}
+     */
+    private static void answerChildChunks(PendingAuthDetailRepository repository,
+            java.util.function.Supplier<List<PendingAuthDetail>> perAccount, Runnable onCall) {
+        when(repository.findByIdAccountIdOrderByIdAuthDateDescIdAuthTimeDesc(any(), any()))
+                .thenAnswer(invocation -> {
+                    onCall.run();
+                    Long accountId = invocation.getArgument(0);
+                    Limit limit = invocation.getArgument(1);
+                    return perAccount.get().stream()
+                            .filter(child -> accountId.equals(child.getId().getAccountId()))
+                            .sorted(UnloadServiceTest::newestFirst)
+                            .limit(limit.max())
+                            .toList();
+                });
+        // WHY : Assumptions: the resumption read is stubbed LENIENTLY while the first read is strict, and
+        //       the asymmetry states a fact about the walk rather than working around the framework.
+        //       Every fixture in this class holds fewer authorizations beneath one account than a chunk
+        //       holds, so the first chunk comes back short and the walk correctly stops without ever
+        //       asking to resume -- a strict stub would therefore fail each of those cases for doing
+        //       exactly the right thing. The one case that does fill a chunk asserts the resumption call
+        //       explicitly by verifying it, which is a stronger statement than strictness would make.
+        lenient().when(repository.findOlderThan(any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    onCall.run();
+                    Long accountId = invocation.getArgument(0);
+                    int afterDate = invocation.<Integer>getArgument(1).intValue();
+                    int afterTime = invocation.<Integer>getArgument(2).intValue();
+                    Limit limit = invocation.getArgument(3);
+                    return perAccount.get().stream()
+                            .filter(child -> accountId.equals(child.getId().getAccountId()))
+                            .filter(child -> {
+                                int date = child.getId().getAuthDate().intValue();
+                                int time = child.getId().getAuthTime().intValue();
+                                return date < afterDate || (date == afterDate && time < afterTime);
+                            })
+                            .sorted(UnloadServiceTest::newestFirst)
+                            .limit(limit.max())
+                            .toList();
+                });
+    }
+
+    /**
      * Orders two authorizations newest first, which is the order the inner walk declares.
      *
      * @param left the first authorization to compare; must not be {@code null}
@@ -2276,7 +2553,14 @@ class UnloadServiceTest {
     private static PendingAuthSummary summaryWithNoAccountIdentifier() {
         PendingAuthSummary orphan = mock(PendingAuthSummary.class);
         when(orphan.getAccountId()).thenReturn(null);
-        when(orphan.getCustomerId()).thenReturn(ORPHAN_CUSTOMER);
+        // WHY : Assumptions: the customer identifier is stubbed LENIENTLY and is deliberately still
+        //       present, even though the export no longer reads it. A real orphan row carries one --
+        //       cpy/CIPAUSMY.cpy declares it at L20 -- and the non-disclosure case above asserts that no
+        //       log line contains it. Removing the stub because nothing reads it any more would make that
+        //       assertion vacuous: it would then be checking that a line does not contain a value the
+        //       fixture never held. Leniency is what lets the value stay available to the two cases that
+        //       do not exercise the diagnostic.
+        lenient().when(orphan.getCustomerId()).thenReturn(ORPHAN_CUSTOMER);
         return orphan;
     }
 

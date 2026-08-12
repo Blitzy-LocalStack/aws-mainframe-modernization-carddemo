@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -22,7 +23,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -146,25 +146,31 @@ class IdentitySyncServiceTest {
     }
 
     /**
-     * Asserts each of the three operations issues the provider call its intention names.
+     * Asserts each of the two operations issues the provider call its intention names.
+     *
+     * <p>Refactoring Rationale: this case covered THREE operations, and the third was
+     * {@code PROVISION} -- an intention no write path can record, because the create path has to
+     * provision before it can insert the row an intention would commit with. The value and the applier's
+     * branch for it were withdrawn together by {@code V3__auth_identity_sync_operations.sql}, so a third
+     * arm here would assert behaviour the column's constraint now refuses to admit.</p>
+     *
+     * <p>Assumptions: the reconciliation count is asserted alongside the two calls, because a pass that
+     * issued both calls and reported the wrong count would still leave an operator unable to tell a
+     * drained ledger from a stalled one.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("each operation issues the provider call its intention names")
     void eachOperationIssuesItsOwnProviderCall() {
-        when(provisioning.provision("USER0002", "Ada", "Lovelace", "A"))
-                .thenReturn(UUID.fromString("11111111-2222-3333-4444-555555555555"));
-
-        service.record("USER0002", IdentitySyncTask.OPERATION_PROVISION, "Ada", "Lovelace", null, "A");
         service.record(USER, IdentitySyncTask.OPERATION_SYNCHRONISE, "Grace", "Hopper", "U", "A");
         service.record("USER0003", IdentitySyncTask.OPERATION_WITHDRAW, null, null, null, null);
 
-        assertThat(service.reconcile(10)).isEqualTo(3);
+        assertThat(service.reconcile(10)).isEqualTo(2);
 
-        verify(provisioning).provision("USER0002", "Ada", "Lovelace", "A");
         verify(provisioning).synchronise(USER, "Grace", "Hopper", "U", "A");
         verify(provisioning).withdraw("USER0003");
+        verify(provisioning, never()).provision(any(), any(), any(), any());
     }
 
     /**

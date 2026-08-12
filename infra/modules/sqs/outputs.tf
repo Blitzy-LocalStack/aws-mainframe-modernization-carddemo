@@ -484,12 +484,51 @@ output "queue_arns" {
 #       for ecs-service's sqs_send_queue_arns and sqs_receive_queue_arns inputs;
 #       each SendMessage statement is therefore bounded to an environment-owned
 #       reply/error queue even if message validation regresses.
+# WHY : Refactoring Rationale: the batch_service entry below was ABSENT, and its
+#       absence was the infrastructure half of a feature that was dead end to
+#       end. batch-service ships a queue configuration gated on the error sink's
+#       address, and its BatchStepLedger reports every terminal step failure
+#       through it -- but no root published the address and no policy granted the
+#       send, so the gate never opened and the sink stayed empty however a night
+#       ended. Granting send here is what makes the Java path reachable; the
+#       address itself is published by each environment root as the batch
+#       workload's own runtime parameter.
+# WHY : Assumptions: the entry grants SEND on the error queue and RECEIVE on
+#       nothing, and the empty receive list is a statement rather than a
+#       placeholder. batch-service consumes no queue at all: no reference batch
+#       program contains an MQ verb, the module is argument-driven from its
+#       --job= option, and its own profile switches listener startup off. An
+#       entry with a receive list would license a consumer this module does not
+#       have and cannot acquire without a code change that would fail review.
 output "service_queue_permissions" {
-  description = "Exact per-service SQS IAM boundaries. authorization-service receives pauth_request and sends only pauth_reply; account-service receives only account_inquiry_request and sends only inquiry_reply/error; reference-service receives only date_inquiry_request and sends only inquiry_reply/error. Pass these lists to ecs-service rather than granting values(queue_arns)."
+  description = "Exact per-service SQS IAM boundaries. authorization-service receives pauth_request and sends only pauth_reply; account-service receives only account_inquiry_request and sends only inquiry_reply/error; reference-service receives only date_inquiry_request and sends only inquiry_reply/error; batch-service receives NOTHING and sends only error. Pass these lists to ecs-service rather than granting values(queue_arns)."
   value = {
     authorization_service = {
       receive = [aws_sqs_queue.pauth_request.arn]
       send    = [aws_sqs_queue.pauth_reply.arn]
+    }
+    # WHY : Refactoring Rationale: this entry did not exist, and its absence was the IAM
+    #       half of a producer that could not publish. batch-service carries a queue
+    #       configuration whose whole purpose is to notify this terminal sink that a run
+    #       failed -- the migration plan scopes such a configuration to exactly two
+    #       bounded contexts, batch and authorization -- and the task role it ran under
+    #       held no sqs:SendMessage statement for any queue at all. So the first send the
+    #       producer ever attempted would have been refused, on the failure path, which is
+    #       the least-exercised path in the deployment.
+    # WHY : Assumptions: receive is EMPTY and stays empty. batch-service declares no
+    #       listener of any kind: it selects its work from a command argument the
+    #       orchestrator supplies and from its own tables, never from a queue. Granting a
+    #       receive action it has no consumer for would let a batch task drain a queue
+    #       another context is the sole consumer of, which is the failure mode a per-service
+    #       boundary exists to make impossible. ecs-service derives the cardinality of its
+    #       queue policy from the LENGTH of each list, so a send-only entry produces a
+    #       send-only statement rather than an empty receive statement.
+    # WHY : Assumptions: the send list is the error queue alone and not the reply queues the
+    #       two inquiry contexts also send to. batch answers no requester, so a reply
+    #       destination is a capability it can only misuse.
+    batch_service = {
+      receive = []
+      send    = [aws_sqs_queue.error.arn]
     }
     account_service = {
       receive = [aws_sqs_queue.account_inquiry_request.arn]

@@ -41,9 +41,37 @@
  * which is the external authorizer's role and reaches no HTTP path published here.
  */
 
-import { getApiClient } from './client';
-import { requestPath } from './types';
-import type { ContractOperation, PageDirection, PageResponse } from './types';
+import { getApiClient, requestPath } from './client';
+import type {
+  ContractOperation,
+  FraudMarkRequest,
+  FraudMarkResponse,
+  NextPendingAuthorization,
+  PendingAuthDetail,
+  PendingAuthDetailScreen,
+  PendingAuthListQuery,
+  PendingAuthListResponse,
+} from './types';
+
+/*
+ * WHY : Refactoring Rationale: the authorization wire shapes are RE-EXPORTED from ./types rather than
+ *       declared here, so every consumer's import path is unchanged while each shape has one definition.
+ */
+export type {
+  ApprovalStatus,
+  MatchStatus,
+  AuthFraudFlag,
+  FraudAction,
+  PendingAuthSummary,
+  PendingAuthListItem,
+  PendingAuthListResponse,
+  PendingAuthDetail,
+  PendingAuthDetailScreen,
+  NextPendingAuthorization,
+  FraudMarkRequest,
+  FraudMarkResponse,
+  PendingAuthListQuery,
+} from './types';
 
 /*
  * Refactoring Rationale: this was `GET /api/v1/authorizations` with the account scope, cursor and
@@ -119,224 +147,10 @@ export const AUTHORIZATION_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
 const MASKED_CARD_NUMBER = /^[*]{12}[0-9]{4}$/u;
 
 /** Whether an authorization was approved or declined by the authorizer. */
-export type ApprovalStatus = 'A' | 'D';
-
-/**
- * How an authorization matched against posted activity.
- *
- * Assumptions: four members, which are the values the `authorization.pending_auth_detail` check
- * constraint admits: pending, declined, expired and matched.
- */
-export type MatchStatus = 'P' | 'D' | 'E' | 'M';
-
-/**
- * The fraud state a reviewer may set, or the state a row already carries.
- *
- * Assumptions: three members on the way out and two on the way in. A response may carry a single
- * space, which is the baseline's unmarked value in a fixed-width field, whereas a request may only
- * mark fraud or reverse a marking -- so {@link FraudAction} is the narrower request vocabulary and is
- * declared separately rather than reused.
- */
-export type FraudState = 'F' | 'R' | ' ';
 
 /** The two fraud transitions a reviewer may request. */
-export type FraudAction = 'F' | 'R';
-
-/**
- * The account-level header the list operation renders above its rows.
- *
- * Assumptions: the five account-status members are five discrete members rather than an array,
- * matching `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
- * `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` L22 as the schema declares it. The fixed arity
- * of five is part of the contract, and an array would admit a sixth.
- */
-export interface PendingAuthSummary {
-  readonly accountId: string;
-  readonly customerId: string;
-  readonly authStatus: string | null;
-  readonly accountStatus1: string | null;
-  readonly accountStatus2: string | null;
-  readonly accountStatus3: string | null;
-  readonly accountStatus4: string | null;
-  readonly accountStatus5: string | null;
-  readonly creditLimit: string;
-  readonly cashLimit: string;
-  readonly creditBalance: string;
-  readonly cashBalance: string;
-  readonly approvedAuthCnt: number;
-  readonly declinedAuthCnt: number;
-  readonly approvedAuthAmt: string;
-  readonly declinedAuthAmt: string;
-}
-
-/**
- * One row of the pending-authorization list.
- *
- * Assumptions: `key` is the opaque sealed selector the detail and fraud operations are addressed by,
- * and it is the ONLY address a row carries. The underlying row is keyed by an account identifier and
- * a packed date and time, and publishing those three as a target would put the composite key of a
- * financial record into the edge access log and the browser's history.
- */
-export interface PendingAuthListItem {
-  readonly key: string;
-  readonly transactionId: string;
-  readonly authOrigDate: string | null;
-  readonly authOrigTime: string | null;
-  readonly authType: string | null;
-  readonly approvalStatus: ApprovalStatus;
-  readonly matchStatus: MatchStatus;
-  readonly amount: string;
-  readonly cardNum: string;
-}
-
-/**
- * The list operation's envelope: one account summary and one bounded page of rows.
- *
- * Assumptions: `screenMessage` carries the baseline's navigation-boundary text verbatim -- the
- * already-at-the-top, already-at-the-bottom and already-at-the-last strings the contract enumerates --
- * and is null when the page needs none. Transformation rule T8 requires it to be rendered unchanged.
- */
-export interface PendingAuthListResponse {
-  readonly summary: PendingAuthSummary;
-  readonly page: PageResponse<PendingAuthListItem>;
-  readonly screenMessage?: string | null | undefined;
-}
-
-/**
- * One pending authorization in full.
- *
- * Assumptions: `authDate` and `authTime` are NUMBERS while every other date and time member here is a
- * string, and the asymmetry is the contract's. Those two are the row's composite key, held in the
- * segment as packed decimal -- a Julian day number and a millisecond-of-day -- and they are echoed
- * back into the fraud request unchanged. The remaining members are the authorizer's own
- * character-format fields, which are text in the message and stay text here.
- */
-export interface PendingAuthDetail {
-  readonly key: string;
-  readonly accountId: string;
-  readonly authDate: number;
-  readonly authTime: number;
-  readonly authOrigDate: string | null;
-  readonly authOrigTime: string | null;
-  readonly cardNum: string;
-  readonly authType: string | null;
-  readonly cardExpiryDate: string | null;
-  readonly messageType: string | null;
-  readonly messageSource: string | null;
-  readonly authIdCode: string | null;
-  readonly authRespCode: string | null;
-  readonly authRespReason: string | null;
-  readonly processingCode: string | null;
-  readonly transactionAmt: string;
-  readonly approvedAmt: string;
-  readonly merchantCategoryCode: string | null;
-  readonly acqrCountryCode: string | null;
-  readonly posEntryMode: string | null;
-  readonly merchantId: string | null;
-  readonly merchantName: string | null;
-  readonly merchantCity: string | null;
-  readonly merchantState: string | null;
-  readonly merchantZip: string | null;
-  readonly transactionId: string;
-  readonly matchStatus: MatchStatus;
-  readonly authFraud: FraudState | null;
-  readonly fraudRptDate: string | null;
-}
-
-/**
- * One authorization projected onto the shape the 3270 detail screen rendered.
- *
- * Assumptions: this is a DIFFERENT shape from {@link PendingAuthDetail} rather than that shape with
- * extra members, and the difference is the contract's. The record reading answers the segment's own
- * fields; this reading answers what the terminal displayed, so its amounts and codes are already
- * rendered -- `authResponse` carries the approval word rather than the two-character code, `authTime`
- * carries the rendered time rather than the packed millisecond-of-day, and the card number arrives
- * masked under the member name `cardNumber`. Reusing one interface for both would let a component read
- * a rendered value as a raw one.
- *
- * Assumptions: the six chrome members are non-nullable because the service derives every one of them
- * from its own constants and clock and accepts none from the caller. The authorizer-supplied members
- * stay nullable for the reason recorded on {@link PendingAuthDetail}: the segments behind them are
- * populated from an external message, and a field that message omitted is absent rather than blank.
- */
-export interface PendingAuthDetailScreen {
-  readonly transactionName: string;
-  readonly title01: string;
-  readonly currentDate: string;
-  readonly programName: string;
-  readonly title02: string;
-  readonly currentTime: string;
-  readonly cardNumber: string;
-  readonly authDate: string;
-  readonly authTime: string;
-  readonly authResponse: string;
-  readonly authResponseReason: string;
-  readonly processingCode: string | null;
-  readonly approvedAmount: string;
-  readonly posEntryMode: string;
-  readonly messageSource: string | null;
-  readonly merchantCategoryCode: string | null;
-  readonly cardExpiry: string;
-  readonly authType: string | null;
-  readonly transactionId: string;
-  readonly matchStatus: MatchStatus;
-  readonly fraudMark: string;
-  readonly merchantName: string | null;
-  readonly merchantId: string | null;
-  readonly merchantCity: string | null;
-  readonly merchantState: string | null;
-  readonly merchantZip: string | null;
-  readonly message: string | null;
-}
-
-/**
- * The outcome of the detail screen's forward paging move.
- *
- * Assumptions: exactly one of `authorization` and `message` is populated, discriminated by
- * `endOfData`. That mirrors the reference program's forward step, which either sets its end-of-data
- * condition and the message the screen shows or replaces the current authorization, never both -- so a
- * caller must read `endOfData` before reading either.
- */
-export interface NextPendingAuthorization {
-  readonly authorization: PendingAuthDetail | null;
-  readonly endOfData: boolean;
-  readonly message: string | null;
-}
-
-/**
- * The fraud transition a reviewer submits.
- *
- * Assumptions: the four identifying members are echoed from the detail the reviewer is looking at,
- * even though the sealed key in the target already identifies the row. The contract requires them
- * because the baseline's own update reads them from the screen, and sending them lets the service
- * refuse a request whose body and target disagree -- which is the case a stale browser tab produces.
- */
-export interface FraudMarkRequest {
-  readonly accountId: string;
-  readonly customerId: string;
-  readonly authDateKey: number;
-  readonly authTimeKey: number;
-  readonly action: FraudAction;
-}
-
-/**
- * The outcome of a fraud transition.
- *
- * Assumptions: this shape describes SUCCESS only. A write that failed is answered with a non-2xx
- * status and a problem document, so `updateStatus` never reports a failure and a caller must not read
- * it as one.
- */
-export interface FraudMarkResponse {
-  readonly updateStatus: string;
-  readonly message?: string | null | undefined;
-}
 
 /** Criteria the pending-authorization list is read with. */
-export interface PendingAuthListQuery {
-  readonly accountId: string;
-  readonly cursor?: string | undefined;
-  readonly direction?: PageDirection | undefined;
-}
 
 /**
  * Lists one account's pending authorizations with the account summary above them.

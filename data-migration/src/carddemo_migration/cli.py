@@ -73,7 +73,9 @@ from carddemo_migration.config import (
     resolve_card_verification_value_key_id,
     resolve_customer_identifier_key_id,
     resolve_dataset_staging_settings,
+    resolve_migration_settings,
     resolve_seed_user_subjects,
+    role_for_schema,
 )
 from carddemo_migration.copybook import layouts
 from carddemo_migration.copybook.ebcdic_codec import (
@@ -92,6 +94,7 @@ from carddemo_migration.credentials import (
     EXIT_USAGE,
 )
 from carddemo_migration.loaders.aurora import (
+    TRANSACTION_ID_SEQUENCE,
     AuroraLoadError,
     LoadContext,
     Projection,
@@ -99,6 +102,7 @@ from carddemo_migration.loaders.aurora import (
     connect,
     load_records,
     prepare_record,
+    reconcile_transaction_id_sequence,
     target_for,
 )
 from carddemo_migration.loaders.protected_columns import (
@@ -111,6 +115,7 @@ from carddemo_migration.loaders.s3_stage import (
     DatasetSourceError,
     StagedObject,
     reserve_generation,
+    s3_client,
     stage_dataset_file,
 )
 from carddemo_migration.readers import reader_module
@@ -118,7 +123,14 @@ from carddemo_migration.readers.factory import RecordReader
 from carddemo_migration.seed_datasets import SeedDatasetError
 from carddemo_migration.verify.checksum import digest_records
 from carddemo_migration.verify.money_parity import compare_money_totals
-from carddemo_migration.verify.row_counts import compare_counts
+from carddemo_migration.verify.row_counts import (
+    RowCountVerificationError,
+    compare_counts,
+    open_reporting_connection,
+    reporting_role,
+    row_count_query_path,
+    verify_row_counts,
+)
 
 # Assumptions: the public surface is declared explicitly and in sorted order, matching
 #   every other module in this package, so a reader can tell an entry point from a
@@ -695,21 +707,28 @@ def _s3_client() -> Any:
     Returns
     -------
     Any
-        A boto3 S3 client, satisfying the staging module's ``S3StagingClient`` protocol.
+        An S3 client satisfying the staging module's ``S3StagingClient`` protocol.
 
     Raises
     ------
-    botocore.exceptions.BotoCoreError
-        If the SDK cannot build a client from the ambient configuration.
+    ConfigurationError
+        If the AWS SDK is not installed, or the environment names no usable region or
+        credentials. Propagated from the configuration module's client factory.
     """
-    # Trade-offs: boto3 is imported here rather than at module scope. The cost is an
-    #   import inside a function, which this package's config module also accepts for the
-    #   same reason: it keeps `--help` and `list-datasets` runnable with no AWS SDK
-    #   import at all, so the entry-point smoke check exercises argument handling without
-    #   depending on a client library resolving credentials or a region.
-    import boto3
-
-    return boto3.client("s3")
+    # WHY : Refactoring Rationale: this delegates to the staging module's published factory, where
+    #   it used to call `boto3.client("s3")` itself. Constructing a client here was a second client
+    #   authority in a distribution that documents exactly one, and the duplication had a concrete
+    #   consequence rather than only an architectural one: `config.aws_client` MEMOISES its clients
+    #   and `config.reset_resolution_cache` discards them by scanning that module's own globals, so
+    #   a client built here was invisible to that reset -- a caller that reset the package's
+    #   resolution state, a test substituting an endpoint between cases or a long-running process
+    #   picking up rotated credentials, would have held a fresh parameter-store client and a stale
+    #   S3 client from the same call. Half-moved state is the hardest kind to attribute.
+    # WHY : Assumptions: this function is KEPT as a one-line delegation rather than deleted and its
+    #   call site pointed at the factory directly, because it is the seam the command tests
+    #   substitute their in-process double at. Removing it would move that substitution onto an
+    #   imported name and make every staging test patch the staging module instead of this one.
+    return s3_client()
 
 
 class _StagingEnvironmentError(RuntimeError):
@@ -1188,6 +1207,53 @@ def _money_field_names(reader: RecordReader) -> tuple[str, ...]:
     return tuple(field.name for field in reader.loaded_fields if field.kind is layouts.Kind.ZONED)
 
 
+def _connect_for(target: TableTarget) -> Any:
+    """Open a connection for one load target, as the role its schema's tables were granted to.
+
+    Purpose
+    -------
+    Resolve a target's schema to its credential and to its expected login role through two
+    independent declarations, and refuse to open the connection unless the two agree -- so that
+    every command touching a table authenticates as the least-privileged role that holds a grant
+    on it rather than as whichever role the environment happened to supply.
+
+    Parameters
+    ----------
+    target : TableTarget
+        The load target whose ``schema`` selects both the credential and the expected role.
+
+    Returns
+    -------
+    Any
+        An open connection, verified to authenticate as the schema's own login role. The caller
+        owns closing it. The driver's connection type is not imported here, exactly as
+        :func:`carddemo_migration.loaders.aurora.connect` does not import it: the driver is
+        resolved inside that function so that this module stays importable without it.
+
+    Raises
+    ------
+    ConfigurationError
+        If the schema is not one of the eight, if the resolved credential is incomplete, or if
+        its stored user is not the schema's login role.
+    """
+    # WHY : Assumptions: the owning role is passed as an EXPECTATION rather than trusted to
+    #   follow from the schema, so the two independent resolutions have to agree before a
+    #   connection is opened. `resolve_aurora_settings` reads a per-schema secret whose stored
+    #   user is what the connection actually authenticates as, and `role_for_schema` states what
+    #   `sql/V0__schemas_and_roles.sql` granted the table to; a secret rotated to another role, or
+    #   a parameter path pointing at the wrong schema's secret, would otherwise succeed as
+    #   whichever role it found -- most damagingly as a superuser, which can write every table and
+    #   therefore proves nothing about the least-privilege boundary the ETL claims to run inside.
+    # WHY : Refactoring Rationale: all four database commands resolve their connection here rather
+    #   than each calling `connect` directly. The expectation was added to one of them first, and
+    #   the asymmetry was itself the defect: the load -- the only command that WRITES -- was the
+    #   one still opening an unverified connection.
+    return connect(
+        resolve_aurora_settings(target.schema),
+        expected_role=role_for_schema(target.schema),
+    )
+
+
 def _load_dataset(arguments: argparse.Namespace) -> int:
     """Bulk-load one decoded dataset into its target table.
 
@@ -1199,7 +1265,9 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     Returns
     -------
     int
-        :data:`EXIT_OK` when the load committed, :data:`EXIT_FAILED` when it was rolled back.
+        :data:`EXIT_OK` when the load committed, and also when the direct-COPY precondition
+        DECLINED it because the target was already populated -- a declined load is the restart
+        case succeeding, not failing. :data:`EXIT_FAILED` when it was rolled back.
 
     Raises
     ------
@@ -1214,7 +1282,7 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
         #   failure: a missing parameter is an operator action, and learning it before the database
         #   is touched keeps the two diagnoses apart.
         context = _load_context_for(target)
-        connection = connect(resolve_aurora_settings(target.schema))
+        connection = _connect_for(target)
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
@@ -1230,6 +1298,11 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     #   written them -- and an operator reading a line that said only "loaded 7 row(s)" would
     #   believe seven rows had been added. The outcome renders the skipped count only when it is
     #   non-zero, so the direct path's line does not carry a number that is always zero.
+    # WHY : Refactoring Rationale: there is no DECLINED branch, and there was one. Every target now
+    #   stages and merges, so a re-run of a completed load reports staged rows with none inserted
+    #   rather than refusing to run -- the same information, reached without a row-count
+    #   precondition that the identity-keyed daily feed could not be made safe by. A restart is
+    #   still safe and still reports success, which is what the withdrawn branch existed for.
     _LOGGER.info(
         "loaded record=%s staged=%d inserted=%d into %s.%s",
         arguments.dataset,
@@ -1239,6 +1312,81 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
         target.table,
     )
     print(f"loaded {arguments.dataset} into {target.schema}.{target.table}: {outcome.describe()}")
+    return EXIT_OK
+
+
+def _reconcile_sequences(arguments: argparse.Namespace) -> int:
+    """Advance the transaction-identifier allocator past every loaded identifier.
+
+    Purpose
+    -------
+    Give the cutover the one step that has to happen between the last load into
+    ``ledger.transactions`` and the moment writes are enabled. The allocator's starting position
+    is derived by its own Flyway migration from the rows the table held AT MIGRATION TIME, which
+    on a cutover is none -- so after the extract is loaded the allocator points into a range the
+    table now occupies, and the first interactive add or bill payment collides on the primary key.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries nothing. The step takes no options for the same reason ``apply-credentials`` takes
+        none: there is exactly one allocator and one correct value for it, and an option would only
+        create a way to set a wrong one.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the allocator is past every stored identifier -- whether this run
+        advanced it or found it already there -- and :data:`EXIT_FAILED` when it could not be
+        reconciled, in which case writes must not be enabled.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the MIGRATION credential is resolved, not the runtime one.
+    #   `sql/V0__schemas_and_roles.sql` grants the service role `USAGE, SELECT` on the schema's
+    #   sequences, which is `nextval` and not `setval`; `setval` needs UPDATE, which only the owner
+    #   holds. Resolving the runtime credential here would fail with a permission error at the one
+    #   step a cutover cannot skip.
+    del arguments
+    try:
+        connection = connect(resolve_migration_settings("ledger"))
+    except _STEP_ERRORS as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    try:
+        reconciliation = reconcile_transaction_id_sequence(connection)
+    except AuroraLoadError as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    # WHY : Trade-offs: a run that changed nothing reports success rather than a distinct status.
+    #   The step is defined by its POSTCONDITION -- the allocator is past every stored identifier
+    #   -- and that holds equally whether this run moved it or found it already there, which is
+    #   what makes the step safe to leave in a cutover script that may be re-run. The rendered line
+    #   still says which of the two happened.
+    if reconciliation.would_have_collided:
+        # WHY : Assumptions: logged at WARNING, because this is the defect having been caught. An
+        #   allocator poised to reissue a stored identifier would have failed every interactive
+        #   write until it climbed past the loaded range, and an operator reading a cutover log
+        #   afterwards needs to see that the step was not merely ceremonial.
+        _LOGGER.warning(
+            "reconciled sequence=%s stored_maximum=%d next_before=%d next_after=%d",
+            reconciliation.sequence,
+            reconciliation.stored_maximum,
+            reconciliation.next_value_before,
+            reconciliation.next_value_after,
+        )
+    else:
+        _LOGGER.info(
+            "sequence=%s already past stored_maximum=%d at next=%d",
+            reconciliation.sequence,
+            reconciliation.stored_maximum,
+            reconciliation.next_value_after,
+        )
+    print(f"reconciled {TRANSACTION_ID_SEQUENCE}: {reconciliation.describe()}")
     return EXIT_OK
 
 
@@ -1262,7 +1410,7 @@ def _verify_row_counts(arguments: argparse.Namespace) -> int:
     try:
         _, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
-        connection = connect(resolve_aurora_settings(target.schema))
+        connection = _connect_for(target)
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
@@ -1284,6 +1432,85 @@ def _verify_row_counts(arguments: argparse.Namespace) -> int:
     #   8 as a failed check, and a verification command that raised would lose the report line
     #   an operator needs in order to see WHICH side was short.
     return EXIT_OK if outcome.matched else EXIT_FAILED
+
+
+def _verify_row_count_report(arguments: argparse.Namespace) -> int:
+    """Run the whole-migration row-count report on a read-only session and print every line.
+
+    Purpose
+    -------
+    Execute ``data-migration/sql/verify/row_counts.sql`` as the least-privilege reporting role and
+    report the six-column verdict it publishes, so one invocation answers "did every dataset land,
+    in the right quantity" for the whole load rather than for one dataset at a time.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries ``sql_root``, the directory holding the ``sql`` tree, or ``None`` to resolve it
+        from the installed package's own location.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when every line verified, otherwise :data:`EXIT_FAILED`.
+
+    Raises
+    ------
+    None
+        Every documented failure is reported as a return code, because the batch state that
+        invokes this branches on one.
+    """
+    # WHY : Refactoring Rationale: this command exists because the reporting-role verification
+    #   path was DELIVERED AND UNREACHED. verify/row_counts.py published
+    #   open_reporting_connection, reporting_settings and verify_row_counts, and nothing in the
+    #   distribution called any of them -- while verify-row-counts beside this command opened a
+    #   SCHEMA-OWNER connection for its per-dataset comparison. So the whole-migration report,
+    #   the one designed to run with no write authority over what it certifies, could only be run
+    #   by hand in a Python session. Wiring it as a command is what makes the least-privilege path
+    #   the one an operator and the batch chain actually take.
+    #
+    # WHY : Alternatives Considered: converting the existing verify-row-counts command to this
+    #   path instead of adding a second one. Rejected because the two answer different questions
+    #   and need different authority: that command counts records in a LOCAL EXTRACT and compares
+    #   them against one table, so it must read the extract and must know which dataset is meant;
+    #   this one reads a server-side aggregate over every table and needs no extract at all.
+    #   Collapsing them would have forced this report to accept --dataset, --source and --encoding
+    #   it does not use.
+    try:
+        connection = open_reporting_connection()
+    except (*_STEP_ERRORS, RowCountVerificationError) as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    try:
+        # WHY : Assumptions: the option names the DISTRIBUTION ROOT and is resolved to the query
+        #   file here, rather than naming the file itself. That is the parameter
+        #   `row_count_query_path` publishes for this purpose, and its own rationale records why
+        #   one is needed: the sql tree ships BESIDE the package rather than inside it, so the
+        #   package-relative default is correct in a source checkout and in an editable install and
+        #   cannot work from a plain wheel. The container is the wheel case -- its image copies
+        #   sql/ to the working directory -- so the documented invocation there passes --sql-root .
+        #   Naming the file instead would let two runs execute two different files under one
+        #   option, where naming the root keeps the layout the contract.
+        query_path = (
+            None if arguments.sql_root is None else row_count_query_path(arguments.sql_root)
+        )
+        report = verify_row_counts(connection, query_path=query_path)
+    except (*_STEP_ERRORS, RowCountVerificationError) as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    # WHY : Assumptions: the role that certified the report is logged and is deliberately NOT
+    #   printed. An operator reading the log needs to know which authority the verdict was reached
+    #   under, because that is the property this pass rests on; the printed text stays byte-stable
+    #   between runs so two runs over unchanged data diff to nothing, and a role name is the kind
+    #   of line that would later acquire a host or a database beside it.
+    _LOGGER.info("row count report certified by role=%s", reporting_role())
+    print(report.render())
+    # WHY : Trade-offs: a mismatch exits FAILED rather than raising, on the same reasoning as the
+    #   per-dataset command above: the rendered report names every short table, and a traceback
+    #   would replace the one artifact an operator acts on with the place the code noticed.
+    return EXIT_OK if report.verified else EXIT_FAILED
 
 
 def _verify_checksum(arguments: argparse.Namespace) -> int:
@@ -1314,7 +1541,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
         #   declarations ask for, so this call reaches the key-management service for no dataset
         #   this command can compare.
         context = _load_context_for(target)
-        connection = connect(resolve_aurora_settings(target.schema))
+        connection = _connect_for(target)
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
@@ -1369,7 +1596,7 @@ def _verify_money_parity(arguments: argparse.Namespace) -> int:
     try:
         reader, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
-        connection = connect(resolve_aurora_settings(target.schema))
+        connection = _connect_for(target)
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
@@ -1615,6 +1842,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_credentials.set_defaults(handler=_apply_credentials)
 
+    reconcile_sequences = subcommands.add_parser(
+        "reconcile-sequences",
+        help="advance the transaction-identifier allocator past every loaded identifier",
+        description=(
+            "Advance ledger.transaction_id_seq past the largest sequence-format identifier "
+            "ledger.transactions holds. Run after the last load into that table and BEFORE "
+            "writes are enabled: the allocator's starting position is derived by its own "
+            "migration from the rows present when the migration ran, which on a cutover is "
+            "none. Only ever advances, so a repeat run is a no-op. Takes no options."
+        ),
+    )
+    reconcile_sequences.set_defaults(handler=_reconcile_sequences)
+
     # WHY : the four commands below share one option set -- --dataset, --source and --encoding
     #   -- because they are four questions about the same pairing of a dataset and a table, and a
     #   caller that has just loaded a record verifies it by changing only the verb.
@@ -1679,6 +1919,39 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         command.set_defaults(handler=handler)
+
+    # WHY : Assumptions: this command is registered on its own rather than inside the loop above,
+    #   because it takes NONE of that loop's three options. It reads a server-side aggregate over
+    #   every table instead of a local extract, so it has no dataset to name, no file to read and
+    #   no seed form to declare -- and accepting three options it ignored would invite an operator
+    #   to believe the report was scoped to whichever dataset was passed.
+    verify_row_count_report = subcommands.add_parser(
+        "verify-row-count-report",
+        help="run the whole-migration row-count report as the read-only reporting role",
+        description=(
+            "Execute data-migration/sql/verify/row_counts.sql on a session for the "
+            "carddemo_reporting role and print its six-column verdict for every dataset at "
+            "once. The session's role is checked against the server before the query runs, so a "
+            "pass that could write cannot certify the load. Unlike verify-row-counts, this "
+            "reads no local extract."
+        ),
+    )
+    # WHY : Trade-offs: the root is optional and defaults to resolution from the package's own
+    #   location, which is correct in a source checkout and in an editable install and is expected
+    #   to fail in a plain wheel -- the sql directory ships BESIDE the package rather than inside
+    #   it. Naming the option is what lets an operator running from an unpacked distribution point
+    #   at the same file they would run with psql, rather than at a second copy in a wheel.
+    verify_row_count_report.add_argument(
+        "--sql-root",
+        default=None,
+        type=Path,
+        help=(
+            "directory holding the sql tree, whose verify/row_counts.sql is executed; omit it in "
+            "a source checkout or an editable install, and pass . in the container image, whose "
+            "working directory holds the copied tree"
+        ),
+    )
+    verify_row_count_report.set_defaults(handler=_verify_row_count_report)
 
     return parser
 

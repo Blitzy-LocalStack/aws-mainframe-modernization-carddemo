@@ -74,16 +74,28 @@ public class GenerateAdHocReportTask implements ReportingTask {
                 ReportingTaskRunner.END_DATE_PARAMETER, ReportingTaskRunner.END_DATE_OPTION);
         String reportType = parameters.get(ReportingTaskRunner.REPORT_TYPE_PARAMETER);
 
-        TransactionReportService.ReportGenerationSummary summary = publisher.publish(start, end, end);
+        // WHY : Assumptions: the type is passed through to the publisher rather than being checked here,
+        //       because the publisher is where it reaches an object key and is therefore where the closed
+        //       domain that admits it belongs. A check here as well would be a second copy of one domain.
+        ReportArtifactPublisher.PublishedArtifact published =
+                publisher.publish(reportType == null ? "" : reportType, start, end, end);
+        TransactionReportService.ReportGenerationSummary summary = published.summary();
 
         // WHY : Assumptions: the report type is SANITISED where the two dates are not. The dates have been
         //       through a date parser, so they cannot carry a delimiter or a line terminator; the type is a
         //       caller-supplied string that reaches this line verbatim, and a value read from a request
-        //       reaching a journal line unsanitised is how a control character forges a log entry.
-        LOG.info("event=reporting.report.produced reportType={} startDate={} endDate={} records={}"
-                        + " detailLines={} pageBands={} groupBands={}",
+        //       reaching a journal line unsanitised is how a control character forges a log entry. It is
+        //       still sanitised even though the publisher has now admitted it against a closed domain,
+        //       because this line reports the value the CALLER supplied and the domain check answers about
+        //       a trimmed and lower-cased form of it.
+        // WHY : Refactoring Rationale: the record names the ARTIFACT and the RUN, where an earlier revision
+        //       recorded only the counts -- so the key this task wrote to, which is now a function of the
+        //       type and the range, was known inside the publisher and reported nowhere.
+        LOG.info("event=reporting.report.produced reportType={} startDate={} endDate={} run={}"
+                        + " artifact={} records={} detailLines={} pageBands={} groupBands={}",
                 reportType == null ? "unset" : LogSafeText.sanitize(reportType),
-                start, end, summary.recordsWritten(), summary.detailLines(),
+                start, end, ReportingTaskRunner.runIdentity(), published.locator(),
+                summary.recordsWritten(), summary.detailLines(),
                 summary.pageTotalBands(), summary.accountTotalBands());
     }
 

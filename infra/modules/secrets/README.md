@@ -77,11 +77,11 @@ the wrong custodian for private-key material, and — the sharper point — an *
 is the wrong channel for it: a Terraform variable can only be given a value from a
 committed tfvars file, a committed default, or a CI-carried environment variable,
 so `sensitive = true` would change how a plan *rendered* the value and nothing
-about whether a tfvars or state file could hold it. Both environment roots
-generate the pair with the `tls` provider and write it into two root-owned Secrets
-Manager entries and into `aws_acm_certificate`, so the material has no input to
-arrive through. Alternatives Considered: nullable PEM inputs that both roots pass
-null — rejected as a convention rather than a control.
+about whether a tfvars or state file could hold it. No listener material arrives
+through this module because none is Terraform-managed anywhere in the package:
+each task mints its own key pair and self-signed leaf at startup, so there is no
+object for an input to carry. Alternatives Considered: nullable PEM inputs that
+both roots pass null — rejected as a convention rather than a control.
 
 **No connection coordinates.** Assumptions: the writer endpoint, the listener
 port and the database name are non-secret, and
@@ -116,16 +116,16 @@ or written into module source. The initial value exists only as an ephemeral
 Secrets Manager. Terraform records the non-secret
 `secret_string_wo_version`, not the generated password.
 
-Refactoring Rationale: this paragraph previously ended by asserting that
-"scheduled rotation then generates pending values inside Secrets Manager and the
-Lambda runtime, outside Terraform" — stated as a fact about the delivered stack,
-which it is not. That sentence describes what WOULD happen if a root supplied a
-rotation function, and neither root does. The property that actually holds
-without qualification is the one above it: the generated value is never
-expressible in source and never lands in Terraform state, whether or not it is
-ever replaced. Replacement, when an operator performs it, likewise keeps the
-value out of state — it goes through Secrets Manager and the scripted applicator,
-not through a Terraform argument.
+Assumptions: the paragraph above holds without a rotation caveat, and the omission
+is deliberate. Scheduled rotation would generate pending values inside Secrets
+Manager and the Lambda runtime, outside Terraform — but that path is reachable only
+when a calling root supplies a rotation function, and neither root does, so
+asserting it as a property of the delivered stack would describe something that
+does not run. What holds unconditionally is that the generated value is never
+expressible in source and never lands in Terraform state, whether or not it is ever
+replaced. Replacement, when an operator performs it, likewise keeps the value out of
+state — it goes through Secrets Manager and the scripted applicator, not through a
+Terraform argument.
 
 Alternatives Considered: accepting a `password`, `master_password`, or
 role-to-password map would force a caller to provide the credential through a
@@ -135,28 +135,26 @@ repository safety depend on every author and reviewer noticing it. A database
 password that the module cannot accept cannot be committed through its
 contract.
 
-There is no exception to the statement above. Refactoring Rationale: this
-paragraph previously described "the optional TLS inputs" as a deliberate,
-narrower exception — certificate material that had to be supplied through an
+There is no exception to the statement above: this module's input contract admits
+**no** secret of any kind. Alternatives Considered: a narrower exception for TLS
+material — a certificate and private-key pair accepted here, supplied through an
 operator-controlled secret channel and kept out of any committed variable file.
-Those inputs no longer exist. They were removed for the reason recorded in the
-**No TLS certificate or private-key entries** paragraph under
+Rejected, for the reason recorded in the **No TLS certificate or private-key
+entries** paragraph under
 [What the module deliberately does NOT provision](#what-the-module-deliberately-does-not-provision)
-above, and the two paragraphs contradicted each other: one said the inputs were
-gone, the other told an operator how to supply them. An instruction for
-supplying material through a channel that no longer accepts it is worse than no
-instruction, because an operator following it looks for a variable, does not
-find one, and has no way to tell whether the variable or the instruction is the
-mistake. This module's input contract now admits **no** secret of any kind.
+above. Trade-offs: documenting a supply channel the contract does not accept is
+worse than documenting none, because an operator following it looks for a variable,
+does not find one, and has no way to tell whether the variable or the instruction is
+the mistake — so no such instruction appears anywhere in this README.
 
-The state-handling obligation that paragraph pointed at has not gone away; it
-has moved to where the material now lives. Both environment roots generate the
-internal HTTPS key pair with the `tls` provider, so `private_key_pem` is an
-attribute of a managed resource and is recorded in the roots' state — not in
-anything this module owns. See
+Assumptions: that exception carried a state-handling obligation, and there is
+nothing left for the obligation to attach to. Neither environment root declares the
+`tls` provider or a `tls_private_key` resource, so no listener key material is
+Terraform-managed anywhere in this stack; each task mints its own key pair and
+self-signed certificate at start-up. See
 [Trade-offs and operational boundaries](#trade-offs-and-operational-boundaries)
 for what this module's own state does and does not carry, and
-`docs/architecture/security-and-identity.md` for the root-owned key.
+`docs/architecture/security-and-identity.md` for the task-minted material.
 
 
 ## Measured baseline divergence
@@ -195,20 +193,14 @@ seven migration -- and nothing else. Three neighbouring owners remain separate:
   RDS-managed master secret.
 * [`../kms/`](../kms/) owns the customer-managed keys; this module receives
   their ARNs and cannot change their policies.
-This module accepts no PEM material at all, so there is no channel through which
-TLS key material could reach a tfvars file. It has no counterpart owner either:
-each task mints its own listener key pair and self-signed certificate at startup
-(`config/docker/generate-listener-material.sh`), so no module and no root holds
-listener material in state.
-
-Refactoring Rationale: a fourth bullet above named "each environment root" as the
-owner of a service TLS certificate and private key, generated with the `tls`
-provider, stored in two root-owned Secrets Manager entries and imported into
-`aws_acm_certificate`. Every part of that is withdrawn: those resources are
-deleted, the `tls` provider requirement is removed from both roots, and the
-private key no longer exists as a Terraform-managed object. It is called out
-rather than silently dropped because an ownership section is exactly where a
-reader goes to find out who holds a private key.
+Listener TLS material has no owner in this list, and that is the point: this
+module accepts no PEM material, no sibling module creates any, and neither
+environment root declares the `tls` provider. Each task mints its own listener key
+pair and self-signed certificate at startup
+(`config/docker/generate-listener-material.sh`), so no Terraform state anywhere in
+the package holds a listener private key. Assumptions: an ownership section is
+where a reader goes to find out who holds a private key, so the answer is stated
+here explicitly rather than left to be inferred from the absence of a bullet.
 
 Assumptions: each resource has one Terraform owner. If this module and the
 Cognito module declared the same secret, each state would claim authority over
@@ -310,7 +302,7 @@ automation silently repair and hide the drift.
 
 | Name | Description |
 |------|-------------|
-| <a name="output_service_credential_secrets"></a> [service\_credential\_secrets](#output\_service\_credential\_secrets) | The Secrets Manager entry created for each per-service database role, as a<br/>map keyed by role name -- `carddemo_auth`, `carddemo_account` and the rest<br/>of the roles named in `service_credential_names` -- whose value carries<br/>that entry's base `arn` for IAM, its created `name` for by-name reads, and<br/>distinct `username_reference` / `password_reference` values in ECS's<br/>`<base-arn>:<json-key>::` syntax. One entry exists per element of that input,<br/>so the map is empty only if the input is. The calling root projects the<br/>`arn` fields into infra/modules/ecs-service's `secret_sources` input, keyed<br/>by the container environment-variable name each service expects, and scopes<br/>one `secretsmanager:GetSecretValue` statement per task role to the single<br/>ARN that role is entitled to read. The `name` fields are what a by-name<br/>reader passes as `SecretId`, matching the role name character for<br/>character.<br/><br/>This module STORES each credential; it does not APPLY it. Binding a stored<br/>value to the matching PostgreSQL role -- the ALTER ROLE that lets the role<br/>authenticate with it -- belongs to whatever runs the schema bootstrap, and so<br/>does any later rotation. A caller therefore has three obligations, not one:<br/>grant each task role read access to its own entry alone, grant the<br/>bootstrapping identity read access to every entry in this map so it can bind<br/>the values it finds, and -- if the deployment wants rotation -- supply a<br/>rotation function through this module's `rotation_lambda_arn` input, because<br/>this module deliberately creates none. |
+| <a name="output_service_credential_secrets"></a> [service\_credential\_secrets](#output\_service\_credential\_secrets) | The Secrets Manager entry created for each per-service database role, as a<br/>map keyed by role name -- `carddemo_auth`, `carddemo_account` and the rest<br/>of the roles named in `service_credential_names` -- whose value carries<br/>that entry's base `arn` for IAM, its created `name` for by-name reads, and<br/>distinct `username_reference` / `password_reference` values in ECS's<br/>`<base-arn>:<json-key>::` syntax. One entry exists per element of that input,<br/>so the map is empty only if the input is. The calling root projects these<br/>fields into infra/modules/ecs-service's `secret_arns` input, keyed by the<br/>container environment-variable name each service expects and carrying both<br/>members that input requires -- `value_from` in the `<base-arn>:<json-key>::`<br/>form the container definition reads, and `resource_arn` for IAM. That module<br/>then scopes one `secretsmanager:GetSecretValue` statement on the workload's<br/>**task EXECUTION role** to the distinct ARNs that workload injects. The<br/>`name` fields are what a by-name reader passes as `SecretId`, matching the<br/>role name character for character.<br/><br/>The execution role and not the task role is the entitled principal, and the<br/>distinction is load-bearing rather than pedantic: ECS resolves a container<br/>definition's `secrets` block itself, before the container starts, using the<br/>execution role, so a `GetSecretValue` grant placed on the task role leaves<br/>the task unable to START -- the failure appears as a stopped task with a<br/>ResourceInitializationError and never as an application error, which is a<br/>considerably harder thing to diagnose from inside the service. The task role<br/>is the identity the RUNNING process uses, and no service in this project reads<br/>a secret from its own code, so it holds no secret grant at all.<br/><br/>This module STORES each credential; it does not APPLY it. Binding a stored<br/>value to the matching PostgreSQL role -- the ALTER ROLE that lets the role<br/>authenticate with it -- belongs to whatever runs the schema bootstrap, and so<br/>does any later rotation. A caller therefore has three obligations, not one:<br/>grant each workload's task EXECUTION role read access to the entries that<br/>workload injects and no others, grant the bootstrapping identity read access<br/>to every entry in this map so it can bind the values it finds, and -- if the<br/>deployment wants rotation -- supply a rotation function through this module's<br/>`rotation_lambda_arn` input, because this module deliberately creates none.<br/>The second obligation is deliberately broader than the first and is the one<br/>concentration this design accepts: a bootstrap step that applies every role's<br/>credential must be able to read every one of them. |
 <!-- END_TF_DOCS -->
 
 
@@ -323,16 +315,13 @@ publishes identifiers and runtime selectors only:
 |---|---|
 | `service_credential_secrets` | Role-keyed secret ARN, name, username selector, and password selector for task-role IAM and ECS injection |
 
-That is the module's entire public surface: **one** output. Refactoring
-Rationale: six others were withdrawn — a conditional TLS handle map, two
-rotation-function identifiers, a rotation execution-role ARN and two rotation
-log-group identifiers — because every resource they named was removed with the
-rotation function and the TLS entries. Withdrawing a published name is a breaking
-change for both environment roots, so it was done only after confirming that the
-roots reference none of them. Trade-offs: a caller that wants a rotation
-function's identity now holds it already, because the root that supplies the
-function is the root that creates it — an output here would only echo an input
-back.
+That is the module's entire public surface: **one** output. Assumptions: an output
+exists only where a caller cannot obtain the value another way, which is why there
+is no TLS handle, no rotation-function identifier and no rotation log-group name
+here — this module creates none of those objects. Trade-offs: a caller that wants
+a rotation function's identity holds it already, because the root that supplies
+the function is the root that creates it, so an output here would only echo an
+input back.
 
 This module holds no reference to the master credential in either direction. The
 Aurora module creates and owns the RDS-managed master secret and publishes its
@@ -410,17 +399,13 @@ and self-signed certificate at startup, so the only Terraform-managed credential
 material anywhere in this stack is the generated database passwords above, every
 one of which is delivered through `secret_string_wo`.
 
-Refactoring Rationale: this paragraph said the certificate and private key were
-generated and stored by the environment root, and that the root's
-`tls_private_key` resource "does place key material in the ROOT's state", with a
-pointer to the encrypted remote backend as the mitigation. The first two claims
-are withdrawn -- that resource is deleted from both roots along with the
-self-signed certificate, the two Secrets Manager entries and the imported ACM
-certificate. The backend is still versioned and encrypted and
-[`infra/bootstrap`](../../bootstrap/) still provides it, which remains the right
-control for state generally; it is simply no longer the mitigation for a
-listener private key, because there is no longer a listener private key in state
-to mitigate.
+Assumptions: the versioned, encrypted backend that
+[`infra/bootstrap`](../../bootstrap/) provides is the right control for state
+generally, and it is deliberately NOT offered above as the mitigation for a listener
+private key. There is no listener private key in any state to mitigate: no root
+declares a `tls_private_key` resource, a self-signed certificate, PEM-bearing
+Secrets Manager entries or an imported ACM certificate, so a reader who met that
+mitigation here would infer key material this stack does not hold.
 
 ### Tags
 
@@ -449,12 +434,28 @@ to this module:
    to reject any generated region that differs from the HCL beside it.
 
 The same workflow also scans migration-owned tracked files for committed
-secrets and runs its explicit material-security Checkov set. The secrets module
-is expected to use the supplied customer-managed key for every secret, attach
-rotation to every service database credential, and keep any scanner exception
-bounded and reviewable. See
+secrets and runs its explicit material-security Checkov set. What it expects of
+this module is that every secret uses the supplied customer-managed key, that the
+rotation *pass-through* is present and wired to its two inputs
+(`aws_secretsmanager_secret_rotation.service` and
+`automatically_after_days = var.rotation_automatically_after_days`), and that the
+single `CKV_AWS_304` exception stays bounded and reviewable — it asserts exactly
+one occurrence of that skip. It does **not** expect an attached rotation
+schedule, and none exists: the resource is created only when a calling root
+supplies both `rotation_lambda_arn` and `rotation_automatically_after_days`, and
+neither root supplies either, so the count is zero. See
 [`infra-ci.yml`](../../../.github/workflows/infra-ci.yml) for the executable
 contract.
+
+Refactoring Rationale: this paragraph said the module is expected to "attach
+rotation to every service database credential". No rotation schedule is attached
+to any credential this module creates, and the section immediately above headed
+[What the module deliberately does NOT provision](#what-the-module-deliberately-does-not-provision)
+says so, so the two halves of this file disagreed about whether the credentials
+rotate. The gate's own wording is used instead of a paraphrase, because a
+validation section is read as a statement of what the build enforces and a
+paraphrase that overstates it invites an operator to assume a control that is not
+there.
 
 Run the module-local checks from the repository root:
 
@@ -525,8 +526,11 @@ The credential exists but has not been bound to its PostgreSQL role. This module
 stores values; it does not run `ALTER ROLE`. Check that the schema-bootstrap step
 ran AFTER these secrets were created and that the bootstrapping identity holds
 `GetSecretValue` on every entry in `service_credential_secrets` — it needs to read
-each value in order to bind it, which is a wider grant than any single task role
-holds and is the one identity for which that is correct.
+each value in order to bind it, which is a wider grant than any single workload's
+task execution role holds and is the one identity for which that is correct. (The
+execution role, not the task role, is what ECS uses to resolve an injected secret;
+see the `service_credential_secrets` description for why the distinction decides
+whether a task can start at all.)
 
 ### Only one rotation input is configured
 

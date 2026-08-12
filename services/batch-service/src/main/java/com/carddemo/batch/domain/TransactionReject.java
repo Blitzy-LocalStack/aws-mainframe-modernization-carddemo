@@ -364,16 +364,16 @@ public class TransactionReject {
     //       masking discipline applies where a value leaves the system to a caller, and this module
     //       publishes no such surface for this record; what closes the remaining log exposure is the
     //       rendering decision at the end of this type.
-    // WHY : Refactoring Rationale: the column is NOT NULL, where an earlier revision of this member
-    //       left it nullable. A reject row EXISTS because a record was rejected, and the single
+    // WHY : Refactoring Rationale: the column is NOT NULL rather than nullable.
+    //       A reject row EXISTS because a record was rejected, and the single
     //       statement cited above copies the whole 350-byte area unconditionally before the write at
     //       app/cbl/CBTRN02C.cbl:448, so the reference program has no path that appends a reject
     //       carrying no image. A null image is an entry recording that something was rejected while
     //       discarding the only evidence of what -- and the 430-byte parity comparison cannot be
     //       performed against it at all. The owning migration declares the same NOT NULL.
     @JdbcTypeCode(SqlTypes.CHAR)
-    // WHY : Refactoring Rationale: nullable = false was ADDED to this member and to the two
-    //       below, matching the NOT NULL the columns now carry. app/cbl/CBTRN02C.cbl L446-L451
+    // WHY : Refactoring Rationale: nullable = false is declared on this member and on the two
+    //       below, matching the NOT NULL the columns carry. app/cbl/CBTRN02C.cbl L446-L451
     //       writes the reject record by moving two WHOLE group items into it, and a group move
     //       transfers the full declared width every time -- so there is no branch on which any of
     //       the three components is absent and no width at which one is short.
@@ -407,18 +407,17 @@ public class TransactionReject {
     //       That padding belongs to the fixed-width emitter in com.carddemo.common.codec; this
     //       column stores the number. Rendering it as anything but four zero-padded characters
     //       displaces the 76 characters that follow.
-    // WHY : Refactoring Rationale: this column is now NOT NULL at V1__ledger.sql:697 and the
-    //       migration now bounds it to the picture's own domain with
-    //       CHECK (reason_code BETWEEN 0 AND 9999) at its L757. An earlier revision declared
-    //       neither, and read the PIC 9(04) domain only as the reason a small integer is WIDE
-    //       ENOUGH -- while leaving that type's whole 32767 range admissible, negative values
-    //       included, which an unsigned picture cannot express. The same reading that makes 9999 the
-    //       sufficiency argument makes it the BOUND. Each reject site moves a code and its text in
-    //       one pair of statements, so a null code is a state the program never produces, and it
-    //       would break the reject COUNT that :229 turns into the return code because a null neither
-    //       equals nor differs from any code a filter names.
-    // WHY : Assumptions: the WRAPPER type is retained even though the column is now NOT NULL, and
-    //       the reason the change makes DECISIVE rather than weaker is that ZERO is a legitimate
+    // WHY : Refactoring Rationale: this column is NOT NULL at V1__ledger.sql:697 and the migration
+    //       bounds it to the picture's own domain with CHECK (reason_code BETWEEN 0 AND 9999) at its
+    //       L757. Reading the PIC 9(04) domain only as the reason a small integer is WIDE ENOUGH
+    //       would leave that type's whole 32767 range admissible, negative values included, which an
+    //       unsigned picture cannot express; the same reading that makes 9999 the sufficiency
+    //       argument makes it the BOUND. Each reject site moves a code and its text in one pair of
+    //       statements, so a null code is a state the program never produces, and it would break the
+    //       reject COUNT that :229 turns into the return code because a null neither equals nor
+    //       differs from any code a filter names.
+    // WHY : Assumptions: the WRAPPER type is retained even though the column is NOT NULL, and what
+    //       makes that DECISIVE rather than weaker is that ZERO is a legitimate
     //       value of this domain: PIC 9(04) at CBTRN02C L181 admits 0000, and the constraint above
     //       is inclusive at that end. A primitive member left unassigned would therefore read back
     //       as a real reason code rather than as an unpopulated one. The provider instantiates

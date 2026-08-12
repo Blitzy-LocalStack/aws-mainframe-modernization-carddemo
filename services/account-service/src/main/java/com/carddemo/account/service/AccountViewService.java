@@ -5,8 +5,10 @@ import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountContextView;
 import com.carddemo.account.dto.AccountViewResponse;
+import com.carddemo.account.dto.CardXrefByAccountView;
 import com.carddemo.account.dto.CardXrefResponse;
 import com.carddemo.account.dto.CardXrefView;
+import com.carddemo.account.dto.CustomerDisplayView;
 import com.carddemo.account.dto.CustomerResponse;
 import com.carddemo.account.mapper.AccountContextMapper;
 import com.carddemo.account.mapper.AccountMapper;
@@ -738,7 +740,7 @@ public class AccountViewService {
                 : this.customers.findByCustomerIdGreaterThanOrderByCustomerIdAsc(
                         Long.parseLong(this.cursorToken.open(CUSTOMER_SCAN_BINDING, cursor)), window);
 
-        return pageOfCustomers(rows, size, cursor != null);
+        return pageOfCustomers(rows, size);
     }
 
     /**
@@ -759,16 +761,12 @@ public class AccountViewService {
      * @param rows the window the store returned, at most the page size plus one, in ascending
      *     identifier order; must not be {@code null}
      * @param size the number of rows the page may carry
-     * @param resumed whether the request that produced this window carried a cursor, which settles
-     *     backward availability: the cursor names a row the caller was already shown and the predicate
-     *     is strictly greater than it, so a page lies behind this one exactly when one was supplied
      * @return the page with both boundaries sealed, or the exhausted page when the window holds no row;
      *     never {@code null}
      * @throws IllegalArgumentException if a sealed boundary is refused by the envelope's own cursor
      *     check, which no value produced here can provoke
      */
-    private PageResponse<CustomerResponse> pageOfCustomers(
-            List<Customer> rows, int size, boolean resumed) {
+    private PageResponse<CustomerResponse> pageOfCustomers(List<Customer> rows, int size) {
         boolean hasSurplus = rows.size() > size;
         List<Customer> shown = hasSurplus ? rows.subList(0, size) : rows;
 
@@ -790,17 +788,17 @@ public class AccountViewService {
         //       published projection, because the projection renders the identifier as text for the
         //       reason recorded on the response record while the resuming query binds a numeric key.
         //       Sealing the rendered form would make the next page's bound depend on a display decision.
-        // WHY : Refactoring Rationale: backward availability is REPORTED rather than implied by the
-        //       leading boundary. This scan travels one way only, so the answer is not a surplus row but
-        //       whether the caller arrived by cursor: the opening page has nothing behind it, and every
-        //       resumed page has at least the page whose trailing key it was given.
+        // WHY : Refactoring Rationale: no backward availability answer is published, and the leading
+        //       boundary below is what this page owes a caller stepping back. The reference settles that
+        //       question from a page ordinal the terminal carried between turns rather than from a read,
+        //       so its migrated home is the client's navigation state and a fifth envelope component
+        //       would answer from the service what the reference answers from the client.
         return PageResponse.ofRows(items,
                 this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
                         String.valueOf(shown.getFirst().getCustomerId())),
                 this.cursorToken.seal(CUSTOMER_SCAN_BINDING,
                         String.valueOf(shown.getLast().getCustomerId())),
-                hasSurplus,
-                resumed);
+                hasSurplus);
     }
 
     /**
@@ -839,8 +837,8 @@ public class AccountViewService {
      *
      * @param accountId the account to read, the eleven-digit identifier the reference supplies as the
      *     record identification field of the read at L778
-     * @return the composed view carrying the account, its customer and both message channels, an
-     *     {@link AccountViewResponse}, never {@code null}
+     * @return the composed view carrying the account, its customer and both message channels, together
+     *     with the revision both rows stand at, a {@link RevisionedAccountView}, never {@code null}
      * @throws NoSuchElementException if the cross-reference, the account master or the customer master
      *     holds no matching row, which the shared advice renders as HTTP 404
      * @throws IllegalStateException if the composition reaches a data condition none of the three
@@ -848,8 +846,9 @@ public class AccountViewService {
      *     for a reason the program-wide handler of L916 would have caught
      */
     @Transactional(readOnly = true)
-    public AccountViewResponse readAccountView(long accountId) {
-        AccountViewResponse view = readAccountUnderAbendHandler(accountId);
+    public RevisionedAccountView readAccountView(long accountId) {
+        RevisionedAccountView composed = readAccountUnderAbendHandler(accountId);
+        AccountViewResponse view = composed.view();
 
         // WHY : Assumptions: BOTH halves are required for this route to answer, and the disjunction is
         //       not a redundancy. The composition leaves the customer half absent on its own when the
@@ -861,7 +860,78 @@ public class AccountViewService {
             throw notFound(view.returnMessage());
         }
 
-        return view;
+        return composed;
+    }
+
+    /**
+     * An account view together with the revision the two rows behind it stand at.
+     *
+     * <p>Purpose: the two members are produced by ONE statement inside ONE read-only transaction and
+     * travel together for that reason. The view is what the caller renders and the revision is the
+     * precondition it must return on its next edit of this account, and pairing them is what stops a
+     * caller being handed one that describes a different state from the other.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the adapter used to obtain the revision by calling a second, read-only
+     * operation on the WRITE service after this one had already answered. At this datasource's
+     * read-committed isolation that is two snapshots, so a concurrent edit committing between them
+     * published a body from before it beside a revision naming the state after it -- and a caller echoing
+     * that revision on an {@code If-Match} was then told its precondition was current while holding a
+     * body that was not, which is exactly the silent overwrite the precondition exists to prevent. The
+     * revision now comes off the same composition row as the body.</p>
+     *
+     * <p>Assumptions: this is a service-layer carrier and NOT a published wire shape. Nothing serialises
+     * it -- the adapter unpacks it, putting the view in the body and the revision in an {@code ETag}
+     * header -- so it is declared here rather than added to the closed transfer-object inventory, which
+     * would describe it as something a client receives.</p>
+     *
+     * @param view the composed view carrying the account, its customer and both message channels; never
+     *     {@code null}
+     * @param revision the token both rows stand at, which the caller returns on its next edit of this
+     *     account; never {@code null} once the composition has both halves, and {@code null} on the
+     *     incomplete compositions this class never publishes
+     */
+    public record RevisionedAccountView(AccountViewResponse view, String revision) {
+    }
+
+    /**
+     * Reads the nine customer fields a neighbouring context renders on a screen.
+     *
+     * <p>Refactoring Rationale: this read exists because the pending-authorization detail screen had no
+     * operation that answers with those fields. Its client read them from the response of
+     * {@link #customerExists(long)}, whose contract carries no body at all, so the screen's name, address
+     * and telephone fields rendered as absent on every request and nothing failed while they did.</p>
+     *
+     * <p>Alternatives Considered: letting that consumer call {@link #readCustomer(long)} instead, which
+     * needs nothing new here. Rejected on least privilege: that read answers with the whole record and is
+     * gated on the customer-master authority, which is granted to no context precisely because it would
+     * hand a caller the national identifier, the government-issued identifier and the credit score of any
+     * customer. Serving nine fields under the narrower decision-read authority the consumer already holds
+     * is what keeps the escalation from happening.</p>
+     *
+     * <p>Assumptions: this method reads the SAME row {@link #readCustomer(long)} reads and applies a
+     * narrower projection to it, rather than issuing a narrower statement. The saving a projection-level
+     * query would make is one round trip's worth of columns from a row already located by primary key,
+     * and what it would cost is a second statement whose column list has to be kept in step with this
+     * projection by hand -- so the two could come to disagree about which fields the screen is entitled
+     * to, which is the disagreement this whole operation exists to remove.</p>
+     *
+     * <p>Trade-offs: an absent row is RAISED rather than returned empty, matching
+     * {@link #readCustomer(long)} rather than {@link #customerExists(long)}. This method promises a
+     * representation and there is no representation of a row that is not there; the consumer reads the 404
+     * as its own absent-customer outcome and renders the screen with the fields unpopulated, which is what
+     * it does today for a customer the master does not hold.</p>
+     *
+     * @param customerId the nine-digit customer identifier, the {@code long} rendering of the key
+     *     {@code CUST-ID} declares at L5 of {@code app/cpy/CVCUS01Y.cpy}
+     * @return the nine-field display projection, never {@code null}
+     * @throws NoSuchElementException if the customer master holds no such row, carrying the reference
+     *     sentence, which the shared advice renders as HTTP 404
+     */
+    @Transactional(readOnly = true)
+    public CustomerDisplayView readCustomerDisplay(long customerId) {
+        return this.customers.findById(customerId)
+                .map(this.customerMapper::toCustomerDisplayView)
+                .orElseThrow(() -> new NoSuchElementException(RETURN_NOT_FOUND_IN_CUSTOMER_MASTER));
     }
 
     /**
@@ -886,15 +956,20 @@ public class AccountViewService {
      *
      * @param accountId the account to resolve, the eleven-digit identifier {@code XREF-ACCT-ID} declares
      *     at L7 of {@code app/cpy/CVACT03Y.cpy}
-     * @return the account and customer the lowest-ordering cross-referenced card names, a
-     *     {@link CardXrefView}, never {@code null}
+     * @return the account, the customer and the card number the lowest-ordering cross-referenced card
+     *     names, a {@link CardXrefByAccountView}, never {@code null}
      * @throws NoSuchElementException if the account has no cross-referenced card, which the shared advice
      *     renders as HTTP 404
      */
     @Transactional(readOnly = true)
-    public CardXrefView resolveCardCrossReferenceByAccount(long accountId) {
+    public CardXrefByAccountView resolveCardCrossReferenceByAccount(long accountId) {
+        // WHY : Refactoring Rationale: the account-keyed operation answers with the WIDER projection,
+        //       which carries the card number the row resolved to. The narrower shape published the
+        //       account and the customer and withheld the one column the caller asked the question to
+        //       learn, so a consuming context had to issue a second, card-keyed call to discover the
+        //       value this row already held.
         return this.crossReferences.findFirstByAccountIdOrderByCardNumAsc(accountId)
-                .map(this.contextMapper::toCardXrefView)
+                .map(this.contextMapper::toCardXrefByAccountView)
                 // WHY : Refactoring Rationale: the raised message names NO identifier at all, where it
                 //       previously named the account and argued that an account identifier was
                 //       admissible because it "already travelled in the request". That argument is
@@ -977,8 +1052,7 @@ public class AccountViewService {
                         null, accountId, Limit.of(CARD_XREF_PAGE_SIZE + 1))
                 : cardXrefWindow(accountId, position, backward);
 
-        return cardXrefPage(window, backward && position != null, position != null, accountId,
-                subject);
+        return cardXrefPage(window, backward && position != null, accountId, subject);
     }
 
     /**
@@ -1015,18 +1089,14 @@ public class AccountViewService {
      * @param window the rows the statement returned, at most one more than a page holds
      * @param backward {@code true} when the window was read in descending order and must be reversed
      *     into presentation order
-     * @param resumed {@code true} when the request carried a cursor, which settles backward availability
-     *     on a forward walk: the cursor names a row the caller was already shown and the forward
-     *     predicate is strictly greater than it
      * @param accountId the account being walked, sealed into both boundary tokens so neither can
      *     reposition a walk of a different account
      * @param subject the validated caller the boundary tokens are sealed for
-     * @return the page envelope carrying the rows, both sealed boundaries and both availability
-     *     indicators, never {@code null}
+     * @return the page envelope carrying the rows, both sealed boundaries and the further-page
+     *     indicator, never {@code null}
      */
     private PageResponse<CardXrefResponse> cardXrefPage(
-            List<CardXref> window, boolean backward, boolean resumed, long accountId,
-            String subject) {
+            List<CardXref> window, boolean backward, long accountId, String subject) {
 
         List<CardXref> rows = new ArrayList<>(window);
         boolean more = rows.size() > CARD_XREF_PAGE_SIZE;
@@ -1052,16 +1122,15 @@ public class AccountViewService {
         // WHY : Assumptions: a backward page always reports a further page forward, because the set the
         //       caller stepped back from is itself ahead of this one. The reference makes the same
         //       unconditional claim on its backward path rather than probing for it.
-        // WHY : Refactoring Rationale: the mirror-image claim is NOT made unconditionally, and that
-        //       asymmetry is the fix. On a backward walk the surplus row is itself a row lying further
-        //       back, so it answers backward availability directly; on a forward walk the answer is
-        //       whether a cursor was supplied, so the OPENING page reports nothing behind it instead of
-        //       advertising an earlier page that would come back empty.
+        // WHY : Refactoring Rationale: no mirror-image claim is made in the backward direction, because
+        //       this envelope carries the backward POSITION and not a backward answer. The reference asks
+        //       that question of the terminal's own page ordinal rather than of the file, so the answer
+        //       belongs to the client that holds the ordinal, and the shared envelope stays at the four
+        //       members every consumer of it declares.
         return PageResponse.ofRows(items,
                 this.cursorToken.seal(cardXrefCursorBinding(accountId, subject, true), leading),
                 this.cursorToken.seal(cardXrefCursorBinding(accountId, subject, false), trailing),
-                backward || more,
-                backward ? more : resumed);
+                backward || more);
     }
 
     /**
@@ -1305,15 +1374,15 @@ public class AccountViewService {
      * renders and logs the original.</p>
      *
      * @param accountKey the account to compose the view for, the eleven-digit identifier
-     * @return the composed view, or the view the reference would have re-rendered when a read missed;
-     *     an {@link AccountViewResponse}, never {@code null}
+     * @return the composed view with its revision, or the view the reference would have re-rendered when
+     *     a read missed carrying no revision; a {@link RevisionedAccountView}, never {@code null}
      * @throws NoSuchElementException never raised from here, and propagated unchanged when the
      *     composition raises it
      * @throws IllegalStateException if the composition reaches the unclassifiable data scenario of
      *     L375 through L380, or if any other runtime failure escapes it, in which case the message
      *     carries the abend code and culprit of L935 and L922 and the original failure is the cause
      */
-    private AccountViewResponse readAccountUnderAbendHandler(long accountKey) {
+    private RevisionedAccountView readAccountUnderAbendHandler(long accountKey) {
         try {
             return readAccount(accountKey);
         } catch (NoSuchElementException | IllegalStateException diagnosed) {
@@ -1361,14 +1430,14 @@ public class AccountViewService {
      *
      * @param accountKey the account to compose the view for, the eleven-digit identifier the reference
      *     moves into the read key at L691
-     * @return the composed view when all three reads resolve, otherwise the view the reference would
-     *     have re-rendered, carrying the latched message; an {@link AccountViewResponse}, never
-     *     {@code null}
+     * @return the composed view with the revision its two rows stand at when all three reads resolve,
+     *     otherwise the view the reference would have re-rendered carrying the latched message and no
+     *     revision; a {@link RevisionedAccountView}, never {@code null}
      * @throws IllegalStateException if the located cross-reference row names no customer, which is a
      *     state the record layout has no encoding for and which the reference would reach as the
      *     unclassifiable data scenario of L375 through L380
      */
-    private AccountViewResponse readAccount(long accountKey) {
+    private RevisionedAccountView readAccount(long accountKey) {
         // WHY : Assumptions: the channel starts unset because the reference clears it once, at L278,
         //       before any branch runs, and the informational channel is cleared at L689 at the head
         //       of this very paragraph. Neither is a field on this class, so both are locals and one
@@ -1397,7 +1466,7 @@ public class AccountViewService {
         }
 
         if (accountFilterState.isError()) {
-            return unpopulatedView(accountKey, returnMessage);
+            return withoutRevision(unpopulatedView(accountKey, returnMessage));
         }
 
         // WHY : Assumptions: the value is taken directly rather than defensively, and the call is safe
@@ -1424,7 +1493,7 @@ public class AccountViewService {
         //       declared at L131 with L132. The comparison is what makes the gate govern, since the
         //       statement that would set that condition is commented out at L792.
         if (RETURN_NOT_FOUND_IN_ACCOUNT_MASTER.equals(returnMessage)) {
-            return unpopulatedView(accountKey, returnMessage);
+            return withoutRevision(unpopulatedView(accountKey, returnMessage));
         }
 
         if (customerKey == null) {
@@ -1453,15 +1522,40 @@ public class AccountViewService {
             //       because the reference's account region is guarded by a disjunction at L471 and
             //       L472 that the located account already satisfies through the read flag it sets at
             //       L788. Suppressing it here would withhold ten fields the screen shows.
-            return this.accountMapper.toAccountViewResponse(
-                    account.get(), null, INFO_PROMPT_FOR_INPUT, returnMessage);
+            return withoutRevision(this.accountMapper.toAccountViewResponse(
+                    account.get(), null, INFO_PROMPT_FOR_INPUT, returnMessage));
         }
 
-        return this.accountMapper.toAccountViewResponse(
-                account.get(),
-                this.customerMapper.toCustomerDetail(customer.get()),
-                INFO_PROMPT_FOR_INPUT,
-                returnMessage);
+        // WHY : Assumptions: the revision is derived from the SAME two rows the body is mapped from, so
+        //       the pair the caller receives cannot describe two different states. Both rows arrived on
+        //       one composition row from one statement, which is what makes the derivation meaningful --
+        //       deriving it from a second read would reintroduce the two-snapshot defect this carrier
+        //       exists to close.
+        // WHY : Assumptions: the derivation goes through AccountRevision rather than being written out
+        //       here, so this token and the one the write path compares cannot differ in format.
+        return new RevisionedAccountView(
+                this.accountMapper.toAccountViewResponse(
+                        account.get(),
+                        this.customerMapper.toCustomerDetail(customer.get()),
+                        INFO_PROMPT_FOR_INPUT,
+                        returnMessage),
+                AccountRevision.of(account.get(), customer.get()));
+    }
+
+    /**
+     * Pairs an incomplete composition with no revision.
+     *
+     * <p>Assumptions: a composition missing either master row has NO revision, and the absence is
+     * expressed as {@code null} rather than as an empty or sentinel token. A caller cannot use a
+     * precondition for rows that were not both located, and this class never publishes these
+     * compositions in any case -- {@link #readAccountView} raises on them -- so the field exists here
+     * only because the internal chain returns one carrier type on every arm.</p>
+     *
+     * @param view the re-rendered view the reference would have sent; must not be {@code null}
+     * @return the view carried with no revision, a {@link RevisionedAccountView}, never {@code null}
+     */
+    private static RevisionedAccountView withoutRevision(AccountViewResponse view) {
+        return new RevisionedAccountView(view, null);
     }
 
     /**

@@ -6,10 +6,20 @@
 #   the Python ETL package. On every push and pull request to the default branch
 #   (and on manual dispatch) it builds and tests the nine-module Maven reactor,
 #   enforces the Java and Python documentation gates that make the repository's
-#   explainability convention mechanical, asserts the reactor's named ArchUnit
-#   layering execution, validates the ETL distribution against its installed
-#   artifact, and proves every service Dockerfile builds -- WITHOUT publishing an
-#   image.
+#   explainability convention mechanical, runs the REPOSITORY-WIDE Rule 1 lexical
+#   gate over every language at once, asserts the reactor's named ArchUnit layering
+#   execution, validates the ETL distribution against its installed artifact, and
+#   proves every service Dockerfile builds -- WITHOUT publishing an image.
+#
+#   The lexical gate is the only step here whose reach is the whole repository
+#   rather than one tree. config/rule1/rule1_gate.py decides the two clauses of
+#   Rule 1 that no per-language linter decides -- that every rationale label is
+#   written in its one permitted form, and that a WHAT comment appears only in a
+#   file's leading header block -- and additionally holds
+#   docs/CODE_DOCUMENTATION_STANDARD.md to the gate configuration it describes.
+#   Assumptions: it is fail-closed and self-testing. It exposes no tolerance flag
+#   and no allow-list argument, and its `self-test` check proves both detectors
+#   still fire before their silence is read as a pass.
 #
 #   The word for the layering step is "asserts", not "invokes":
 #   services/common-lib/src/test/java/com/carddemo/common/architecture/LayeringRulesTest.java
@@ -34,7 +44,9 @@
 #   One deterministic pass/fail status, plus two uploaded report artifacts and two
 #   check-annotation surfaces. GATING -- any failure reddens the run: the Maven
 #   reactor build and unit tests; the Checkstyle documentation gate; the Ruff
-#   pydocstyle gate; the ETL distribution build/install; the ETL pytest run;
+#   pydocstyle gate; the Rule 1 lexical gate, including its self-test and its
+#   prose/configuration consistency check; the ETL distribution build/install;
+#   the ETL pytest run;
 #   every service image build; the ArchUnit layering execution asserted by step 4b,
 #   which fails the run on a violated boundary AND on a vanished one, because the
 #   execution carries `failIfNoTests` through an inherited profile in
@@ -74,8 +86,8 @@
 #     and every AWS interaction belong to the deployment workflow, so a
 #     compromise of any step here has no credential to read.
 #   - Assumptions: the sibling trees this workflow drives (services/**,
-#     config/checkstyle/**, data-migration/**) own their own tool and version
-#     pins -- the Spring Boot parent, the Checkstyle ruleset, the hash-locked
+#     config/checkstyle/**, config/rule1/**, data-migration/**) own their own tool
+#     and version pins -- the Spring Boot parent, the Checkstyle ruleset, the hash-locked
 #     Python closures and each Dockerfile's base images. This file invokes them
 #     and deliberately restates none of those pins, so a pin can never disagree
 #     between the build and the pipeline that runs it.
@@ -90,31 +102,48 @@ name: CardDemo Services CI
 # source on the *main* branch", which is why both triggers are scoped to `main`. workflow_dispatch
 # adds a manual entry point plus the image-build toggle documented under Parameters above.
 #
-# Assumptions: the four path filters below are the complete set of trees whose
-# change can invalidate a gate in this workflow -- services/** for the reactor,
-# config/checkstyle/** because the Java documentation gate reads its ruleset from
-# there rather than from the reactor, data-migration/** for the ETL package, and
-# this file itself so that editing the pipeline revalidates it under its own
-# rules. An over-narrow filter is the dangerous direction: it produces a green
-# pull request that never ran the owning gate, which reads as a pass but proves
-# nothing. Deliberately OUT: app/**, tests/**, scripts/** and samples/** are the
-# reference-only COBOL baseline and its parity-oracle suite, owned by
-# .github/workflows/tests.yml; including them here would run these gates against
-# trees they do not govern and duplicate that pipeline's authority.
+# Assumptions: the path filters below are the complete set of files whose change
+# can invalidate a gate in this workflow, and the set is wider than the trees the
+# gates read: services/** for the reactor, config/checkstyle/** because the Java
+# documentation gate reads its ruleset from there rather than from the reactor,
+# config/rule1/** because the lexical gate's own source and its self-test live
+# there, data-migration/** for the ETL package, this file itself so that editing
+# the pipeline revalidates it under its own rules, and the two PROSE AUTHORITIES --
+# docs/CODE_DOCUMENTATION_STANDARD.md and CONTRIBUTING.md.
+# Assumptions: those last two are triggers because they are AUTHORITATIVE over the
+# configuration rather than descriptive of it. The standard's own Conflicts section
+# says a disagreement between it and a linter is resolved by correcting the
+# configuration, and this workflow's consistency check asserts exactly that
+# agreement -- so a prose-only edit to either file can invalidate a gate here
+# without touching a line of code, and omitting them would let that edit reach the
+# default branch with no run at all.
+# Trade-offs: an over-narrow filter is the dangerous direction, because it produces
+# a green pull request that never ran the owning gate -- a pass that proves nothing.
+# The cost of the wider set is a full reactor run on a documentation-only commit,
+# which is accepted for that reason. Deliberately OUT: app/**, tests/**, scripts/**
+# and samples/** are the reference-only COBOL baseline and its parity-oracle suite,
+# owned by .github/workflows/tests.yml; including them here would run these gates
+# against trees they do not govern and duplicate that pipeline's authority.
 on:
   push:
     branches: [main]
     paths:
       - "services/**"
       - "config/checkstyle/**"
+      - "config/rule1/**"
       - "data-migration/**"
+      - "docs/CODE_DOCUMENTATION_STANDARD.md"
+      - "CONTRIBUTING.md"
       - ".github/workflows/services-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "services/**"
       - "config/checkstyle/**"
+      - "config/rule1/**"
       - "data-migration/**"
+      - "docs/CODE_DOCUMENTATION_STANDARD.md"
+      - "CONTRIBUTING.md"
       - ".github/workflows/services-ci.yml"
   workflow_dispatch:
     inputs:
@@ -175,12 +204,13 @@ jobs:
     # check runs or comment on pull requests would be reachable from that code, and
     # the write scopes are needed by exactly one step, an ADVISORY publisher that
     # only reads an uploaded artifact.
-    # Refactoring Rationale: the publisher therefore moved out of this job
-    # into `publish-java-reports` below, which runs no build step at all. An earlier
-    # revision granted `checks: write` and `pull-requests: write` here and relied on
-    # the publisher being the last step -- but step ordering is not an isolation
-    # boundary: every earlier step in the job already holds the job's whole token,
-    # so the two write scopes were reachable from Maven, from any plugin it
+    # Refactoring Rationale: the publisher lives in `publish-java-reports` below,
+    # which runs no build step at all, and it was moved there from this job for a
+    # reason a reader meeting the split should know. Alternatives Considered:
+    # granting `checks: write` and `pull-requests: write` here and relying on the
+    # publisher being the LAST step. Rejected -- step ordering is not an isolation
+    # boundary: every earlier step in a job already holds the job's whole token, so
+    # those two write scopes would be reachable from Maven, from any plugin it
     # resolved, and from every Dockerfile build. Splitting the job is what makes the
     # narrowing real rather than positional.
     permissions:
@@ -229,10 +259,12 @@ jobs:
       # Alternatives Considered: a mutable tag (CWE-1357). Pinned to an immutable full
       # commit SHA for the same supply-chain reason as checkout above; the trailing `# v5.7.0`
       # lets Dependabot bump it forward under review.
-      # WHY : Refactoring Rationale: this pin was v4.7.1, and the note here argued for STAYING on
-      # the v4 line so that hardening provenance would not "take on a major-version behavioural
-      # change at the same time". That argument is withdrawn, because a full SHA freezes the bundle
-      # it names and this particular bundle was vulnerable: the lock committed at
+      # WHY : Refactoring Rationale: this pin advanced from v4.7.1, and the move is
+      # recorded because a reader comparing it with an older workflow should know why.
+      # Alternatives Considered: staying on the v4 line, so that hardening provenance
+      # would not take on a major-version behavioural change at the same time.
+      # Rejected -- a full SHA freezes the bundle it names, and this particular bundle
+      # was vulnerable: the lock committed at
       # actions/setup-java@v4.7.1 resolves `form-data` 2.5.1 and 4.0.0, both below the 2.5.4/4.0.4
       # fix line of GHSA-fjxv-7rqg-78g4 (unsafe random boundary selection), reached through
       # `@azure/core-http` behind `@actions/cache`. The v5.0.0 release notes name the fix
@@ -331,15 +363,11 @@ jobs:
       # `architecture-rules-fail-if-absent` makes an empty selection fail rather than
       # pass, so the gate cannot report green on no tests.
       #
-      # Refactoring Rationale: this paragraph previously qualified that middle item
-      # as having a reach "narrower than its name suggests", because the rule class
-      # its include pattern names was "authored at a later index of the plan" and so
-      # "selects no test". That class has since landed, and step 4b's own rationale
-      # already records the same correction from the other side -- so this file held
-      # both the live description and the superseded one, forty lines apart. The
-      # stale half is the more expensive one to leave: it invites a reader to treat a
-      # green architecture result as meaningless and to remove the wiring that
-      # produces it.
+      # Assumptions: the middle item's reach is exactly what its name says, and this
+      # is stated because the opposite reading is the expensive one -- a reader who
+      # believed the architecture result meaningless would remove the wiring that
+      # produces it. Step 4b records the same property from the other side, against
+      # the class itself.
       #
       # Assumptions: `verify` reaches the integration tier, and that is why no
       # separate step invokes Failsafe. Failsafe binds `integration-test` and
@@ -351,16 +379,14 @@ jobs:
       # a repository test tier that silently does not run is the exact condition the
       # widening from `test` to `verify` was made to end.
       #
-      # Refactoring Rationale: this step ran `clean test`, and the reason recorded
-      # here was that `verify` additionally runs the Spring Boot `repackage` goal,
-      # which failed on every module declaring no application main class. That was
-      # true and is no longer: all eight services now declare an entry point, so
-      # `clean verify` completes for the whole reactor. Restoring it is not a
-      # preference -- stopping at `test` skipped two gates outright. `repackage`
-      # never ran, so CI never proved that the executable jar each Dockerfile copies
-      # can actually be produced; and Failsafe is bound to `integration-test`, which
-      # `test` does not reach, so the integration suite was structurally unreachable
-      # no matter how many `*IT` classes existed. The reactor now has real ones.
+      # Assumptions: the lifecycle is `clean verify` and NOT `clean test`, and the
+      # difference is two whole gates rather than a phase name. Stopping at `test`
+      # never runs the Spring Boot `repackage` goal, so nothing proves that the
+      # executable jar each Dockerfile copies can be produced at all; and Failsafe
+      # binds `integration-test`, which `test` does not reach, so every `*IT` class in
+      # the reactor would be structurally unreachable however many of them exist. All
+      # eight services declare an application main class, so `repackage` completes for
+      # the whole reactor.
       # Alternatives Considered: keeping `test` and adding a separate `package` step,
       # or running `verify` with `-Dmaven.test.failure.ignore` or a skipped
       # repackage. All three were rejected: the first re-resolves and re-runs the
@@ -485,6 +511,113 @@ jobs:
         shell: bash
         run: mvn -B --no-transfer-progress -f services/pom.xml test-compile surefire:test@architecture-rules
 
+      # Step 4c: prove the database trust-anchor contract holds across the four
+      # places that state it. GATING, and it exists because the failure it detects
+      # was invisible to every other gate in this repository: the reactor built, all
+      # eight images built, Checkstyle passed, `terraform validate` passed and
+      # `terraform plan` succeeded while every service's JDBC URL named a certificate
+      # file that no image created. pgjdbc opens the configured sslrootcert before it
+      # opens a socket, so the first thing that would have observed it is a task in a
+      # deployed environment failing to connect.
+      #
+      # Assumptions: this check reads FILES and needs no Docker, so it runs even on a
+      # diagnostics-only dispatch with build_images false. The complementary
+      # assertion -- that the file is actually present IN the built image -- is made
+      # inside the build loop below, where an image exists to inspect.
+      # Alternatives Considered: asserting only that each Dockerfile mentions the
+      # bundle. Rejected because the defect being prevented is disagreement between
+      # four independently edited files, not absence from one of them; a mention that
+      # named a different path would satisfy the weaker check and still ship an
+      # unusable image.
+      - name: Verify the database trust-anchor contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'ANCHOR'
+          """Assert every statement of the database trust-anchor path agrees.
+
+          Parameters:
+              None. The eight service names and the two literal paths are spelled out
+              below, because each is a contract term rather than a discovered value.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If a service's application.yml, its Dockerfile or either
+                  environment root names a different path, if a Dockerfile does not
+                  install the bundle at all, or if the two pinned bundle digests in the
+                  repository disagree.
+              OSError: If any of the read paths is absent, which is a moved file rather
+                  than a contract defect and is left to surface as itself.
+          """
+
+          import re
+          from pathlib import Path
+
+          SERVICES = [
+              "auth-service",
+              "account-service",
+              "card-service",
+              "transaction-service",
+              "reference-service",
+              "batch-service",
+              "authorization-service",
+              "reporting-service",
+          ]
+          SERVICE_ANCHOR = "/etc/ssl/certs/carddemo-rds-ca-bundle.pem"
+          ETL_ANCHOR = "/etc/ssl/certs/aws-rds-global-bundle.pem"
+          SCRATCH = "/tmp/carddemo-rds-ca-bundle.pem"
+
+          for service in SERVICES:
+              config = Path(f"services/{service}/src/main/resources/application.yml").read_text()
+              assert f"sslrootcert: ${{CARDDEMO_DB_SSL_ROOT_CERT:{SERVICE_ANCHOR}}}" in config, (
+                  f"{service}: application.yml must default sslrootcert to {SERVICE_ANCHOR}"
+              )
+
+              dockerfile = Path(f"services/{service}/Dockerfile").read_text()
+              assert "COPY config/docker/install-rds-trust-anchor.sh" in dockerfile, (
+                  f"{service}: the build stage must copy the shared trust-anchor installer"
+              )
+              assert f"install-rds-trust-anchor.sh {SCRATCH}" in dockerfile, (
+                  f"{service}: the build stage must run the installer against {SCRATCH}"
+              )
+              # Assumptions: the runtime COPY is matched across a line continuation,
+              #   because the instruction is wrapped for width and a single-line pattern
+              #   would silently stop matching the first time it is reformatted.
+              assert re.search(
+                  r"COPY --from=build %s \\\n\s+%s" % (re.escape(SCRATCH), re.escape(SERVICE_ANCHOR)),
+                  dockerfile,
+              ), f"{service}: the runtime stage must copy the verified bundle to {SERVICE_ANCHOR}"
+
+          for environment in ("dev", "prod"):
+              root = Path(f"infra/envs/{environment}/main.tf").read_text()
+              assert f'CARDDEMO_DB_SSL_ROOT_CERT = "{SERVICE_ANCHOR}"' in root, (
+                  f"{environment}: the service workloads must be given {SERVICE_ANCHOR}"
+              )
+              assert f'CARDDEMO_DB_SSL_ROOT_CERT = "{ETL_ANCHOR}"' in root, (
+                  f"{environment}: data-migration must be given {ETL_ANCHOR}, which is where"
+                  " its own image installs the bundle"
+              )
+
+          # WHY: the two build contexts are disjoint -- config/docker is not inside
+          #   data-migration/ -- so the ETL image cannot share the installer script and
+          #   pins the same bundle itself. Two copies of one digest is exactly what
+          #   drifts, so they are asserted equal here rather than trusted to agree.
+          installer = Path("config/docker/install-rds-trust-anchor.sh").read_text()
+          etl_image = Path("data-migration/Dockerfile").read_text()
+          service_digest = re.search(r'EXPECTED_SHA256="([0-9a-f]{64})"', installer)
+          etl_digest = re.search(r'EXPECTED = "([0-9a-f]{64})"', etl_image)
+          assert service_digest, "config/docker/install-rds-trust-anchor.sh: no pinned digest found"
+          assert etl_digest, "data-migration/Dockerfile: no pinned digest found"
+          assert service_digest.group(1) == etl_digest.group(1), (
+              "the service images and the ETL image pin DIFFERENT Aurora bundle digests: "
+              f"{service_digest.group(1)} versus {etl_digest.group(1)}. AWS publishes one "
+              "bundle; refreshing one pin without the other ships two different trust "
+              "anchors from one commit."
+          )
+
+          print(f"Database trust-anchor contract: PASS ({len(SERVICES)} services)")
+          ANCHOR
+
       # Step 5: prove every service image definition still builds. VALIDATION
       # ONLY -- nothing is pushed, no registry is contacted and no credential is
       # used, which is why this step needs no secret and no AWS permission at all.
@@ -533,10 +666,52 @@ jobs:
             exit 1
           fi
           echo "[ci-services] validating all ${#dockerfiles[@]} service image definitions"
+
+          # WHY : Assumptions: the digest is read from the installer script rather than
+          #       written here, so this assertion cannot drift from the pin it checks. The
+          #       preceding step already proved the ETL image pins the same value.
+          expected_anchor_digest="$(
+            sed -n 's/^EXPECTED_SHA256="\([0-9a-f]\{64\}\)"$/\1/p' \
+              config/docker/install-rds-trust-anchor.sh
+          )"
+          if [ -z "$expected_anchor_digest" ]; then
+            echo "[ci-services] could not read the pinned Aurora bundle digest from" >&2
+            echo "[ci-services] config/docker/install-rds-trust-anchor.sh" >&2
+            exit 1
+          fi
+
           for dockerfile in "${dockerfiles[@]}"; do
             service="$(basename "$(dirname "$dockerfile")")"
+            image="carddemo-ci/${service}:${GITHUB_SHA}"
             echo "[ci-services] building ${service} from ${dockerfile}"
-            docker build --file "$dockerfile" --tag "carddemo-ci/${service}:${GITHUB_SHA}" .
+            docker build --file "$dockerfile" --tag "$image" .
+
+            # GATING: an image-CONTENT assertion, not a build assertion. A Dockerfile
+            # that builds is not evidence that the shipped filesystem carries what the
+            # runtime configuration names, and the specific regression this prevents
+            # already happened: every service defaulted sslrootcert to a path no image
+            # created, and the eight builds stayed green because nothing read the image
+            # back. The check runs as the image's own unprivileged user, so it also
+            # proves the file is readable by the process that will open it.
+            # Alternatives Considered: asserting only that the path exists. Rejected --
+            # an empty file, an HTML error page or a DER blob would all satisfy it and
+            # none is usable by pgjdbc, so the digest and a PEM block are asserted too.
+            echo "[ci-services] asserting the database trust anchor inside ${service}"
+            docker run --rm --entrypoint /usr/bin/sh "$image" -c '
+              set -eu
+              anchor=/etc/ssl/certs/carddemo-rds-ca-bundle.pem
+              test -s "$anchor" || { echo "missing or empty: $anchor" >&2; exit 1; }
+              grep -q -- "-----BEGIN CERTIFICATE-----" "$anchor" ||
+                { echo "no PEM certificate block in $anchor" >&2; exit 1; }
+              actual="$(sha256sum "$anchor" | cut -d " " -f 1)"
+              [ "$actual" = "'"$expected_anchor_digest"'" ] || {
+                echo "trust-anchor digest mismatch in the built image" >&2
+                echo "  expected: '"$expected_anchor_digest"'" >&2
+                echo "  actual:   $actual" >&2
+                exit 1
+              }
+              echo "trust anchor verified: $anchor ($(id -un))"
+            '
           done
 
       # Step 6: retain the machine-readable evidence for audit.
@@ -616,11 +791,12 @@ jobs:
       # exist to prevent.
       # Refactoring Rationale: advanced from v4.1.8, whose bundle carried the
       # vulnerable `form-data` 4.0.0; the measurement is recorded once at the
-      # setup-java pin above. The previous note corroborated its SHA against the
-      # SHA/tag pairing used by two large public workflow sets, which established
-      # that the pin named the release it claimed to -- and could not establish
-      # anything about what that release BUNDLED. Reading the release's own lock is
-      # what closed the question, and it is the check this pin is now held to.
+      # setup-java pin above. Alternatives Considered: corroborating the SHA against
+      # the SHA/tag pairing used by two large public workflow sets. Rejected as
+      # sufficient -- that establishes only that the pin names the release it claims
+      # to, and says nothing about what that release BUNDLED, which is the property
+      # the vulnerability turns on. Reading the release's own lock is the check this
+      # pin is held to.
       # Assumptions: v8 changes two defaults in this action's favour and neither
       # affects the inputs below. A digest mismatch on the downloaded artifact now
       # FAILS the step instead of logging a warning, which is the behaviour this
@@ -670,6 +846,90 @@ jobs:
             java-reports/*/target/failsafe-reports/*.xml
           check_name: CardDemo Services Test Results
           fail_on_failure: false
+
+  # Assumptions: the lexical gate gets a job of its own rather than a step inside
+  # either job above, and the reason is scope. It reads the WHOLE repository -- Java,
+  # TypeScript, Python, HCL, SQL, YAML, Dockerfiles and Markdown -- so hanging it
+  # under a job named for one language would misreport where a failure lives, and a
+  # reader auditing "which step enforces the label form?" would have to guess. It
+  # needs no `needs:` edge because it consumes nothing either job produces.
+  # Trade-offs: one extra runner job per run, in exchange for a failure that names
+  # itself. Accepted because the job installs nothing and finishes in seconds -- the
+  # gate imports only the standard library.
+  rule1-documentation-gate:
+    name: Enforce the Rule 1 rationale-label and statement-WHAT gate
+    # Trade-offs: pinned for the same reason as every other job here -- the runner
+    # image is reviewed rather than allowed to drift with `ubuntu-latest`.
+    runs-on: ubuntu-24.04
+    # Trade-offs: a low ceiling, because this job walks the tree once and runs no
+    # build. Reaching it means the walk is stuck, never that the repository grew.
+    timeout-minutes: 15
+    # Assumptions: least privilege -- `contents: read` and nothing else. This job
+    # executes committed Python over committed files and publishes no report, so it
+    # has no use for a write scope and is granted none.
+    permissions:
+      contents: read
+
+    steps:
+      # Step 1: obtain the reviewed revision, with the same two hardening choices
+      # every checkout in this file makes -- an immutable full-SHA pin (CWE-1357) and
+      # `persist-credentials: false` (CWE-522), each for the reason recorded at the
+      # Java job's checkout above.
+      - name: Check out the reviewed revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # Step 2: provide the interpreter, pinned rather than taken from the image.
+      # Alternatives Considered: using the runner image's own `python3`. Rejected --
+      # the gate would then depend on whichever interpreter the image happens to ship,
+      # which is exactly the silent drift the pinned images and pinned actions in this
+      # file exist to prevent. 3.13 matches the ETL job below and the repository's
+      # COBOL harness, so one interpreter version governs every Python this pipeline
+      # runs. Immutable full-SHA pin, same rationale as the pins above.
+      - name: Configure Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      # Step 3: the gate itself, run over the whole tree.
+      # GATING and FAIL-CLOSED: no `continue-on-error`, no `|| true` and no tolerance
+      # flag. The script exposes none either -- it has no `--fix` and no allow-list
+      # argument, so a finding is fixed in the file that carries it.
+      # Assumptions: this step closes the two clauses of Rule 1 that no language
+      # linter in this repository decides -- the one permitted written form of a
+      # rationale label, and the prohibition on a statement-level WHAT comment. The
+      # standard's enforcement summary records which obligations remain with review
+      # BECAUSE a lexical gate decides form and never truth.
+      # Assumptions: the `self-test` and `consistency` checks run in the same
+      # invocation and are not decoration. `self-test` proves both detectors still
+      # fire before their silence is believed, which is the anti-vacuity guard the
+      # ArchUnit execution in step 4b has for the same reason; `consistency` holds
+      # docs/CODE_DOCUMENTATION_STANDARD.md to the gate configuration it describes,
+      # so a claim whose mechanism was deleted or renamed fails here instead of being
+      # believed. That check is why this workflow's path filters name the standard and
+      # CONTRIBUTING.md.
+      - name: Run the Rule 1 lexical and consistency gate
+        shell: bash
+        run: python config/rule1/rule1_gate.py
+
+      # Step 4: hold the gate's own source to the house Python style.
+      # Assumptions: the ETL's Ruff configuration is reused rather than a second one
+      # added, because two Ruff configurations in one repository drift apart and then
+      # one of them is wrong about the house style. Ruff is installed at the version
+      # data-migration/requirements-dev.txt pins, so this step and the ETL job below
+      # lint with the same release.
+      # Trade-offs: a bare `pip install` of one pinned package rather than the
+      # hash-verified closure the ETL job installs. Accepted because this step needs
+      # only the linter, and the version is pinned here to the same release; the
+      # hash-verified path stays where the closure actually matters.
+      - name: Lint and format-check the gate itself
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "ruff==0.16.0"
+          ruff check --config data-migration/pyproject.toml config/rule1
+          ruff format --check --config data-migration/pyproject.toml config/rule1
 
   # Assumptions: no `needs:` on this job -- the ETL package consumes nothing the Java
   # reactor produces -- it is a separate distribution with its own dependency closure -- so making
@@ -728,10 +988,10 @@ jobs:
       # that rounds or decodes differently produces plausible numbers that are quietly wrong.
       # Alternatives Considered: a mutable tag (CWE-1357). Immutable full-SHA pin.
       # Refactoring Rationale: advanced from v5.3.0, whose bundle carried the vulnerable
-      # `form-data` 2.5.1 and 4.0.0. The note here previously argued for keeping the v5 line so
-      # provenance would harden "without absorbing a major-version runtime change"; that reasoning
-      # is withdrawn for the reason recorded once at the setup-java pin above -- a full SHA freezes
-      # whatever the named release bundled, so staying put preserved the defect precisely.
+      # `form-data` 2.5.1 and 4.0.0. Alternatives Considered: keeping the v5 line so provenance
+      # would harden without absorbing a major-version runtime change. Rejected for the reason
+      # recorded once at the setup-java pin above -- a full SHA freezes whatever the named release
+      # bundled, so staying put would preserve the defect precisely.
       # Assumptions: the only input this step sets, `python-version`, is unchanged by the two
       # major moves. v7 removes the `pip-install` input, which this step never set, and drops
       # end-of-life interpreter versions, which does not touch 3.13 -- the version the ETL image

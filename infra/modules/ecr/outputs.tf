@@ -50,13 +50,18 @@
 #   - An output naming a key absent from `var.repository_names` would fail at
 #     plan time with an invalid-index error. That is precisely why all three
 #     maps below are PROJECTED from `aws_ecr_repository.this` with a `for`
-#     expression rather than listing the ten artifacts a second time: a key
+#     expression rather than listing the eleven artifacts a second time: a key
 #     present in an output and absent from the resource cannot be written at
 #     all, so the failure class is removed instead of guarded against.
 #   - `registry_id` would fail at plan time with an index-out-of-range error
 #     against an empty repository collection. It cannot be empty: variables.tf
-#     asserts both a non-empty set and a length of exactly ten before any
+#     asserts both a non-empty set and a length of exactly ELEVEN before any
 #     resource is touched. The dependency is recorded on that output.
+#     Refactoring Rationale: this said ten, which understated the assertion it
+#     cites. The number matters here because it is offered as the proof that the
+#     collection is non-empty, so a reader checking that proof against
+#     variables.tf would have found a validation demanding a different count and
+#     had no way to tell which statement was the stale one.
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: the baseline had no machine-readable inventory of
@@ -210,7 +215,7 @@ output "registry_id" {
   #       the choice deterministic rather than incidental. It is safe only
   #       because the collection is never empty, and that is guaranteed
   #       upstream: variables.tf asserts a non-empty set and a length of
-  #       exactly ten at plan time, before any resource is touched.
+  #       exactly ELEVEN at plan time, before any resource is touched.
   value = values(aws_ecr_repository.this)[0].registry_id
 }
 

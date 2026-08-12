@@ -241,6 +241,43 @@
     </dependency>
 
     <!--
+     `RethrowingDigestErrorHandler`, in the one package
+     `com.carddemo.common.messaging.listener`, implements the queue starter's
+     own error handler interface and takes a Spring messaging Message, so the
+     starter's listener artifact must sit on THIS module's compile classpath.
+     The library artifact is named rather than the starter, because this module
+     needs the two types only and not the auto configuration a starter brings.
+
+     WHY the handler is shared at all: the pinned starter's error handler stage
+     RECOVERS from a failure, so a handler that returns normally leaves the
+     pipeline result successful and the message is DELETED rather than
+     redelivered. Three per service copies of a control with that property is
+     three chances for one to be edited into swallowing a failure; one copy is
+     negative tested once.
+
+     Alternatives Considered: plain `compile` scope, rejected because it would
+     push an SQS client transitively onto the four services that own no queue
+     at all, which is the same boundary the four starters above are optional to
+     preserve. It differs from the `ssm` dependency further down, which is
+     deliberately NOT optional: forgetting that one would leave a fail closed
+     write gate silently absent, whereas forgetting this one is a COMPILATION
+     failure in the consuming service, since that service's own listener
+     configuration is already written against the same starter types. A loud
+     failure needs no defensive non optional declaration.
+
+     Assumptions: four service modules declare
+     io.awspring.cloud:spring-cloud-aws-starter-sqs today, and those four are
+     the ones that can register this handler. No `<version>` is declared: the
+     aggregator imports io.awspring.cloud:spring-cloud-aws-dependencies in its
+     `dependencyManagement`, so the version resolves from that single pin.
+    -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-sqs</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!--
      `OnlineWriteGate` reads the one Parameter Store entry the nightly batch
      state machine toggles around its write window, so this module needs a
      Systems Manager client on its compile classpath. Until this dependency
@@ -489,6 +526,37 @@
     <dependency>
       <groupId>com.tngtech.archunit</groupId>
       <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!--
+     TEST SCOPE ONLY. `RethrowingDigestErrorHandlerTest` asserts the one
+     framework contract the handler's whole registration strategy rests on:
+     that the queue starter's auto configuration still takes an error handler
+     FROM THE CONTEXT and installs it on the listener container factory it
+     builds. Three services publish that handler as a bean and none of them
+     touches the factory, so if that parameter were ever withdrawn upstream the
+     bean would simply stop being installed, the framework's own full throwable
+     record would return in its place, and nothing anywhere would fail.
+
+     Alternatives Considered: asserting the same contract inside one of the
+     three consuming services, each of which already has this artifact through
+     the starter. Rejected because the contract belongs to the shared handler
+     rather than to any one service, and putting it in one of the three would
+     leave the other two depending on a guard that lives somewhere arbitrary
+     and could be deleted with that service.
+
+     Assumptions: `test` scope is not transitive, so this reaches no consumer,
+     and the test jar this module publishes carries only the layering rules
+     into the services because Surefire's scan is filtered to that one simple
+     name. No `<version>` is declared: the aggregator imports
+     io.awspring.cloud:spring-cloud-aws-dependencies, which manages this
+     artifact id, so it resolves from the same single pin as the sqs artifact
+     above.
+    -->
+    <dependency>
+      <groupId>io.awspring.cloud</groupId>
+      <artifactId>spring-cloud-aws-autoconfigure</artifactId>
       <scope>test</scope>
     </dependency>
 

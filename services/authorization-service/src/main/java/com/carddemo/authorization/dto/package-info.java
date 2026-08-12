@@ -12,19 +12,27 @@
 /**
  * Request and response payload types for the pending credit-card authorization context.
  *
- * <h2>Target contract, and the tree state at the checkpoint that authored it</h2>
+ * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Assumptions: every type name below describes this package's <b>target contract</b> as the
- * migration plan assigns it, not the set of files present beside this one. At the checkpoint that
- * authored this charter the directory held this file alone, so each type named below was
- * <b>planned</b> rather than missing; all eleven have since landed. The counts attached to the COBOL
- * sources are different in kind: those are measurements taken from the reference tree, and each names
- * the file and the line range it was taken from so that any reader can re-take it.</p>
+ * <p>Twelve compilation units sit in this directory: this charter and the eleven payload types named
+ * below. Every type name and count here is a measurement of that directory, and the marker line is
+ * re-measured on every build by
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
+ * so a twelfth type arriving without an entry fails the build:</p>
+ *
+ * <pre>
+ * this directory: 12 java files = 11 classes + 1 charter
+ * </pre>
+ *
+ * <p>Assumptions: the counts attached to the COBOL sources below are different in kind from that one.
+ * Those are measurements taken from the reference tree, and each names the file and the line range it
+ * was taken from so that any reader can re-take it.</p>
  *
  * <h2>Which type is authoritative for which edge</h2>
  *
- * <p>Refactoring Rationale: this section exists because the package holds two types for each of two
- * payloads and an earlier state of it did not say which was which. The rule is one sentence:
+ * <p>Assumptions: this section exists because the package holds two types for each of two payloads,
+ * so which of the pair is authoritative for which edge has to be stated rather than inferred. The rule
+ * is one sentence:
  * <b>{@code src/main/resources/openapi/authorization-api.yaml} is the contract of record for the HTTP
  * edge, and the four {@code ...View} types plus {@code FraudMarkRequest} and {@code FraudMarkResponse}
  * below are its Java realisation.</b> The two symbolic-map projections are the record of what the 3270

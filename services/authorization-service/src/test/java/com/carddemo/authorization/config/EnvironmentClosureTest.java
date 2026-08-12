@@ -102,7 +102,7 @@ class EnvironmentClosureTest {
             // -- which is why the roots gate it on a pair and infra/modules/ecs-service asserts that pair
             // biconditionally.
             //
-            // WHY the name carries the caller (Refactoring Rationale): this entry read
+            // Refactoring Rationale: the name carries the caller. This entry read
             // CARDDEMO_INTERNAL_IDENTITY_SIGNING_KEY while ONE key was injected into three workloads --
             // this service, transaction-service and account-service. That shape made the two callers
             // mutually impersonating: either could mint a token bearing the other's subject, because with
@@ -346,7 +346,7 @@ class EnvironmentClosureTest {
                 .contains("CARDDEMO_MESSAGING_REPLY_QUEUE_ALLOWLIST")
                 .contains("CARDDEMO_MESSAGING_HMAC_KEY")
                 .contains("CARDDEMO_INTERNAL_IDENTITY_AUTHORIZATION_SIGNING_KEY")
-                // WHY assert the undifferentiated name is absent (Trade-offs): admission of the per-caller
+                // Trade-offs: the undifferentiated name is asserted absent. Admission of the per-caller
                 // name does not by itself prevent the shared name being re-added alongside it, and a module
                 // admitting both would let a root inject one key into every caller again without failing
                 // any assertion. Requiring the absence of the superseded name closes that path. The two
