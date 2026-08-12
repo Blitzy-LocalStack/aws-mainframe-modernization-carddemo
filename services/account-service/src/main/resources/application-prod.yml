@@ -40,19 +40,58 @@
 #   being a rehearsal for prod, which is the only reason to have a dev
 #   environment at all.
 #
-#   Four of the ten values below RESTATE the base value rather than changing it,
+#   SEVEN of the ten values below RESTATE the base value rather than changing it,
 #   and that is deliberate in each case: restating a value is what makes a later
 #   broader edit - to the base document, or to a dev value read as if it applied
 #   everywhere - unable to move production without a visible diff in this file.
-#   The four are the acquisition timeout, the two SQS listener numbers and the
-#   bind-parameter level. Each records that reason at its own key. The six that
-#   genuinely change are the pool ceiling, the idle floor, the root level, the
-#   project package level, the SQS listener level and the statement level.
+#   The seven are the acquisition timeout, the two SQS listener numbers, the
+#   project package level, the SQS listener level, the statement level and the
+#   bind-parameter level. Each records that reason at its own key. Only THREE
+#   values here differ from the base document at all: the pool ceiling, the idle
+#   floor and the root level.
+#
+#   Read against application-dev.yml instead of against the base, the picture
+#   inverts: NINE of the ten differ from dev, and the single exception is the
+#   bind-parameter level, which is WARN in both because it is the one value no
+#   environment may ever raise. That asymmetry is the point of the file. Prod
+#   diverges from dev on nine axes while diverging from the base on three,
+#   because dev is the profile that moves values away from the fleet default and
+#   prod is largely the profile that holds them there on purpose.
 #
 #   No endpoint, credential, identifier, queue name, region, account number or
-#   bucket appears below, and no stand-in for one. Every such value stays an
-#   unresolved placeholder in application.yml and is injected by the platform at
-#   deployment.
+#   bucket appears below, and no stand-in for one - not in a value, not in a
+#   placeholder default, and not in a comment example. Every such value stays an
+#   unresolved placeholder in application.yml, which resolves it from Systems
+#   Manager Parameter Store and Secrets Manager at deployment, and the credentials
+#   themselves are generated at apply time rather than authored. The baseline set
+#   the same precedent: app/app-vsam-mq/cbl/COACCT01.cbl declares `01 QUEUE-INFO.`
+#   at physical line 92 and its four PIC X(48) queue-name fields at physical lines
+#   93 to 96, and every one of them is VALUE SPACES, filled at run time rather
+#   than compiled in.
+#
+#   What CANNOT be used to validate a value here, stated so nobody looks for it:
+#   this context has NO golden-master parity oracle. tests/README.md records at
+#   its physical lines 83 to 85 that the online CO* CICS programs cannot run
+#   end-to-end without a CICS runtime, which the runner does not have, and its
+#   section 13 of business rules asserted verbatim - beginning at physical line
+#   553 - governs CBTRN02C, CBACT04C and the transaction-category-balance branch
+#   only, none of which belongs to this deployable. Every number below is
+#   therefore justified from a repository artifact that can be read, and never
+#   from a parity run that does not exist.
+#
+#   Two properties of the target that this file's log levels protect are
+#   DIVERGENCES from the baseline rather than ports of it, and the distinction
+#   matters for how the prohibitions below are read. All four indexed files this
+#   context replaces were defined with RECOVERY(NONE) beside FWDRECOVLOG(NO) -
+#   app/csd/CARDDEMO.CSD physical lines 9, 46, 59 and 72 - with JOURNAL(NO) at
+#   physical lines 7, 44, 57 and 70, and all four were read at
+#   READINTEG(UNCOMMITTED), which is weaker than the READ COMMITTED the base
+#   document pins. The baseline stored its records unencrypted and read them
+#   uncommitted; the target encrypts at rest under a managed key, takes automated
+#   backups and reads at the stronger level. Those divergences are deliberate and
+#   documented, and the two logger pins at the foot of this file exist so that a
+#   diagnostic raised in production cannot quietly undo the encryption half of
+#   them by copying decrypted values into log storage.
 #
 # Parameters:
 #   Each property key below is the YAML analogue of a parameter, and each one
@@ -101,7 +140,22 @@
 #      connection, after the acquisition timeout below elapses - not as a startup
 #      failure. Raising the listener concurrency above the pool ceiling is the
 #      specific way to cause it, which is why the two numbers are chosen together.
-#   3. Silent no-op from a misspelling. Spring ignores an unknown property rather
+#   3. Exhaustion of the CLUSTER's connection allowance rather than this task's
+#      pool, which is the failure mode unique to production and the one this file
+#      cannot detect on its own. The quantity that has to fit the cluster is the
+#      pool ceiling MULTIPLIED BY the task count, and the multiplier is the
+#      autoscaled maximum rather than the desired count, so the figure to reason
+#      about is four times the ceiling below and not one times it - the arithmetic
+#      is worked through, with its sources, on maximum-pool-size. It surfaces the
+#      same way as item 2, as an acquisition timeout, which is exactly why the two
+#      are easy to confuse: the difference is that LOWERING the ceiling relieves
+#      this one while RAISING it relieves item 2, so the two pull in opposite
+#      directions and a reader who mistakes one for the other tunes the wrong way.
+#      Reaching it needs no fault, only
+#      simultaneous scale-out across the fleet, and the cluster-wide budget it is
+#      measured against is derived in infra/envs/prod/main.tf because that is the
+#      only place that knows both factors.
+#   4. Silent no-op from a misspelling. Spring ignores an unknown property rather
 #      than reporting it, so a typo here does not fail startup - it leaves the
 #      base value in force and the intended change never happens. In production
 #      that silence is the whole risk this file carries, because two of the values
@@ -110,26 +164,56 @@
 #      pinning it down. That is why both of those loggers are restated here
 #      explicitly rather than inherited, and why each names what it prevents.
 #
-# WHY (non-obvious design decisions):
+# Non-obvious design decisions:
 #   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
 #     values and Exceptions on a module entry point. YAML has no docstring
 #     construct, so this header block is the module-entry-point equivalent, and
 #     the convention it follows is docs/CODE_DOCUMENTATION_STANDARD.md. That
-#     standard also fixes the comment form used below: a statement-level WHAT
+#     standard also settles the comment form used below: a statement-level WHAT
 #     comment is forbidden in a configuration file because it restates the key it
-#     sits on, so every key below carries a labelled WHY rationale and nothing
-#     else - one category name, the reason, and what differs under the
-#     alternative. A file-header WHAT is the documented exception, because this
-#     header is the docstring analogue for a format that has none.
-#   - Assumptions: no linter in this project reads this file.
-#     config/checkstyle/checkstyle.xml narrows itself to fileExtensions="java",
-#     and the standard records the same absence of a mechanical gate for YAML, so
-#     the obligation rests on that written standard and on review.
+#     sits on, so every key below carries one labelled rationale and nothing else
+#     - one category name, the reason, and what differs under the alternative. A
+#     file-header WHAT is the documented exception, because this header is the
+#     docstring analogue for a format that has none.
+#   - Trade-offs: this heading is spelled without the marker that opens every
+#     rationale below, so that a search for that marker returns the per-key
+#     rationales and nothing else. The standard publishes two header spellings -
+#     one at its physical line 767 and one at its physical line 893 - and the
+#     one used here is the first. The cost is that this file's heading differs by
+#     three words from the sibling profile's; what it buys is that the marker
+#     stays unambiguous as a marker rather than doubling as a section title.
+#   - Assumptions: no linter in this project reads this file. The only
+#     documentation gate in the Java build is Checkstyle, and
+#     config/checkstyle/checkstyle.xml narrows itself with a fileExtensions
+#     property of "java" at its physical line 209, so it never sees a YAML
+#     document; the standard records the same absence of a mechanical gate for
+#     YAML. The obligation therefore rests on that written standard and on review,
+#     and no comment in this file claims a gate enforces something it does not.
+#   - Refactoring Rationale: three claims this header previously made were wrong,
+#     and each is recorded rather than quietly replaced, because a reader who had
+#     relied on any of them would otherwise have no way to know it had moved.
+#     First, the accounting above said four values restate the base and six change
+#     it, naming the project package level, the SQS listener level and the
+#     statement level among the six. All three of those in fact HOLD their base
+#     value, so the true split is seven and three. That error mattered in a
+#     specific way: it told a reader that six values here are environment-specific
+#     when only three are, which is exactly the impression that invites someone to
+#     "align" a value that was deliberately identical. Second, the retention note
+#     attributed this service's log group to infra/modules/observability; the group
+#     is created by infra/modules/ecs-service beside the service definition, which
+#     that module states explicitly, so a reader following the old pointer would
+#     have searched the wrong module for a value that was never there. Third, the
+#     Checkstyle note described the narrowing imprecisely; it now names the actual
+#     construct and its line, because a claim about a gate is the last place to be
+#     approximate.
 #   - Assumptions: production capacity has a NON-ZERO minimum, so the cluster
-#     never pauses. That single difference from dev is what justifies both the
-#     larger pool and the shorter acquisition timeout below, and it is why the
-#     idle floor is held above zero here while dev takes it to zero; neither
-#     number would be right against a cluster that sleeps.
+#     never pauses - infra/envs/prod/terraform.tfvars sets aurora_min_capacity to
+#     2 where the dev root sets it to 0. That single difference is what justifies
+#     all three Hikari numbers below and not just one of them: it is why the pool
+#     is wider, why the idle floor is held above zero where dev takes it to zero,
+#     and why the acquisition timeout is SHORTER here than in dev rather than
+#     longer. None of the three would be right against a cluster that sleeps,
+#     which is why dev changes all three rather than scaling one down alone.
 #   - Trade-offs: nothing here re-enables a diagnostic the base document
 #     suppresses. The two that would be tempting to raise during an incident -
 #     the Hibernate statement logger and the bind-parameter logger - are exactly
@@ -159,26 +243,69 @@ spring:
       #       lock for the length of an update while its optimistic-locking check
       #       resolves, so its connections are held longer than a pure read
       #       context's. Twenty gives the read path, the update path and the
-      #       inquiry handler headroom without one task claiming a disproportionate
-      #       share of the cluster's budget - the quantity that has to fit that
-      #       budget is this number multiplied by the task count and summed across
-      #       all eight services, which is why it is raised here rather than in the
-      #       base document where every environment would inherit it.
+      #       inquiry handler headroom, and it is raised here rather than in the
+      #       base document precisely so that dev does not inherit it.
+      # WHY : Trade-offs: THE CEILING THAT MATTERS IS NOT THIS NUMBER BUT ITS
+      #       PRODUCT WITH THE TASK COUNT, AND THE RIGHT MULTIPLIER IS THE
+      #       AUTOSCALED MAXIMUM RATHER THAN THE DESIRED COUNT. The arithmetic,
+      #       stated rather than left to be reconstructed: infra/envs/prod/
+      #       terraform.tfvars sets ecs_desired_count to 2, and
+      #       infra/envs/prod/main.tf passes max_capacity as
+      #       max(ecs_desired_count, ecs_desired_count * 2), so this service
+      #       autoscales to FOUR tasks and opens at most 20 x 4 = 80 connections
+      #       against the cluster - not the 40 that the desired count of two would
+      #       suggest. Sizing against the desired count is the specific mistake
+      #       that turns an ordinary scale-out into connection exhaustion, and it
+      #       is avoided the same way in the infrastructure: the same root derives
+      #       its whole-fleet connection budget from each workload's maximum task
+      #       count rather than its desired one. Raising this number therefore
+      #       costs four times its own increment at full autoscale, and the
+      #       accepted cost of holding it at twenty is that a burst beyond twenty
+      #       concurrent database operations per task waits for a connection
+      #       rather than opening one.
+      # WHY : Assumptions: production capacity has a NON-ZERO minimum, which is
+      #       what makes a pool this wide usable at all rather than merely
+      #       declared. infra/envs/prod/terraform.tfvars sets aurora_min_capacity
+      #       to 2 against the dev root's 0, so the prod cluster never pauses and
+      #       has standing capacity to serve the connections this ceiling permits.
+      #       The same assumption is what justifies the idle floor and the short
+      #       acquisition timeout below; none of the three would be right against a
+      #       cluster that sleeps, which is why application-dev.yml sets all three
+      #       differently rather than scaling this one down in isolation.
       # WHY : Assumptions: DataSourceConfig reads this number from configuration
       #       rather than hard-coding it, so this file is the prod source for it,
       #       and it logs the accepted ceiling and idle floor at startup precisely
-      #       because the task-count factor of that invariant lives outside this
-      #       deployable and can only be audited from there.
+      #       because the task-count factor of the invariant above lives outside
+      #       this deployable and can only be audited from there. It also refuses
+      #       the pair outright when the floor exceeds the ceiling, so the two
+      #       numbers here are checked against each other before the listener
+      #       starts rather than after the first request fails.
       maximum-pool-size: 20
 
       # WHY : Trade-offs: a floor of five rather than the base document's two, and
-      #       decisively rather than the zero application-dev.yml uses. Production
-      #       capacity has a non-zero minimum so the cluster never pauses, which
-      #       removes the reason dev empties its pool entirely; what remains is the
-      #       cost of a cold connection inside a request, and five covers the
-      #       steady-state concurrency of the interactive read path so that only a
-      #       genuine burst pays a handshake. No production caller pays a resume,
-      #       which is the whole reason dev is allowed to accept one.
+      #       decisively rather than the zero application-dev.yml uses. What is
+      #       being bought is the removal of connection establishment and its TLS
+      #       handshake from inside the request, and it matters here specifically
+      #       because these endpoints are synchronous request/response APIs behind
+      #       an internal load balancer - a caller has nowhere to wait but on the
+      #       response, so a handshake paid in the request path is latency the user
+      #       sees. What is paid for it is that five connections are held open
+      #       whether or not anything is using them, which keeps a small amount of
+      #       cluster capacity continuously awake. That is an acceptable price in
+      #       production and an unacceptable one in dev, where the same held
+      #       connection would stop a cluster provisioned to scale to zero from
+      #       ever pausing and would forfeit the entire saving; that is why dev
+      #       takes this floor to zero and accepts a resume instead. Five, against
+      #       the ceiling of twenty above, covers the steady-state concurrency of
+      #       the interactive read path so that only a genuine burst pays a
+      #       handshake, and it leaves three quarters of the pool elastic.
+      # WHY : Assumptions: this floor is checked against the ceiling above before
+      #       the web server starts, not merely accepted. DataSourceConfig refuses
+      #       a negative floor and refuses one above the ceiling, so the pair is
+      #       validated as a pair; the reason it does so rather than reading the
+      #       started pool back is that a pool handed a floor above its ceiling
+      #       silently substitutes the ceiling and writes no log line, which would
+      #       make the misconfiguration invisible from the outside.
       minimum-idle: 5
 
       # WHY : Assumptions: ten seconds, restating the base document's value rather
@@ -197,17 +324,33 @@ spring:
       sqs:
         listener:
 
-          # WHY : Assumptions: ten concurrent messages, restating the base
-          #       document's value rather than inheriting it, because
-          #       application-dev.yml reduces this to two and the reduction must
-          #       not be readable as a system-wide setting. The invariant that
-          #       makes ten correct here is the pool ceiling above: each in-flight
-          #       inquiry holds one connection while it reads the account, the
-          #       customer and the cross-reference, so a concurrency ceiling must
-          #       stay at or below the pool ceiling, and ten against twenty leaves
-          #       half the pool for the REST endpoints. Ordering and delivery
-          #       semantics are untouched by this number - they are queue-side
-          #       properties provisioned by infra/modules/sqs.
+          # WHY : Trade-offs: ten concurrent messages, five times the two
+          #       application-dev.yml allows, and THIS NUMBER AND THE POOL CEILING
+          #       ABOVE ARE ONE DECISION RATHER THAN TWO. Raising it raises inquiry
+          #       throughput, and it is paid for in concurrent database
+          #       connections: each in-flight inquiry holds one for the length of
+          #       its three reads - the account, the customer and the
+          #       cross-reference - so every unit of concurrency added here is a
+          #       unit of the pool above spoken for. Ten against a ceiling of
+          #       twenty is therefore the coupling made explicit: the listener can
+          #       occupy at most half the pool and the other half stays available
+          #       to the REST endpoints, which are the paths a signed-on user is
+          #       waiting on. Choosing the two numbers independently is what
+          #       produces the failure, and there are two distinct failures rather
+          #       than one: a concurrency ceiling ABOVE the pool ceiling converts
+          #       queue depth into connection-acquisition waits and times out
+          #       handlers that would otherwise have succeeded, while a ceiling
+          #       merely EQUAL to it lets a saturated listener claim every
+          #       connection and starve the request path instead. Staying strictly
+          #       below the pool ceiling is what avoids both, so neither number may
+          #       be raised here without the other being re-checked.
+          # WHY : Assumptions: the value restates the base document's rather than
+          #       inheriting it, because application-dev.yml reduces this to two
+          #       and that reduction must not be readable as a system-wide
+          #       setting. Ordering and delivery semantics are untouched by this
+          #       number - they are queue-side properties provisioned by
+          #       infra/modules/sqs, not application settings - so what changes
+          #       here is the drain rate and nothing else.
           max-concurrent-messages: 10
 
           # WHY : Assumptions: the batch is held equal to the concurrency ceiling
@@ -241,31 +384,66 @@ spring:
           #       outbox to close. This is the opposite of the authorization
           #       context, whose COPAUA0C.cbl computes its options with the
           #       NO-syncpoint variant at physical lines 389 and 753 and therefore
-          #       does need one.
+          #       does need one. The same word appears in both option names, which
+          #       is exactly how a reader skimming for "syncpoint" reaches the
+          #       wrong conclusion and gives this context an outbox it has no
+          #       window for, or takes one away from the context that does.
+          # WHY : Assumptions: no redrive policy and no maximum-receive count
+          #       appear here either, and their absence is deliberate rather than an
+          #       oversight to make good during an incident. Both are queue-side
+          #       infrastructure owned by infra/modules/sqs, which provisions each
+          #       queue with its own dead-letter queue; an application-side key of
+          #       either name would be accepted by the binder, silently ignored, and
+          #       would leave a reader believing this file governs redelivery when
+          #       it does not - which is the worst of the three outcomes, because it
+          #       is the one that looks like it worked.
 
 logging:
   level:
 
-    # WHY : Trade-offs: the root logger returns to WARN, narrower than the base
-    #       document's INFO and narrower than dev's INFO. At production request
-    #       rates root INFO is framework narration on every call, and the startup
-    #       diagnostics it buys are read once by a deployment pipeline rather than
-    #       continuously. Flyway's own migration line stays at INFO by omission,
+    # WHY : Trade-offs: the root logger narrows to WARN, one level below both the
+    #       base document's INFO and dev's INFO, and this is the only level here
+    #       that is quieter than the base rather than equal to it. Two costs are
+    #       being avoided at once and both are real: at production request rates
+    #       root INFO is framework narration on every call, which is billed by the
+    #       gigabyte in CloudWatch Logs, and it is also the reason an operator
+    #       reading a live incident scrolls past the line that matters. The
+    #       startup diagnostics INFO buys are read once by a deployment pipeline
+    #       rather than continuously, so the same evidence survives at a fraction
+    #       of the volume. Flyway's own migration line stays at INFO by omission,
     #       because the base document pins org.flywaydb separately and this file
-    #       does not restate it, so the durable record that V1__account.sql ran is
-    #       preserved. The accepted cost is that a framework warning is the
+    #       does not restate it, so the durable record that V1__account.sql ran
+    #       against a given task is preserved rather than swept up by this
+    #       narrowing. The accepted cost is that a framework warning is the
     #       earliest signal available here, which is why the project package below
-    #       is held a level wider.
+    #       is deliberately held one level wider.
+    # WHY : Assumptions: nothing above the base level is set here, in either
+    #       direction of misreading - this file lowers the root level and never
+    #       raises it, and no logger below is set to DEBUG or TRACE at all. The
+    #       narrowing is safe because it is not the only observability this
+    #       deployable has: common-lib's MetricsConfig contributes the common tag
+    #       set behind the metrics scrape path the base document exposes, and the
+    #       correlation identifier the base's shared defaults put in the console
+    #       pattern ties the lines that do survive to a single request. The depth
+    #       dev gets from DEBUG is obtained in production from those metrics and
+    #       from request correlation instead, which is why losing it here costs
+    #       diagnosis nothing it cannot recover another way.
     root: WARN
 
-    # WHY : Trade-offs: INFO on the project package, against dev's DEBUG. The
-    #       account-view and account-update outcomes are the audit trail this
-    #       context produces and they are emitted at INFO; DEBUG would add the
-    #       128-field validation chain transcribed from app/cbl/COACTUPC.cbl on
-    #       every update, which costs log storage billed by the gigabyte and
-    #       buries the lines that matter. This is the key the base document
-    #       declares, so it governs common-lib's shared kernel together with this
-    #       module.
+    # WHY : Trade-offs: INFO on the project package, which holds the base
+    #       document's value and declines dev's DEBUG rather than choosing a third
+    #       level. It is stated rather than inherited because this is the key most
+    #       likely to be raised during an incident, and the cost of raising it is
+    #       specific: DEBUG adds the 128-field validation chain transcribed from
+    #       app/cbl/COACTUPC.cbl on every update, on a request path every signed-on
+    #       user exercises. INFO already carries the account-view and
+    #       account-update outcomes, which are the audit trail this context is
+    #       actually asked for, so DEBUG buys transcription detail rather than
+    #       operational evidence - and it buys it at a per-gigabyte price while
+    #       burying the outcome lines among the field-by-field ones. This is also
+    #       the key the base document declares for the whole package root, so it
+    #       governs common-lib's shared kernel together with this module; raising
+    #       it here would raise both.
     com.carddemo: INFO
 
     # WHY : Trade-offs: the SQS listener container's package stays at WARN, so a
@@ -276,15 +454,26 @@ logging:
     #       what stops that from being read as a system-wide setting.
     io.awspring.cloud.sqs: WARN
 
-    # WHY : Assumptions: the Hibernate statement logger is pinned at WARN rather
-    #       than inherited, so no broader level change can raise it in production.
-    #       At DEBUG it writes the generated SQL, whose predicates carry account
-    #       and customer identifiers, and the questions worth asking in production
-    #       are about plans and waits rather than syntax - the database's own
-    #       statement statistics answer those without copying identifiers into log
-    #       storage. application-dev.yml raises this one to DEBUG, which the base
-    #       document permits for dev and for dev alone; pinning it here is what
-    #       keeps that permission from spreading.
+    # WHY : Trade-offs: STATEMENT LOGGING IS NOT ENABLED IN PRODUCTION, and what
+    #       is given up by that is genuinely available elsewhere. At DEBUG this
+    #       logger emits one line per statement on every request, so the volume is
+    #       proportional to traffic rather than to incidents; and the questions
+    #       worth asking in production are about plans, waits and row counts rather
+    #       than about statement syntax, all of which the database's own statement
+    #       statistics already capture without copying anything into log storage.
+    #       The one thing DEBUG here uniquely answers - whether the by-account
+    #       query that replaces the CXACAIX alternate index uses
+    #       idx_card_xref_account_id or degrades to a sequential scan - is a
+    #       question about a query shape that does not change between environments,
+    #       so application-dev.yml is the right place to answer it and does. This
+    #       is therefore a development-only allowance, which the base document
+    #       grants for dev and for dev alone.
+    # WHY : Assumptions: the level is pinned at WARN here rather than inherited, so
+    #       that no broader edit can raise it in production by accident. Note what
+    #       this logger does NOT emit even at DEBUG - the statement text carries
+    #       parameter placeholders, not parameter values - which is the entire
+    #       reason it is merely expensive here while the one below is dangerous
+    #       anywhere.
     # WHY : Assumptions: this pin is also why spring.jpa.show-sql is not restated
     #       in either profile. That switch writes to standard output OUTSIDE the
     #       logging subsystem, so no level can narrow it once enabled and it would
@@ -312,14 +501,22 @@ logging:
     #       than a log-volume one.
     org.hibernate.orm.jdbc.bind: WARN
 
-    # WHY : Assumptions: log RETENTION is the fourth permitted dev/prod axis and
-    #       it is deliberately absent from this file, because it is not an
-    #       application property at all. Retention is a property of the CloudWatch
-    #       log group, owned by infra/modules/observability and set per environment
-    #       there - longer here than in dev - and the service writes to the group
-    #       with no say in how long the group keeps what it wrote. This note is the
-    #       entire discharge of the retention axis on the application side, and it
-    #       is recorded rather than left implicit so that a later reader does not
-    #       invent an application-level retention key - such a key would be
-    #       accepted by the property binder, would appear to have been set, and
-    #       would do nothing whatsoever.
+    # WHY : Assumptions: log RETENTION is the fourth permitted dev/prod axis and it
+    #       is deliberately absent from this file, because it is not an application
+    #       property at all. Retention is a property of the CloudWatch log group,
+    #       and the group THIS service writes to is created by
+    #       infra/modules/ecs-service alongside the service definition rather than
+    #       centrally, with infra/modules/observability owning the remaining groups,
+    #       the dashboards and the alarms. Either way the value comes from the
+    #       environment root: infra/envs/prod/terraform.tfvars sets
+    #       log_retention_days to 365 where the dev root sets it to 7. The service
+    #       writes to the group and has no say in how long the group keeps what it
+    #       wrote. The axis is therefore genuinely exercised between the two
+    #       environments; it is simply exercised in Terraform rather than here.
+    #       This note is the entire discharge of the retention axis on the
+    #       application side, and it is recorded rather than left implicit so that a
+    #       later reader does not invent an application-level retention key - such a
+    #       key would be accepted by the property binder, would appear to have been
+    #       set, and would do nothing whatsoever. Note also that the levels above
+    #       and this retention are one cost decision seen from two ends: a level
+    #       raised here multiplies the volume that the 365-day window then holds.

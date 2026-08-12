@@ -121,7 +121,11 @@ from carddemo_migration.loaders.s3_stage import (
 from carddemo_migration.readers import reader_module
 from carddemo_migration.readers.factory import RecordReader
 from carddemo_migration.seed_datasets import SeedDatasetError
-from carddemo_migration.verify.checksum import digest_records
+from carddemo_migration.verify.checksum import (
+    ChecksumVerificationError,
+    compare_record_digests,
+    deterministic_field_names,
+)
 from carddemo_migration.verify.money_parity import compare_money_totals
 from carddemo_migration.verify.row_counts import (
     RowCountVerificationError,
@@ -1531,7 +1535,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     None
     """
     try:
-        _, records = _reader_and_records(arguments)
+        reader, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
         # WHY : Assumptions: the context is resolved here as well as in the load handler, because
         #   the source side is now projected through the target's own declarations and a
@@ -1545,7 +1549,6 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
-    fields = target.comparable_fields()
     # WHY : Refactoring Rationale: the source side is digested through `prepare_record`, over the
     #   target's comparable fields, where it used to digest the RAW decoded record over every
     #   mapped field. Both halves of that were wrong once the loader began projecting values. The
@@ -1554,26 +1557,43 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     #   correct; and the full field set includes the envelope columns, whose bytes differ on every
     #   write by design. Digesting what was STORED, over the fields that can be stored
     #   deterministically, is the only construction that compares the two sides of the same load.
+    # WHY : Refactoring Rationale: the comparable field set is now passed through
+    #   `deterministic_field_names`, and the two digests through `compare_record_digests`. Both
+    #   halves close a claim this package published and did not keep. `README.md` section 10.1
+    #   states that the pass excludes the wall-clock processing stamp by reading the layout's own
+    #   `normalize_ts` mark -- nothing read that mark, so a comparison of the two transaction
+    #   records differed on every run and reported a correct load as a defect. And section 5.2
+    #   states that the pass writes the identifier of every record whose checksum differs -- it
+    #   wrote two whole-dataset digests, so a difference was announced with nowhere to look.
+    fields = deterministic_field_names(reader.layout, target.comparable_fields())
     try:
-        source_digest = digest_records(
-            (prepare_record(target, record, context) for record in records), fields
-        )
         # WHY : the loaded rows are read back and digested through the SAME field order and the
         #   same canonical rendering, so the comparison is between two digests of the same
         #   construction. Comparing a source digest against a value recorded in a file would
         #   only prove the source had not changed, which is not what a load needs verifying.
+        # WHY : Trade-offs: the read-back is collected BEFORE the lockstep walk begins, and it is
+        #   collected rather than streamed. The walk consumes both sides together, so the rows have
+        #   to exist before it starts; and they are read inside this block because it is the one
+        #   that closes the connection, which a lazy cursor consumed after the close could not use.
         loaded = _read_back(connection, target)
-    except _DECODE_ERRORS as exc:
+        comparison = compare_record_digests(
+            record_name=arguments.dataset,
+            qualified_table=target.qualified_name,
+            source_records=(prepare_record(target, record, context) for record in records),
+            target_records=loaded,
+            fields=fields,
+            layout=reader.layout,
+        )
+    except (*_DECODE_ERRORS, ChecksumVerificationError) as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
     finally:
         connection.close()
-    target_digest = digest_records(loaded, fields)
-    print(f"source {source_digest.describe()}")
-    print(f"target {target_digest.describe()}")
-    matched = source_digest.digest == target_digest.digest
-    print(("MATCH " if matched else "DIFFER ") + f"{arguments.dataset} -> {target.qualified_name}")
-    return EXIT_OK if matched else EXIT_FAILED
+    print(comparison.render())
+    # WHY : Trade-offs: a difference exits FAILED rather than raising, on the same reasoning as the
+    #   row-count report above: the rendered comparison names every located difference, and a
+    #   traceback would replace the one artifact an operator acts on with the place code noticed.
+    return EXIT_OK if comparison.verified else EXIT_FAILED
 
 
 def _verify_money_parity(arguments: argparse.Namespace) -> int:

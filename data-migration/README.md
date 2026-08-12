@@ -484,7 +484,7 @@ becomes optional when the mapping has an authoritative home in code.
 | `apply-credentials` | A SCRAM verifier on each of the service login roles. The plaintext credential never crosses the connection | any role is missing, cannot be given its verifier, or cannot then log in |
 | `reconcile-sequences` | At most one `setval` on `ledger.transaction_id_seq`, issued as the schema owner reached by `SET ROLE`; both allocator positions and the largest stored identifier on standard output | the owner cannot be assumed, the sequence or the table cannot be read, or the advance is refused — in which case writes must not be enabled |
 | `verify-row-counts` | A per-dataset expected-versus-actual table | any dataset's counts differ |
-| `verify-checksum` | The identifier of every record whose checksum differs, with sensitive fields masked | any record differs |
+| `verify-checksum` | The two whole-dataset digests, then one line per located difference giving the differing record's position in the extract and the differing field's name, byte interval and storage regime — never either value. The lines are bounded and the withheld count is stated, so a wholly-wrong load reports a diagnostic rather than a file; the position, differing-record and one-sided-position counts are exact whatever the bound | any record differs, or either side has a position the other does not |
 | `verify-money-parity` | A per-column source-versus-loaded total table | any total differs by any amount |
 | `verify-row-count-report` | The whole-migration row-count report — one line per declared dataset and one verdict line — rendered so that two runs over unchanged data diff to nothing. Writes nothing anywhere and cannot: the session it runs on holds `SELECT` on the two aggregate verification views and nothing else | any line's baseline and actual count differ, the session is not the reporting role, the shipped query cannot be located, or the report omits a declared dataset |
 | `verify-all` | The three tables above, in order | any one pass fails |
@@ -1470,6 +1470,17 @@ excluded — blanking it would discard business data the comparison has to verif
 would shorten the effectively compared record. One layout is the exception and is
 named separately for it: the interest-generated transaction, where the batch program
 writes the run clock into **both** stamps, so both are marked there.
+
+The mechanism is [`verify/checksum.py`](src/carddemo_migration/verify/checksum.py)'s
+`deterministic_field_names`, which resolves each candidate field against the layout and
+drops the ones marked; `cli.py` passes the target's comparable field set through it
+before either side is digested. Excluding a stamp is not the same as ignoring it:
+`validated_timestamp` admits the field out of the compared span only when its value is
+one of the two spellings CardDemo writes or is uniformly unwritten — the 26 blanks the
+shipped daily-transaction extract carries — and raises on anything else. Assumptions:
+blanking by position with no shape check would discard a record sliced at the wrong
+offset, or a corrupted one, along with the stamp, which is the class of defect this pass
+exists to surface rather than absorb.
 
 ---
 

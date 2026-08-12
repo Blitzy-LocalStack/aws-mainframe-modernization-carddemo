@@ -4,23 +4,73 @@
 # Purpose:
 #   Builds the non-root container image for the CardDemo reference-data context: the
 #   migrated form of app/app-transaction-type-db2/cbl/COTRTLIC.cbl and COTRTUPC.cbl,
-#   their batch updater COBTUPDT.cbl, the queue-driven date conversion
-#   app/app-vsam-mq/cbl/CODATE01.cbl and the date-edit utility app/cbl/CSUTLDTC.cbl.
+#   their batch updater COBTUPDT.cbl, and the queue-driven date conversion
+#   app/app-vsam-mq/cbl/CODATE01.cbl. The date-edit rules of app/cbl/CSUTLDTC.cbl are
+#   reached THROUGH this context but do not live in it -- DateEditValidator sits in
+#   common-lib and this module is its HTTP and queue front door -- so a reader looking
+#   for those rules in this image's own sources finds only the endpoint that calls
+#   them.
+#   Two start-up behaviours of the packaged jar are what the health probe below is
+#   sized for. Flyway applies TWO migrations rather than one: V1__reference.sql
+#   creates the six `reference` tables and V2__seed_reference.sql seeds them, this
+#   being the only module in the migration that carries a V2, because it seeds the
+#   mandatory 'DEFAULT' disclosure-group row and the address allow-lists that other
+#   contexts read to validate an address. DateInquiryMessageListener then begins
+#   polling SQS, which is what replaces CODATE01's IBM MQ front door.
+#
+# Stages:
+#   build   - installs the pinned database trust anchor, resolves the reactor's
+#             dependencies, then compiles the unpublished common-lib sibling and this
+#             module from source in one invocation, producing the repackaged bootable
+#             jar under reference-service/target.
+#   runtime - carries that one jar, the verified trust anchor and the shared
+#             listener-material entry point, and nothing else from the build stage:
+#             no Maven, no compiler, no resolved dependency cache and no sources.
+#
+# Artifact:
+#   One bootable Spring Boot jar at /app/app.jar, owned and executed by the non-root
+#   identity 10001:10001, listening on 8080, and probed by the single HEALTHCHECK
+#   below against the actuator health endpoint /actuator/health over TLS. This
+#   module's POM records that the same endpoint is read by BOTH the ALB target group
+#   and this container check, so the two readers cannot disagree about one instance.
+#
+# Gates:
+#   The Checkstyle documentation gate runs INSIDE this build, not merely in the
+#   pipeline. services/pom.xml binds its checkstyle-documentation-gate execution to
+#   Maven's validate phase, and validate precedes package, so a missing or incomplete
+#   Javadoc in either module compiled here fails `docker build` rather than surfacing
+#   later in a pipeline step this image never runs.
 #
 # Parameters:
-#   This image takes no command arguments. The entrypoint is the exec-form JVM
-#   invocation below and the process is a long-running HTTP listener, so there is
-#   no per-run token of the kind the batch image accepts.
+#   This image declares no build argument, and the entry point takes no argument of
+#   its own: it is the exec-form invocation of the shared listener-material script
+#   below, whose last line is `exec java ... -jar /app/app.jar "$@"`, so a `docker
+#   run` trailer such as --spring.profiles.active=prod and an ECS container `command`
+#   override both reach the JVM unchanged. What this image has no equivalent of is a
+#   per-run token of the kind the batch image accepts, because this process is a
+#   long-running HTTP listener rather than a job.
 #   Runtime configuration arrives entirely through environment variables that the
-#   ECS task definition supplies. The values this service cannot start without,
-#   because their placeholders declare no fallback, are:
+#   ECS task definition supplies from Parameter Store and Secrets Manager. The values
+#   this service cannot start without, because their placeholders declare no fallback,
+#   are:
 #     - SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD
+#     - SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD
 #     - SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI
 #     - CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID
 #     - AWS_REGION
 #     - CARDDEMO_REFERENCE_INQUIRY_REQUEST_QUEUE,
 #       CARDDEMO_REFERENCE_INQUIRY_REPLY_QUEUE and
 #       CARDDEMO_REFERENCE_INQUIRY_ERROR_QUEUE
+#   That is the complete set of no-fallback placeholders in application.yml with ONE
+#   deliberate exclusion. CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD has no fallback either
+#   and is omitted on purpose: the entry point mints the keystore and exports its
+#   password itself, so a deployment that injected one would be overriding material
+#   this task generates for its own single use.
+#   Refactoring Rationale: SPRING_FLYWAY_USER and SPRING_FLYWAY_PASSWORD were absent
+#   from this list while application.yml required them, which is the worst shape for a
+#   list like this one -- it read as exhaustive and was not, so an operator following
+#   it would have provisioned a task that fails during migration with a null
+#   migration credential rather than at the missing variable.
 #
 # Return values:
 #   0 (integer): the JVM exited after a requested shutdown.
@@ -41,8 +91,53 @@
 # WHY : Assumptions: the repository root is the build context, not services/,
 #       because the image compiles the unpublished common-lib sibling from source
 #       and the inherited Checkstyle documentation gate reads config/checkstyle,
-#       which sits OUTSIDE the services reactor. Every COPY below is therefore
-#       repository-root-relative and all of them fail if the context is narrowed.
+#       which sits OUTSIDE the services reactor. Every COPY that reads from the
+#       CONTEXT is therefore repository-root-relative and all of them fail if the
+#       context is narrowed; the two `COPY --from=build` instructions are stage-
+#       relative and are unaffected by the context.
+#
+# WHY (non-obvious design decisions):
+#   - Assumptions: the four rationale labels used throughout this file are the
+#     plural, un-parenthesised forms of the Explainability rule's lines 31 to 34 --
+#     Alternatives Considered, Refactoring Rationale, Assumptions and Trade-offs.
+#     The reference-only baseline under tests/ and scripts/ tags three of the four
+#     in the singular -- measured there as Assumption, Trade-off and Alternative
+#     Considered, with Refactoring Rationale spelled identically in both -- and the
+#     two spellings name the same categories, not different ones.
+#     The equivalence is stated once here and the plural is then used without
+#     exception, because docs/CODE_DOCUMENTATION_STANDARD.md requires one spelling
+#     per file and config/rule1/rule1_gate.py fails the build on any other form --
+#     a rationale a grep cannot find is a rationale a review cannot count.
+#   - Alternatives Considered: narrowing the context to services/, the Maven
+#     reactor root, which would send the daemon a far smaller tree. Rejected on a
+#     measurement rather than a preference: config/checkstyle and config/docker both
+#     sit OUTSIDE services/, so under that context the Checkstyle COPY and both
+#     config/docker COPYs resolve to nothing and the build fails outright -- and the
+#     only way to make it succeed would be to drop the documentation gate this
+#     module is required to run. It is also the context that
+#     .github/workflows/services-ci.yml and deploy.yml pass for all eight service
+#     images, so this file and both pipelines agree about one root.
+#     Trade-offs: the accepted cost is a genuinely larger context. The committed
+#     root .dockerignore removes .git, build output and the tool caches, but it does
+#     NOT exclude the reference-only trees, so app/, tests/ and samples/ are still
+#     sent to the daemon on every build. That is stated plainly rather than claimed
+#     away, because a reader who believed those trees were excluded would draw the
+#     wrong conclusion about what an added exclusion here would cost.
+#   - Trade-offs: two stages rather than one. Maven, the JDK compiler and the entire
+#     resolved dependency cache stay out of the shipped image, which is the
+#     difference between shipping a build toolchain to production and shipping a
+#     jar; a single-stage image would also make every dependency it downloaded part
+#     of a running service's attack surface. The cost is that the artifact must
+#     cross a stage boundary by path, so this file is coupled to the module's jar
+#     naming -- which is why the copy below names the version the POM sets and why
+#     that copy is the line to change when the version moves.
+#   - Assumptions: nothing here publishes. The only registry hostname in this file
+#     belongs to the public base image, and the tag in the command above names no
+#     account and no region, so no line of this file can be mistaken for a
+#     publishable reference or carry an account-scoped registry host. The datasource
+#     URL, the queue names, the issuer URI and every key ARN arrive at run time from
+#     Parameter Store and Secrets Manager through the ECS task definition, which is
+#     why this file declares no ENV and no ARG at all.
 # =============================================================================
 
 # WHY : Assumptions: the build JDK deliberately matches the runtime's Amazon
@@ -144,20 +239,47 @@ COPY services/reference-service/src ./reference-service/src
 
 # WHY : Trade-offs: tests are skipped while packaging because the suite gate is
 #       the repository-root reactor build `mvn -f services/pom.xml clean verify`,
-#       whose Surefire and Failsafe executions cover all ten modules. This stage
+#       whose Surefire and Failsafe executions cover all nine modules. This stage
 #       sees only common-lib and reference-service, so running tests here would report a
 #       narrower result under a name that reads like the full one.
-# WHY : Assumptions: Checkstyle stays bound to `validate` and therefore still runs
-#       inside this stage, before `package`, even under -DskipTests. It is the one
-#       gate this image build keeps, because a missing Javadoc is a defect in the
-#       sources being compiled here rather than a statement about behavior.
+# WHY : Refactoring Rationale: that count read "ten" and was wrong by measurement --
+#       services/pom.xml declares NINE modules, common-lib plus eight services. Ten is
+#       the number of ECR repositories and of committed Dockerfiles, because ui and
+#       data-migration ship images while common-lib is a library that ships none, and
+#       borrowing that figure here invented a tenth Maven module. The distinction is
+#       worth keeping straight in both directions: a reader who believes there are ten
+#       modules goes looking for one that does not exist, and a reader who believes
+#       there are nine images builds one too few.
+# WHY : Assumptions: the parent reactor at services/pom.xml is the build root, and
+#       `-am` is what makes common-lib a required upstream of this module rather than
+#       a second invocation to sequence by hand. common-lib is unpublished -- no
+#       registry holds a 1.0.0-SNAPSHOT of it -- so `-pl reference-service` alone
+#       would fail to resolve the dependency instead of building it, and the two
+#       modules must be compiled in one reactor pass for the version to match.
+# WHY : Assumptions: -DskipTests suppresses test EXECUTION only - it does not skip
+#       Checkstyle. The documentation gate stays bound to `validate`, which runs
+#       before `package`, so it still executes inside this stage. The two must not be
+#       conflated: no skip flag for that gate, no severity downgrade and no
+#       return-code tolerance may be added here or anywhere, and in particular none
+#       may be added alongside the flag above for the sake of looking consistent -
+#       doing so would silently delete the one gate this image build keeps. It is kept
+#       because a missing Javadoc is a defect in the sources being compiled here
+#       rather than a statement about behavior.
 RUN mvn -B -ntp --offline -f pom.xml -pl common-lib,reference-service -am \
     clean package -DskipTests
 
 # WHY : Assumptions: the publisher provides no Alpine variant of this Corretto
-#       image; `21-alpine` does not resolve and would fail the build. 21.0.12 is
-#       the highest published 21.x tag and headless is selected because an HTTP
-#       service needs no AWT or graphics stack.
+#       image. The repository publishes only -al2 and -al2023 tags with headful,
+#       headless, generic and jdk suffixes, so `21-alpine` is not a smaller
+#       alternative to weigh -- it is a tag that does not resolve, and substituting
+#       it for image-size reasons fails the build outright rather than producing a
+#       leaner image. 21.0.12 is the highest published 21.x tag.
+# WHY : Trade-offs: headless rather than headful or generic. A headless JRE omits
+#       AWT and Swing, and this process serves HTTP and consumes SQS, so it loads
+#       no class from either - the capability given up is one this context cannot
+#       reach. What is accepted in exchange is that a future need for server-side
+#       image rendering would require changing this tag rather than adding a
+#       dependency, which is a visible edit here instead of a silent one downstream.
 # WHY : Refactoring Rationale: the reference is digest-pinned rather than left on
 #       the bare tag because this tag has already moved at least once - the
 #       registry index for `21.0.12-al2023-headless` and a copy cached earlier on
@@ -250,17 +372,36 @@ RUN chmod 0555 /usr/local/bin/carddemo-entrypoint.sh
 #       metadata while the numeric records keep behavior deterministic.
 USER carddemo:carddemo
 
-# WHY : Trade-offs: the container start period below is the same 30 seconds as
-#       every sibling even though this context runs the largest migration in the
-#       tree - V2 seeds the transaction types, the categories, the mandatory
-#       'DEFAULT' disclosure-group row and the address allow-lists drawn from the
-#       490 codes of app/cpy/CSLKPCDY.cpy. A longer period was considered and
-#       rejected: the health endpoint reports not-ready while Flyway runs, and
-#       the retry budget below already covers that, so lengthening the period
-#       would only delay detection of a genuinely stuck start.
-# WHY : Assumptions: the pinned headless runtime contains /usr/bin/curl - verified
-#       inside this exact digest, which also confirms wget is absent - so the probe
-#       needs no package installation and fails explicitly on a non-success status.
+# WHY : Trade-offs: the container start period below is 30 seconds even though this
+#       context applies the only two-migration Flyway chain in the tree - V2 seeds the
+#       transaction types, the categories, the mandatory 'DEFAULT' disclosure-group
+#       row and the address allow-lists drawn from the 490 codes of
+#       app/cpy/CSLKPCDY.cpy. A longer period was considered and rejected: the health
+#       endpoint reports not-ready while Flyway runs, and the retry budget below
+#       already covers that, so lengthening the period would only delay detection of a
+#       genuinely stuck start.
+# WHY : Refactoring Rationale: this note used to justify 30 seconds as "the same as
+#       every sibling", which is not true and would have misled the next reader to
+#       change it. Measured across services/*/Dockerfile: six siblings use 30s and
+#       reporting-service uses 60s, because it renders statements rather than serving
+#       lookups. The claim is restated as the reason this value fits THIS context, so
+#       it no longer rests on a uniformity that does not exist.
+# WHY : Assumptions: spring-boot-starter-actuator is on the classpath -- declared in
+#       services/reference-service/pom.xml, whose own comment records that the
+#       endpoint is read by BOTH the ALB target group and this container check -- and
+#       the ALB probes the SAME /actuator/health path. That shared path is the point:
+#       two probes reading one endpoint cannot reach opposite verdicts about one
+#       instance, whereas a container check on a bespoke path could report healthy
+#       while the load balancer drained the task, or the reverse.
+# WHY : Alternatives Considered: the probe tool. curl is used because /usr/bin/curl is
+#       present in this pinned digest -- verified by running it, which also confirms
+#       wget is ABSENT, so a wget probe would fail on every task. Installing a tool
+#       was rejected because it would add a package layer to the shipped image for a
+#       binary already in it, and a shell /dev/tcp probe was rejected because it
+#       proves only that the port accepts a connection: the connector answers before
+#       Flyway finishes, so a TCP probe would report healthy during migration and the
+#       HTTP status is what distinguishes listening from ready. curl also fails
+#       explicitly on a non-success status thanks to --fail.
 # WHY : Assumptions: the probe speaks HTTPS, not HTTP. server.ssl.enabled is true
 #       in the base profile, so the connector is TLS and a plaintext request would
 #       fail the check on every healthy task - a probe that always fails is worse
@@ -308,6 +449,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # WHY : Assumptions: the script takes no argument of its own and forwards "$@",
 #       so `docker run <image> --spring.profiles.active=prod` and an ECS
 #       container `command` override both still reach the JVM unchanged.
+# WHY : Refactoring Rationale: SPRING_PROFILES_ACTIVE is deliberately NOT set in this
+#       image, and the argument above is one of the two ways it arrives instead. What
+#       is wrong with baking it into a layer is not style: this exact artifact is
+#       promoted from dev to prod by digest, so a fixed profile would force either two
+#       images built from one commit -- which makes the digest promoted to prod one
+#       nobody tested -- or a stale layer, rather than the task definition, deciding
+#       which environment's configuration a task loads. Leaving it unset is what keeps
+#       promote-the-same-digest true, and it is why this file declares no ENV at all.
 # WHY : Alternatives Considered: keeping the exec-form java entry point and
 #       generating the keystore in a separate ECS container that shares a volume.
 #       Rejected: a sidecar or init container adds a task-definition dependency

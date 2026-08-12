@@ -55,11 +55,15 @@
 --   text runs unchanged under `psql -v ON_ERROR_STOP=1 -f` and through a driver
 --   cursor. Its paired harness is
 --   data-migration/src/carddemo_migration/verify/money_parity.py, which is the
---   pass that compares a source total against a target total; that module issues
---   its own per-column aggregate rather than loading this text, so this file is
---   the operator-facing form of the same pass and has to stand on its own. That
+--   pass that compares a source total against a target total. That module reaches
+--   this pass two ways and both matter here: `verify_money_totals` reads THIS
+--   TEXT and executes it verbatim through a cursor, judging all nine rows against
+--   totals it recomputes from the source extracts, while `compare_money_totals`
+--   issues its own single-column aggregate for the per-dataset command line. That
 --   is why the single-statement contract below is a contract and not a
---   preference: it keeps this text safe to hand to a cursor unedited.
+--   preference: it is what keeps this text safe to hand to a cursor unedited, so
+--   that the file an operator runs with psql and the text the harness executes
+--   are the same bytes.
 --   It assumes, and does not verify:
 --     - data-migration/sql/V0__schemas_and_roles.sql has created the schemas,
 --       three owning migrations have created the five tables the aggregate view
