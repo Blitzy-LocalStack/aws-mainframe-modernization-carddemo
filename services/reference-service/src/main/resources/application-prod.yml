@@ -2,265 +2,441 @@
 # services/reference-service/src/main/resources/application-prod.yml
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The production profile overlay for the CardDemo reference bounded context, the
-#   migration target of COBOL programs COTRTLIC, COTRTUPC, COBTUPDT, CODATE01 and
-#   CSUTLDTC. It overrides VALUES ONLY, on keys that application.yml beside it
-#   already declares, and it adds exactly one key that the base deliberately
-#   leaves to a profile - springdoc.swagger-ui.enabled, for the reason recorded at
-#   it. Nine leaf values are set, and every one of them sits on one of the four
-#   axes the base document's closing block names: connection-pool sizing, log
-#   levels, actuator exposure breadth, and the Swagger UI's reachability.
+#   The prod profile overlay for the CardDemo reference-data bounded context --
+#   module six of the nine in the com.carddemo:carddemo-services reactor, owner
+#   of the reference schema and its six tables, and the only module in the
+#   migration that carries two migrations. It is the paired half of
+#   application-dev.yml in this same directory: the two files record ONE
+#   capacity decision twice, from the two ends of it, and reading either alone
+#   makes its numbers look arbitrary.
 #
-#   This file differs from application-dev.yml in SIZING, RETENTION and DIAGNOSTIC
-#   VERBOSITY only, never in topology, protocol or security posture. The listener
-#   still serves TLS on the same port, the datasource is still the Aurora writer
-#   endpoint resolved from the platform, the same six tables are reached through
-#   the same pinned search path under the same carddemo_reference role, both Flyway
-#   migrations still run, and identity still arrives as a signed token whose
-#   token_use, client and scope claims config/SecurityConfig.java checks before
-#   common-lib's JwtRoleConverter maps its groups to authorities. A profile that
-#   turned off TLS or opened a write endpoint "just for prod triage" would make dev
-#   stop being a rehearsal for prod, which is the only reason to have a dev
-#   environment at all.
+#   It overrides TWO values, and declares one key the base leaves at its
+#   library default. That is the whole of it, and the smallness is the design
+#   rather than an omission: application.yml beside it already states the
+#   deployed posture -- statement echo off, health detail withheld, the
+#   actuator surface at three endpoints, both migrations applied, the
+#   bind-parameter logger at WARN -- so this profile has almost nothing left to
+#   close. What it varies is one pool dimension and one endpoint's
+#   reachability. Every key below carries a value the base does not; a key that
+#   merely repeated a base value would be noise and is absent rather than left
+#   to read as a decision.
 #
-#   Five of the nine values below RESTATE a base value rather than changing it,
-#   and that is deliberate in each case: restating a value is what makes a dev
-#   value read as if it applied everywhere unable to move production without a
-#   visible diff in this file. Two of the five matter more than the rest - the
-#   bind-parameter logger and the actuator exposure list - because this module's
-#   dev overlay is the one place in this repository where both are widened. Each
-#   records that reason at its own key.
+#   Because so much is inherited, the reasoning for what is NOT written here
+#   matters as much as the reasoning for what is. Seven keys a reader would
+#   reasonably expect this overlay to carry are absent on purpose, and each is
+#   accounted for in the closing block, which is where an absent key's rationale
+#   can sit adjacent to something.
 #
-#   No endpoint, credential, identifier, queue name, region or bucket appears
-#   below, and no stand-in for one. Every such value stays an unresolved
-#   placeholder in application.yml and is injected by the platform at deployment.
+#   The base file is the property-key contract for this module. This file is an
+#   overlay on it, never a replacement, so everything the base settles continues
+#   to hold here unrestated: the datasource kind and driver, the owned schema
+#   and the pool statement that pins it, the migration locations, the listener
+#   port, TLS on it, the queue family and its message format, and the
+#   resource-server configuration with the authority model built from it.
+#
+#   The behaviour being sized belongs to programs that are REFERENCE ONLY and
+#   are never modified: app/app-transaction-type-db2/cbl/COTRTLIC.cbl and
+#   COTRTUPC.cbl (the transaction-type screens), COBTUPDT.cbl (the sequential
+#   reference update, which migrates to a reference-maintenance service method
+#   rather than to a batch job), and app/app-vsam-mq/cbl/CODATE01.cbl (the
+#   queue-driven date conversion). The date-edit rules are not configured here
+#   at all: they live in common-lib as
+#   com.carddemo.common.validation.DateEditValidator, transcribed from
+#   app/cbl/CSUTLDTC.cbl. Two baseline citations below are load-bearing and were
+#   read from disk rather than recalled: CODATE01.cbl L146, L147, L243 and L286,
+#   and app/cbl/CBACT04C.cbl L436-L439, L455, L458 and L628-L632.
 #
 # Parameters:
-#   Each property key is the YAML analogue of a parameter. This overlay consumes
-#   NO environment variable of its own, and the reason is recorded in the closing
-#   block: this module carries no Parameter Store config-data resolver, so it
-#   declares no configuration import.
+#   SPRING_PROFILES_ACTIVE
+#     String. Selects this file. The value prod arrives from the ECS task
+#     definition and is deliberately absent from the image, so one built digest
+#     is promoted from one environment to the next rather than one image being
+#     built per environment. The base file records that decision; this file is
+#     the artifact it selects.
+#   No other variable is introduced here. Every placeholder this profile
+#     resolves is declared, named and described in application.yml, and no value
+#     for any of them appears in this file. Because this overlay adds no
+#     placeholder of its own, it adds nothing to the set of variables a prod
+#     task must supply, and an unset variable still aborts startup naming itself
+#     rather than defaulting to something reachable.
 #
-# Return values:
-#   The effective configuration handed to the Spring application context after
-#   this overlay is merged over src/main/resources/application.yml and the
-#   carddemo-common-defaults.yml that the base document imports.
+# Effect:
+#   What this file yields is one thing: the effective configuration the Spring
+#   application context is started from, after this overlay is merged over
+#   application.yml in this directory and over the carddemo-common-defaults.yml
+#   that the base imports from common-lib. That merged result is the return value
+#   a docstring would describe, and the merge order is part of it -- a value
+#   stated here wins over the base, and every value NOT stated here is the base's.
+#   The difference this overlay makes to it is two values and one added key, on
+#   two of the axes the base permits a profile to vary: the connection pool holds
+#   a genuine warm floor instead of the base's minimal one, and the interactive
+#   API browser is switched off. Nothing here changes what the service does,
+#   which endpoints exist, who may reach them, or what any of them returns.
 #
-# Exceptions or errors:
-#   A misspelled Spring property is silently ignored rather than reported, so a
-#   typo here does not fail startup - it leaves the base value in force and the
-#   intended change simply never happens. In production that silence is the whole
-#   risk this file carries, because four of its nine values exist to CLOSE
-#   something the dev overlay opens: a mis-typed logger name or endpoint
-#   identifier would leave the dev-shaped setting in force with nothing reporting
-#   it. That is why the four are restated explicitly rather than inherited, and
-#   why each names what it closes.
+# Failure modes:
+#   No override here can abort startup on its own, and neither can it report
+#   itself: a misspelled Spring property binds to no property at all and is
+#   silently ignored, leaving the base value in force while the intended change
+#   never happens. That asymmetry is the reason this file is short rather than
+#   thorough. Every closure production depends on is asserted in application.yml
+#   -- one file, one place, no profile -- so a typo in THIS file can only fail to
+#   raise a floor or fail to switch off a browser. Restating the closures here
+#   would add a second place each of them could be quietly lost from, which is
+#   the opposite of what restating them appears to buy.
+#
+# Label form:
+#   The four rationale labels used below are written plural, unparenthesised,
+#   colon-terminated and free of emphasis markup -- Alternatives Considered:,
+#   Refactoring Rationale:, Assumptions:, Trade-offs: -- which is the single form
+#   docs/CODE_DOCUMENTATION_STANDARD.md permits and the form the governing
+#   Explainability rule itself uses at its own lines 31 to 34.
+#   Their singular, parenthesised counterparts mean the same four categories and
+#   are the idiom that predominates in the reference-only tree, whose header
+#   bullets tag rationale with the singular word inside parentheses -- see
+#   .github/workflows/tests.yml lines 19 to 43. That tree is reference-only and is
+#   never retyped, so the two trees do read differently on purpose. This file uses
+#   the plural form throughout and mixes neither idiom into the other, because the
+#   plural is the wording the rule's validation gate is applied against and a
+#   category spelled two ways is a category a review cannot count by search. The
+#   equivalence is stated once, here, rather than restated at each site.
 #
 # WHY (non-obvious design decisions):
-#   - Assumptions: user-specified Rule 1 requires Purpose, Parameters, Return
-#     values and Exceptions on a module entry point. YAML has no docstring
-#     construct, so the mapping is: this header states Purpose; property keys are
-#     Parameters; the merged Spring Environment is the Return value; and each
-#     adjacent rationale states what a wrong value silently admits.
-#   - Assumptions: config/checkstyle/checkstyle.xml limits Checkstyle to
-#     fileExtensions="java", and docs/CODE_DOCUMENTATION_STANDARD.md records the
-#     same limit for YAML. No linter in this project inspects this file, so the
-#     obligation rests on that written standard and on review.
-#   - Assumptions: production capacity has a NON-ZERO minimum, so the cluster never
-#     pauses. That single difference from dev is what justifies both the larger pool
-#     and the shorter acquisition timeout below; neither number would be right
-#     against a cluster that sleeps.
-#   - Trade-offs: nothing here re-enables a diagnostic the base document
-#     suppresses, and nothing here keeps a diagnostic the dev overlay adds. This
-#     module is the one whose dev overlay legitimately raises the bind-parameter
-#     logger, because its own tables hold no cardholder data; that argument does
-#     not extend to production, where the cost is log-storage volume at request
-#     rate on the lookup path every other context calls into.
-#   - Alternatives Considered: widening the actuator health detail here so an
-#     on-call reader can see which contributor is failing. Rejected: the probe path
-#     is unauthenticated by deployment necessity, so a detail payload would
-#     describe the data tier to anything able to reach the port. The base document
-#     closes it at never and this file leaves that closed rather than restating it,
-#     because health detail is not one of this module's four permitted axes.
+#   - Refactoring Rationale: this file and application-dev.yml differ from each
+#     other, and from the base, ONLY in sizing and verbosity. Neither varies
+#     topology: not the datasource kind, not the driver, not the owned schema,
+#     not the migration locations, not the listener port, not the queue family
+#     or its message format, and not the identity mechanism. The failure mode
+#     that constraint exists to prevent is specific rather than stylistic: once
+#     two environments differ in SHAPE rather than in SIZE, a dev pass stops
+#     being evidence about prod, and every defect dev cannot reproduce is first
+#     observed in production -- where the cheapest available explanation,
+#     configuration drift, has to be excluded before anybody can start looking
+#     for the real cause. Holding the shapes identical is what makes a
+#     production-only failure attributable to data or capacity instead.
+#   - Trade-offs: production holds its Aurora minimum capacity ABOVE zero, and
+#     every number in this file follows from that one fact. application-dev.yml
+#     takes the minimum to zero and accepts a cold resume of roughly fifteen
+#     seconds on the first request after an idle period, because the saving is
+#     real and no interactive user depends on it there. Production cannot accept
+#     the same cost, and the reason is not a preference: its request traffic
+#     arrives from the browser client through the API gateway and an internal
+#     load balancer, so a fifteen-second stall on the first request is a
+#     user-visible outage, and it is also long enough to consume the health
+#     probe's own budget -- the container HEALTHCHECK in
+#     services/reference-service/Dockerfile allows five seconds per attempt --
+#     so the resume would be observed as an unhealthy task and answered with a
+#     replacement rather than with a wait. The auto-pause saving is therefore
+#     forgone deliberately, in exchange for a cluster that is always awake, and
+#     that is what licenses the warm floor below.
+#   - Assumptions: no capacity number, auto-pause threshold, backup or log
+#     retention period, deletion-protection flag or final-snapshot flag is set in
+#     this file, and none can be. Those live in
+#     infra/modules/aurora-postgresql, infra/modules/observability and
+#     infra/envs/prod, and prod's own values are recorded in
+#     infra/envs/prod/terraform.tfvars. Retention is named as an environment axis
+#     and is genuinely one, but it is a property of the CloudWatch log group and
+#     of the cluster's backup configuration rather than a Spring key: what this
+#     file could vary is how much is written, not how long any of it is kept. A
+#     reader who added an infrastructure setting to a Spring profile would be
+#     configuring nothing at all -- the key would bind to no property and would
+#     be silently ignored, which is worse than absent because it reads as
+#     configured.
+#   - Assumptions: two gates read this file and they cover different halves of
+#     the obligation, so neither one passing is evidence about the other.
+#     config/checkstyle/checkstyle.xml sets fileExtensions="java" at its Checker
+#     element, so the Checkstyle execution bound to the Maven validate phase in
+#     services/pom.xml never opens a .yml file and decides nothing here.
+#     config/rule1/rule1_gate.py does read this file -- .yml is in its governed
+#     suffixes and services/ is not among its excluded prefixes -- and it is
+#     fail-closed and self-testing, so it decides the FORM of every label below
+#     and that no statement carries a purpose comment outside this header block.
+#     Neither gate can decide whether a rationale is TRUE, which is why each one
+#     below names the consequence under the alternative rather than asserting a
+#     preference: that part is settled by review and by nothing else.
 # =============================================================================
 
 spring:
+
   datasource:
     hikari:
-      # WHY : Trade-offs: twenty connections per task rather than the base
-      #       document's ten. This context is the lookup path every other bounded
-      #       context calls into - address validation for account-service,
-      #       disclosure-group rates for batch-service, date conversion for the
-      #       inquiry flow - so its read concurrency is the sum of its callers'
-      #       rather than its own. Twenty gives those callers, the reference-write
-      #       endpoints and the inquiry listener headroom without one task claiming
-      #       a disproportionate share of the cluster's budget: the quantity that
-      #       has to fit that budget is this number multiplied by the task count and
-      #       summed across all eight services, which is why it is raised here
-      #       rather than in the base document where every environment would
-      #       inherit it.
-      maximum-pool-size: 20
 
-      # WHY : Trade-offs: a floor of five rather than the base document's two.
-      #       Production capacity has a non-zero minimum so the cluster never
-      #       pauses, which removes the reason the base keeps the floor low; what
-      #       remains is the cost of a cold connection inside a lookup that another
-      #       service is already waiting on, and five covers the steady-state
-      #       concurrency of the lookup path so that only a genuine burst pays a
-      #       handshake.
+      # WHY : (1) Assumptions: five rather than the base's two, and the licence for
+      #       it is the capacity decision in the header rather than anything about
+      #       this service. The base keeps the floor low and says why: a connection
+      #       held open while nothing is using it reads to the cluster as activity,
+      #       so in an environment permitted to release capacity when idle a floor
+      #       above zero keeps some of that capacity awake and charges for it. That
+      #       cost is CONDITIONAL on the release being reachable, and in production
+      #       it is not: infra/envs/prod/terraform.tfvars holds the minimum at two
+      #       Aurora Capacity Units, so no capacity is ever released and a floor
+      #       cannot keep awake something that never sleeps. What remains of the
+      #       cost is connections, and those are counted below.
+      #       (2) Assumptions: the arithmetic that bounds this number is the same
+      #       product the base names -- pool size multiplied by task count, summed
+      #       across the services sharing one cluster -- and every factor in it is
+      #       recorded rather than assumed. infra/envs/prod/main.tf declares
+      #       max_capacity as twice the desired count for an online workload, and
+      #       terraform.tfvars sets that desired count to two, so this context runs
+      #       at most four tasks. Against the inherited ceiling of ten that is
+      #       forty connections this context can hold at full autoscale, of which
+      #       this floor accounts for twenty held permanently. The same root
+      #       computes the whole-cluster figure from its map of pool sizes, and
+      #       it comes to two hundred and sixty; the four connections batch-service
+      #       holds under its own role are inside that figure, and the nightly
+      #       window is exactly when this floor is least useful and still occupied.
+      #       Twenty of two hundred and sixty is the share this decision spends,
+      #       and it is a share of a budget the alarm in
+      #       infra/modules/observability is set from.
+      #       (3) Trade-offs: five rather than the ceiling of ten, which is the
+      #       other obvious choice and would remove connection establishment from
+      #       every request instead of most of them. It is declined because a floor
+      #       equal to the maximum makes the inherited idle-timeout inert -- the
+      #       pool only retires connections ABOVE the floor -- so the pool would
+      #       never return capacity after a burst, and the setting that says it
+      #       should would still be sitting in the base file reading as though it
+      #       did something. Half the ceiling keeps both halves honest: five stay
+      #       warm, five are elastic and are returned on the base's timer.
+      #       (4) Trade-offs: what the floor buys is worth naming precisely,
+      #       because a floor is otherwise easy to read as caution. The base pins
+      #       sslmode to verify-full, so opening a connection means a full TLS
+      #       handshake with certificate-chain verification against the bundle, and
+      #       the pool statement that pins the search path runs after it. Paying
+      #       that inside a request is the cost this floor removes, and it is paid
+      #       on a path other bounded contexts call into synchronously -- address
+      #       validation for account-service, disclosure-group rates for
+      #       batch-service -- so the latency lands in their requests, not only in
+      #       this service's own.
       minimum-idle: 5
-
-      # WHY : Assumptions: ten seconds, restating the base document's value rather
-      #       than inheriting it. Production capacity has a non-zero minimum, so the
-      #       cluster never pauses and the base value is right here; it is restated
-      #       so that the thirty-second value application-dev.yml sets for a pausing
-      #       cluster cannot be mistaken for a change that applies everywhere. The
-      #       base note records what the longer wait would cost under real load:
-      #       each waiting request occupies its servlet thread, the thread pool
-      #       saturates, the health endpoint stops answering, and a database
-      #       slowdown becomes a task replacement loop.
-      connection-timeout: 10000
-
-logging:
-  level:
-    # WHY : Trade-offs: INFO on the project package, restating the base value so
-    #       that the dev overlay's DEBUG cannot be read as applying anywhere else.
-    #       At INFO the two decisions this context exists to make are recorded by
-    #       outcome - a refused transaction-type delete, a disclosure-group lookup
-    #       falling through to DEFAULT - which is the audit trail. DEBUG would add a
-    #       line per lookup on the path every other service calls into, which is
-    #       the highest-volume logging surface in the system and is billed by the
-    #       gigabyte.
-    com.carddemo: INFO
-
-    # WHY : Assumptions: the root logger returns to WARN, narrower than the base
-    #       document's INFO and narrower than dev. The one thing the base INFO buys
-    #       - the framework lines recording which configuration sources loaded and
-    #       which migrations applied - is a startup diagnostic a deployment pipeline
-    #       reads once, whereas at production request rates root INFO is framework
-    #       narration on every call. Flyway's own migration line survives by
-    #       omission, because the base pins org.flywaydb separately at INFO and this
-    #       file does not restate it, so the durable record that V1__reference.sql
-    #       and V2__seed_reference.sql ran is preserved.
-    root: WARN
-
-    # WHY : Assumptions: the statement logger returns to WARN, restating the base
-    #       value against the dev overlay's DEBUG. The text alone is a per-statement
-    #       cost on the busiest read path in the system and offers nothing the
-    #       database's own statement statistics do not, since the questions worth
-    #       asking in production are about plans and waits rather than syntax.
-    org.hibernate.SQL: WARN
-
-    # WHY : (1) Assumptions: pinned at WARN rather than inherited, and this is the
-    #       most important line in the file. application-dev.yml raises this logger
-    #       to TRACE, which is unique to this module and is justified there by the
-    #       data: these six tables hold reference codes, interest rates and the
-    #       address allow-lists from app/cpy/CSLKPCDY.cpy, none of it cardholder
-    #       data. That argument does not carry into production, where the cost is
-    #       volume rather than disclosure - TRACE writes a line per bound parameter
-    #       on the lookup path every other bounded context calls into.
-    #       (2) Trade-offs: restating it here rather than omitting it is what stops
-    #       a broader level change from raising it, and stops a reader who saw the
-    #       dev value from assuming it applies everywhere. The base pins it at WARN
-    #       too, so this line changes nothing today; it exists so that the pair of
-    #       overlays states the same axis at both ends.
-    org.hibernate.orm.jdbc.bind: WARN
-
-  # WHY : Assumptions: only the log LEVELS are touched. The console pattern that
-  #       carries the correlation, trace and span identifiers arrives from the
-  #       shared defaults document the base imports, and is not restated here -
-  #       giving one pattern two sources is how one environment's logs silently
-  #       lose their identifiers.
-
-management:
-  endpoints:
-    web:
-      exposure:
-        # WHY : (1) Assumptions: the base document's three endpoints, restated
-        #       against the dev overlay's five. This is the second value in this
-        #       file that CLOSES something dev opens, and it is not cosmetic: dev
-        #       adds flyway, which lists applied migrations, and loggers, which is a
-        #       WRITE endpoint able to change a logging level at runtime. An
-        #       unauthenticated write endpoint reachable from anything inside the
-        #       private network could raise the bind-parameter logger that the line
-        #       above exists to pin, which would defeat the control rather than
-        #       merely widen the surface.
-        #       (2) Trade-offs: the accepted cost is that an operator cannot read
-        #       the applied-migration list from the running task and cannot raise a
-        #       level without a redeployment. Both are available by other means -
-        #       the Flyway history table is queryable, and Flyway's own INFO line
-        #       survives in the task logs by the omission recorded above - so
-        #       nothing is lost except the shortest route to them.
-        #       (3) Assumptions: health, info and prometheus are each load-bearing
-        #       and none may be dropped: two unauthenticated pollers consume health,
-        #       info is what makes a defect report attributable to a build, and
-        #       prometheus is the scrape path the Terraform observability module's
-        #       dashboards and alarms read. Dropping the last of those would report
-        #       healthy silence rather than an error.
-        include: health,info,prometheus
 
 springdoc:
   swagger-ui:
-    # WHY : (1) Assumptions: false here, which is the narrowing the base document
-    #       anticipates when it records the UI as reachable in the base
-    #       configuration and says the profiles may narrow it. This is the key that
-    #       axis requires and the one key in this overlay the base does not itself
-    #       declare, because springdoc's autoconfiguration matches when the
-    #       property is missing - the reachable state is produced by a condition
-    #       rather than by a value, so the axis has no base value to override.
-    #       Declaring it in BOTH overlays turns it into a real value a reader can
-    #       compare, rather than one environment carrying a line and the other
-    #       carrying an absence that looks like an oversight.
-    #       (2) Trade-offs: the UI itself discloses nothing - it renders
-    #       reference-api.yaml and issues requests the resource server
-    #       authenticates exactly as it would any other caller. What it does is
-    #       publish a complete, machine-readable description of every route,
-    #       parameter and schema of a write-capable service to anything that
-    #       reaches the port, and in production that description is reconnaissance
-    #       rather than documentation. The contract itself remains available where
-    #       it belongs, in this repository and in the generated document at
-    #       /v3/api-docs, which the base document leaves served.
-    #       (3) Alternatives Considered: leaving the UI reachable and relying on the
-    #       API Gateway route table not to expose /swagger-ui.html. Rejected because
-    #       that places the control in a different module from the surface it
-    #       protects: a route added at the edge for another purpose could expose it
-    #       without anyone editing this service, whereas a disabled UI is not
-    #       reachable however the edge is configured.
+
+    # WHY : (1) Alternatives Considered: leaving the interactive browser reachable
+    #       and relying on the gateway's authorizer plus the filter chain to guard
+    #       it, which is a real option rather than a straw one -- the page already
+    #       needs a token, because config/SecurityConfig.java matches the reference
+    #       surface and closes with denyAll rather than permitting the UI path. It
+    #       is declined because the browser adds an untrusted-input surface without
+    #       adding a source of truth. The contract of record is
+    #       openapi/reference-api.yaml, hand-authored OpenAPI 3.1, and it is
+    #       consumed by ui/src/api/reference.ts when that client is built, so the
+    #       document a reader needs is already published and already versioned with
+    #       the code. What the live page adds over it is a form that composes and
+    #       sends requests, against real reference data, from whatever session
+    #       reaches it. A deployed surface that can only be justified by the
+    #       controls in front of it is a surface worth not having.
+    #       (2) Assumptions: this is the ONE key in this file the base does not
+    #       declare, and the exception is deliberate and bounded. The base declares
+    #       three sibling keys under this same node -- the UI's path, the contract
+    #       URL it renders, and the suppression of the library's own default URL --
+    #       and leaves enabled at the library's default of true, so switching the
+    #       page off cannot be expressed by overriding a value the base already
+    #       carries. The base's own rule that a profile overrides values without
+    #       adding keys exists to stop a profile changing the module's SHAPE, and
+    #       this adds no endpoint, no datasource and no schema: it removes a page.
+    #       application-dev.yml records the other side of the same decision at its
+    #       closing block -- it declines to write this key as true, because true is
+    #       already in force there and an override that changes nothing reads as a
+    #       decision that was made -- and names this file as where the narrowing
+    #       belongs.
+    #       (3) Alternatives Considered: declaring enabled: true in application.yml
+    #       purely so this profile could override a declared key and keep the
+    #       no-new-key property intact. Rejected: it would put a key in the
+    #       property-key contract whose only purpose is to be contradicted once,
+    #       and it is precisely the value-already-in-force restatement both
+    #       overlays remove everywhere else. The narrower exception is to add one
+    #       leaf under a node the base already owns and to say so here.
+    #       (4) Assumptions: springdoc.api-docs stays enabled and is NOT switched
+    #       off alongside this. The two are separable and only one of them is a
+    #       form: the api-docs path serves the document, which is what a client
+    #       generator or a reviewer reads, while the UI is the page that submits
+    #       requests. Switching both off would take away the machine-readable
+    #       contract to remove an interactive form, and the base's static-resource
+    #       location publishes that contract deliberately.
     enabled: false
 
 # =============================================================================
-# Closing notes: three deliberate absences
+# Closing notes: seven deliberate absences
 # -----------------------------------------------------------------------------
-#   Each entry is a key a reader would reasonably expect in a production overlay.
-#   They are recorded together because an absent key has no line of its own to sit
-#   beside.
+#   Each entry below is a key a reader would reasonably expect a production
+#   overlay to carry. An absent key has no line of its own to sit beside, so the
+#   reasoning is collected here rather than left to be re-derived. Under the
+#   governing Explainability rule the PRESENCE of a key in an overlay is itself a
+#   decision; so is its absence, when a reasonable author would have written it.
+#   Four of the seven are keys application-dev.yml DOES set, so a reader
+#   comparing the two files finds a value on one side and this block on the
+#   other, which is the comparison that has to be answerable.
 #
-# Assumptions: no spring.config.import. Every other production overlay in this
-#   repository declares one - re-naming the shared defaults document and adding an
-#   optional:aws-parameterstore: location for its own subtree - so this absence is
-#   the one most likely to read as an oversight. Two reasons it is not. First, a
-#   profile's import list REPLACES the base document's, so an overlay that adds
-#   nothing must not declare the key at all: declaring it would restate what the
-#   base already imports and create a second place for the shared defaults
-#   document to be named. Second, this module carries no Parameter Store
-#   config-data resolver. services/reference-service/pom.xml declares
-#   spring-cloud-aws-starter-sqs and NOT spring-cloud-aws-starter-parameter-store,
-#   verified by dependency:list rather than by reading the POM, so an
-#   aws-parameterstore: location here would be handled by the standard resource
-#   resolver, resolve to nothing, and - being optional - be skipped in silence. In
-#   production a line that silently supplies nothing is the worst kind: an operator
-#   would place a parameter in that subtree, see the service ignore it, and look
-#   for the fault in the parameter rather than in the missing resolver.
+# WHY : Assumptions: spring.datasource.hikari.maximum-pool-size is NOT raised and
+#       stays at the base's ten, which is the one absence in this block that would
+#       be a defect rather than untidiness if it were written differently. The
+#       ceiling is not a local decision: infra/envs/prod/main.tf keeps a map of
+#       per-service pool sizes, states that the map MIRRORS
+#       spring.datasource.hikari.maximum-pool-size in each service's
+#       application.yml, and derives the cluster's connection budget and its alarm
+#       threshold from the product of that map and the task count. It records the
+#       failure mode itself: a value that drifts from a service's application.yml
+#       understates the budget. So raising the pool here to twenty would not merely
+#       spend an allowance the other contexts share -- the base file names that
+#       consequence, and names its symptom, an exhaustion error raised in
+#       whichever service connects NEXT rather than in the one that took the slots
+#       -- it would also leave the threshold computed from ten while the pools
+#       could open twenty, which is the same as switching the alarm off for the
+#       case it exists to catch. A profile cannot be the place this number
+#       changes, because the infrastructure that budgets it reads the base file
+#       and cannot see a profile.
+#       Trade-offs: the accepted cost is that a burst beyond ten concurrent
+#       database operations queues for a connection here exactly as it does in the
+#       base. That is accepted because these are lookups against six small tables
+#       holding a connection for milliseconds, and because the warm floor above
+#       removes the establishment cost from most of them.
 #
-# Assumptions: no spring.jpa.show-sql override. The base already holds it false,
-#   and the dev overlay does not change it either - the statement text is obtained
-#   there through the org.hibernate.SQL logger, which this file restates at WARN
-#   above. Restating a flag neither overlay moves would suggest the pair disagree
-#   about it when they do not.
+# WHY : Assumptions: connection-timeout, idle-timeout and max-lifetime are all
+#       inherited, and each is inherited because the base's value is already the
+#       production one -- application-dev.yml is the file that moves them, and it
+#       records that this file does not. Ten seconds for acquisition is the base's
+#       own choice and prod is the environment it was chosen for: no request here
+#       waits on a cluster resume, so the thirty seconds dev needs would buy
+#       nothing while bringing the thread-pool cascade the base describes nearer.
+#       Five minutes of idle life is correctly ordered against fifteen minutes of
+#       total life for these numbers, and the pool disables an idle timeout that
+#       comes within a second of the lifetime, so the inherited pair is the pair
+#       that is actually in force. Fifteen minutes of total life sits below the
+#       shortest window in which anything between the pool and the engine may
+#       retire a connection, which is the ordering that matters: the pool must
+#       retire a connection before the network path or the engine does, or it
+#       hands out a socket the server has already dropped and the first statement
+#       on it fails as a broken pipe that reads like an application defect. Dev
+#       shortens it because its own shortest window is auto-pause, which prod does
+#       not have; nothing about prod's path is shorter than the base assumed, so
+#       there is no prod-specific number to write.
 #
-# Assumptions: no spring.flyway.clean-disabled override. The base document already
-#   pins it true, unlike some sibling contexts whose base leaves it to the
-#   production overlay alone. Restating it here would create a second place for the
-#   most destructive setting in the file to be decided, and the failure mode of two
-#   places is that one of them is edited.
+# WHY : Trade-offs: statement echo stays off, and it is off in the base rather than
+#       switched off here -- spring.jpa.show-sql is already false, and Hibernate's
+#       statement formatting is left at its own default of off, so neither is
+#       restated. What that gives up is exactly what application-dev.yml keeps
+#       deliberately: the statement text is where a keyset predicate is legible --
+#       the ordering columns, the strict inequality against the previous page's
+#       last key, and the limit of size-plus-one that decides whether a further
+#       page exists -- and that visibility is genuinely useful while a paged
+#       reference screen is being built. It is given up in a deployed task for two
+#       specific costs rather than one. The volume cost is per-statement output on
+#       the lookup path every other bounded context calls into synchronously, held
+#       for the retention period the log group is configured with, which
+#       infra/envs/prod/terraform.tfvars sets far longer here than in dev. The
+#       disclosure cost is the one that settles it: raising statement logging
+#       usefully means raising the bind-parameter logger with it, and that logger's
+#       entire output is parameter values written to the same correlated stream
+#       every request uses. Diagnosis in a deployed task is served by the
+#       correlation identifier common-lib's
+#       com.carddemo.common.web.CorrelationIdFilter publishes into the MDC and by
+#       the metrics com.carddemo.common.observability.MetricsConfig tags, neither
+#       of which is configured here and neither of which needs a second mechanism.
+#
+# WHY : Assumptions: no logger is named in this file at all, and the ceiling that
+#       decision draws is deliberate rather than an oversight. The application
+#       package stays at the base's INFO, which is the deployed level for it --
+#       this service's own decisions, a refused transaction-type delete or a
+#       disclosure-group lookup falling through to DEFAULT, are visible without
+#       the per-request volume DEBUG produces -- and application-dev.yml is the
+#       profile that raises it. The framework packages stay at their own defaults
+#       and root stays at INFO, which is the base's stated position and is left
+#       alone on purpose: lowering root would discard the startup and lifecycle
+#       lines that confirm a task came up while saving nothing measurable, because
+#       framework packages emit per-request output at DEBUG and not at INFO. The
+#       migration logger stays at INFO because its output is the only record that
+#       the seed completed and how long it took. The ceiling is this: no log
+#       statement this profile enables may emit an unmasked primary account
+#       number, a card verification value, a national identifier or a
+#       government-issued identifier. No table in the reference schema holds any
+#       of the four, so the ceiling is not about this schema's own columns -- it is
+#       about the bind-parameter logger, which is a framework logger on the shared
+#       correlated stream, and which stays at the base's WARN here. Dev's own note
+#       at that key states the same limit and reaches it the same way, by not
+#       raising the one logger whose output is nothing but values.
+#
+# WHY : Assumptions: nothing here skips, reorders, baselines or otherwise defers a
+#       migration, and clean is not enabled in any form. Flyway stays enabled with
+#       the base's locations, so a prod task applies V1__reference.sql and then
+#       V2__seed_reference.sql on every start, seeding 862 rows -- 76 reference
+#       rows across transaction types, categories and disclosure groups, plus 786
+#       address-lookup rows -- before this service answers anything, and there is
+#       no V3. That cost is what the HEALTHCHECK in
+#       services/reference-service/Dockerfile is sized for at
+#       --start-period=30s --interval=30s --retries=3, and the target group's grace
+#       period has to allow the same interval; here the seed is the whole of it,
+#       where dev pays a cluster resume before the first statement as well.
+#       Tightening either on the assumption that startup is only process start
+#       produces a task killed before it can ever become healthy, and the symptom
+#       -- a replacement loop with no error in the application log -- points
+#       nowhere near the cause. What a clean would remove is the seed, and the seed
+#       carries the mandatory 'DEFAULT' disclosure-group rows. The consumer of
+#       those rows is not this service: app/cbl/CBACT04C.cbl reads a disclosure
+#       group per account, and at L436-L439, on file status '23' -- key not found
+#       -- it moves 'DEFAULT' into FD-DIS-ACCT-GROUP-ID and performs
+#       1200-A-GET-DEFAULT-INT-RATE to re-read. Should that re-read also fail, L455
+#       displays 'ERROR READING DEFAULT DISCLOSURE GROUP' and L458 performs
+#       9999-ABEND-PROGRAM, whose body at L628-L632 is DISPLAY 'ABENDING PROGRAM',
+#       MOVE 0 TO TIMING, MOVE 999 TO ABCODE, CALL 'CEE3ABD' USING ABCODE, TIMING
+#       -- a genuine Language Environment abend that ends the run. The baseline
+#       behaves that way; the target keeps the same shape, so the equivalent
+#       failure is a crash in batch-service, in a job holding no defect of its own,
+#       caused by rows that a DIFFERENT service's profile permitted to be removed.
+#       That divergence is recorded in
+#       docs/architecture/cobol-to-service-traceability.md.
+#
+# WHY : Assumptions: the queue-consumer bounds are inherited and the long-poll wait
+#       is inherited, and the second of those is the one no profile may touch. The
+#       wait is not an environment-sized value: app/app-vsam-mq/cbl/CODATE01.cbl
+#       L286 is MOVE 5000 TO MQGMO-WAITINTERVAL -- five seconds -- as the wait on
+#       the baseline get, and the comment above it at L285 says so in the source.
+#       Varying it here would make prod poll differently from both dev and the
+#       program being migrated. The concurrency bound is inherited for a different
+#       reason, and it is the one place a production overlay is tempting and wrong:
+#       raising it above the pool size is not a throughput change but a
+#       redelivery mechanism, because every date-conversion handler holds a pooled
+#       connection while it resolves its request, so handlers admitted beyond the
+#       pool wait out the acquisition timeout, fail, and are redelivered until the
+#       dead-letter queue accepts them at the fifth receive. The base's ten already
+#       equals the inherited pool ceiling, and the messages-per-poll bound cannot
+#       usefully rise at all: the queue service accepts at most ten messages per
+#       receive, and the framework refuses to start a listener whose per-poll bound
+#       exceeds its concurrency bound, so the base's pair is simultaneously at the
+#       protocol ceiling and correctly ordered.
+#       Assumptions: the queue NAMES stay unresolved placeholders in the base and
+#       no literal appears here, for two independent reasons. The baseline does not
+#       hold its own input queue name either -- CODATE01.cbl L146 is
+#       MOVE MQTM-QNAME TO INPUT-QUEUE-NAME, taking it from the trigger message --
+#       and the names it does hold are dotted and uppercase, L147
+#       'CARD.DEMO.REPLY.DATE' and L243 'CARD.DEMO.ERROR', a form the target queue
+#       service does not accept, so the reply and error names could not be carried
+#       across verbatim even if a profile were the place to write them. The target
+#       names each queue per environment and provisions each with a dead-letter
+#       queue at a maximum receive count of five and encryption with a managed key,
+#       which is infrastructure rather than configuration.
+#
+# WHY : Alternatives Considered: widening management.endpoint.health.show-details,
+#       or the actuator exposure list, so an on-call reader could see which
+#       contributor is failing without a token. Both are declined and neither is
+#       restated, because the base already withholds the detail and already lists
+#       three endpoints. Detail is what the alternative would cost: two consumers
+#       poll /actuator/health and neither can present a token -- the load
+#       balancer's target group and the HEALTHCHECK in
+#       services/reference-service/Dockerfile, which is why
+#       config/SecurityConfig.java permits that path -- so widening the detail to
+#       always would describe this service's datasource and migration state to
+#       anything that reached the port, on a task that resolves a real database
+#       credential from a managed secret store. Recording both consumers here is
+#       the point of the note: a future narrowing that removed the permitted path
+#       would take the ALB probe and the container probe with it, and the task
+#       would be replaced for a reason that looks like a fault. Naming a fourth
+#       actuator endpoint is separately pointless rather than merely unwise --
+#       the filter chain closes with denyAll, so the endpoint would be published
+#       by the actuator and refused by the chain to every caller, including an
+#       administrator holding a valid token -- and env, configprops, beans,
+#       loggers, mappings, heapdump and threaddump are out of the question in
+#       every environment, because env alone would publish that credential. The
+#       migration state such an endpoint would have shown is read from the
+#       migration log instead, which the base holds at INFO for exactly that
+#       purpose.
 # =============================================================================

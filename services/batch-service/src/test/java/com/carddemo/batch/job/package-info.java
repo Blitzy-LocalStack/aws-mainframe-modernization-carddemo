@@ -101,7 +101,7 @@
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 7 java files = 6 tests + 1 charter
+ * this directory: 12 java files = 11 tests + 1 charter
  * </pre>
  *
  * <ul>
@@ -111,25 +111,117 @@
  *   <li>{@code BatchJobRosterTest} across 5 cases -- the same agreement read from the classes
  *       themselves by reflection, plus distinctness of the registered names and of the durable
  *       ledger step names.</li>
- *   <li>{@code PostTransactionsJobTest} across 9 cases -- the posting job's step, its single
- *       transactional boundary, its reject-count result and its generation handling.</li>
+ *   <li>{@code PostTransactionsJobTest} across 25 cases -- the posting job's step, its single
+ *       transactional boundary and the reference order of the three writes inside it, its
+ *       reject-count result in both the forms the orchestrator can read, the two counter lines it
+ *       renders, the inverted downstream-run predicate, the two timestamps a posted row carries, and
+ *       its generation handling. Nine of the 25 are one per committed expectation tree, so the class
+ *       contributes 33 executed cases rather than 25.</li>
  *   <li>{@code DatasetJobBodiesTest} across 14 cases and {@code GenerationStagingJobsTest} across 6
  *       -- what the dataset-writing jobs emit and the generation prefix they emit it under.</li>
- *   <li>{@code CalculateInterestJobTest} across 4 cases -- the interest job's control break and its
- *       injected business date.</li>
+ *   <li>{@code CalculateInterestJobTest} across 26 cases -- the interest job's registered name, its
+ *       business-date parameter contract, its numeric result, its control break, its corrected
+ *       final-account flush, its generation allocation, its emitted output, its step record and its
+ *       parity against the three committed interest expectations.</li>
+ *   <li>{@code ImportJobTest} across 36 cases -- the export-to-import round trip that stands in for
+ *       the golden that does not exist, the five-way record-type dispatch with its counted unknown
+ *       arm, the six fixed-width outputs including the one no driver allocates, the pipe-delimited
+ *       diagnostic record, and the four divergences the pair registers.</li>
+ *   <li>{@code CombineTransactionsJobTest} across 20 cases -- the combine job's pipeline join, the
+ *       byte-wise ordering its sort-utility driver declares, and the absence of a load-back into the
+ *       relation it reads.</li>
+ *   <li>{@code BackupTransactionsJobTest} across 21 cases -- the backup job's condition-code
+ *       inversion, the tolerated-not-found semantics of its removal step, the deliberate omission of
+ *       its wipe-and-re-create pair, and the 350-byte form of the image it emits. Two of the
+ *       twenty-one are parameterised, so the runner reports thirty-six executions; the figure stated
+ *       here is the declared-case count this module's charter inventory measures, which counts
+ *       annotated members rather than executions.</li>
+ *   <li>{@code ExportJobTest} across 29 cases -- the export dataset's own SHAPE: the 500-byte record,
+ *       every field of the 40-byte common prefix at its declared offset, the five 460-byte payload
+ *       views, the single monotonic sequence number that spans them, the per-field codec routing one
+ *       record with three storage regimes demands, the two attribution literals and their configured
+ *       overrides, and the statement of divergence D-1.</li>
+ *   <li>{@code PreflightDailyTransactionsJobTest} across 12 cases -- the pre-posting pass's read-only
+ *       guarantee, proven by snapshotting four tables across a real run; the unreachability of the
+ *       soft-warn tier; its three input outcomes and their two diagnostics; divergence {@code D-7};
+ *       and the durable step row that makes a redriven state a no-op.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the census above is a MEASUREMENT of this directory and not a plan for
- * it, and the distinction is stated because the two diverge here in a way a reader will notice. The
+ * it, and the distinction is stated because the two are converging here rather than agreeing. The
  * migration plan's per-service test rows imply one test type per job type, which would name a
  * {@code PreflightDailyTransactionsJobTest}, a {@code BackupTransactionsJobTest}, a
- * {@code CombineTransactionsJobTest}, an {@code ExportJobTest} and an {@code ImportJobTest}. None of
- * those exists, and none is missing coverage: the five subjects they would have covered are asserted
- * by {@code DatasetJobBodiesTest} and {@code GenerationStagingJobsTest}, which are organised by the
- * behaviour under assertion -- what a dataset job emits, and the generation it emits under -- rather
- * than by one class per job. Recording that here is what stops a reader from filing a sixth
- * per-job type against a subject already covered, and from reading the absence of five expected
- * filenames as a gap.</p>
+ * {@code CombineTransactionsJobTest}, an {@code ExportJobTest} and an {@code ImportJobTest}. ALL FIVE
+ * now exist and every one is listed above, so this directory and the plan's per-service test rows
+ * agree exactly; the paragraphs below record, per class, why each earns a type of its own rather than
+ * being folded into a behaviour-organised sibling. {@code DatasetJobBodiesTest} and
+ * {@code GenerationStagingJobsTest} remain organised by the behaviour under assertion -- what a
+ * dataset job emits, and the generation it emits under -- so a reader should expect deliberate,
+ * bounded overlap between them and the per-job types rather than a partition.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph once said that none of the five existed and that all five
+ * subjects were covered elsewhere, and both halves were amended together rather than only the count.
+ * The preflight pass is the one of the five whose subject the dataset cases could NOT have covered:
+ * what it owns is that a run writes nothing at all, which is observable only against real tables and
+ * is asserted nowhere else in this module. Leaving the earlier wording in place while the classes
+ * existed would have told a reader that filenames they can see in this directory are absent, which is
+ * precisely the drift the census note above exists to prevent.</p>
+ *
+ * <p>Alternatives Considered: covering the export-to-import ROUND TRIP from the producing side as
+ * well, as a second assertion inside {@code ExportJobTest}, which is the symmetrical shape the plan's
+ * rows imply. Rejected because what those two jobs share is a SINGLE specification -- a record written
+ * by {@code ExportJob} and read back unchanged by {@code ImportJob} -- so it is one assertion spanning
+ * two runs and has to have one owner. It is owned from the consuming side because that is the
+ * direction the production types declare: {@code ImportJob} carries {@code ExportJob} among its
+ * dependencies and an {@code @see} to it, so the consumer already knows the producer, while a
+ * producer-side round-trip assertion would have to reach forward to a type its own subject exists
+ * independently of. What is given up is a per-class home for the round trip on the producing side;
+ * what is bought is that the pair's one specification cannot be half-asserted in two places that
+ * drift apart. This is why {@code ExportJobTest} exists but does NOT re-assert the round trip: the
+ * two classes divide the pair by subject, geometry on the producing side and round trip on the
+ * consuming side, rather than duplicating one claim.</p>
+ *
+ * <p>Assumptions: the case figure quoted for {@code ImportJobTest} is 36 DECLARED cases and a run of
+ * it reports 48 executed, and the two differ legitimately because three of its methods are
+ * parameterised and expand. The declared figure is the one every entry above quotes and the one
+ * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java}
+ * re-measures, counting methods annotated as a test, a parameterised test or a repeated test. The
+ * distinction is recorded because substituting the executed figure would look like a correction and
+ * would fail that check.</p>
+ *
+ * <p>Trade-offs: the combine case therefore OVERLAPS {@code DatasetJobBodiesTest} and
+ * {@code GenerationStagingJobsTest} rather than replacing either, and the overlap is bounded
+ * deliberately. Those two settle which calls the job makes, with which coordinates and in which order,
+ * against test doubles; the combine case settles the three things a test double cannot show -- that
+ * the emitted order is the byte-wise order its driver declares rather than whatever collation the
+ * column carries, that both upstream producers' rows reach one artefact, and that the run writes
+ * nothing back. What is given up is that this directory holds cases that need a database engine, which
+ * are slower than every doubles-based case beside them and are the cases here that cannot run without
+ * a container runtime; what is bought is that the ordering contract is checked against a real
+ * comparison instead of against an arrangement the test itself chose.</p>
+ *
+ * <p>Assumptions: {@code BackupTransactionsJobTest} earns a class of its own, and the reason is a
+ * property of its subject rather than a change of convention. Its job is the only one in this package
+ * with no COBOL program behind it -- {@code app/jcl/TRANBKP.jcl:23} copies through a catalogued
+ * procedure and its other two steps are utility invocations -- so that file is a SPECIFICATION rather
+ * than a transcription, and it additionally carries two rulings that belong to no dataset-emission
+ * grouping: the inversion of the baseline's only {@code COND=(4,LT)} at
+ * {@code app/jcl/TRANBKP.jcl:51}, and the deliberate non-porting of the cluster delete-and-re-create
+ * at {@code :37-46} and {@code :51-60} whose literal translation would empty the transaction table
+ * nightly. Grouping either ruling under a behaviour-organised class would leave the most consequential
+ * decision in this package without an obvious home.</p>
+ *
+ * <p>Refactoring Rationale: {@code ExportJobTest} was added rather than folded into
+ * {@code DatasetJobBodiesTest} because its subject is not the behaviour that file is organised around.
+ * {@code DatasetJobBodiesTest} asserts what each dataset job EMITS -- the key, the record count, the
+ * discriminators present -- across five jobs at once. What was missing was the export record's own
+ * GEOMETRY: each prefix field at its declared offset and width, each payload view closing at 460
+ * bytes, the four-byte binary sequence field, one gapless sequence across every type, and the packed,
+ * display and binary spans of one record decoded through their own codecs with negative values. Those
+ * properties are specific to one record layout and are the ones a wrong {@code USAGE} assumption
+ * breaks silently, since a mis-sized field still leaves the record at its declared 500 bytes; adding
+ * them to a file organised by job would have made that file two files in one. It is also the one place
+ * divergence D-1 is stated authoritatively rather than in passing.</p>
  *
  * <p>Assumptions: the roster cases exist because this module states what it can run in TWO
  * independent places -- the token list {@code com.carddemo.batch.BatchApplication} validates an
@@ -366,12 +458,45 @@
  *
  * <h2>Test style, and where inputs come from</h2>
  *
- * <p>Measured at this revision: five of the six types are plain JUnit 5 cases that construct their
- * subject directly and supply every collaborator as a test double, and the sixth,
- * {@code JobRegistrationCensusTest}, assembles a context over the seven job configurations with a
- * context runner in order to observe bean registration, which is the one thing a directly
- * constructed subject cannot show. No case starts a full application, selects a profile, requests a
- * database container or contacts a queue emulator, and no case launches a job.</p>
+ * <p>Measured at this revision, the eleven types fall into three groups. FIVE build no Spring context
+ * at all -- {@code BatchJobRosterTest}, {@code CalculateInterestJobTest}, {@code DatasetJobBodiesTest},
+ * {@code GenerationStagingJobsTest} and {@code PostTransactionsJobTest} -- constructing their subject
+ * directly and supplying every collaborator as a test double. FOUR assemble a narrow context with a
+ * context runner in order to observe bean registration, which is the one thing a directly constructed
+ * subject cannot show: {@code JobRegistrationCensusTest}, {@code BackupTransactionsJobTest},
+ * {@code ExportJobTest} and {@code ImportJobTest}. TWO select the test profile and start a context
+ * against a database container -- {@code CombineTransactionsJobTest} and
+ * {@code PreflightDailyTransactionsJobTest}. No case contacts a queue emulator.</p>
+ *
+ * <p>NINE of the eleven RUN their job; only {@code BatchJobRosterTest} and
+ * {@code JobRegistrationCensusTest} do not, because their subject is registration read by reflection
+ * and by context assembly rather than execution. Eight of the nine run it over the framework's
+ * resourceless in-memory job repository, which is what puts the step lifecycle, the attached parameter
+ * validator and the exit-status propagation from step to job under assertion without needing an
+ * application. The ninth, {@code PreflightDailyTransactionsJobTest}, launches through the framework's
+ * job-operator test support against the container database, because its subject is what the run did
+ * NOT write.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph once stated that no case started a full application,
+ * selected a profile, requested a database container or launched a job, and every one of those four
+ * claims has since become false. They are corrected against a re-measurement of the directory rather
+ * than softened, because a reader uses this paragraph to decide what shape a new case may take, and a
+ * charter's false claim costs more than a missing one: a reader deciding how to assert a job's result
+ * would take the old sentence as ruling a launch out, leaving the private body as the only apparent
+ * way in. The grouping is stated as three explicit rosters rather than as a count with one named
+ * exception, because a count with an exception is what drifted -- it stayed readable while becoming
+ * wrong, and naming every member makes the next divergence visible instead of plausible.</p>
+ *
+ * <p>Assumptions: the two container-backed cases are the ONLY two here that need a database engine,
+ * and each is an exception on a stated ground rather than by preference. What the combine case settles
+ * is the order the engine returns a sixteen-byte character column in, which the reference's sort
+ * utility declares as a byte-wise comparison at {@code app/jcl/COMBTRAN.jcl:28}; a repository test
+ * double would return rows in whatever order the case itself arranged, so the assertion would restate
+ * its own stub and hold under every collation. What the preflight case settles is that a run leaves
+ * every table unchanged, and with repositories replaced by doubles there are no tables, so that
+ * assertion would pass whatever the pass wrote. A case in this directory needing a container for any
+ * OTHER reason is not covered by these two exceptions -- the persistence-subject cases belong to
+ * {@code com.carddemo.batch.repository}, which is chartered for them.</p>
  *
  * <p>Assumptions: launching a job is available rather than forbidden, and the distinction matters
  * for whoever writes the next case. The module's test profile at
@@ -436,8 +561,18 @@
  * collected at the integration phase and asserted at verify, where nothing prepares the environment
  * such a case would expect, while the unit runner never sees it -- so the case is skipped or fails
  * on connection rather than on its assertions, and the build still reports success. Every class here
- * therefore ends in {@code Test} and the container-backed cases live in
- * {@code com.carddemo.batch.repository}, which is chartered for them.</p>
+ * therefore ends in {@code Test}, and that holds for the one case here that does start a container:
+ * {@code PreflightDailyTransactionsJobTest} requests one and is nevertheless collected by the UNIT
+ * runner, because the runners divide by name and not by what a case does.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph previously closed by saying that the container-backed cases
+ * live in {@code com.carddemo.batch.repository}. That remains true of the three named with the
+ * integration suffix, and it is no longer the whole picture, so the sentence is narrowed rather than
+ * left to read as a prohibition it never was. The rule this paragraph states is about NAMING, and
+ * naming is all it was ever about: a case belongs in the persistence package when its subject is
+ * persistence, not merely because it needs a database to observe its subject. The preflight case's
+ * subject is a job, and what it needs a database for is to prove that the job wrote nothing to
+ * one.</p>
  *
  * <p>Assumptions: this directory is a leaf and holds no subdirectory, no ignore file and no
  * architecture-rule configuration. The layering invariants are owned by the pinned gate under

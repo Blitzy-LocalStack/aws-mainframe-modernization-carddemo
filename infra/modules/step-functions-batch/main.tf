@@ -2,16 +2,23 @@
 # infra/modules/step-functions-batch/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions three STANDARD Step Functions workflows: the eleven-work-state
+#   Provisions four STANDARD Step Functions workflows: the eleven-work-state
 #   nightly CardDemo batch chain, the ad-hoc report workflow started by
-#   reporting-service, and the operator-invoked dataset export/import round trip.
-#   All three use one least-privilege execution role, encrypted CloudWatch
-#   execution logs and optional X-Ray tracing. It also provisions the out-of-graph
+#   reporting-service, the operator-invoked dataset export/import round trip, and
+#   the operator-invoked authorization unload/load extract.
+#   All four use one least-privilege execution role, encrypted CloudWatch
+#   execution logs and X-Ray tracing. It also provisions the out-of-graph
 #   finalizer that releases the online-write quiesce bracket for a daily execution
 #   that was terminated rather than failed.
 #
-#   Refactoring Rationale: the round-trip workflow is the third and newest, and it
-#   exists because two batch jobs were unreachable. BatchApplication accepts
+#   Collectively these four replace the mainframe's job stream: the nightly chain
+#   replaces the JCL/JES2 batch cycle under app/jcl/, and the three on-demand
+#   machines replace work an operator or a CICS user submitted by hand. The
+#   baseline is not removed by any of this -- app/** continues to exist and run,
+#   and every citation below is a reference to it, never a change to it.
+#
+#   Refactoring Rationale: the round-trip workflow is the third of the four, and
+#   it exists because two batch jobs were unreachable. BatchApplication accepts
 #   `--job=export` and `--job=import` and ExportJob and ImportJob register beans
 #   under exactly those tokens, yet neither token appeared in any state machine,
 #   schedule or API in this repository -- so both jobs could be built, tested and
@@ -21,21 +28,41 @@
 #   on-demand machine is the faithful target rather than two more nightly states.
 #
 # Parameters:
-#   variables.tf declares the ECS cluster and three task definitions, private
-#   task placement, passable roles, three Lambda functions, dataset bucket,
-#   notification topic, per-state timeout and retry controls and observability
-#   settings. The business date is deliberately execution input, never Terraform
-#   state.
+#   variables.tf declares the ECS cluster and four task definitions -- batch,
+#   data-migration, reporting and authorization -- private task placement,
+#   passable roles, three Lambda functions, dataset bucket, notification topic,
+#   per-state timeout and retry controls and observability settings.
+#
+#   The one parameter that is NOT a Terraform input is the business date. It is
+#   execution input, named `businessDate` and formatted YYYY-MM-DD, supplied by
+#   the eventbridge-scheduler payload; a `scheduledTime` ISO timestamp is accepted
+#   as a fallback and reduced to its date part. Assumptions: this preserves
+#   app/jcl/INTCALC.jcl:22, which runs PGM=CBACT04C with PARM='2022071800' rather
+#   than letting the program read a clock -- an injected date is what makes a
+#   rerun reproducible and a golden-master comparison meaningful. A Terraform
+#   variable would freeze one date into the infrastructure, so the input contract
+#   is asserted at run time instead and an execution that satisfies neither form
+#   is refused rather than defaulted.
 #
 # Return values:
-#   None here. outputs.tf publishes all three state-machine ARNs and names, the
-#   execution role and all three log-group identities.
+#   None here. outputs.tf publishes all four state-machine ARNs and names, the
+#   execution role, all four log-group identities and the finalizer rule.
+#   infra/modules/eventbridge-scheduler starts an execution of the daily machine,
+#   services/reporting-service starts an execution of the ad-hoc machine, and
+#   infra/modules/observability builds its dashboards and alarms from the ARNs.
 #
 # Exceptions or errors:
-#   Every work state has an explicit timeout, retry and catch, and NO execution
-#   carries a top-level timeout, because a top-level timeout ends an execution
-#   outside the state graph and so skips the cleanup states. Infrastructure
-#   faults reach the common notification path; container exit codes are
+#   Every work state has an explicit timeout, retry and catch, and every machine
+#   ALSO carries a top-level TimeoutSeconds -- var.state_machine_timeout_seconds
+#   for the daily chain and one ceiling each for the three on-demand machines.
+#   Assumptions: a top-level ceiling is a CEILING, not a prediction of how long a
+#   run takes, and it is there because a per-state timeout cannot bound an
+#   execution that stalls BETWEEN states. Trade-offs: the accepted cost is that
+#   the ceiling is not catchable -- an execution it terminates is ended by the
+#   service as TIMED_OUT without entering any further state, so no Catch and no
+#   in-graph cleanup runs. That is precisely why the quiesce bracket is released
+#   from OUTSIDE the graph as well; see the finalizer at the foot of this file.
+#   Infrastructure faults reach the common notification path; container exit codes are
 #   evaluated explicitly so posting codes 0 and 4 rejoin the success path while
 #   every other code notifies and fails. The daily failure path releases the
 #   online-write quiesce bracket before terminating, but only when the ownership
@@ -47,14 +74,69 @@
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: a JCL COND is a skip predicate and a Choice is a
-#     run predicate. PostTransactions therefore continues on EXACTLY 0 and
-#     EXACTLY 4 and fails on every other code; copying the JCL sense would turn
-#     a normal reject night into a failed chain, and copying its "4 or lower"
-#     shape would tolerate exit codes the posting program cannot produce.
+#     run predicate, so every condition code INVERTS on the way across rather
+#     than being copied. Stated once here because it governs three distinct
+#     baseline forms, each mapped where it occurs:
+#       (a) COND=(0,NE) -- eight sites, at app/jcl/DEFGDGD.jcl:36, :47, :59 and
+#           :82, app/jcl/CREASTMT.JCL:56, :66 and :79, and app/jcl/TXT2PDF1.JCL:26
+#           (a job that retires with no target). It skips the step when zero does
+#           NOT equal a prior code, so it RUNS only when every predecessor ended
+#           cleanly. Target: the DEFAULT SUCCESS EDGE, with any non-zero code
+#           taken by that state's Catch to NotifyFailure and then Fail. Modelling
+#           it as a Choice would add a predicate for a condition the edge already
+#           expresses.
+#       (b) COND=(4,LT) -- exactly ONE site, app/jcl/TRANBKP.jcl:51. It skips
+#           when four is LESS THAN the code, so it RUNS when the code is 4 or
+#           lower. Target: the explicit CheckPostingExitCode Choice below, which
+#           admits 4 as a warning rather than a failure. The full argument, and
+#           why the predicate is exactly-0-or-exactly-4 rather than a "4 or
+#           lower" ceiling, is at local.posting_warn_return_code.
+#       (c) INCLUDE COND=(...) -- exactly ONE site, app/jcl/TRANREPT.jcl:47-48,
+#           and it is NOT a step gate at all. It sits inside a DFSORT step and
+#           selects RECORDS by an inclusive processing-date range. Target: a SQL
+#           WHERE clause inside reporting-service. It is deliberately absent from
+#           every state graph in this file; see the GenerateReports state.
+#     The hazard the three share is the keyword: conflating a record predicate
+#     with a step gate, or copying either sense unaltered, produces a chain that
+#     plans and applies cleanly and is wrong only at run time.
 #   - Assumptions: state 2 is a ten-item Map using data-migration, states 3-7
 #     use batch-service, and states 8-9 plus ad-hoc reporting use
 #     reporting-service. BatchApplication's verified seven-name list contains
 #     the five daily batch jobs used here and contains no reporting job.
+#   - Refactoring Rationale: restart is an IMPROVEMENT here, not a preserved
+#     contract, and the direction matters. The baseline has no batch-restart
+#     mechanism to port: the only RESTART= anywhere under app/ is COMMENTED OUT,
+#     at app/jcl/DEFGDGD.jcl:2 (`//*  RESTART=STEP30`, carrying a leftover
+#     JOB05067 sequence field), and CHKPT= -- the JCL checkpoint keyword --
+#     appears ZERO times across the whole tree. What replaces it is a STANDARD
+#     execution's redrive, which resumes from the failed state, plus the durable
+#     batch.batch_run step ledger owned by batch-service, unique on
+#     (run_id, step_name), so a redriven step that already completed is a no-op.
+#     As an observation of an immutable baseline rather than an asserted defect:
+#     had that RESTART=STEP30 been active it would have re-entered a job whose
+#     earlier step had already defined a generation-data group, which is exactly
+#     the idempotency problem the step ledger removes.
+#   - Assumptions: one baseline job retires WITH an analogue rather than without
+#     one. app/jcl/WAITSTEP.jcl:22 drives PGM=COBSWAIT, a step whose only purpose
+#     is to make a job wait for the step before it. That is precisely what an edge
+#     between two states already is here, so the wait is expressed by the graph's
+#     own ordering and no state corresponds to it. Recorded because its absence
+#     from the state list would otherwise look like an omission.
+#   - Assumptions: what this module does NOT own, recorded once so nothing is
+#     bolted on here that belongs to a sibling. The dataset bucket, its TEN
+#     generation-dataset prefix families and the five-noncurrent-version
+#     lifecycle rule that reproduces their LIMIT(5) belong to
+#     infra/modules/s3-datasets -- six families defined at app/jcl/DEFGDGB.jcl:25,
+#     :31, :37, :43, :49 and :55, three at app/jcl/DEFGDGD.jcl:28, :51 and :74,
+#     and one at app/jcl/DALYREJS.jcl:24-26, every one at LIMIT(5) SCRATCH. This
+#     module only consumes var.dataset_bucket_name and creates nothing inside it.
+#     The nightly cron schedule belongs to infra/modules/eventbridge-scheduler,
+#     which targets the daily ARN exported here. Dashboards, alarms and the
+#     notification topic belong to infra/modules/observability; this module
+#     creates only its own four log groups. The three Lambda functions arrive as
+#     ARNs. Aurora, its schemas and the batch.batch_run table are elsewhere
+#     entirely. The IAM grant that lets reporting-service call StartExecution on
+#     the ad-hoc machine is wired by the environment root, not here.
 #   - Trade-offs: the execution payload carries only dates, dataset names,
 #     execution identities and task metadata. Record data and credentials never
 #     enter Step Functions, which is why execution-data logging can remain on.
@@ -71,9 +153,35 @@
 #     as timeout and adds one rule.
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Data sources
+# -----------------------------------------------------------------------------
+
+# WHY : Assumptions: these three exist so that every ARN this module must BUILD is
+#       composed rather than written. Two ARNs cannot come from a variable: the
+#       EventBridge managed rule the synchronous run-task integration relies on has
+#       a name AWS fixes, and the state-machine ARN prefix the trust policy matches
+#       on describes machines this module is itself creating. Hard-coding either
+#       would embed one account, one region and one partition in a module that both
+#       environment roots share, which defeats having two roots that differ only in
+#       sizing -- and an account identifier in a committed ARN is exactly what the
+#       no-secrets-in-source constraint forbids. Composing from the caller's own
+#       partition, region and identity makes the module correct in whichever of the
+#       three it is applied to, including a non-commercial partition where the
+#       `aws` literal is wrong.
+# WHY : Alternatives Considered: accepting the account identifier and region as
+#       input variables instead. Rejected because the values are already knowable
+#       from the provider the calling root configured, so an input would let a
+#       caller pass a region that disagrees with the provider's and produce a policy
+#       that references resources in one region while the machines are created in
+#       another -- a mismatch that plans and applies cleanly and denies at run time.
 data "aws_partition" "current" {}
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
+
+# -----------------------------------------------------------------------------
+# Locals
+# -----------------------------------------------------------------------------
 
 locals {
   name_stem                = "${var.name_prefix}-${var.environment}"
@@ -111,6 +219,20 @@ locals {
     state_name => var.state_timeout_seconds[state_name]
   }
 
+  # WHY : Assumptions: AssignPublicIp is DISABLED as a literal rather than an input.
+  #       Every task these machines start reaches Aurora, the queues, Secrets
+  #       Manager, KMS, ECR, CloudWatch Logs and Step Functions itself through the
+  #       interface VPC endpoints infra/modules/network provisions, and reaches
+  #       anything genuinely off-VPC through that module's NAT gateway, so a public
+  #       address on the task ENI is never the path any of its traffic takes. Making
+  #       it configurable would offer one setting whose only other value widens the
+  #       task's exposure while enabling nothing, and both environment roots are
+  #       required to differ in sizing rather than in topology.
+  # WHY : Assumptions: one shared network block for every task state in all four
+  #       machines. The alternative -- per-state subnets or security groups -- would
+  #       let one step in the chain reach something its neighbours cannot, and there
+  #       is no step here whose data access differs in kind: they all read and write
+  #       the same Aurora cluster and the same dataset bucket.
   network_configuration = {
     AwsvpcConfiguration = {
       Subnets        = var.private_app_subnet_ids
@@ -153,8 +275,9 @@ locals {
   #       the transaction-posting program can produce, and therefore the only two the
   #       chain continues on. They were one CONFIGURABLE ceiling compared with
   #       NumericLessThanEquals, and both halves of that were wrong. The ceiling
-  #       admitted 1, 2 and 3 as warnings, and app/cbl/CBTRN02C.cbl assigns
-  #       RETURN-CODE in exactly one place -- MOVE 4 TO RETURN-CODE at its line 230
+  #       admitted 1, 2 and 3 as warnings, and app/cbl/CBTRN02C.cbl:229-230 assigns
+  #       RETURN-CODE in exactly one place -- IF WS-REJECT-COUNT > 0 at :229
+  #       guarding MOVE 4 TO RETURN-CODE at :230
   #       -- so it produces 0 or 4 and nothing else. An exit status of 1, 2 or 3
   #       therefore did not come from the program's own exit path at all: it came
   #       from the runtime failing before or around it, which is a hard failure
@@ -171,6 +294,25 @@ locals {
   #       as a SKIP predicate runs the step when the code is 4 or lower. Reading
   #       that as "tolerate 1 through 4" would be reading a bound the baseline never
   #       had to express, because the only producible codes below 4 are 0.
+  #       The producer and the consumer sit at opposite ends of the baseline:
+  #       app/cbl/CBTRN02C.cbl:229-230 PRODUCES the 4 when the reject count is
+  #       positive, and app/jcl/TRANBKP.jcl:51 CONSUMES it by still running its
+  #       step. Treating 4 as a failure here is therefore not a conservative
+  #       choice, it is a wrong one: a reject is a normal operating condition, so
+  #       every night that posted correctly but rejected at least one transaction
+  #       would be reported as a failed batch run, and the interest, backup,
+  #       combine, statement and report states that the baseline does run would
+  #       all be skipped. That is the specific false alarm this pair prevents.
+  # WHY : Assumptions: what TRANBKP.jcl:51 gates is a safety interlock, which is
+  #       why the warn tier has to reach it rather than merely be tolerated. Its
+  #       STEP05R at :23 unloads the transaction master to TRANSACT.BKUP(+1)
+  #       (:33, LRECL=350 RECFM=FB), its STEP05 at :37 DELETEs the cluster and its
+  #       alternate index, and the gated STEP10 at :51 DEFINEs the master again --
+  #       so an empty master is never re-created unless the backup and the delete
+  #       both went acceptably. The two IF MAXCC LE 08 THEN SET MAXCC = 0 lines at
+  #       :42 and :45 are what normalise a not-found DELETE down to zero so the
+  #       "4 or lower" test can pass at all, which is why the target's own
+  #       drop-if-exists behaviour must likewise be non-fatal and idempotent.
   posting_clean_return_code = 0
   posting_warn_return_code  = 4
 
@@ -204,6 +346,56 @@ locals {
     "leaseOwner.$"    = "$.Payload.leaseOwner"
   }
 
+  # WHY : Assumptions: these five tokens are VERIFIED against batch-service's own
+  #       BatchJobName enum rather than inferred from the state names --
+  #       preflight-daily-transactions, post-transactions, calculate-interest,
+  #       backup-transactions and combine-transactions are five of the seven
+  #       constants it declares. The other two, export and import, are reachable
+  #       only through the dataset round-trip machine further down this file. A
+  #       token that does not match that enum is not a plan-time error: the
+  #       container starts, fails to resolve the job and exits non-zero, so the
+  #       chain reports a failed step for what is really a spelling mistake.
+  # WHY : Assumptions: each entry's `next` names an exit-code Choice rather than
+  #       the following work state, because the synchronous run-task integration
+  #       does NOT throw on a non-zero container exit -- it returns the exit code
+  #       in the task envelope. Wiring one work state straight to the next would
+  #       run the whole chain over a failed step's output.
+  # WHY : Refactoring Rationale: one JCL job per state, and the state ORDER carries
+  #       what each job's DD statements and generation references used to. The
+  #       lineage, job by job:
+  #         PreflightDailyTransactions <- CBTRN01C, which has NO JCL driver
+  #           anywhere in the baseline: it appears in no app/jcl file and in no
+  #           app/scheduler definition, and the EXEC PGM= census across app/jcl
+  #           names CBTRN03C, CBTRN02C, CBSTM03A, CBIMPORT, CBEXPORT, CBCUS01C,
+  #           CBACT04C, CBACT03C, CBACT02C and CBACT01C but never CBTRN01C. Its
+  #           only exercised contract is tests/integration/test_cbtrn01c_prepost.py.
+  #           Assumptions: this state exists because the PROGRAM exists and that
+  #           test defines its behaviour, not because a job card was ported.
+  #         PostTransactions <- app/jcl/POSTTRAN.jcl:23, //STEP15 EXEC PGM=CBTRN02C,
+  #           with nine DD statements (STEPLIB :24, SYSPRINT :26, SYSOUT :27,
+  #           TRANFILE :28, DALYTRAN :30, XREFFILE :32, DALYREJS :34, ACCTFILE :39,
+  #           TCATBALF :41). The reject stream at :34 is DISP=(NEW,CATLG,DELETE)
+  #           with DCB=(RECFM=F,LRECL=430,BLKSIZE=0) writing DALYREJS(+1) at :38 --
+  #           fixed UNBLOCKED at 430 bytes, and a NEW generation every run, which
+  #           is why a rerun never appends to a previous night's rejects.
+  #         CalculateInterest <- app/jcl/INTCALC.jcl:22,
+  #           //STEP15 EXEC PGM=CBACT04C,PARM='2022071800'. It reads the
+  #           cross-reference through TWO paths, XREFFILE :29 and XREFFIL1 :31, the
+  #           second being the alternate-index PATH, and writes its generated
+  #           interest transactions to a SEPARATE generation: the DD is named
+  #           TRANSACT at :37 but the dataset is SYSTRAN(+1) at :41,
+  #           DCB=(RECFM=F,LRECL=350,BLKSIZE=0). That separation is what state 7
+  #           later depends on.
+  #         BackupTransactions <- app/jcl/TRANBKP.jcl:23-33, unloading the master
+  #           to TRANSACT.BKUP(+1) at LRECL=350 RECFM=FB.
+  #         CombineTransactions <- app/jcl/COMBTRAN.jcl, whose STEP05R at :22 sorts
+  #           a CONCATENATED SORTIN of TRANSACT.BKUP(0) at :24 and SYSTRAN(0) at
+  #           :26 on TRAN-ID (:30) into TRANSACT.COMBINED(+1) at :37, then REPROs
+  #           it back into the master at :48. Assumptions: those two (0) references
+  #           read the generations states 5 and 6 have just created, which is the
+  #           whole reason this state is ordered after BOTH of them rather than
+  #           beside either. Neither COMBTRAN step carries a COND=, so both take
+  #           the default success edge per form (a) in the header.
   batch_jobs = {
     PreflightDailyTransactions = {
       job         = "preflight-daily-transactions"
@@ -232,6 +424,23 @@ locals {
     }
   }
 
+  # WHY : Assumptions: every `Command.$` in this file is built with States.Array so it
+  #       resolves to a JSON ARRAY OF DISCRETE ARGUMENT STRINGS, and that is a
+  #       requirement of the container contract rather than a formatting preference.
+  #       services/batch-service/Dockerfile uses an EXEC-FORM ENTRYPOINT, and an ECS
+  #       command override replaces CMD and is appended after that entrypoint, so each
+  #       element arrives as one argv entry. A single space-joined string
+  #       ("--job=x --business-date=y") would arrive as ONE argument, which the
+  #       argument parser rejects because no such option exists. States.Format is
+  #       nested inside the array rather than wrapped around it for the same reason:
+  #       it interpolates the date INTO one token and does not join tokens together.
+  # WHY : Alternatives Considered: wrapping the command in `sh -c "<joined string>"`,
+  #       which would make the joined form work. Rejected because it inserts a shell
+  #       as PID 1: the shell, not the JVM, then receives SIGTERM when ECS drains the
+  #       task, and a non-exec shell does not forward it, so the job loses its
+  #       shutdown hook and its chance to finish the chunk in flight. It would also
+  #       put job arguments through shell word-splitting for no gain, since the array
+  #       form already passes them exactly.
   batch_task_states = {
     for state_name, job_config in local.batch_jobs :
     state_name => {
@@ -268,6 +477,58 @@ locals {
     }
   }
 
+  # WHY : Assumptions: these two tokens are VERIFIED against reporting-service, not
+  #       derived from the state names. GenerateStatementsTask and
+  #       GenerateReportsTask declare generate-statements and generate-reports, and
+  #       ReportingTaskRunner dispatches on exactly those two plus generate-report,
+  #       which the ad-hoc machine below uses. They live in reporting-service and
+  #       NOT in batch-service because batch-service's BatchJobName enum has no
+  #       statement job and no report job at all -- which is why states 8 and 9
+  #       run a different task definition from states 3 through 7. If a token ever
+  #       stops matching, the correction belongs on this side, against that
+  #       service's actual argument surface, rather than in a new convention.
+  # WHY : Refactoring Rationale: GenerateStatements replaces app/jcl/CREASTMT.JCL,
+  #       whose five steps include THREE carrying COND=(0,NE) -- STEP020 at :56,
+  #       STEP030 at :66 and STEP040 at :79 -- all three of which invert to the
+  #       default success edge per form (a) in the header block. The step produces
+  #       TWO artifacts, not one: STMTFILE at :87-91,
+  #       DCB=(LRECL=80,BLKSIZE=8000,RECFM=FB), the plain-text statement, and
+  #       HTMLFILE at :92-96, DCB=(LRECL=100,BLKSIZE=800,RECFM=FB), the HTML one.
+  # WHY : Assumptions: a statement rerun REPLACES and never appends, which is why
+  #       this state writes a new generation prefix instead of opening an existing
+  #       object for append. The baseline expresses it in two steps: STEP030 at :66
+  #       runs IEFBR14 with DISP=(MOD,DELETE,DELETE) purely to delete the previous
+  #       run's two outputs, and STEP040 at :79 then creates them fresh with
+  #       DISP=(NEW,CATLG,DELETE). Recorded as observations of an immutable
+  #       baseline rather than asserted defects, two artifacts of that job are
+  #       visible while reading it and neither is reproduced here: overlapping
+  #       corrupted text at :90, and the HTML dataset declared at LRECL=80 in
+  #       STEP030 against LRECL=100 at :94.
+  # WHY : Refactoring Rationale: GenerateReports replaces app/jcl/TRANREPT.jcl,
+  #       whose STEP10R at :59 runs PGM=CBTRN03C and writes TRANREPT(+1) at :80
+  #       with DCB=(LRECL=133,RECFM=FB,BLKSIZE=0) -- the 133-column report --
+  #       together with app/jcl/PRTCATBL.jcl, a DFSORT-only job with no COBOL
+  #       program that builds the category-balance report from TCATBALF.BKUP(+1).
+  #       The ordering gain is real and worth naming: TRANREPT.jcl RE-DOES the very
+  #       same REPROC unload that TRANBKP.jcl performs, both writing
+  #       TRANSACT.BKUP(+1), because each JCL job is written to be self-contained.
+  #       This chain unloads ONCE, in state 6, and states 7 and 9 read that one
+  #       generation -- less work for byte-identical output.
+  # WHY : Assumptions: the inclusive date range that app/jcl/TRANREPT.jcl:47-48
+  #       expresses as INCLUDE COND=(TRAN-PROC-DT,GE,PARM-START-DATE,AND,
+  #       TRAN-PROC-DT,LE,PARM-END-DATE) is deliberately ABSENT from this state
+  #       graph. It is a RECORD-selection predicate inside a DFSORT step, not a
+  #       step gate, so it belongs in reporting-service's SQL WHERE clause and is
+  #       carried there. Modelling it as a Choice state is the specific mistake to
+  #       avoid: the two forms share the COND keyword, and a Choice can only admit
+  #       or reject a whole step, so it would either run the report over every
+  #       transaction ever recorded or skip it entirely. Its bounds are job
+  #       parameters in the baseline too -- DFSORT SYMNAMES inject
+  #       PARM-START-DATE at :43 and PARM-END-DATE at :44 -- which is why the
+  #       ad-hoc machine below passes them as --start-date and --end-date rather
+  #       than embedding a range. As an observation of an immutable baseline, that
+  #       job also sorts on the single key TRAN-CARD-NUM at :46 and declares two
+  #       steps both named STEP05R, at :23 and :37.
   reporting_jobs = {
     GenerateStatements = {
       job         = "generate-statements"
@@ -376,9 +637,10 @@ locals {
     #       its top-level timeout is terminated by the service as TIMED_OUT WITHOUT
     #       running any state's Catch: no further state is entered, so
     #       ResumeOnlineWritesOnFailure cannot run, no in-graph cleanup path is
-    #       reachable, and the flag this chain set would stay set. The same holds for an operator ABORT, which
-    #       no in-execution Catch can observe either. Relying on the ceiling meant
-    #       that the one failure mode the bracket exists to survive -- a chain that
+    #       reachable, and the flag this chain set would stay set. The same holds
+    #       for an operator ABORT, which no in-execution Catch can observe either.
+    #       Relying on the ceiling meant that the one failure mode the bracket
+    #       exists to survive -- a chain that
     #       hangs rather than fails -- was the one mode that left the online
     #       services read-only until an operator noticed. The release is therefore
     #       performed OUTSIDE the graph, by aws_cloudwatch_event_rule.daily_finalizer
@@ -396,6 +658,30 @@ locals {
       local.batch_task_states,
       local.reporting_task_states,
       {
+        # WHY : Assumptions: the business date is a PARAMETER of the run, supplied by
+        #       the eventbridge-scheduler payload, and this state asserts that contract
+        #       before anything else happens. It preserves app/jcl/INTCALC.jcl:22,
+        #       which runs PGM=CBACT04C with PARM='2022071800' rather than letting the
+        #       program read a clock -- an injected date is what makes a rerun produce
+        #       the same output and so what makes a golden-master comparison mean
+        #       anything. Two forms are accepted because two callers exist: an explicit
+        #       businessDate for an operator or a replay, and a scheduledTime ISO
+        #       timestamp reduced to its date part for the scheduler, whose payload
+        #       carries the fire time rather than a business date.
+        # WHY : Alternatives Considered: defaulting a missing input to the current date.
+        #       Rejected outright: it is the one failure mode that produces a COMPLETE
+        #       AND PLAUSIBLE result that is silently wrong. A replay of last night's
+        #       chain would post, accrue interest over and report on today instead, and
+        #       nothing in the output would say so. Failing fast to
+        #       InvalidExecutionInput makes the misconfiguration visible at the only
+        #       point where it is still cheap to correct.
+        # WHY : Trade-offs: the shape checks are StringMatches wildcards rather than a
+        #       real date parse, because ASL has no date type and a Choice cannot call
+        #       out to one. They therefore catch a missing, empty or wrongly shaped
+        #       value but would admit a well-shaped impossible date; the container's own
+        #       parser rejects that, one state later, with the offending value in its
+        #       message. Accepted because the check exists to stop an UNSET input from
+        #       reaching the chain, which is the mistake that actually happens.
         ValidateExecutionInput = {
           Type = "Choice"
           Choices = [
@@ -508,6 +794,20 @@ locals {
           Next = "BatchFailed"
         }
 
+        # WHY : Refactoring Rationale: this replaces app/jcl/CLOSEFIL.jcl, whose step
+        #       CLCIFIL at :22 runs EXEC PGM=SDSF and whose ISFIN DD at :25 issues
+        #       FIVE operator commands -- /F CICSAWSA,'CEMT SET FIL(x ) CLO' at :26
+        #       through :30 over TRANSACT, CCXREF, ACCTDAT, CXACAIX and USRSEC. The
+        #       SDSF MECHANISM retires: there is no operator console to drive and no
+        #       CICS region to address. What is preserved is the BEHAVIOUR, as a
+        #       read-only flag the online services honour.
+        # WHY : Assumptions: a flag rather than a hard lock is the faithful analogue,
+        #       and the baseline's own scope is the evidence. That bracket closes five
+        #       files, not the eight app/csd/CARDDEMO.CSD defines, because it is
+        #       scoped to the WRITE path -- the read-only unload jobs that run inside
+        #       the window open their inputs shared and would break under a real
+        #       exclusive lock. A flag reproduces exactly that: writes are refused,
+        #       reads continue.
         QuiesceOnlineWrites = {
           Type           = "Task"
           Resource       = "arn:${data.aws_partition.current.partition}:states:::lambda:invoke"
@@ -625,6 +925,29 @@ locals {
           Cause = "Another execution holds the online-write bracket; this execution stopped without staging or posting anything, and without touching the other execution's lease"
         }
 
+        # WHY : Refactoring Rationale: this replaces the baseline's master-refresh
+        #       block, which is TEN separate load jobs rather than one step --
+        #       app/jcl/ACCTFILE.jcl, CARDFILE.jcl, CUSTFILE.jcl, XREFFILE.jcl,
+        #       TRANFILE.jcl, DISCGRP.jcl, TCATBALF.jcl, TRANTYPE.jcl, TRANCATG.jcl
+        #       and DUSRSECJ.jcl. Each one runs the same IDCAMS shape, DELETE then
+        #       DEFINE CLUSTER then REPRO, adding BLDINDEX where the cluster carries
+        #       an alternate index. A Map over one list expresses ten instances of a
+        #       single operation more honestly than ten near-identical states, and it
+        #       keeps the dataset list an input (var.seed_datasets) instead of ten
+        #       pieces of graph.
+        # WHY : Assumptions: the Map branches take the DEFAULT SUCCESS EDGE, per form
+        #       (a) in the header block, because NONE of those ten jobs carries a
+        #       COND= parameter at all -- there is no baseline gate on any of them to
+        #       invert. A non-zero branch is therefore an infrastructure or data
+        #       fault, which the branch's Catch surfaces rather than a condition code
+        #       the chain was meant to interpret.
+        # WHY : Trade-offs: MaxConcurrency is an input rather than unbounded. Ten
+        #       branches at once would each open its own Aurora connection and its own
+        #       bulk-copy stream against the cluster this same chain is about to post
+        #       through, so the ceiling exists to bound the concurrent load on one
+        #       writer rather than to bound Fargate. Setting it to 1 is legal and
+        #       makes the refresh strictly sequential, which is what the baseline's
+        #       ten separate jobs actually did.
         StageSeedDatasets = {
           Type           = "Map"
           ItemsPath      = "$.seedDatasets"
@@ -728,9 +1051,28 @@ locals {
               }
             }
           }
+
+          # WHY : Assumptions: ResultPath is null so the Map DISCARDS its per-branch
+          #       output instead of writing it into the execution state. Each branch
+          #       returns a task envelope, and ten of those replacing or nesting under
+          #       the state object would push businessDate out of the path every
+          #       following state reads it from. Nothing downstream consumes which
+          #       datasets were staged -- a failed branch has already failed the Map --
+          #       so the ten envelopes are cost without a reader.
           ResultPath = null
-          Catch      = local.common_catch
-          Next       = "PreflightDailyTransactions"
+
+          # WHY : Trade-offs: the Map carries a Catch and a TimeoutSeconds but
+          #       deliberately NO Retry of its own, while the branch state inside it
+          #       does. A Retry here would re-enter the Map as a whole and re-run all
+          #       ten datasets because one of them failed transiently, redoing nine
+          #       successful DELETE/DEFINE/REPRO refreshes to recover one; retrying
+          #       inside the branch retries only the dataset that faulted. The cost
+          #       accepted is that a fault in the Map's own orchestration -- as opposed
+          #       to in a branch -- is not retried at all, and goes straight to the
+          #       Catch. That is the right way round: a branch fault is the transient
+          #       one, and this state's own timeout still bounds the whole fan-out.
+          Catch = local.common_catch
+          Next  = "PreflightDailyTransactions"
         }
 
         CheckPreflightExitCode = {
@@ -820,6 +1162,21 @@ locals {
           Default = "NotifyFailure"
         }
 
+        # WHY : Refactoring Rationale: this replaces app/jcl/TRANIDX.jcl, whose three
+        #       IDCAMS steps are STEP20 at :22, DEFINE ALTERNATEINDEX at :25 with
+        #       KEYS(26 304), NONUNIQUEKEY, UPGRADE and RECORDSIZE(350,350) at :27-30;
+        #       STEP25 at :39, DEFINE PATH at :42; and STEP30 at :49, BLDINDEX at :52.
+        #       All three retire, because PostgreSQL maintains an index inside the same
+        #       transaction as the write that affects it, so there is no build to
+        #       schedule and no window in which the index is stale.
+        # WHY : Assumptions: the distinction a reader could easily get wrong is that
+        #       the INDEX is not dropped -- only its imperative REBUILD retires. The
+        #       equivalent of that alternate index is declared permanently in
+        #       transaction-service's own Flyway migration, over the same columns the
+        #       KEYS(26 304) offsets address. What survives as this state is the
+        #       remaining half of TRANIDX.jcl's intent: refreshing the planner
+        #       statistics that a night of bulk posting has just invalidated, which is
+        #       real work with no baseline analogue in the index build itself.
         AnalyzeTables = {
           Type           = "Task"
           Resource       = "arn:${data.aws_partition.current.partition}:states:::lambda:invoke"
@@ -838,6 +1195,23 @@ locals {
           Next       = "ResumeOnlineWrites"
         }
 
+        # WHY : Refactoring Rationale: this replaces app/jcl/OPENFIL.jcl, whose step
+        #       OPCIFIL at :22 issues the mirror image of the close bracket -- the same
+        #       five /F CICSAWSA,'CEMT SET FIL(x ) OPE' commands at :26 through :30
+        #       over TRANSACT, CCXREF, ACCTDAT, CXACAIX and USRSEC. As with the
+        #       quiesce, the SDSF mechanism retires and the behaviour is preserved by
+        #       clearing the read-only flag.
+        # WHY : Trade-offs: releasing the bracket has to be reachable on the FAILURE
+        #       path too, or one bad night leaves online writes refused until an
+        #       operator intervenes. That is accepted as needing THREE release points
+        #       rather than one, because no single one covers every way an execution
+        #       can end: this state on success, ResumeOnlineWritesOnFailure on a
+        #       caught failure, and aws_cloudwatch_event_rule.daily_finalizer from
+        #       outside the graph for an execution that was TERMINATED -- by its own
+        #       ceiling or by an operator -- and so entered no further state at all.
+        #       The cost is that the release logic is expressed three times over and
+        #       must stay consistent; the alternative, a single in-graph release, is
+        #       provably unreachable in the terminated case.
         ResumeOnlineWrites = {
           Type           = "Task"
           Resource       = "arn:${data.aws_partition.current.partition}:states:::lambda:invoke"
@@ -1681,10 +2055,37 @@ locals {
 # Encrypted execution logs
 # -----------------------------------------------------------------------------
 
+# WHY : Assumptions: the /aws/vendedlogs/states/ prefix is not decoration and is not
+#       interchangeable with a name of our own choosing. Step Functions delivers
+#       execution history as a VENDED log, and CloudWatch Logs grants that delivery
+#       through a resource policy on the destination. Outside this reserved prefix
+#       each destination is enumerated individually in that policy, which has a hard
+#       size limit -- so once enough state machines log to bespoke paths in one
+#       account, a further destination cannot be attached at all, and the failure
+#       appears as a state machine that applies cleanly and then logs nothing.
+#       Inside the
+#       prefix the service covers the whole path at once and the limit is never
+#       approached. This module alone adds four destinations, which is why it matters
+#       here rather than being a general preference.
+# WHY : Refactoring Rationale: these four log groups are declared here rather than
+#       left to the service to create implicitly. A group Step Functions creates for
+#       itself carries never-expire retention and no customer-managed key, so the
+#       execution history of a financial batch chain would accumulate indefinitely
+#       and unencrypted; declaring them makes retention and encryption reviewable and
+#       lets Terraform delete them with the machines they belong to.
 resource "aws_cloudwatch_log_group" "daily" {
   name              = "/aws/vendedlogs/states/${local.daily_machine_name}"
   retention_in_days = var.log_retention_days
-  kms_key_id        = var.log_group_kms_key_arn
+
+  # WHY : Trade-offs: this input is nullable, and a null leaves the group on the
+  #       CloudWatch-managed key rather than failing the plan. Customer-managed
+  #       encryption at rest is a property this migration ADDS -- every CICS file in
+  #       app/csd/CARDDEMO.CSD:1-89 is defined RECOVERY(NONE) JOURNAL(NO) -- so a
+  #       caller that has not yet provisioned a key still gets a usable,
+  #       service-encrypted module rather than a blocked one. Both environment roots
+  #       do pass the key, so the null case is a bootstrapping affordance and not the
+  #       operating posture.
+  kms_key_id = var.log_group_kms_key_arn
 
   tags = merge(var.tags, {
     Name = "${local.daily_machine_name}-logs"
@@ -1747,10 +2148,13 @@ data "aws_iam_policy_document" "assume_role" {
       identifiers = ["states.amazonaws.com"]
     }
 
-    # WHY : Assumptions: both machines share one role, so the source ARN is
+    # WHY : Assumptions: all four machines share one role, so the source ARN is
     #       scoped to this module's name prefix rather than one exact machine.
     #       SourceAccount separately prevents a state machine in another
-    #       account from satisfying the wildcard.
+    #       account from satisfying the wildcard. Together the two conditions are
+    #       the confused-deputy guard: without them the trust policy would let the
+    #       Step Functions service principal assume this role on behalf of ANY
+    #       state machine that service runs, including one in another account.
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
@@ -1804,6 +2208,15 @@ data "aws_iam_policy_document" "permissions" {
     }
   }
 
+  # WHY : Assumptions: the `.sync` in ecs:runTask.sync is not implemented by polling.
+  #       Step Functions learns that a task has stopped through an EventBridge MANAGED
+  #       RULE it creates and maintains itself, named StepFunctionsGetEventsForECSTaskRule,
+  #       which is why a state machine that only starts tasks still needs three events
+  #       permissions. Without them the service cannot register its listener, so every
+  #       task state runs the task and then HANGS until its own TimeoutSeconds expires
+  #       rather than failing usefully -- a symptom that looks like a slow batch job and
+  #       is not one. The rule name is fixed by AWS, so the ARN is composed from the
+  #       data sources above rather than named by an input.
   statement {
     sid       = "ObserveSynchronousTaskCompletion"
     effect    = "Allow"
@@ -1811,6 +2224,18 @@ data "aws_iam_policy_document" "permissions" {
     resources = [local.ecs_events_rule_arn]
   }
 
+  # WHY : Assumptions: RunTask cannot start a task without also PASSING that task's
+  #       role and execution role to ECS, so this grant is a consequence of running
+  #       tasks at all rather than a separate privilege. It is scoped by resource to
+  #       the enumerated roles, which is why var.pass_role_arns is required and exact.
+  # WHY : Trade-offs: the iam:PassedToService condition is what stops the grant being
+  #       usable to hand those same roles to any OTHER service -- without it, this
+  #       execution role could pass a task role to a service that would assume it for
+  #       something the role's own policy permits but this chain never intended. The
+  #       cost accepted is one extra condition block per statement and the coupling to
+  #       a service principal string; the alternative, resource scoping alone, leaves
+  #       the passing DESTINATION unconstrained, and it is the destination that decides
+  #       what the passed credentials end up doing.
   statement {
     sid       = "PassApprovedECSTaskRoles"
     effect    = "Allow"
@@ -1900,8 +2325,32 @@ resource "aws_iam_role_policy" "this" {
 resource "aws_sfn_state_machine" "daily" {
   name     = local.daily_machine_name
   role_arn = aws_iam_role.this.arn
-  type     = "STANDARD"
 
+  # WHY : Alternatives Considered: EXPRESS, rejected on a hard capability limit and
+  #       not on cost or preference. An EXPRESS workflow does not support the
+  #       synchronous service integrations at all, and every work state in this chain
+  #       is an ecs:runTask.sync or a lambda:invoke, so the definition below simply
+  #       could not be deployed as EXPRESS. Its five-minute execution ceiling rules it
+  #       out independently, since a single posting or statement step processes a whole
+  #       day's volume in one pass. STANDARD also refuses a duplicate execution NAME,
+  #       which the graph relies on as the outer half of its run-id idempotency.
+  # WHY : Assumptions: redrive -- the closest analogue to a JCL RESTART= -- needs
+  #       nothing configured here. It is a runtime capability of a STANDARD execution,
+  #       invoked against a failed execution rather than declared on the machine, so
+  #       there is deliberately no Terraform attribute for it in this resource. The
+  #       durable half that makes a redriven step safe is batch-service's
+  #       batch.batch_run ledger, as recorded in the header block.
+  type = "STANDARD"
+
+  # WHY : Alternatives Considered: holding the ASL in a templates/*.json.tftpl file
+  #       rendered by templatefile(). Rejected because it would turn every cluster,
+  #       task-definition, function, topic and log-group reference into a
+  #       stringly-typed template variable that neither terraform validate nor tflint
+  #       can check, and a typo in one would surface as a malformed state machine at
+  #       apply or a broken reference at run time. jsonencode over an HCL object keeps
+  #       the whole definition inside the validator's view, lets every ARN stay a
+  #       native reference that Terraform orders the graph on, and keeps each state's
+  #       rationale adjacent to the state instead of a file away.
   definition = jsonencode(local.daily_definition)
 
   logging_configuration {
@@ -2086,11 +2535,42 @@ resource "aws_lambda_permission" "daily_finalizer" {
   source_arn    = aws_cloudwatch_event_rule.daily_finalizer.arn
 }
 
+# WHY : Refactoring Rationale: this machine replaces a CICS-side job-submission
+#       tunnel, and the defect it retires is specific. app/csd/CARDDEMO.CSD:499-505
+#       defines TDQUEUE(JOBS) -- DEFINE TDQUEUE(JOBS) GROUP(CARDDEMO) at :499,
+#       DESCRIPTION(SUBMIT JOBS FROM CICS) at :500, then
+#       TYPE(EXTRA) DATABUFFERS(1) DDNAME(INREADER) ERROROPTION(IGNORE) at :501,
+#       OPENTIME(INITIAL) TYPEFILE(OUTPUT) RECORDSIZE(80) at :502 and
+#       RECORDFORMAT(FIXED) BLOCKFORMAT(UNBLOCKED) DISPOSITION(MOD) at :503. An
+#       on-demand report was requested by writing 80-byte JCL card images to that
+#       extrapartition queue, which DDNAME(INREADER) at :501 routed to the internal
+#       reader for submission. ERROROPTION(IGNORE) on that same line means a FAILED
+#       WRITE WAS SWALLOWED SILENTLY: a user could believe a report had been
+#       requested when nothing was ever queued, and there was no return path to tell
+#       them otherwise. DISPOSITION(MOD) at :503 additionally means submissions
+#       accumulated in the queue rather than replacing one another.
+#       states:StartExecution replaces both properties: it returns an execution ARN
+#       the caller can poll and it FAILS LOUDLY, so a refused request is refused
+#       where it was made.
+# WHY : Assumptions: this module does NOT create the permission that lets
+#       reporting-service call StartExecution on this machine, and does not publish
+#       the Parameter Store entry that carries the ARN to it. It exports the ARN from
+#       outputs.tf and the environment root wires both, because the grant belongs on
+#       that service's TASK role -- the identity that actually makes the call -- and a
+#       cross-service grant bolted in here would attach it to the wrong principal and
+#       make this module depend on a consumer it is meant to be independent of.
 resource "aws_sfn_state_machine" "adhoc" {
   name     = local.adhoc_machine_name
   role_arn = aws_iam_role.this.arn
-  type     = "STANDARD"
 
+  # WHY : Alternatives Considered: EXPRESS, rejected for the same capability reason
+  #       the daily machine records -- its single work state is an ecs:runTask.sync,
+  #       which an EXPRESS workflow cannot express at all, and a report over a
+  #       user-chosen date range can outlast the five-minute ceiling.
+  type = "STANDARD"
+
+  # WHY : Alternatives Considered: a templatefile()-rendered ASL, rejected for the
+  #       reason recorded on the daily machine's definition above.
   definition = jsonencode(local.adhoc_definition)
 
   logging_configuration {
@@ -2121,7 +2601,7 @@ resource "aws_sfn_state_machine" "adhoc" {
 #       leave the batch step ledger as the only defence.
 # WHY : Assumptions: the SHARED execution role is reused rather than a third one
 #       created. Its privileges are already exactly what this machine needs and
-#       nothing more: ecs:RunTask is scoped to the three task definitions this
+#       nothing more: ecs:RunTask is scoped to the four task definitions this
 #       module was given -- of which this machine uses only the batch one --
 #       alongside ecs:StopTask, ecs:DescribeTasks, the managed-rule permissions
 #       Step Functions needs to observe task completion, iam:PassRole over the
@@ -2133,6 +2613,8 @@ resource "aws_sfn_state_machine" "dataset_roundtrip" {
   role_arn = aws_iam_role.this.arn
   type     = "STANDARD"
 
+  # WHY : Alternatives Considered: a templatefile()-rendered ASL, rejected for the
+  #       reason recorded on the daily machine's definition above.
   definition = jsonencode(local.dataset_roundtrip_definition)
 
   logging_configuration {
@@ -2178,6 +2660,8 @@ resource "aws_sfn_state_machine" "authorization_extract" {
   role_arn = aws_iam_role.this.arn
   type     = "STANDARD"
 
+  # WHY : Alternatives Considered: a templatefile()-rendered ASL, rejected for the
+  #       reason recorded on the daily machine's definition above.
   definition = jsonencode(local.authorization_extract_definition)
 
   logging_configuration {

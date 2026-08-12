@@ -697,11 +697,21 @@ logging:
 #      fixture larger than it. Sizing that belongs to the fixture that a job
 #      test seeds, not to this profile, and stating it here as a property would
 #      create a second source of truth that can drift from the constant.
-#      Assumptions: no test in this module launches a job today -- the job
-#      classes are asserted on structurally rather than run -- so no chunk
-#      commit is observable from here yet, and a value invented now could not
-#      be checked against anything. The first test that launches a job is the
-#      one that has to seed past the constant to cross a boundary.
+#      Assumptions: one test in this module now LAUNCHES a job --
+#      PreflightDailyTransactionsJobTest starts the pre-posting pass against a
+#      database container under this profile -- and it deliberately seeds fewer
+#      rows than the constant, so its whole pass is one page and one
+#      transaction. No case therefore crosses a page boundary yet, and a
+#      property invented here still could not be checked against anything.
+#      Refactoring Rationale: this entry previously said no test launched a job
+#      at all and named the first one to do so as the one that would have to
+#      seed past the constant. The first half became false when that case
+#      landed and is corrected rather than left standing, because the entry's
+#      purpose is to tell a reader why an absent key is absent, and a reader who
+#      believed no job was ever launched here would conclude the page limit was
+#      unreachable rather than merely uncrossed. The second half still holds:
+#      crossing the boundary remains the job of whichever case first needs it,
+#      and it belongs to that case's fixture rather than to this profile.
 #
 #   5. No default job name and no default business date.
 #      Assumptions: both arrive only as the command-line arguments
