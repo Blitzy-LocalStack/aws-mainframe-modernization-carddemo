@@ -100,29 +100,40 @@
  * {@code com.carddemo.common}. The production {@code com.carddemo.transaction.config.OpenApiConfig}
  * records that arrangement and declares none of those beans itself.
  *
- * <p>Assumptions: none of that reaches a test in this package, because no test here starts an application
- * context. Each controller test builds its entry point through {@code MockMvcBuilders.standaloneSetup}
- * and therefore has to register by hand the two pieces its assertions depend on -- the message converter
- * carrying {@code MoneyModule}, without which money renders as a JSON number instead of a string, and
- * {@code GlobalExceptionHandler}, without which a refusal renders in the framework's own default shape
- * instead of the shared problem envelope with its per-field error array. A class that omits either one
- * still runs green while asserting the wrong body, which is why the requirement is recorded once here
- * rather than rediscovered per class.
+ * <p>Assumptions: none of that reaches a test here unbidden, because nothing in this package is an
+ * application. Whichever way a class builds its entry point, it has to arrange the two pieces its
+ * assertions depend on -- the amount codec {@code MoneyModule}, without which money renders as a JSON
+ * number instead of a string, and {@code GlobalExceptionHandler}, without which a refusal renders in the
+ * framework's own default shape instead of the shared problem envelope with its per-field error array. A
+ * class that arranges neither still runs green while asserting the wrong body, which is why the
+ * requirement is recorded once here rather than rediscovered per class.
  *
- * <p>Alternatives Considered: importing the production configuration into a Spring slice so those
- * registrations arrive instead of being written out. Rejected on two grounds that hold independently of
- * each other. A context for this module resolves a token issuer and a database, neither of which a build
- * agent provides, which is the same constraint that makes the routing-contract test read mapping
- * annotations rather than a started context. And that configuration is not a carrier of those beans, so
- * importing it would supply none of them; each shared registration is guarded by a missing-bean
- * condition, and a local declaration written to force the issue REPLACES the guarded one silently,
- * dropping the conditions the guard carried.
+ * <p>Refactoring Rationale: this paragraph used to state that no test here starts a context and that each
+ * one hand-registers those two pieces onto {@code MockMvcBuilders.standaloneSetup}. Two classes now
+ * assemble a Spring slice instead -- {@code TransactionControllerTest} and
+ * {@code BillPaymentControllerTest}, each through a nested configuration that imports this module's
+ * {@code OpenApiConfig} and {@code SecurityConfig} together with the shared kernel's registration class --
+ * and the correction is recorded rather than made silently, because the earlier wording rejected exactly
+ * what those two now do. What was wrong with hand-registration is specific: a converter built in a test is
+ * not the converter the deployment installs, so the encoding under assertion was a local one; and a
+ * standalone entry point runs no security chain at all, so an authority case had nothing to assert against
+ * and a refusal produced inside that chain could not be shown to be correlatable. The two objections the
+ * earlier wording raised are both answered by construction rather than waved away. A context for this
+ * module would resolve a token issuer and a database -- so neither slice imports the persistence
+ * configuration, which is what leaves no datasource to create and no migration to run, and both substitute
+ * the credential reader at DEFINITION level, which is what stops the real factory fetching the issuer's
+ * provider document while the context refreshes. And this module's own web configuration is indeed not the
+ * carrier of the two shared beans -- so the kernel's registration class is imported for them, since that is
+ * where they are declared, rather than re-declared locally in a way that would replace a guarded
+ * definition and drop the conditions its guard carried.
  *
- * <p>Trade-offs: hand-registration repeats those two lines in each setup method instead of inheriting
- * them from one place, and a further controller test added here would repeat them again. That was
- * accepted because the wiring then sits at the top of the class whose assertions depend on it, whereas a
- * shared base class would put the reason a body has its shape one file away from the assertion about that
- * shape.
+ * <p>Trade-offs: a slice pays for that fidelity by also creating beans no assertion reads, and by needing
+ * one bean marked primary because a missing-bean guard evaluated under a plain import does not suppress the
+ * kernel's own clock. Both costs are accepted for the same reason: the alternative hides a defect rather
+ * than avoiding one, since a locally wired edge can satisfy every assertion in this package while the
+ * deployed service emits different JSON and refuses different callers. {@code TransactionCaptureWireContractTest}
+ * remains on a standalone entry point deliberately, because what it asserts is which submitted payloads
+ * deserialise at all, and that question is settled before any of this reaches a handler.
  *
  * <h2>No golden master covers any program in this package</h2>
  *

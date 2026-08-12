@@ -9,8 +9,21 @@
  * `app/cbl/COUSR00C.cbl` through `COUSR03C.cbl`. Every target is derived from the operation manifest
  * below rather than written as a literal, for the reason recorded in `ui/src/api/types.ts`.
  *
- * Credentials never reach a target
- * --------------------------------
+ * Which requests carry a credential, and which carry an authority
+ * --------------------------------------------------------------
+ * Assumptions: the three token exchanges are the ONLY operations in this contract declared
+ * `security: []`, and each of the five user-administration operations declares both `bearerAuth` and
+ * `x-required-authority: carddemo-admin` -- so a held token is necessary but not sufficient for them.
+ * This mirrors the baseline, whose sign-on program was the one program that ran before any identity
+ * existed: it detected that first turn by an empty communication area, `IF EIBCALEN = 0` at
+ * `app/cbl/COSGN00C.cbl` L80, and every other program in the region was reached only after it.
+ * The consequence of the unauthenticated case is already carried by `applyRequestHeaders` in
+ * `ui/src/api/client.ts`, which attaches NO `Authorization` header when no token is held rather than
+ * one reading `Bearer undefined`: a service handed a malformed credential answers 401, which would
+ * report a refused token to an operator who has not yet presented one. Nothing here may add a header,
+ * and nothing here may send a credential on the five administration calls beyond the bearer token the
+ * shared interceptor attaches.
+ *
  * Assumptions: every credential this module transmits -- a password, a new password, a refresh token,
  * a challenge session -- travels in a request BODY, and never in a path or a query string. That is not
  * a preference: a target is written in full into the edge access log before any application code runs
@@ -18,6 +31,18 @@
  * could add. The contract declares all three token exchanges as POST with a body for exactly this
  * reason, and a convenience overload accepting a credential as a query parameter must never be added
  * here.
+ *
+ * How a failure arrives
+ * --------------------
+ * Assumptions: every rejection from this module is the normalised `ApiRequestError` that
+ * `ui/src/api/client.ts` mints, never a raw transport error, so each `@throws` below names the status
+ * conditions its operation can produce rather than the class. A caller renders
+ * `ApiRequestError.problem.message` for the sentence and `problem.fieldErrors` for the per-field
+ * marks. That array is the WHOLE field-marking mechanism on a 400: the baseline moved the error colour
+ * into a field only when its validation flag was not-OK or blank AND the program was on a re-entry
+ * turn -- `app/cpy/CSSETATY.cpy` L18 and L19 with `AND CDEMO-PGM-REENTER` at L20 -- and that turn
+ * counter lived in the pseudo-conversational session struct the target removes, so dropping,
+ * reordering or padding the array changes what a screen highlights.
  *
  * What this module does not do
  * ---------------------------
@@ -32,6 +57,7 @@ import { getApiClient, requestPath } from './client';
 import type {
   ContractOperation,
   CreateUserRequest,
+  CreatedUserResponse,
   PageResponse,
   SignOnChallengeRequest,
   SignOnRequest,
@@ -42,7 +68,6 @@ import type {
   UserListQuery,
   UserResponse,
   UserSummary,
-  CreatedUserResponse,
 } from './types';
 
 /*
@@ -119,7 +144,10 @@ const DELETE_USER: ContractOperation = {
  * Every operation `auth-api.yaml` declares, in the order the contract declares them.
  *
  * Assumptions: exhaustive rather than a selection, and compared with the contract for equality in
- * both directions by `ui/src/api/contracts.test.ts`.
+ * both directions by `ui/src/api/contracts.test.ts`. Eight entries, because the contract publishes
+ * eight: the refresh and challenge exchanges are declared operations rather than optional extras, so
+ * omitting either would leave a published operation with no client and would fail that comparison in
+ * the contract-to-client direction.
  */
 export const AUTH_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   SIGN_ON,
@@ -141,28 +169,51 @@ export const SIGN_ON_CHALLENGE = 'CHALLENGE';
 /**
  * Maximum user-identifier length the contract accepts, and the 3270 field width it preserves.
  *
- * Assumptions: eight, from `SEC-USR-ID PIC X(08)` at `app/cpy/CSUSR01Y.cpy` L18. It is exported because
- * the sign-on screen sets it as the input's `maxLength`, which is how the terminal's own field width
- * survives into the browser rather than being re-derived per screen.
+ * Assumptions: eight, from `05 SEC-USR-ID PIC X(08).` at `app/cpy/CSUSR01Y.cpy` L18 and again from
+ * `02 USERIDI PIC X(8).` at `app/cpy-bms/COSGN00.CPY` L72. It is exported because the sign-on screen
+ * sets it as the input's `maxLength`, which is how the terminal's own field width survives into the
+ * browser rather than being re-derived per screen.
  */
 export const USER_ID_MAX_LENGTH = 8;
 
 /**
  * Maximum password length the contract accepts.
  *
- * Assumptions: this is NOT the baseline's eight-character field. The plaintext credential the baseline
- * stored is not carried forward at all, so the bound here is the identity provider's rather than the
- * copybook's, and a longer password is an improvement the migration deliberately admits.
+ * Assumptions: this is NOT the baseline's eight-character field at `app/cpy-bms/COSGN00.CPY` L78. The
+ * plaintext credential the baseline stored is not carried forward at all, so the bound here is the
+ * identity provider's rather than the copybook's, and a longer password is an improvement the
+ * migration deliberately admits. It is exported so the sign-on input's `maxLength` states the bound a
+ * submission is actually judged against.
  */
 export const PASSWORD_MAX_LENGTH = 256;
 
-/** The credentials a sign-on submits. */
-
-/** The identifier and refresh token a renewal submits. */
-
-/** The identifier, continuation session and replacement credential a challenge answer submits. */
-
-/** Criteria the user browse is read with. */
+// WHY : Refactoring Rationale: NO password appears on any type below except the sign-on and challenge
+//       REQUESTS, and none appears on any response or on either user-administration request. The
+//       baseline did all three of the things this declines. It STORED the credential in the record --
+//       `05 SEC-USR-PWD PIC X(08).` at `app/cpy/CSUSR01Y.cpy` L21 -- it COMPARED it directly at
+//       sign-on with `IF SEC-USR-PWD = WS-USER-PWD` at `app/cbl/COSGN00C.cbl` L223, and its update
+//       screen ECHOED it back to the terminal with `MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI` at
+//       `app/cbl/COUSR02C.cbl` L169. The target carries no password column and no password property
+//       outside these two request bodies: identity moves to a managed user pool and a new account's
+//       initial credential is generated at provisioning time into a secret store, which is why
+//       creation answers with the NAME of that entry and never its value. This is the documented
+//       divergence D-4 and it is the one place in the migration where parity is explicitly declined
+//       -- porting a plaintext credential faithfully would be indefensible -- so it is recorded here
+//       rather than left for a reader to infer from an absence.
+// WHY : Refactoring Rationale: no response type this module reads carries an authoritative user type,
+//       and `SignOnTokens` carries none at all. The baseline kept the operator's authority in
+//       communication-area storage the terminal echoed back on every screen turn --
+//       `10 CDEMO-USER-TYPE PIC X(01).` at `app/cpy/COCOM01Y.cpy` L26, with
+//       `88 CDEMO-USRTYP-ADMIN VALUE 'A'.` at L27 and `88 CDEMO-USRTYP-USER VALUE 'U'.` at L28 -- so
+//       a client could in principle have asserted its own user type. In the target the
+//       `cognito:groups` claim is signed, is converted server-side to authorities ('A' to
+//       `carddemo-admin`, 'U' to `carddemo-user`), and is revalidated by every service, so the client
+//       asserts nothing. The consequence is a rule for callers: the admin-or-user branch taken after
+//       a sign-on reads the signed claim, never a member of a body this module returned. The
+//       `userType` on `UserSummary` and `UserResponse` is the ADMINISTERED row's stored value -- the
+//       datum an administrator is listing or editing -- and must never be read as the caller's own
+//       authority; restoring a user type onto the sign-on response for convenience would reintroduce
+//       exactly the assertion the signed claim removes.
 
 /**
  * Exchanges a user identifier and password for a token set.
@@ -172,10 +223,14 @@ export const PASSWORD_MAX_LENGTH = 256;
  * not as a member of a success body. A caller renders that message unchanged under transformation
  * rule T8 and must not substitute its own wording.
  * @param {string} userId - Operator identifier, at most `USER_ID_MAX_LENGTH` characters.
- * @param {string} password - The password as typed.
+ * @param {string} password - The password as typed. It is placed in the request body and is neither
+ *   logged, stored, nor transformed on the way.
  * @returns {Promise<SignOnResult>} The token set when the provider authenticated the caller, or the
- *   challenge it requires to be answered first.
- * @throws {Error} If the request fails, including HTTP 401 for a refused credential.
+ *   challenge it requires to be answered first. Discriminate on `outcome`.
+ * @throws {Error} The normalised `ApiRequestError`, whose `problem` carries the service's own
+ *   sentence: 400 with `fieldErrors` keyed `userId` or `password` for a value outside its domain, and
+ *   401 for a credential the provider refused. This is the one operation here that cannot answer 403,
+ *   because it requires no authority to call.
  */
 export async function signOn(userId: string, password: string): Promise<SignOnResult> {
   const request: SignOnRequest = { userId, password };
@@ -187,11 +242,11 @@ export async function signOn(userId: string, password: string): Promise<SignOnRe
 /**
  * Renews a token set from a held refresh token.
  * @param {string} userId - The identifier the tokens belong to.
- * @param {string} refreshToken - The refresh token last issued.
+ * @param {string} refreshToken - The refresh token last issued, sent in the body as a credential.
  * @returns {Promise<SignOnTokens>} A fresh token set. Its `refreshToken` may be null, in which case
- *   the held one remains current.
- * @throws {Error} If the request fails, including HTTP 401 when the refresh token has been revoked or
- *   has expired.
+ *   the held one remains current and must not be overwritten with the null.
+ * @throws {Error} The normalised `ApiRequestError`: 401 when the refresh token has been revoked or
+ *   has expired, which a caller treats as a completed sign-out rather than as a retryable failure.
  */
 export async function refreshTokens(userId: string, refreshToken: string): Promise<SignOnTokens> {
   const request: TokenRefreshRequest = { userId, refreshToken };
@@ -200,13 +255,14 @@ export async function refreshTokens(userId: string, refreshToken: string): Promi
 }
 
 /**
- * Completes a sign-on that required a new credential.
+ * Completes a sign-on that the provider will not finish until the credential is replaced.
  * @param {string} userId - The identifier the challenge was raised for.
- * @param {string} session - The opaque session handle from the challenge.
- * @param {string} newPassword - The replacement credential.
- * @returns {Promise<SignOnTokens>} The token set issued once the credential was accepted.
- * @throws {Error} If the request fails, including HTTP 400 for a credential the provider's policy
- *   rejects and 401 for an expired session.
+ * @param {string} session - The opaque continuation handle from the challenge, passed back unread.
+ * @param {string} newPassword - The replacement credential, at most `PASSWORD_MAX_LENGTH` characters
+ *   and sent only in the request body.
+ * @returns {Promise<SignOnTokens>} The token set issued once the replacement credential was accepted.
+ * @throws {Error} The normalised `ApiRequestError`: 400 for a credential the provider's policy
+ *   rejects, and 401 for a session that has expired, which obliges a fresh sign-on.
  */
 export async function answerSignOnChallenge(
   userId: string,
@@ -221,13 +277,56 @@ export async function answerSignOnChallenge(
   return response.data;
 }
 
+// WHY : Alternatives Considered: positioning the browse by a page number, a row offset or a page
+//       size, which is the obvious shape and is rejected on a specific defect. Under concurrent
+//       insertion the number of rows preceding a position changes between one request and the next,
+//       so an offset-paged reader silently skips some rows and shows others twice, whereas a key
+//       already read keeps its place in the ordering however many rows are inserted around it. The
+//       substitution is one-for-one rather than an approximation, because the baseline's browse was
+//       ALREADY a cursor over keys: it stored the page's first and last key as real key values --
+//       `CDEMO-CU00-USRID-FIRST` at `app/cbl/COUSR00C.cbl` L389 and `CDEMO-CU00-USRID-LAST` at L435
+//       -- and kept no count of rows consumed anywhere. The screen's own page-number field is a trap
+//       for this reason: `02 PAGENUMI PIC X(8).` at `app/cpy-bms/COUSR00.CPY` L60 exists, but it is
+//       display-only and never positions the browse, so exposing a page number here would invent
+//       positioning semantics the baseline never had. No parameter below names a page, an offset, a
+//       size or a limit.
+// WHY : Refactoring Rationale: `CreateUserRequest` and `UpdateUserRequest` stay two DISTINCT types
+//       and neither is derived from the other with `Omit`, `Partial` or an intersection, even though
+//       they overlap in two of their members. The property order is behaviour, not style: the
+//       baseline's validation cascade short-circuits in physical screen order, so the first error a
+//       user sees genuinely differs between the two flows. Creation validates first name, last name,
+//       user identifier, then user type -- `app/cbl/COUSR01C.cbl` L120, L126, L132 and L144 -- while
+//       the update path validates first name, last name, then user type at
+//       `app/cbl/COUSR02C.cbl` L188, L194 and L206, its L200 password check having no target here at
+//       all. The service orders `fieldErrors` to match, so merging the two shapes would silently
+//       change which field a form marks first, in the most user-visible place there is. Creation
+//       carries the identifier because it assigns it; the update takes the identifier from the PATH,
+//       so admitting it in the body as well would allow a request whose two halves disagreed about
+//       which user is being changed.
+
 /**
- * Lists users by key.
- * @param {UserListQuery} [query] - Optional sealed cursor and the direction it was issued for. Omit it
- *   for the first page.
- * @returns {Promise<PageResponse<UserSummary>>} One bounded page of user rows.
- * @throws {Error} If the request fails, including HTTP 403 for a caller outside the administrative
- *   group.
+ * Lists users one bounded page at a time, positioned by key.
+ *
+ * Assumptions: a cursor is an opaque sealed token minted by the service and is echoed back EXACTLY as
+ * received -- never parsed, compared, incremented or constructed. A caller copies the `lastKey` of
+ * the page it holds to advance or the `firstKey` to retreat, and states the matching direction; the
+ * contract refuses a direction whose cursor is absent with a 400, which is why both are sent together
+ * or not at all.
+ *
+ * Assumptions: the page size is set by the service at ten rows and is never supplied by the caller,
+ * proven twice in the baseline -- `02 USER-REC OCCURS 10 TIMES.` at `app/cbl/COUSR00C.cbl` L57, and
+ * exactly ten row groups on the screen itself at `app/cpy-bms/COUSR00.CPY` L78 through L348.
+ *
+ * Assumptions: reaching an end of the file is a SUCCESS. A short or empty page answers 200 with a
+ * short `items` and `hasNext` false; it is never a 404, so a caller must not render an
+ * end-of-browse as an error.
+ * @param {UserListQuery} [query] - Optional sealed cursor and the direction it was issued for. Omit
+ *   it entirely for the first page.
+ * @returns {Promise<PageResponse<UserSummary>>} One bounded page of user rows, with the `firstKey`
+ *   and `lastKey` a caller pages from and the `hasNext` that says whether a forward move exists.
+ * @throws {Error} The normalised `ApiRequestError`: 400 for a cursor sealed for the other direction
+ *   or supplied without one, 401 for an absent or expired token, and 403 for an authenticated caller
+ *   outside the administrative group -- which is distinct from 401 and must not sign the caller out.
  */
 export async function listUsers(query: UserListQuery = {}): Promise<PageResponse<UserSummary>> {
   const params: Record<string, string> = {};
@@ -245,14 +344,20 @@ export async function listUsers(query: UserListQuery = {}): Promise<PageResponse
 /**
  * Creates one user and provisions the matching identity-provider account.
  *
- * Assumptions: the resolved value names the managed-secret entry the account's one-time credential was
- * published to, and never the credential itself. A caller collects the value from that entry and presents
- * it to the person the account is for. See {@link CreatedUserResponse} for why the handover works this
- * way.
- * @param {CreateUserRequest} request - The four fields a creation accepts.
- * @returns {Promise<CreatedUserResponse>} The created user, carrying the subject the provider minted
- *   and the name of the managed-secret entry holding its one-time credential.
- * @throws {Error} If the request fails, including HTTP 409 when the identifier is already taken.
+ * Assumptions: the resolved value names the managed-secret entry the account's one-time credential
+ * was published to, and never the credential itself. A caller collects the value from that entry and
+ * presents it to the person the account is for. See {@link CreatedUserResponse} for why the handover
+ * works this way.
+ * @param {CreateUserRequest} request - The four values a creation accepts, in the order the create
+ *   screen validates them. No credential is among them, because the provider mints the initial one.
+ * @returns {Promise<CreatedUserResponse>} The created user on 201, carrying the subject the provider
+ *   minted and the name of the managed-secret entry holding its one-time credential.
+ * @throws {Error} The normalised `ApiRequestError`: 400 with `fieldErrors` keyed `firstName`,
+ *   `lastName`, `userId` or `userType` in that cascade order, 401, 403 for a caller outside the
+ *   administrative group, and 409 when the identifier is already taken -- the branch the baseline
+ *   reports as 'User ID already exist...' at `app/cbl/COUSR01C.cbl` L263. That literal is reproduced
+ *   as the baseline writes it, missing its trailing letter, because it is an externally observable
+ *   string and message fidelity under rule T8 outranks its grammar.
  */
 export async function createUser(request: CreateUserRequest): Promise<CreatedUserResponse> {
   const response = await getApiClient().post<CreatedUserResponse>(
@@ -263,10 +368,12 @@ export async function createUser(request: CreateUserRequest): Promise<CreatedUse
 }
 
 /**
- * Retrieves one user.
- * @param {string} userId - The user's identifier, at most eight characters.
- * @returns {Promise<UserResponse>} The user.
- * @throws {Error} If the request fails, including HTTP 404 when no such user exists.
+ * Reads one user, which is the shared load contract for the update and delete views.
+ * @param {string} userId - The user's identifier, at most `USER_ID_MAX_LENGTH` characters. It is
+ *   percent-encoded into the target by `requestPath`, so it cannot read as extra path segments.
+ * @returns {Promise<UserResponse>} The user, carrying the provider subject that creation minted.
+ * @throws {Error} The normalised `ApiRequestError`: 400 for a blank or over-long identifier, 401, 403
+ *   for a caller outside the administrative group, and 404 when no row carries the identifier.
  */
 export async function getUser(userId: string): Promise<UserResponse> {
   const response = await getApiClient().get<UserResponse>(requestPath(GET_USER, { userId }));
@@ -274,11 +381,14 @@ export async function getUser(userId: string): Promise<UserResponse> {
 }
 
 /**
- * Updates one user's name and type.
- * @param {string} userId - The user's identifier, at most eight characters.
- * @param {UpdateUserRequest} request - The three fields an update accepts.
+ * Updates the mutable values of one user.
+ * @param {string} userId - The user's identifier, taken from the path and never from the body.
+ * @param {UpdateUserRequest} request - The three values an update accepts, in the order the update
+ *   screen validates them. The identifier is not among them and neither is a credential.
  * @returns {Promise<UserResponse>} The user as stored after the change.
- * @throws {Error} If the request fails, including HTTP 404 when no such user exists.
+ * @throws {Error} The normalised `ApiRequestError`: 400 with `fieldErrors` keyed `firstName`,
+ *   `lastName` or `userType` in that cascade order, 401, 403 for a caller outside the administrative
+ *   group, and 404 when no row carries the identifier.
  */
 export async function updateUser(
   userId: string,
@@ -293,20 +403,33 @@ export async function updateUser(
 }
 
 /**
- * Deletes one user.
+ * Deletes one user, with the deletion explicitly confirmed by the caller.
  *
- * Assumptions: the confirmation is a REQUIRED query parameter whose only accepted value is true, and
- * this function supplies it rather than exposing it. The contract declares it as a constant, so a
- * request without it is refused with 400; making it a parameter of this function would offer a caller
- * a value that has exactly one legal setting. It stands in for the baseline's re-key-to-confirm
- * convention, which the SPA renders as a confirmation the user dismisses or accepts before this
- * function is reached at all.
- * @param {string} userId - The user's identifier, at most eight characters.
- * @returns {Promise<void>} Nothing. The operation answers 204 with no body.
- * @throws {Error} If the request fails, including HTTP 404 when no such user exists.
+ * Refactoring Rationale: the confirmation is a REQUIRED parameter of this function and carries no
+ * default, because the baseline made deleting a two-step act and that safeguard has to be
+ * reconstructed rather than dropped. Its load arm displayed the record and then invited a second,
+ * different keystroke -- 'Press PF5 key to delete this user ...' at `app/cbl/COUSR03C.cbl` L283 -- so
+ * displaying a user and destroying one were never the same operation. A keystroke cannot survive as a
+ * keystroke over HTTP, and without a replacement a prefetch, a retried request or a crawler following
+ * a link could destroy a row. Requiring the caller to pass the affirmative value explicitly means
+ * mere navigation to a target can never delete a user. It is typed as the literal `true` rather than
+ * as a boolean because the contract declares the query parameter with `const: true`: false is not a
+ * second mode that deletes nothing, it is a refusal, and a caller that means to keep the row does not
+ * call this function at all.
+ * @param {string} userId - The user's identifier, at most `USER_ID_MAX_LENGTH` characters.
+ * @param {true} confirmed - Explicit confirmation that the row named is to be destroyed. The only
+ *   accepted value; the service refuses an absent or false one with 400 and deletes nothing.
+ * @returns {Promise<void>} Nothing. The operation answers 204 with no body, so there is no
+ *   representation of the removed row to hand back.
+ * @throws {Error} The normalised `ApiRequestError`: 400 with a single `fieldErrors` entry keyed
+ *   `confirmed` when the confirmation is absent or not true, 401, 403 for a caller outside the
+ *   administrative group, and 404 when no row carries the identifier. Its 500 branch reports an
+ *   UPDATE failure on a delete, which is what the baseline writes at `app/cbl/COUSR03C.cbl` L332 --
+ *   the same literal its sibling writes at `app/cbl/COUSR02C.cbl` L386 -- and the service carries it
+ *   across as it stands for the same message-fidelity reason as the 409 above.
  */
-export async function deleteUser(userId: string): Promise<void> {
+export async function deleteUser(userId: string, confirmed: true): Promise<void> {
   await getApiClient().delete<void>(requestPath(DELETE_USER, { userId }), {
-    params: { confirmed: true },
+    params: { confirmed },
   });
 }

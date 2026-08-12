@@ -27,24 +27,47 @@
  *   <li>That the account update's two writes, the customer row flushed first and the account row
  *       second, commit together and roll back together. Only something able to commit and to roll back
  *       can show it.</li>
+ *   <li>That the by-account read of the cross-reference resolves through the secondary index the
+ *       migration creates rather than by reading that table end to end. Which access path a cost-based
+ *       planner chooses is a decision only a planner makes, so a substituted store would answer the
+ *       query correctly while saying nothing at all about the path.</li>
  * </ul>
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds five files and a sixth is prohibited: this descriptor, together with
- * {@code AccountScreenProjectionIT}, {@code AccountUpdateAtomicityIT},
- * {@code CustomerMasterRepositoryIT} and {@code InquiryReplyLedgerIT}. The three entities those four
+ * <p>This directory holds eight files and a ninth is prohibited: this descriptor, together with
+ * {@code AccountRepositoryIT}, {@code AccountScreenProjectionIT}, {@code AccountUpdateAtomicityIT},
+ * {@code CardXrefRepositoryIT}, {@code CustomerMasterRepositoryIT}, {@code CustomerRepositoryIT} and
+ * {@code InquiryReplyLedgerIT}. The three entities those seven
  * reach are the three this context owns, and each derives from one copybook record -- {@code Account}
  * from {@code ACCOUNT-RECORD} at {@code app/cpy/CVACT01Y.cpy} L4, {@code Customer} from
  * {@code CUSTOMER-RECORD} at {@code app/cpy/CVCUS01Y.cpy} L4 and {@code CardXref} from
  * {@code CARD-XREF-RECORD} at {@code app/cpy/CVACT03Y.cpy} L4 -- alongside the reply ledger that the
  * inquiry exchange this context absorbs writes through.</p>
  *
+ * <pre>
+ * this directory: 8 java files = 7 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that marker line is new, and it is what turns the sentence above from a
+ * claim into a checked one. {@code PackageCharterInventoryTest} in the shared kernel parses the line and
+ * re-counts this directory, so an inventory that falls behind now fails the build instead of ageing
+ * quietly -- which is the precise failure the paragraph below this one describes having already happened
+ * once. Deleting the line to silence a failure is a visible act, because that test also holds the number
+ * of charters carrying it to a floor.</p>
+ *
+ * <p>Assumptions: two members reach the cross-reference and they divide it rather than overlap.
+ * {@code AccountScreenProjectionIT} owns the joined composition -- its outer-join arms, its ordering and
+ * its bound -- while {@code CardXrefRepositoryIT} owns that table's own contract: the column set, the
+ * absence of a version column, the keyed read on its textual key, and the by-account access path
+ * together with the plan the engine chooses for it. The division is recorded because both classes name
+ * the same table and a reader could otherwise take one for a duplicate of the other.</p>
+ *
  * <p>Alternatives Considered: an abstract base class holding the container, the property registration
- * and the schema prerequisite once for all four. Rejected because it would be a type whose only purpose
+ * and the schema prerequisite once for all seven. Rejected because it would be a type whose only purpose
  * is to be extended, and it would place behind inheritance the two things a reader of any one class most
  * needs to see at that class: which properties it publishes, and what it creates before the context is
- * built. Trade-offs: the same prerequisite is therefore expressed four times, which is a real cost every
+ * built. Trade-offs: the same prerequisite is therefore expressed seven times, which is a real cost every
  * time it changes. It is accepted on the same ground recorded beside {@code spring.flyway} in
  * {@code services/account-service/src/test/resources/application-test.yml}, whose own note reaches the
  * identical conclusion about the identical duplication.</p>
@@ -55,7 +78,14 @@
  * a sentence saying there are fewer. This file is the only place the inventory can be recorded at all,
  * for the reason set out in the closing section -- {@code config/checkstyle/checkstyle.xml} makes a
  * descriptor mandatory here and Java admits only one per package -- so a later class arriving in this
- * directory belongs in this list on the same change that introduces it.</p>
+ * directory belongs in this list on the same change that introduces it. {@code CustomerRepositoryIT}
+ * arrived under that clause and is listed above on the change that introduced it: it takes the
+ * copybook-contract seat, holding the customer record layout, the fixture bytes, the keyed read, the
+ * version column and the composition of the three window queries into one envelope, where
+ * {@code CustomerMasterRepositoryIT} holds the migration history, the catalog geometry and those queries
+ * individually. Ruling nine's sentence about fixtures is scoped to the members that predate it: that
+ * class reads none, and this one resolves one by the classpath name recorded on itself, which is why the
+ * name is part of its contract and is stated there.</p>
  *
  * <h2>Ruling one: the name is the selector</h2>
  *
@@ -78,7 +108,7 @@
  *
  * <h2>Ruling two: the profile is named on the class</h2>
  *
- * <p>Assumptions: each of the four carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the seven carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code services/account-service/src/test/resources/application-test.yml} comes into force. No build
  * plugin activates that profile on any class's behalf, so a class omitting the annotation would resolve
  * the base profile alone -- reaching for the two remote configuration sources named in ruling three, and
@@ -89,7 +119,7 @@
  * <p>Assumptions: no connection literal appears anywhere in this package, and none may be introduced. A
  * container assigns its host port as it starts, so a literal authored ahead of the run either addresses
  * nothing or -- the worse outcome, because it passes -- addresses whatever database happened to be
- * listening. Every one of the four classes publishes the container's generated URL, user name and
+ * listening. Every one of the seven classes publishes the container's generated URL, user name and
  * credential through {@code @DynamicPropertySource}, and publishes {@code spring.flyway.user} and
  * {@code spring.flyway.password} beside them.</p>
  *
@@ -124,7 +154,7 @@
  *
  * <h2>Ruling four: the schema exists before Flyway opens a connection</h2>
  *
- * <p>Assumptions: each of the four classes creates the owning role and the schema itself, in a
+ * <p>Assumptions: each of the seven classes creates the owning role and the schema itself, in a
  * {@code @BeforeAll} that runs after the container has started and before the application context is
  * refreshed. It creates a {@code NOLOGIN} role, grants the container's generated user the right to
  * assume it, and then creates schema {@code account} owned by that role. This is the single most likely
@@ -215,14 +245,34 @@
  *
  * <h2>Ruling nine: the rows a case needs are written by that case</h2>
  *
- * <p>Assumptions: each class seeds its own rows with plain statements against the container, and no
- * member of this package reads a fixture from the classpath, so no fixture filename is part of any
- * contract here. Seeding through the repository under test was rejected because it lets a defect in that
+ * <p>Assumptions: every class here seeds its own rows with plain statements against the container, and
+ * none seeds through the repository under test. That was rejected because it lets a defect in that
  * repository conceal itself: a projection returning nothing because the seed never persisted is
- * indistinguishable from a projection whose query is wrong. Two flat fixture files do exist under this
- * module's test resources, both of them exactly 300 bytes, which is the record length the account
- * copybook declares at {@code app/cpy/CVACT01Y.cpy} L2; no member of this package reads either one, and
- * that is stated so their presence is not mistaken for an input to these tests.</p>
+ * indistinguishable from a projection whose query is wrong.</p>
+ *
+ * <p>Refactoring Rationale: this ruling previously said that no member here reads a fixture from the
+ * classpath and that no fixture filename is part of any contract here. Both halves are withdrawn rather
+ * than adjusted, because the directory has moved past them and a stale ruling is worse than none. Four
+ * flat records now exist under this module's test resources: two account records of 300 bytes each,
+ * which is the length {@code app/cpy/CVACT01Y.cpy} declares at its L2, one customer record of 500 bytes
+ * per {@code app/cpy/CVCUS01Y.cpy} L2, and one cross-reference record of 50 bytes per
+ * {@code app/cpy/CVACT03Y.cpy} L2.</p>
+ *
+ * <p>Assumptions: those four records are decode vectors and never a seed, and the distinction is what
+ * keeps the previous paragraph intact -- reading a record is not the same as seeding through the
+ * subject: the rows still reach the container as plain statements, and the record supplies their values.
+ * Three members read them, and each declares the names it resolves as constants on itself, so those
+ * names ARE part of that class's contract. {@code AccountRepositoryIT} resolves both account records,
+ * the negative-balance one being the only negative money vector in this module.
+ * {@code CardXrefRepositoryIT} resolves the cross-reference record together with the account and
+ * customer records, for one reason: the account and customer identifiers those two carry are the
+ * identifiers the cross-reference record points at, so the triple is pinned across three separate files
+ * and a change to any one of them breaks the join deliberately and visibly. {@code CustomerRepositoryIT}
+ * resolves the customer record. No other member of this package reads any of them. Each record is
+ * decoded through the layout registered for it in {@code com.carddemo.common.codec.CopybookLayout}
+ * rather than through offsets written into a test, which is how the house rule recorded at L540 through
+ * L542 of {@code tests/README.md} -- that a layout stays single-sourced and is never duplicated -- is
+ * honoured on this side of the migration.</p>
  *
  * <p>Assumptions: every date, identifier and stored byte a case writes is a literal, and no case reads a
  * wall clock. A value compared against the current instant passes for a reason unrelated to the code

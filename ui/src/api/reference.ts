@@ -16,10 +16,26 @@
  * Why a delete can fail with a conflict
  * ------------------------------------
  * Assumptions: `deleteTransactionType` may answer 409, and a caller must render that as a refusal
- * rather than as an error to retry. The reference schema carries a foreign key from
- * `transaction_categories.type_cd` with `ON DELETE RESTRICT`, preserving the semantic the baseline's
- * own Db2 constraint asserted, so deleting a type that still has categories is refused by the database.
- * Surfacing it as a status rather than as a 500 is what lets the screen say which type is still in use.
+ * rather than as an error to retry. This is not a guard the migration invents. The baseline already
+ * asserts it in Db2: `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` declares
+ * `FOREIGN KEY TRC_TYPE_CODE (TRC_TYPE_CODE) REFERENCES CARDDEMO.TRANSACTION_TYPE (TR_TYPE) ON DELETE
+ * RESTRICT` over `TRC_TYPE_CODE CHAR(2)` and `TRC_TYPE_CATEGORY CHAR(4)`, against the parent table
+ * `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` whose `TR_TYPE CHAR(2)` is the primary key. The target
+ * preserves that `RESTRICT` semantic in PostgreSQL, so referential integrity is still asserted by the
+ * datastore and the service translates the violation into a status. Without the translation the
+ * operator would read an opaque server error instead of a sentence naming the type still in use.
+ *
+ * Assumptions: a caller discriminates that refusal with `isConflictFailure` from `./client`, and this
+ * module deliberately re-inspects no status code of its own. Every function here propagates the
+ * `ApiRequestError` the shared client already normalised, which is the only place the transport status
+ * is read. A second comparison against 409 written here would be a second definition of what a
+ * conflict is, and the two would answer differently the first time either moved.
+ *
+ * Trade-offs: a screen must NOT count a type's categories first to predict whether its delete will
+ * succeed. Such a pre-flight reads committed state that another session may change before the delete
+ * arrives, so it can encourage a delete that then fails and forbid one that would have succeeded. The
+ * cost accepted is that the refusal is only known after the attempt; what is bought is that the answer
+ * comes from the constraint that actually decides it.
  *
  * Why every replace carries a version
  * ----------------------------------
@@ -28,6 +44,23 @@
  * the baseline already implements that pattern by hand -- `app/cbl/COACTUPC.cbl` snapshots a complete
  * before-image across the pseudo-conversational gap and compares it before rewriting. A request
  * without the version cannot express "change it only if nobody else did", so the service refuses one.
+ *
+ * Why every code on every signature here is a string
+ * -------------------------------------------------
+ * Assumptions: the type code, the category code, the area code, the state code and the state-and-ZIP
+ * pair are CONSTANT-WIDTH CHARACTER values, not numbers, and every parameter below is typed `string` for
+ * that reason rather than by habit. Two of them look numeric and are not. The type code is
+ * `PIC X(02)` at `app/cpy/CVTRA03Y.cpy` L5 -- character even in the baseline. The category code is
+ * `PIC 9(04)` at `app/cpy/CVTRA04Y.cpy` L7, which is a digits-only PICTURE used as a constant-width key
+ * rather than as a quantity, and the extension DDL settles it by declaring the same column
+ * `TRC_TYPE_CATEGORY CHAR(4)` in `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` -- a character
+ * column, not an integer one. The consequence of typing either as a number is concrete and silent: a
+ * number discards leading zeros, so the category code `0001` becomes `1`, the request goes out three
+ * characters shorter than the key it names, and the contract's `^[0-9]{4}$` pattern refuses it with 400 --
+ * or, worse for a filter, it matches nothing and reads as an empty collection. The same reasoning
+ * settles the URL shape: the category code is a path segment carried verbatim, and the edit screen's
+ * route parameter is `:cd`, so `/reference/transaction-types/:cd` and the request target below agree
+ * on one spelling of the code.
  */
 
 import { getApiClient, requestPath } from './client';
@@ -224,35 +257,16 @@ export const REFERENCE_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   APPLY_REFERENCE_MAINTENANCE_ACTIONS,
 ];
 
-/** One transaction type, with the concurrency token its replace operation requires. */
-
-/** The fields a transaction-type creation accepts. */
-
-/** One transaction category, keyed by its type and its own code. */
-
-/** The fields a transaction-category creation accepts. */
-
-/** The fields a transaction-category replace accepts. */
-
-/** One North American area code and its class. */
-
-/** One two-letter state code. */
-
-/** One four-character state-and-ZIP-prefix pair. */
-
-/** The verdict on one date, with the structured feedback the baseline's date utility returns. */
-
-/** Which change one batch maintenance entry requests. */
-
-/** A batch of reference maintenance entries, applied in the order given. */
-
-/** How one batch maintenance entry resolved. */
-
-/** Criteria the transaction-type and transaction-category browses may narrow by. */
-
-/** Criteria a keyset browse over a seeded lookup table is read with. */
-
-/** Criteria the area-code browse may narrow by. */
+/*
+ * WHY : Refactoring Rationale: fifteen single-line docstrings stood here, each describing one wire
+ *       shape -- the transaction type, the category, the lookup rows, the date verdict, the batch
+ *       entry and the three query criteria. Their declarations moved to `./types` so that one shape
+ *       has one definition, but the docstrings were left behind and documented nothing: a reader
+ *       looking for the shape found a sentence about it with no members beneath, and
+ *       `jsdoc/require-description` cannot report a block that describes no declaration. Each
+ *       description now lives on the declaration itself in `./types`, where it stays true when a
+ *       member changes.
+ */
 
 /**
  * Assembles the paging parameters shared by every browse in this module.
@@ -275,15 +289,15 @@ function pagingParameters(query: LookupListQuery): Record<string, string> {
 /**
  * Issues one browse and returns its page.
  *
- * Refactoring Rationale: the seven browses in this module differ only in their operation and their
- * extra criteria, so the request itself is issued once here rather than seven times. Repeating it
- * would repeat the empty-parameter handling seven times as well, and that is precisely the kind of
- * detail that ends up applied in six places out of seven.
+ * Refactoring Rationale: the five browses in this module differ only in their operation and their
+ * extra criteria, so the request itself is issued once here rather than five times. Repeating it
+ * would repeat the empty-parameter handling five times as well, and that is precisely the kind of
+ * detail that ends up applied in four places out of five.
  * @template T The row type the browse returns.
  * @param {ContractOperation} operation - The browse operation to issue.
  * @param {Record<string, string>} params - Every query parameter, paging and criteria together.
  * @returns {Promise<PageResponse<T>>} One bounded page.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 async function browse<T>(
   operation: ContractOperation,
@@ -316,7 +330,7 @@ function referenceParameters(query: ReferenceListQuery): Record<string, string> 
  * @param {ReferenceListQuery} [query] - Optional code and description filters, plus a sealed cursor and
  *   the direction it was issued for.
  * @returns {Promise<PageResponse<TransactionType>>} One bounded page of transaction types.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listTransactionTypes(
   query: ReferenceListQuery = {},
@@ -328,7 +342,8 @@ export async function listTransactionTypes(
  * Creates one transaction type.
  * @param {TransactionTypeCreateRequest} request - The code and description.
  * @returns {Promise<TransactionType>} The created type, carrying its initial version.
- * @throws {Error} If the request fails, including HTTP 409 when the code already exists.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 409 when the code already exists.
  */
 export async function createTransactionType(
   request: TransactionTypeCreateRequest,
@@ -344,7 +359,8 @@ export async function createTransactionType(
  * Retrieves one transaction type.
  * @param {string} typeCd - The two-character type code.
  * @returns {Promise<TransactionType>} The type.
- * @throws {Error} If the request fails, including HTTP 404 when no such type exists.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such type exists.
  */
 export async function getTransactionType(typeCd: string): Promise<TransactionType> {
   const response = await getApiClient().get<TransactionType>(
@@ -358,8 +374,8 @@ export async function getTransactionType(typeCd: string): Promise<TransactionTyp
  * @param {string} typeCd - The two-character type code.
  * @param {TransactionTypeReplaceRequest} request - The new description and the version last read.
  * @returns {Promise<TransactionType>} The type as stored after the change, with its new version.
- * @throws {Error} If the request fails, including HTTP 404 when no such type exists and 409 when the
- *   version supplied is no longer current.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such type exists and 409 when the version supplied is no longer current.
  */
 export async function replaceTransactionType(
   typeCd: string,
@@ -373,11 +389,19 @@ export async function replaceTransactionType(
 }
 
 /**
- * Deletes one transaction type.
- * @param {string} typeCd - The two-character type code.
- * @returns {Promise<void>} Nothing. The operation answers 204 with no body.
- * @throws {Error} If the request fails, including HTTP 404 when no such type exists and 409 when
- *   categories still reference it.
+ * Deletes one transaction type, unless categories still reference it.
+ *
+ * Assumptions: 409 is an expected outcome of this call rather than a fault, and a caller distinguishes
+ * it with `isConflictFailure` from `./client` instead of comparing a status itself. The refusal comes
+ * from the `ON DELETE RESTRICT` foreign key the baseline declares in
+ * `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` and the target preserves, so the correct response is
+ * to tell the operator the type is still in use -- not to retry, and not to report a server fault. See
+ * the module block for why no category count is taken first.
+ * @param {string} typeCd - The two-character type code, as a constant-width string.
+ * @returns {Promise<void>} Nothing. The operation answers 204 with no body, so there is no
+ *   representation of a deleted row to return.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such type exists and **409 when categories still reference it**.
  */
 export async function deleteTransactionType(typeCd: string): Promise<void> {
   await getApiClient().delete<void>(requestPath(DELETE_TRANSACTION_TYPE, { typeCd }));
@@ -388,7 +412,7 @@ export async function deleteTransactionType(typeCd: string): Promise<void> {
  * @param {ReferenceListQuery} [query] - Optional type-code and description filters, plus a sealed
  *   cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<TransactionCategory>>} One bounded page of categories.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listTransactionCategories(
   query: ReferenceListQuery = {},
@@ -400,8 +424,8 @@ export async function listTransactionCategories(
  * Creates one transaction category beneath an existing type.
  * @param {TransactionCategoryCreateRequest} request - The type code, category code and description.
  * @returns {Promise<TransactionCategory>} The created category, carrying its initial version.
- * @throws {Error} If the request fails, including HTTP 409 when the pair already exists or the type
- *   does not.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 409 when the pair already exists or the type does not.
  */
 export async function createTransactionCategory(
   request: TransactionCategoryCreateRequest,
@@ -418,7 +442,8 @@ export async function createTransactionCategory(
  * @param {string} typeCd - The two-character type code.
  * @param {string} catCd - The four-character category code.
  * @returns {Promise<TransactionCategory>} The category.
- * @throws {Error} If the request fails, including HTTP 404 when no such category exists.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such category exists.
  */
 export async function getTransactionCategory(
   typeCd: string,
@@ -436,8 +461,8 @@ export async function getTransactionCategory(
  * @param {string} catCd - The four-character category code.
  * @param {TransactionCategoryReplaceRequest} request - The new description and the version last read.
  * @returns {Promise<TransactionCategory>} The category as stored after the change.
- * @throws {Error} If the request fails, including HTTP 404 when no such category exists and 409 when
- *   the version supplied is no longer current.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such category exists and 409 when the version supplied is no longer current.
  */
 export async function replaceTransactionCategory(
   typeCd: string,
@@ -456,7 +481,8 @@ export async function replaceTransactionCategory(
  * @param {string} typeCd - The two-character type code.
  * @param {string} catCd - The four-character category code.
  * @returns {Promise<void>} Nothing. The operation answers 204 with no body.
- * @throws {Error} If the request fails, including HTTP 404 when no such category exists.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when no such category exists.
  */
 export async function deleteTransactionCategory(typeCd: string, catCd: string): Promise<void> {
   await getApiClient().delete<void>(requestPath(DELETE_TRANSACTION_CATEGORY, { typeCd, catCd }));
@@ -464,12 +490,47 @@ export async function deleteTransactionCategory(typeCd: string, catCd: string): 
 
 /**
  * Reads the interest rate one disclosure group applies to one type and category.
- * @param {string} acctGroupId - The account's disclosure-group identifier.
+ *
+ * Assumptions: `interestRate` arrives as a decimal STRING and is returned untouched, and this function
+ * performs no arithmetic on it. The money rule that forbids floating point covers RATES and not only
+ * amounts, which is worth stating because a reader may assume a rate is exempt for being small.
+ * `app/cpy/CVTRA02Y.cpy` L9 declares `05 DIS-INT-RATE PIC S9(04)V99` -- an exact scaled-decimal value at
+ * scale 2 -- which becomes `NUMERIC(6,2)` in PostgreSQL and `BigDecimal` at scale 2 in the service. A
+ * JSON number would be parsed into an IEEE-754 double by the browser before any code here saw it, and
+ * that conversion is lossy and irreversible: the exactness is gone at the parse, not at the first sum.
+ * Transporting it as a string is what keeps the value the service computed identical to the value a
+ * screen displays.
+ *
+ * Assumptions: the rate is an OPERAND of the interest computation and that computation belongs to the
+ * service, so no caller multiplies with the value this returns. The baseline computes
+ * `( TRAN-CAT-BAL * DIS-INT-RATE) / 1200` in `1300-COMPUTE-INTEREST` at `app/cbl/CBACT04C.cbl` L464
+ * to L465, and the target multiplies at full precision before dividing with an explicit scale and
+ * rounding mode. Reordering those two steps changes the result by whole cents on ordinary inputs, so a
+ * browser reproducing the formula would show a figure that disagrees with the interest actually posted
+ * while looking entirely plausible.
+ *
+ * Assumptions: a response naming `DEFAULT` is a correct 200 and NOT a missing-data condition. The group
+ * literally named `DEFAULT` is a real seeded row, and the baseline's interest calculation falls back to
+ * it in `1200-GET-INTEREST-RATE` at `app/cbl/CBACT04C.cbl` L415 to L440: a read returning status 23
+ * moves the literal `DEFAULT` into the group key at L437 and reads again, so the fallback is a second
+ * keyed read of a row that has to exist. The target seeds that row deliberately for the same reason. A
+ * client treating a defaulted result as "no rate found" would report an error where the baseline
+ * reports a number.
+ *
+ * Assumptions: the contract already distinguishes a configured rate from a defaulted one, so this
+ * client mirrors that distinction rather than inventing one. `requestedAcctGroupId` is the group asked
+ * about, `appliedAcctGroupId` the group whose row answered, and `defaultGroupApplied` is true exactly
+ * when the fallback supplied the rate -- which is false when the caller asked about `DEFAULT` directly,
+ * because that is a configured hit on its own row. A screen wanting to mark a rate as inherited reads
+ * that flag; it must not infer the fallback by comparing the two identifiers itself.
+ * @param {string} acctGroupId - The account's disclosure-group identifier, up to ten characters.
  * @param {string} tranTypeCd - The two-character transaction type code.
- * @param {string} tranCatCd - The four-character transaction category code.
- * @returns {Promise<DisclosureGroupRate>} The rate, and which group supplied it.
- * @throws {Error} If the request fails, including HTTP 404 when neither the named group nor the
- *   `DEFAULT` group carries a row for the pair.
+ * @param {string} tranCatCd - The four-character transaction category code, leading zeros retained.
+ * @returns {Promise<DisclosureGroupRate>} The rate as an exact decimal string, the group that supplied
+ *   it, and whether the `DEFAULT` fallback answered. A defaulted rate is a success, not a miss.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 400 when a code is not the published width, and HTTP 404 when neither the named group nor
+ *   the `DEFAULT` group carries a row for the pair.
  */
 export async function getDisclosureGroupRate(
   acctGroupId: string,
@@ -487,7 +548,7 @@ export async function getDisclosureGroupRate(
  * @param {PhoneAreaCodeListQuery} [query] - Optional class filter, plus a sealed cursor and the
  *   direction it was issued for.
  * @returns {Promise<PageResponse<UsPhoneAreaCode>>} One bounded page of area codes.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsPhoneAreaCodes(
   query: PhoneAreaCodeListQuery = {},
@@ -503,7 +564,8 @@ export async function listUsPhoneAreaCodes(
  * Retrieves one North American area code.
  * @param {string} areaCd - The three-digit area code.
  * @returns {Promise<UsPhoneAreaCode>} The area code and its class.
- * @throws {Error} If the request fails, including HTTP 404 when the code is not a seeded one.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when the code is not a seeded one.
  */
 export async function getUsPhoneAreaCode(areaCd: string): Promise<UsPhoneAreaCode> {
   const response = await getApiClient().get<UsPhoneAreaCode>(
@@ -516,7 +578,7 @@ export async function getUsPhoneAreaCode(areaCd: string): Promise<UsPhoneAreaCod
  * Lists state codes by key.
  * @param {LookupListQuery} [query] - Optional sealed cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<UsState>>} One bounded page of state codes.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsStates(query: LookupListQuery = {}): Promise<PageResponse<UsState>> {
   return browse<UsState>(LIST_US_STATES, pagingParameters(query));
@@ -526,7 +588,8 @@ export async function listUsStates(query: LookupListQuery = {}): Promise<PageRes
  * Retrieves one state code.
  * @param {string} stateCd - The two-letter state code.
  * @returns {Promise<UsState>} The state code.
- * @throws {Error} If the request fails, including HTTP 404 when the code is not a seeded one.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when the code is not a seeded one.
  */
 export async function getUsState(stateCd: string): Promise<UsState> {
   const response = await getApiClient().get<UsState>(requestPath(GET_US_STATE, { stateCd }));
@@ -537,7 +600,7 @@ export async function getUsState(stateCd: string): Promise<UsState> {
  * Lists state-and-ZIP-prefix pairs by key.
  * @param {LookupListQuery} [query] - Optional sealed cursor and the direction it was issued for.
  * @returns {Promise<PageResponse<UsStateZipPrefix>>} One bounded page of prefix pairs.
- * @throws {Error} If the request fails.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails.
  */
 export async function listUsStateZipPrefixes(
   query: LookupListQuery = {},
@@ -549,7 +612,8 @@ export async function listUsStateZipPrefixes(
  * Retrieves one state-and-ZIP-prefix pair.
  * @param {string} stateZipCd - The four-character pair: two letters of state, two digits of prefix.
  * @returns {Promise<UsStateZipPrefix>} The prefix pair.
- * @throws {Error} If the request fails, including HTTP 404 when the pair is not a seeded one.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 404 when the pair is not a seeded one.
  */
 export async function getUsStateZipPrefix(stateZipCd: string): Promise<UsStateZipPrefix> {
   const response = await getApiClient().get<UsStateZipPrefix>(
@@ -561,21 +625,50 @@ export async function getUsStateZipPrefix(stateZipCd: string): Promise<UsStateZi
 /**
  * Evaluates one date against a mask, reproducing the baseline's date-edit utility.
  *
+ * Refactoring Rationale: the baseline has no route a screen could take to this rule at all. It reaches
+ * date conversion through an IBM MQ request/reply exchange -- `app/app-vsam-mq/cbl/CODATE01.cbl` reads
+ * a request message, edits the date and puts a reply on a reply queue -- so the caller had to be a
+ * message producer, which a browser is not. The target replaces that exchange with this synchronous
+ * endpoint for interactive callers and keeps an SQS consumer for the message path, so both callers
+ * reach one implementation. The consequence is the reason this function exists: a screen can now ask
+ * the authoritative validator directly, where previously it could only have guessed locally.
+ *
+ * Assumptions: the edit rules live SERVER-SIDE and this module performs no date logic whatsoever --
+ * no parsing, no arithmetic, no formatting, no pattern test. They are transcribed from
+ * `app/cbl/CSUTLDTC.cbl` and its two companion copybooks `app/cpy/CSUTLDPY.cpy` and
+ * `app/cpy/CSUTLDWY.cpy`, including leap-year handling and the supported-range and era checks, and they
+ * resolve to `com.carddemo.common.validation.DateEditValidator`. A convenience check written here would
+ * be a SECOND implementation of a rule that has exactly one authority, and the two would not fail
+ * together: a browser regular expression that accepts 29 February in a common year, or rejects a year
+ * the baseline's range allows, disagrees with the service silently. Nothing would report the
+ * divergence, because both answers are well-formed -- it would surface as a wrong verdict on a real
+ * date, which is precisely the class of parity defect the golden masters cannot see from the browser
+ * side. Deferring every judgement to this call is what keeps one rule with one answer.
+ *
+ * Assumptions: a date the validator judges INVALID comes back as a 200 carrying a feedback code, not
+ * as an HTTP error, so a caller reads `feedbackCode` rather than catching. Only a malformed REQUEST --
+ * a missing date, or one outside the eight-to-ten-character window the parameter declares -- is a 400.
+ * The distinction matters because the two look alike from a form's point of view: conflating them
+ * would put a transport error in the message band where the baseline shows a specific date complaint.
+ *
  * Assumptions: the date travels as a query parameter, which is safe here in a way it would not be for
  * a card number: a calendar date a user typed into a form field is not a secret, and the operation is
  * a pure read that a browser may legitimately cache and repeat.
+ *
  * Assumptions: the mask parameter is typed as a plain string and NOT as the `DateMask` union declared
- * in `./types`, even though that union names the two forms the service supports. The contract accepts any string of up to ten
- * characters here, and the one legitimate caller of the wider type is a screen echoing back a mask it
- * received in a previous result -- narrowing the parameter would make that round trip need a cast.
- * Writing it as `DateMask | string` was the first attempt and is rejected: a union of a literal type
- * with `string` collapses to `string`, so it reads as a constraint while imposing none, and the lint
- * rule that forbids it is right to.
+ * in `./types`, even though that union names the two forms the service supports. The contract accepts
+ * any string of up to ten characters here, and the one legitimate caller of the wider type is a screen
+ * echoing back a mask it received in a previous result -- narrowing the parameter would make that round
+ * trip need a cast. Alternatives Considered: writing it as `DateMask | string`, which was the first
+ * attempt. Rejected because a union of a literal type with `string` collapses to `string`, so it reads
+ * as a constraint while imposing none -- and the lint rule forbidding that redundancy is correct to.
  * @param {string} date - Eight or ten characters of date text, matching the mask.
  * @param {string} [mask] - The mask to read it against, normally one of the two `DateMask` forms.
  *   Omit it for the hyphenated form the contract defaults to.
- * @returns {Promise<DateEvaluationResult>} The verdict and the structured feedback behind it.
- * @throws {Error} If the request fails.
+ * @returns {Promise<DateEvaluationResult>} The verdict and the structured feedback behind it: a
+ *   feedback code, a severity, a message number and the date and mask as evaluated.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 400 when the date is absent or outside the published width. An invalid DATE is not a throw.
  */
 export async function evaluateDate(date: string, mask?: string): Promise<DateEvaluationResult> {
   const params: Record<string, string> = { date };
@@ -592,14 +685,34 @@ export async function evaluateDate(date: string, mask?: string): Promise<DateEva
 /**
  * Applies a batch of reference maintenance entries in the order given.
  *
+ * Assumptions: this belongs on a browser client because the contract publishes it as an ordinary
+ * synchronous administrative operation, and that reading was checked rather than assumed. The
+ * migrated program `app/app-transaction-type-db2/cbl/COBTUPDT.cbl` is a batch reader, which makes
+ * "a job, not an endpoint" the natural expectation; `reference-api.yaml` states the opposite outright
+ * for this service -- the operation accepts no schedule, returns no job or execution identifier and
+ * offers nothing to poll, because the module declares no batch starter and no `spring.batch`
+ * configuration and so has no repository to record an execution in. It is published under
+ * `admin-reference-data` with the administrative authority alongside the individual create, replace
+ * and delete operations. Where the contract and an expectation disagree the contract is authoritative,
+ * so the operation is exposed here; `ui/src/api/contracts.test.ts` compares this module's manifest with
+ * that document in both directions, so omitting it would fail the build rather than pass quietly.
+ *
  * Assumptions: this operation answers 200 even when an entry matched no rows, and the aggregate
  * return code reports that. A caller must read `returnCode` and each entry's `outcome` rather than the
  * HTTP status alone, because the status describes whether the batch RAN and the codes describe what it
  * did -- the same separation the baseline job's condition code expresses.
+ *
+ * Assumptions: the batch is NOT all-or-nothing, so a caller may not treat a single failed entry as
+ * having discarded the others. The baseline continues past a failed statement and keeps the successes
+ * -- its failure paragraph moves 4 to `RETURN-CODE` and exits to the read loop rather than rolling
+ * back -- and the service reproduces that by attempting each entry between its own savepoint and
+ * release. A caller that resubmitted the whole batch after a partial failure would therefore reapply
+ * entries that already took effect.
  * @param {MaintenanceActionBatchRequest} request - The entries to apply.
  * @returns {Promise<MaintenanceActionBatchResponse>} One outcome per entry, and the aggregate return
  *   code: 0 when every entry applied, 4 when at least one matched nothing.
- * @throws {Error} If the request fails, including HTTP 400 when an entry is malformed.
+ * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
+ *   HTTP 400 when an entry is malformed.
  */
 export async function applyReferenceMaintenanceActions(
   request: MaintenanceActionBatchRequest,

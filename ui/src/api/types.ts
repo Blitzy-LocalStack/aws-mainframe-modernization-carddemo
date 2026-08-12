@@ -1953,16 +1953,26 @@ export interface NextPendingAuthorization {
 /**
  * The fraud transition a reviewer submits.
  *
- * Assumptions: the four identifying members are echoed from the detail the reviewer is looking at,
- * even though the sealed key in the target already identifies the row. The contract requires them
- * because the baseline's own update reads them from the screen, and sending them lets the service
- * refuse a request whose body and target disagree -- which is the case a stale browser tab produces.
+ * Assumptions: ONE member, the action, and no identity of its own. `authorization-api.yaml` declares
+ * `FraudMarkRequest` with `required: [action]` and `additionalProperties: false`, and the service's
+ * own
+ * `services/authorization-service/src/main/java/com/carddemo/authorization/dto/FraudMarkRequest.java`
+ * is a record of that single component. The row is identified entirely by the sealed selector in the
+ * request target, so this body carries no account, customer or row-key member.
+ *
+ * Refactoring Rationale: this declared four further members -- an account identifier, a customer
+ * identifier and the two components of the row key -- reasoning that echoing them would let the
+ * service refuse a request whose body and target disagreed. The service refuses no such thing: it
+ * reads the action alone, and `services/authorization-service/src/main/resources/application.yml`
+ * sets `fail-on-unknown-properties: true`, so a body carrying those four is answered with HTTP 400
+ * and the fraud write never runs at all. A shape that cannot be sent is worse than a narrow one,
+ * because it type-checks at every call site and fails only against a running service -- and it is the
+ * one write this context publishes.
+ *
+ * Assumptions: the two admitted values are the reference's own transitions rather than a
+ * create-or-delete pair, which is why the member is a {@link FraudAction} and is never used nullably.
  */
 export interface FraudMarkRequest {
-  readonly accountId: string;
-  readonly customerId: string;
-  readonly authDateKey: number;
-  readonly authTimeKey: number;
   readonly action: FraudAction;
 }
 
@@ -2157,9 +2167,31 @@ export interface StatementTransaction {
  *
  * Assumptions: not a page. A statement covers one card's posted transactions for one period and the
  * reference generator bounds that set itself, so there is no open-ended sequence for a cursor to walk.
+ *
+ * Refactoring Rationale: `transactionCount` and `truncated` are declared here, where only `items`
+ * was. The published `StatementTransactionCollection` schema requires all THREE and the service
+ * always emits all three, so declaring one left the other two unreadable from a screen even though
+ * they arrive on every response -- and `truncated` is the ONLY signal that the array stops short of
+ * what the statement covers. Omitting it meant a cardholder whose history exceeds the response
+ * ceiling would be shown a silently short list indistinguishable from a complete one.
  */
 export interface StatementTransactionCollection {
   readonly items: readonly StatementTransaction[];
+  /**
+   * How many transactions the statement covers in total.
+   *
+   * Assumptions: a database aggregate over the whole card rather than the length of `items`, which is
+   * why the array's own length is not published in its place: the two are equal on every statement
+   * within the response ceiling and differ on exactly the statements where the difference matters.
+   */
+  readonly transactionCount: number;
+  /**
+   * Whether `items` stops short of `transactionCount`.
+   *
+   * Assumptions: derived by the service from the two counts and never accepted from a caller, so the
+   * three members cannot disagree. A screen renders this rather than comparing the counts itself.
+   */
+  readonly truncated: boolean;
 }
 
 export interface ReportRangeQuery {

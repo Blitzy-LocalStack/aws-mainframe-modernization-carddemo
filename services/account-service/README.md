@@ -1486,9 +1486,9 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-<!-- test-inventory: 28 tests + 5 integration tests -->
-**33** test classes: **28** unit and web-layer tests matching `*Test`, run by
-Surefire, and **5** integration tests matching `*IT`, run by Failsafe. Every one of
+<!-- test-inventory: 28 tests + 8 integration tests -->
+**36** test classes: **28** unit and web-layer tests matching `*Test`, run by
+Surefire, and **8** integration tests matching `*IT`, run by Failsafe. Every one of
 the seven test packages also carries a `package-info.java`, because the
 documentation gate audits test sources too.
 
@@ -1502,27 +1502,37 @@ paragraph is not decoration: `ServiceReadmeInventoryTest` in `common-lib` parses
 and re-measures both figures against this module's test tree, so this count now
 fails the build when it drifts instead of ageing quietly.
 
+Refactoring Rationale: the integration figure then read 5 while the `repository`
+row below named only two of the classes in that package, and the sentence after the
+table still said three. `AccountRepositoryIT` — which holds the account master's own
+storage contract, its exact-decimal columns, its date narrowing and its keyed
+windows — took the count to 6 and made that drift fail the build, which is how it
+was found. All six are now named in the table, so the row and the figure can be
+compared by reading rather than by counting files.
+
 | Package | Classes | What they cover |
 |---|---|---|
 | `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
 | `service` | `AccountUpdatePreservationTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the update path including the 409-on-version-conflict branch, the read composition, the by-account cross-reference read, address validation, the inquiry consumer, and identifier protection |
 | `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT` | Filter chain and authority mapping, the internal-token chain, listener wiring, the served OpenAPI document, and startup |
 | `mapper` | `AccountMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking, the misspelling correction, `FILLER` removal, the fixed-width reply |
-| `repository` | `AccountScreenProjectionIT`, `CustomerMasterRepositoryIT` | Testcontainers-backed PostgreSQL, including the by-account query that replaces `CXACAIX` |
+| `repository` | `AccountRepositoryIT`, `AccountScreenProjectionIT`, `AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`, `CustomerRepositoryIT`, `InquiryReplyLedgerIT` | Testcontainers-backed PostgreSQL — the account master's column contract, exact-decimal scale, date narrowing, version conflict and keyed windows; the joined screen projection and its outer-join arms; the two-write commit boundary of the update path; the cross-reference table's own contract together with the query plan the engine chooses for the by-account read that replaces `CXACAIX`; the customer master's column widths and schema ownership; the customer record's own contract — its layout, fixture bytes, keyed read, version column and keyed windows; and the inquiry reply ledger's second-delivery conflict |
 | `domain` | `DiagnosticRenderingTest` | Entity rendering — that no protected value leaks into a diagnostic string |
 | `dto` | `AccountUpdateResponseShapeTest` | Response shape, including money as a JSON string |
 
-The three integration tests are named individually rather than described as a
-`*RepositoryIT` family, because one of them — `AwsStarterRuntimeIT` — is not a
-repository test at all. Failsafe selects on the `IT` suffix, not on the package.
+All eight integration tests are named individually rather than described as a
+`*RepositoryIT` family, because four of them are not named that way and one —
+`AwsStarterRuntimeIT` — is not a repository test at all. Failsafe selects on the
+`IT` suffix, not on the package.
 
 ```bash
 # WHY : Assumptions: Failsafe binds to `integration-test` and `verify`, so the
-#       three `*IT` classes run under `verify` and NOT under `test`. A run that
-#       stops at `test` therefore exercises 25 of the 28 classes and skips every
-#       Testcontainers-backed database assertion -- including the by-account query
-#       that stands in for the CXACAIX alternate index, which is the one query a
-#       reader is most likely to assume is covered.
+#       eight `*IT` classes run under `verify` and NOT under `test`. A run that
+#       stops at `test` therefore exercises the 28 `*Test` classes and skips all
+#       eight, and with them every Testcontainers-backed database assertion --
+#       including the by-account query that stands in for the CXACAIX alternate
+#       index and the plan assertion that proves it resolves through an index,
+#       which is the one query a reader is most likely to assume is covered.
 mvn -B -f services/pom.xml -pl account-service -am verify
 ```
 
@@ -1585,9 +1595,10 @@ mvn -B -f services/pom.xml -pl account-service test -Dtest='AccountMapperTest#*I
 # WHY : Trade-offs: invoking plugin goals directly bypasses the lifecycle, so the
 #       jar is not repackaged and nothing is installed. That is exactly what is
 #       wanted for a fast database-only loop, and it is why the full `verify`
-#       above remains the command to trust before pushing. Expect three IT
-#       classes and 23 integration tests; `AwsStarterRuntimeIT` contributes 0 of
-#       them by design, because its LocalStack precondition is absent.
+#       above remains the command to trust before pushing. Expect eight IT
+#       classes declaring 49 integration tests, of which 47 run;
+#       `AwsStarterRuntimeIT` contributes 0 of them by design, because its
+#       LocalStack precondition is absent.
 mvn -B -f services/pom.xml -pl account-service test-compile \
     failsafe:integration-test failsafe:verify -Dit.test='*IT'
 ```
@@ -1704,7 +1715,7 @@ its own limitations in `tests/README.md` §1.1.
   to avoid. The test provides an opt-in that turns the skip into a hard failure, so
   a pipeline that intends to cover this layer can require it rather than hope for
   it — the same posture `tests/README.md` §6 takes for its own optional AWS layer.
-  The other two integration tests need only a container runtime and always run.
+  The other seven integration tests need only a container runtime and always run.
 
 
 ## Code Documentation Standard

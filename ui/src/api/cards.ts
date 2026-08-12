@@ -25,8 +25,50 @@
  * guards enforcing that are imported from `../routes/cards` rather than restated here. A primary
  * account number written into a path would be recorded in the edge access log and in the browser's
  * history before any application code ran, and neither store is reachable by anything this module
- * could add. The one operation that accepts a number, the lookup, sends it in a query the contract
- * declares for that purpose and returns the selector the other four use.
+ * could add. The one operation that accepts a number, the lookup, sends it in the request BODY the
+ * contract declares for that purpose and answers with the selector the three selector-addressed
+ * operations reach that card by. The same discipline settles the browser routes those selectors are
+ * interpolated into: `ui/src/routes/cards.ts` spells them `/cards/:cardKey` and `/cards/:cardKey/edit`,
+ * so the path builders that consume what these operations return carry a sealed selector and never a
+ * card number.
+ *
+ * Identifiers on the wire
+ * -----------------------
+ * Assumptions: a card number and an account identifier are digit-validated STRINGS in every direction,
+ * never numbers, and the reference itself carries them that way. `05 CARD-NUM PIC X(16).` at
+ * `app/cpy/CVACT02Y.cpy` L5 is a character field, and the online copybook declares the same value
+ * twice for the two uses -- `10 CC-CARD-NUM PIC X(16)` at `app/cpy/CVCRD01Y.cpy` L37 with
+ * `10 CC-CARD-NUM-N REDEFINES CC-CARD-NUM PIC 9(16).` at L39 -- so it is characters on the wire and a
+ * number only inside arithmetic. Carrying either as a JavaScript `number` would lose data rather than
+ * report a failure: sixteen digits reach 10^16, above `Number.MAX_SAFE_INTEGER` at 2^53 - 1, which is
+ * approximately 9.007 x 10^15, so the low-order digits are silently rounded away, and an eleven-digit
+ * account identifier such as `00000000011` would additionally shed its leading zeros and stop matching
+ * the exact width the contract's pattern requires.
+ *
+ * Field lineage
+ * -------------
+ * Refactoring Rationale: the expiry member is `expirationDate`, and the reference spells the same field
+ * `05 CARD-EXPIRAION-DATE PIC X(10).` at `app/cpy/CVACT02Y.cpy` L9 -- a misspelling of "expiration"
+ * that the baseline carries and that this migration does not propagate into a published name. The
+ * lineage is written down here because the two spellings are one field: a reader comparing this module
+ * with the copybook finds no `EXPIRAION` member and would otherwise have to guess whether a member was
+ * renamed or dropped. Renaming rather than transcribing costs one indirection at exactly two places,
+ * the mapper and the schema-mapping table in `docs/architecture`, and it buys a published surface a
+ * reader can spell from the word itself rather than from the baseline's spelling of it.
+ *
+ * The card verification value
+ * ---------------------------
+ * Assumptions: the reference record carries one -- `05 CARD-CVV-CD PIC 9(03).` at
+ * `app/cpy/CVACT02Y.cpy` L7, between the account identifier and the embossed name -- and NO operation
+ * in `card-api.yaml` returns it and none accepts it, so this module offers no way to reference it: no
+ * shape member, no parameter, no request member and no target. The omission is written down rather
+ * than merely observed, because the layout declares seven items at L5 to L11 of which this module
+ * carries five -- the number, the account identifier, the embossed name, the expiry and the status --
+ * so a reader completing that mapping mechanically from the copybook would supply the one item whose
+ * whole purpose is to be unreachable. `FILLER PIC X(59)` at L11 is the other item this module does not
+ * carry, and it is left out for the ordinary reason that it pads the record to 150 bytes and holds no
+ * value; this one is left out for a different reason entirely, and conflating the two is what this note
+ * prevents.
  */
 
 import { getApiClient, requestPath } from './client';
@@ -90,6 +132,12 @@ export type { PageDirection, PageResponse } from './types';
  * the migration's sensitive-data logging contract names account identifiers in the same sentence as
  * the primary account number, so leaving the account filter in the query string applied that finding
  * to only one of the two values it covers.
+ *
+ * Assumptions: the account narrowing this operation accepts IS an access path and not a convenience.
+ * The reference surfaces the card file's alternate index to CICS as a file of its own, `CARDAIX` keyed
+ * on the account identifier, and the online programs read it; the migration preserves it as a
+ * non-unique secondary index on `card.cards(account_id)`. Recording that here is what stops the
+ * narrowing from being read as an optional filter that could be answered by scanning and discarding.
  */
 const LIST_CARDS: ContractOperation = {
   method: 'POST',
@@ -138,6 +186,40 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   GET_ADMIN_CARD_DETAIL,
 ];
 
+// WHY : Alternatives Considered: the two operations below are the collection-level pair, serving the
+//       browse screen's two entry fields between them -- one page of rows optionally narrowed by
+//       account, and one row resolved from a card number a user typed -- and the page is positioned by
+//       KEY. The alternative was offset paging, expressing a position as a row ordinal and a count,
+//       which is what a page number in a request would carry. Rejected because it does not preserve
+//       behaviour: rows enter and leave this set while an operator pages through it, and an offset
+//       names a POSITION rather than a row, so an insert ahead of the current offset repeats a row on
+//       the following page and a delete skips one. Paging by key can do neither, because the position
+//       it resumes from identifies a row rather than counting the rows in front of it.
+// WHY : Assumptions: paging by key transcribes the reference rather than redesigning it, so the
+//       mapping is one-to-one. `app/cbl/COCRDLIC.cbl` keeps the entire browse position in its own
+//       communication area at L229: `WS-CA-LAST-CARDKEY` at L230, being
+//       `WS-CA-LAST-CARD-NUM PIC X(16)` at L231 with `WS-CA-LAST-CARD-ACCT-ID PIC 9(11)` at L232;
+//       the mirrored `WS-CA-FIRST-CARDKEY` at L233 to L235; the screen ordinal
+//       `WS-CA-SCREEN-NUM PIC 9(1)` at L237 with `88 CA-FIRST-PAGE VALUE 1` at L238;
+//       `WS-CA-LAST-PAGE-DISPLAYED PIC 9(1)` at L239; and `WS-CA-NEXT-PAGE-IND PIC X(1)` at L242 with
+//       `88 CA-NEXT-PAGE-EXISTS VALUE 'Y'` at L244. Those are the same four ideas the page envelope
+//       carries -- a position to read forward from, a position to read backward from, the ordinal that
+//       decides whether a backward step exists, and one forward-availability flag -- so the envelope
+//       renames the reference's own state instead of introducing a scheme of its own.
+// WHY : Assumptions: the forward-availability flag is settled identically on both sides, by reading
+//       ONE row more than the page shows. The reference issues a look-ahead READNEXT at L1197 whose
+//       normal arm sets `CA-NEXT-PAGE-EXISTS` at L1210, which is precisely the size-plus-one probe the
+//       service performs before it answers `hasNext`. A client that instead compared the row count it
+//       received against a page size it assumed would report an exhausted set wrongly, because a page
+//       may be short while further rows remain: the account narrowing is applied per record as the
+//       reference does it at L1159, calling the filter paragraph at L1382.
+// WHY : Assumptions: the eight browse verbs collapse into ONE request. Forward is STARTBR at
+//       L1129, READNEXT at L1146, the look-ahead READNEXT at L1197 and ENDBR at L1258; backward is
+//       STARTBR at L1273, READPREV at L1294, READPREV at L1322 and ENDBR at L1376. A stateless service
+//       holds no browse between requests, so what those two verb sequences expressed is expressed
+//       instead by WHICH cursor a caller sends -- `lastKey` reads forward and `firstKey` reads
+//       backward -- and nothing here has an open browse to end.
+
 /**
  * Lists cards, optionally narrowed by account.
  *
@@ -148,13 +230,34 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * and answered the first page to every paging request. The service seals the direction into each
  * token, so replaying a backward position with direction `next` is refused with HTTP 400 rather than
  * answered with the wrong page.
+ *
+ * Assumptions: a cursor is an OPAQUE string that this module round-trips verbatim and never parses,
+ * splits, decodes, compares, orders or increments. The rule is stated rather than assumed because the
+ * two sides hold different things: the reference's position is composite, the card number beside the
+ * account identifier at `app/cbl/COCRDLIC.cbl` L231 to L232, whereas `card-api.yaml` declares its
+ * `CursorToken` an enciphered value of which no part is a card number, an account identifier or a row
+ * ordinal, bound to the query, the caller and the direction it was minted for. Splitting on a
+ * delimiter, comparing two tokens or deriving one from another would therefore encode a key structure
+ * this module does not own into the browser, against a value that does not carry one. Where a cursor
+ * reaches a target, `requestPath` in `./client` percent-encodes it, because base64url text may
+ * legitimately hold characters a target would otherwise read as structure.
+ *
+ * Assumptions: no page number, offset, size or limit crosses this boundary in either direction, so
+ * none appears in this signature. How many rows a page holds is the service's to decide -- the
+ * reference's own bound is the seven rows its map paints, `WS-SCREEN-ROWS OCCURS 7 TIMES` at
+ * `app/cbl/COCRDLIC.cbl` L255 -- and publishing it as an input would let one request ask for the whole
+ * collection.
  * @param {CardListQuery} [query] - Optional criteria: the account filter, which is the first of the
  *   baseline list screen's two filter fields, plus a sealed cursor and the direction that cursor was
  *   issued for. Omit it for the first page of the unfiltered set.
- * @returns {Promise<PageResponse<CardSummary>>} One bounded page whose rows each carry a masked
- *   rendering of the card number and the selector that addresses it.
- * @throws {RangeError} If any row arrives unmasked or without a well-formed selector.
- * @throws {Error} If the request fails.
+ * @returns {Promise<PageResponse<CardSummary>>} One bounded page whose rows each render the card
+ *   number's last four digits beside the selector that addresses it, together with the two sealed
+ *   positions and the forward-availability flag the following request is built from.
+ * @throws {RangeError} If any row renders a whole card number or carries no well-formed selector.
+ * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
+ *   service's problem document: HTTP 400 for a malformed account filter or a cursor that cannot be
+ *   opened, 401 when no session is held, 403 for a caller outside the required group, and 500 or 503
+ *   for a service fault or a write window.
  */
 export async function listCards(query: CardListQuery = {}): Promise<PageResponse<CardSummary>> {
   // Refactoring Rationale: these criteria were assembled into a query-parameter record and are now
@@ -194,10 +297,15 @@ export async function listCards(query: CardListQuery = {}): Promise<PageResponse
  * the load balancer's access log nor the distribution's records, and both record a path and a query
  * string verbatim before any application code runs. A GET with a body was rejected because caches and
  * intermediaries may drop it, which would leave the number no place to travel except the request line.
- * @param {string} cardNumber - The card's sixteen-digit number, as a user typed it.
- * @returns {Promise<CardDetail>} The card, carrying the selector every later request addresses it by.
+ * @param {string} cardNumber - The card's sixteen-digit number, as a user typed it, carried as a
+ *   string for the reason the module note on identifiers gives.
+ * @returns {Promise<CardDetail>} The card, carrying the selector the three selector-addressed
+ *   operations reach it by.
  * @throws {RangeError} If the value is not exactly sixteen digits, or the response is malformed.
- * @throws {Error} If the request fails, including HTTP 404 when no card carries the number.
+ * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
+ *   service's problem document: HTTP 400 for a number the service refuses, 401 when no session is
+ *   held, 403 for a caller outside the required group, 404 when no card carries the number, and 500
+ *   or 503 for a service fault or a write window.
  */
 export async function lookupCard(cardNumber: string): Promise<CardDetail> {
   const number = requireCardNumber(cardNumber);
@@ -207,12 +315,37 @@ export async function lookupCard(cardNumber: string): Promise<CardDetail> {
   return validateCardDetail(response.data);
 }
 
+// WHY : Trade-offs: the two reads below answer with one row in the two renderings the contract keeps
+//       apart -- the ordinary one showing the card number's last four digits, the administrative one
+//       showing it whole -- so the primary account number is rendered to its last four digits
+//       everywhere except that administrative read. The exchange is deliberate rather than
+//       incidental. What is given
+//       up is the ability to show a whole number on the browse, the detail and the edit screens, where
+//       the reference did show one -- its list row paints `WS-ROW-CARD-NUM PIC X(16)` at
+//       `app/cbl/COCRDLIC.cbl` L259, one of seven such rows declared at L255. What is bought is that
+//       disclosure of a whole number is confined to a single address under a single authority, which
+//       can be authorised, routed, rate-limited and audited on its own, so an ordinary caller reaches
+//       it not with a partial answer but with HTTP 403.
+// WHY : Assumptions: the rendering is produced SERVER-SIDE in the mapping layer, so this module does
+//       not produce, reverse, shorten, pad or re-format one in either direction. That omission is what
+//       makes the boundary checkable: a browser able to render the short form must first have received
+//       the whole number, which is exactly the disclosure the short form exists to prevent, so the
+//       absence of any such code here is evidence rather than style. `card-api.yaml` states the same
+//       thing structurally -- the ordinary shapes publish `displayCardNumber` as twelve asterisks
+//       followed by four digits, and only `AdminCardDetail` publishes a sixteen-digit `cardNumber` --
+//       so the two responses are distinguishable by a schema validator and not only by a reader. What
+//       this module does instead is CHECK the rendering, at `validateCardSummary` below.
+
 /**
  * Retrieves one card by the opaque selector a response published for it.
  * @param {string} cardKey - The card's sealed selector.
- * @returns {Promise<CardDetail>} The selected card detail.
+ * @returns {Promise<CardDetail>} The selected card detail, whose card number is rendered to its last
+ *   four digits and whose version token an update submission echoes back.
  * @throws {RangeError} If the value is not the published selector shape, or the response is malformed.
- * @throws {Error} If the request fails.
+ * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
+ *   service's problem document: HTTP 400 for a selector that cannot be opened, 401 when no session is
+ *   held, 403 for a caller outside the required group, 404 when the selector addresses no row, and 500
+ *   or 503 for a service fault or a write window.
  */
 export async function getCard(cardKey: string): Promise<CardDetail> {
   const identifier = requireCardSelector(cardKey);
@@ -223,20 +356,23 @@ export async function getCard(cardKey: string): Promise<CardDetail> {
 }
 
 /**
- * Retrieves one card by its sealed selector, with the primary account number unmasked.
+ * Retrieves one card by its sealed selector, with the primary account number rendered whole.
  *
  * Assumptions: this is the administrative counterpart of `getCard` and differs from it only in what
- * the response is permitted to render. The full number arrives in the response BODY and never in the
- * target, so the disclosure is confined to a payload that neither the edge access log nor the
- * browser's history retains; the selector addresses the row exactly as it does for the ordinary
- * operation.
+ * the response is permitted to render. It is the single documented exception to the rendering rule
+ * stated above: the whole number arrives in the response BODY and never in the target, so the
+ * disclosure is confined to a payload that neither the edge access log nor the browser's history
+ * retains, and the selector addresses the row exactly as it does for the ordinary operation.
  * @param {string} cardKey - The card's sealed selector.
- * @returns {Promise<AdminCardDetail>} The card detail, additionally carrying the unmasked
- *   sixteen-digit card number.
- * @throws {RangeError} If the value is not the published selector shape, if the masked rendering is
- *   itself unmasked, if the version is invalid, or if the unmasked number is not sixteen digits.
- * @throws {Error} If the request fails, including HTTP 403 for a caller outside the administrative
- *   group.
+ * @returns {Promise<AdminCardDetail>} The card detail, additionally carrying the whole sixteen-digit
+ *   card number as a string.
+ * @throws {RangeError} If the value is not the published selector shape, if the four-digit rendering
+ *   carries a whole card number, if the version is invalid, or if the whole number is not sixteen
+ *   digits.
+ * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
+ *   service's problem document: HTTP 400 for a selector that cannot be opened, 401 when no session is
+ *   held, 403 for a caller outside the administrative group, 404 when the selector addresses no row,
+ *   and 500 or 503 for a service fault or a write window.
  */
 export async function getAdminCardDetail(cardKey: string): Promise<AdminCardDetail> {
   const identifier = requireCardSelector(cardKey);
@@ -245,28 +381,72 @@ export async function getAdminCardDetail(cardKey: string): Promise<AdminCardDeta
   );
 
   /*
-   * WHY : Assumptions: the unmasked member is checked for BEING sixteen digits, which is the exact
+   * WHY : Assumptions: the whole-number member is checked for BEING sixteen digits, which is the exact
    *       inverse of the check validateCardSummary applies to `displayCardNumber`, and both run on
    *       this response. The two members carry the same value in two renderings, so a service fault
-   *       that swapped them would leave a masked value where the unmasked one belongs -- which an
-   *       administrative caller reads as a masking success rather than as a fault. Checking both
+   *       that swapped them would leave a short value where the whole one belongs -- which an
+   *       administrative caller reads as a successful rendering rather than as a fault. Checking both
    *       directions is what distinguishes those two outcomes.
    */
   if (!isCardNumber(response.data.cardNumber)) {
     throw new RangeError(
-      'Administrative card detail must carry the unmasked sixteen-digit card number.',
+      'Administrative card detail must carry the whole sixteen-digit card number.',
     );
   }
   return { ...validateCardDetail(response.data), cardNumber: response.data.cardNumber };
 }
 
+// WHY : Refactoring Rationale: the write below is the one operation here that can be refused because
+//       the stored row moved between the read and the submission, and HTTP 409 is surfaced DISTINCTLY
+//       rather than folded into the general failure path, because it is the one refusal that is not
+//       the operator's mistake and because the
+//       reference already performs the check it reports. `app/cbl/COCRDUPC.cbl` commits this update at
+//       its single SYNCPOINT at L470, and the account program of the same family shows the mechanism in
+//       full: it snapshots a complete pre-edit before-image at `05 ACUP-OLD-DETAILS.`,
+//       `app/cbl/COACTUPC.cbl` L669, holding each numeric as a display field with a numeric REDEFINES
+//       -- the account identifier at L671 to L673 -- and it carries
+//       `05 WS-DATACHANGED-FLAG PIC X(1).` at L168 with `88 CHANGE-HAS-OCCURRED VALUE '1'.` at L170,
+//       so a record altered across the screen turn is detected before the rewrite instead of being
+//       overwritten by it. The target expresses the same guarantee as a JPA `@Version` column whose
+//       `OptimisticLockException` becomes 409, carrying the card program's own sentence
+//       `Record changed by some one else. Please review` at `app/cbl/COCRDUPC.cbl` L207 to L208 -- two
+//       words in "some one", and no closing full stop. The consequence of not distinguishing it is
+//       concrete: an operator whose edit lost a race would read the same sentence as one whose write
+//       failed outright, and would retry the same values rather than re-read the row.
+// WHY : Assumptions: the discriminant is `isConflictFailure`, which `./client` exports, and this module
+//       compares no status number of its own. That module owns the one comparison, so a second copy
+//       here would be a second declaration of the same fact and could drift from it; and the sentence
+//       a screen renders is the service's own, carried verbatim in the problem document the normalised
+//       failure holds, never reworded here. The card program declares three refusals of this class and
+//       the contract reports each of them separately -- `Could not lock record for update` at L205 to
+//       L206, the data-changed sentence at L207 to L208, and `Update of record failed` at L209 to
+//       L210 -- and only the data-changed one carries the row as now stored, so a caller can resubmit
+//       against the version that refusal reports.
+// WHY : Assumptions: that refreshed row is left for the caller to read and is deliberately not
+//       projected into a typed member here. `./types` declares no shape for the conflict body, and a
+//       client module may declare none of its own -- the gate in ui/src/api/contracts.test.ts refuses
+//       a wire shape declared in a client module so that every shape keeps exactly one definition --
+//       so typing that member belongs beside the other declarations in `./types` rather than in this
+//       module, where it would become a second definition of one contract shape.
+
 /**
  * Updates one card by the opaque selector a response published for it.
+ *
+ * Assumptions: the version token the request carries is the one the card was last read at, and the
+ * service compares it with the stored row rather than trusting it. Submitting a token from a stale read
+ * is therefore refused rather than applied, which is the whole point of sending it.
  * @param {string} cardKey - The card's sealed selector.
- * @param {CardUpdateRequest} request - Validated editable fields and optimistic-lock version.
- * @returns {Promise<CardDetail>} The updated card detail, carrying a freshly minted selector.
+ * @param {CardUpdateRequest} request - The editable fields the contract admits, together with the
+ *   optimistic-lock version the card was last read at.
+ * @returns {Promise<CardDetail>} The card as now stored, carrying the incremented version so a second
+ *   change needs no intervening read, and a freshly minted selector.
  * @throws {RangeError} If the value is not the published selector shape, or the response is malformed.
- * @throws {Error} If the request fails or the optimistic lock is stale.
+ * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
+ *   service's problem document: HTTP 400 for a field the service refuses or a selector that cannot be
+ *   opened, 401 when no session is held, 403 for a caller outside the required group, 404 when the
+ *   selector addresses no row, 405 and 406 and 415 for a request the edge will not accept, 409 for the
+ *   three contention refusals of which the optimistic-concurrency one is distinguished by
+ *   `isConflictFailure` from `./client`, and 500 or 503 for a service fault or a write window.
  */
 export async function updateCard(cardKey: string, request: CardUpdateRequest): Promise<CardDetail> {
   const identifier = requireCardSelector(cardKey);
@@ -280,11 +460,11 @@ export async function updateCard(cardKey: string, request: CardUpdateRequest): P
 /**
  * Validates the two security-sensitive fields a card row carries.
  *
- * Assumptions: what is checked of the rendering is that it is MASKED. The contract publishes a
- * sixteen-character value here and the masker replaces every position but the last four, so a value
- * that is sixteen digits has not been masked at all. Refusing it at the boundary is what turns a
- * server-side masking failure into a named client error rather than an unmasked number rendered into
- * a table, a log line and a bug report.
+ * Assumptions: what is checked of the rendering is that it shows only the last four digits. The
+ * contract publishes a sixteen-character value in this member and the service replaces every position
+ * but the last four, so a value that is sixteen DIGITS was never rendered at all. Refusing it at the
+ * boundary is what turns a server-side rendering failure into a named client error rather than a whole
+ * card number reaching a table, a log line and a bug report.
  *
  * Assumptions: what is checked of the selector is its SHAPE, because a row whose selector is malformed
  * would otherwise become a link that fails only when it is followed — naming `cardDetailPath` at the
@@ -292,13 +472,14 @@ export async function updateCard(cardKey: string, request: CardUpdateRequest): P
  * importantly, a value that is a card number rather than a selector would put the number back into a
  * URL. Its validity is the service's to decide, since only the service holds the sealing key.
  * @param {CardSummary} card - Typed response row supplied by Axios.
- * @returns {CardSummary} The row, unchanged, once its rendering is masked and its selector well-formed.
- * @throws {RangeError} If the rendering carries an unmasked card number or the selector is malformed.
+ * @returns {CardSummary} The row, unchanged, once its rendering shows four digits and its selector is
+ *   well-formed.
+ * @throws {RangeError} If the rendering carries a whole card number or the selector is malformed.
  */
 function validateCardSummary(card: CardSummary): CardSummary {
   if (isCardNumber(card.displayCardNumber)) {
     throw new RangeError(
-      'displayCardNumber must be a masked rendering; a sixteen-digit value has not been masked.',
+      'displayCardNumber must render only the last four digits; a sixteen-digit value renders them all.',
     );
   }
   if (!isCardSelector(card.key)) {
@@ -307,9 +488,9 @@ function validateCardSummary(card: CardSummary): CardSummary {
     );
   }
   /*
-   * WHY : Assumptions: the selector is validated here as well as the masked rendering, because it is
-   *       about to be interpolated into a browser path. Refusing a malformed one at the boundary is
-   *       what guarantees that whatever this client puts in a URL has the shape of a selector -- so a
+   * WHY : Assumptions: the selector is validated here as well as the rendering, because it is about to
+   *       be interpolated into a browser path. Refusing a malformed one at the boundary is what
+   *       guarantees that whatever this client puts in a URL has the shape of a selector -- so a
    *       service that mistakenly returned a card number in this member could not have it silently
    *       become a path segment.
    */
@@ -320,7 +501,8 @@ function validateCardSummary(card: CardSummary): CardSummary {
  * Validates a card detail and its optimistic-lock version.
  * @param {CardDetail} card - Typed detail supplied by Axios.
  * @returns {CardDetail} A normalized detail safe for rendering and update submission.
- * @throws {RangeError} If its rendering is unmasked, its selector malformed, or its version invalid.
+ * @throws {RangeError} If its rendering carries a whole card number, its selector is malformed, or its
+ *   version is invalid.
  */
 function validateCardDetail(card: CardDetail): CardDetail {
   if (!Number.isSafeInteger(card.version) || card.version < 0) {
@@ -332,7 +514,7 @@ function validateCardDetail(card: CardDetail): CardDetail {
    *       type, so spreading its result narrows the object to the summary's members and the compiler
    *       reports the ones it dropped - which is how the earlier revision's omission of them from
    *       this shape was caught. Naming them here keeps that check in force: a member added to
-   *       CardDetail later fails to compile until it is handled, instead of being silently discarded.
+   *       CardDetail fails to compile until it is handled here, instead of being silently discarded.
    */
   return {
     ...card,

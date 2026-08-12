@@ -16,10 +16,12 @@ endpoint, credential or bucket name is ever accepted as an argument.
 
 Returns
 -------
-An integer process status from :func:`main`, following the rubric ``tests/README.md``
-section 8 fixes and :mod:`carddemo_migration.credentials` already implements: ``0``
-success, ``2`` usage, ``8`` the step did not complete, ``16`` the environment could not
-be reached.
+An integer process status from :func:`main`, which IS the process exit status. It is
+binary in meaning: ``0`` says the command did what it was asked, and **any** non-zero
+value says it did not. Where a failure can usefully be classified the non-zero value
+narrows it -- ``2`` invoked incorrectly, ``8`` the step did not complete, ``16`` the
+environment or cluster could not be reached at all -- as ``data-migration/README.md``
+section 5.6 specifies and :mod:`carddemo_migration.credentials` already implements.
 
 Raises
 ------
@@ -27,6 +29,25 @@ SystemExit
     Raised by :mod:`argparse` for ``--help`` and for an unrecognised argument.
     :func:`main` converts both into a return code so an orchestrated container step
     never sees a traceback in place of a status.
+
+Alternatives Considered: the repository's graded aggregate return-code rubric was
+available to reuse and is deliberately NOT adopted here. That rubric carries a warn tier
+in which a return of ``4`` is the documented **green** state, and it earns that tolerance
+for one immutable, out-of-scope defect in the COBOL baseline; it belongs to the parity
+oracle under ``tests/**`` and to nothing else. Importing it would make a non-zero status
+from this CLI ambiguous between "warn, and therefore a pass" and "failed", and the
+consequence is precise: a batch state branching on the number would treat a half-finished
+load as a success and enable writes over it. This package has no warn tier -- a load that
+half worked is a failed load -- which is why the numbers above classify failures only and
+no non-zero value is ever a pass.
+
+Alternatives Considered: the command line is built with the standard library's
+:mod:`argparse` rather than a third-party CLI framework. The pinned closure in
+``data-migration/requirements.txt`` contains no such framework, so adopting one would add
+a distribution -- and its own transitive set -- to a hash-locked manifest whose
+completeness is what makes an install reproducible, in exchange for flag parsing
+:mod:`argparse` already does. Subcommands, ``--key=value`` options, type coercion and a
+per-subcommand ``--help`` are all native to it.
 
 Assumptions: only the subcommands whose backing modules are present in this
 distribution are registered here. A registered subcommand that cannot do its work is
@@ -58,6 +79,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import date
@@ -206,6 +228,14 @@ _WITHHELD_RENDERING: Final[str] = "<withheld>"
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
+# Assumptions: the extended ISO calendar form, and only it -- four digits, a hyphen, two, a
+#   hyphen, two. This exists because `date.fromisoformat` is deliberately NOT the shape
+#   authority: it accepts the whole of ISO 8601, so it would admit the basic form `20220718`,
+#   the baseline's compact `PARM` token `2022071800` and the week form `2022-W27-1`. The
+#   staging prefix embeds the date as `dt=YYYY-MM-DD`, so this is the one spelling that reads
+#   back from an object key identically to the way it was typed.
+_BUSINESS_DATE_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
 # Assumptions: the two decode failures a delivered extract can produce -- a record that is
 #   not the declared length, and a field that cannot be decoded at its declared geometry --
 #   are SIBLING ``ValueError`` subclasses rather than one hierarchy, so both are named here.
@@ -274,7 +304,7 @@ def _load_context_for(target: TableTarget) -> LoadContext:
         If a needed parameter or document cannot be resolved, which is an incomplete environment
         rather than a database that refused.
     """
-    # WHY : Trade-offs: each collaborator is resolved ONLY when a projection asks for it, rather
+    # Trade-offs: each collaborator is resolved ONLY when a projection asks for it, rather
     #   than all three up front. Resolving eagerly would make `load-dataset TRANTYPE` -- a
     #   seven-row reference load needing no cipher at all -- require a key-management grant and a
     #   published subject document, so an environment that had provisioned neither could not load
@@ -491,12 +521,12 @@ def _decode_record(arguments: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return EXIT_USAGE
-        # WHY : a layout carrying a suppressed field is decoded through the codec's PROJECTION
-        #   entry point, so the suppressed span is never converted to characters in this process
-        #   -- the same rule `readers/export_record.py` applies to the card verification value.
-        #   Redacting after a whole-layout decode would put the cleartext in a local, in this
-        #   frame, and in the traceback of any exception raised while it is live, which is a
-        #   materialization the disclosure policy forbids however briefly it lasts.
+        # Alternatives Considered: a layout carrying a suppressed field is decoded through the
+        #   codec's PROJECTION entry point, so the suppressed span is never converted to characters
+        #   in this process -- the same rule `readers/export_record.py` applies to the card
+        #   verification value. Redacting after a whole-layout decode would put the cleartext in a
+        #   local, in this frame, and in the traceback of any exception raised while it is live,
+        #   which is a materialization the disclosure policy forbids however briefly it lasts.
         # Trade-offs: two call sites rather than one. `decode_record` is kept for the common case
         #   so the unrestricted decode remains provably the same call it always was, and the
         #   projection is taken only where something must be withheld.
@@ -614,15 +644,16 @@ def _redacted(
     #   needed them, and a flag defaulting to safe is still a flag an operator can pass.
     safe: dict[str, str] = {}
     for field in layout.fields:
-        # WHY : the suppression test comes FIRST, before the missing-value test and before the
-        #   sensitivity branch, and the order is load-bearing rather than stylistic. A suppressed
-        #   field is not decoded at all by the caller, so it arrives here with no value; reaching
-        #   the missing-value test first would drop it from the output and lose the proof that the
-        #   record carries a field at that offset, and reaching the sensitivity branch first would
-        #   hand its characters to `mask_field`, which returns a keyed tag DERIVED from them.
-        #   A keyed tag of a stored password is a representation of that password, and the
-        #   contract the owning reader publishes for a suppressed field is that no representation
-        #   exists -- not its characters, not a digest of them, not a keyed tag of them.
+        # Alternatives Considered: the suppression test comes FIRST, before the missing-value test
+        #   and before the sensitivity branch, and the order is load-bearing rather than stylistic.
+        #   A suppressed field is not decoded at all by the caller, so it arrives here with no
+        #   value; reaching the missing-value test first would drop it from the output and lose the
+        #   proof that the record carries a field at that offset, and reaching the sensitivity
+        #   branch first would hand its characters to `mask_field`, which returns a keyed tag
+        #   DERIVED from them. A keyed tag of a stored password is a representation of that
+        #   password, and the contract the owning reader publishes for a suppressed field is that no
+        #   representation exists -- not its characters, not a digest of them, not a keyed tag of
+        #   them.
         # Refactoring Rationale: this branch closes the second door onto the first door's problem.
         #   `readers/usrsec.py` stopped putting the password through the masking helper when its
         #   whole-record rendering was rewritten, but THIS command reaches the same field by a
@@ -719,7 +750,7 @@ def _s3_client() -> Any:
         If the AWS SDK is not installed, or the environment names no usable region or
         credentials. Propagated from the configuration module's client factory.
     """
-    # WHY : Refactoring Rationale: this delegates to the staging module's published factory, where
+    # Refactoring Rationale: this delegates to the staging module's published factory, where
     #   it used to call `boto3.client("s3")` itself. Constructing a client here was a second client
     #   authority in a distribution that documents exactly one, and the duplication had a concrete
     #   consequence rather than only an architectural one: `config.aws_client` MEMOISES its clients
@@ -728,7 +759,7 @@ def _s3_client() -> Any:
     #   resolution state, a test substituting an endpoint between cases or a long-running process
     #   picking up rotated credentials, would have held a fresh parameter-store client and a stale
     #   S3 client from the same call. Half-moved state is the hardest kind to attribute.
-    # WHY : Assumptions: this function is KEPT as a one-line delegation rather than deleted and its
+    # Assumptions: this function is KEPT as a one-line delegation rather than deleted and its
     #   call site pointed at the factory directly, because it is the seam the command tests
     #   substitute their in-process double at. Removing it would move that substitution onto an
     #   imported name and make every staging test patch the staging module instead of this one.
@@ -872,6 +903,18 @@ def _stage_dataset(arguments: argparse.Namespace) -> int:
     #   The bytes are copied verbatim, so this command cannot detect a wrong dataset from
     #   the payload; the token is the only thing that decides which prefix the object
     #   lands under, and a typo would otherwise stage a real extract where nothing reads.
+    # Assumptions: `--dataset` names exactly ONE dataset and this command stages exactly one
+    #   extract per invocation. The batch chain's StageSeedDatasets step is a Step Functions
+    #   `Map` state that runs one branch per dataset, so the state machine is what supplies the
+    #   fan-out; a subcommand that looped over every dataset would serialise inside a single
+    #   task the work the Map runs in parallel, and would collapse ten independently retryable
+    #   branches into one all-or-nothing task whose retry re-stages the nine that had already
+    #   succeeded.
+    # Assumptions: one invocation is therefore idempotent and safely re-runnable, which is
+    #   required rather than merely desirable -- Step Functions may retry a Map branch, and the
+    #   generation is RESERVED against the execution token rather than computed, so presenting
+    #   the same token again returns the same number and the retry rewrites one key instead of
+    #   consuming a second generation for a byte-identical copy.
     try:
         descriptor = seed_datasets.seed_dataset(arguments.dataset)
     except SeedDatasetError as exc:
@@ -1092,6 +1135,40 @@ def _business_date(value: str) -> date:
     #   what the object key carries; accepting both spellings would mean two argument
     #   forms producing one key, and the ambiguity would surface only as a mis-sorted
     #   generation listing.
+    # Assumptions: the business date is a PARAMETER and is never defaulted from the clock --
+    #   there is deliberately no `date.today()` fallback in this function or anywhere below it.
+    #   The baseline injects it the same way, as `PARM='2022071800'` on the job step
+    #   (app/jcl/INTCALC.jcl line 22), because the date selects which day's data a run
+    #   processes rather than recording when the run happened. A wall-clock read would put a
+    #   rerun under a different dt= prefix from the attempt it is meant to reproduce, orphaning
+    #   the first attempt's object and leaving a later step reading an empty location; and a
+    #   rerun after midnight would silently process a different day.
+    # Assumptions: this validator is attached only to the subcommands whose OUTPUT depends on
+    #   the date, and is deliberately not a global option. Not every baseline job takes one --
+    #   app/jcl/POSTTRAN.jcl line 23 is `EXEC PGM=CBTRN02C` with no PARM at all -- so requiring
+    #   it everywhere would invent a parameter the baseline does not have and force a caller of,
+    #   say, `load-dataset` to supply a date that reaches nothing it writes.
+    # Refactoring Rationale: the shape is checked against `_BUSINESS_DATE_PATTERN` BEFORE
+    #   `date.fromisoformat` is consulted, where this previously called `fromisoformat` alone.
+    #   That was measured to accept three spellings this command must refuse, because since
+    #   Python 3.11 `fromisoformat` parses the whole of ISO 8601 rather than the extended
+    #   calendar form only: the baseline's own compact token `2022071800` returns 2022-07-18,
+    #   the basic form `20220718` does too, and the week form `2022-W27-1` returns 2022-07-04.
+    #   Each is the "two argument forms producing one key" ambiguity the paragraph above says
+    #   was rejected, so the code contradicted its own stated contract -- and the week form is
+    #   the damaging one, because it silently resolves to a DIFFERENT day from the one its
+    #   digits read as, and the dt= segment is built from whatever date comes back.
+    # Trade-offs: a caller who holds the baseline's `PARM='2022071800'` token must now
+    #   reformat it rather than paste it, and that is the point: the refusal names the accepted
+    #   form, whereas silent acceptance produced a correct-looking key from an unintended
+    #   spelling and surfaced only later as a mis-sorted generation listing.
+    if _BUSINESS_DATE_PATTERN.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not an ISO calendar date in the form YYYY-MM-DD"
+        )
+    # Assumptions: the pattern fixes the SHAPE and `fromisoformat` still decides whether the
+    #   date EXISTS, so a well-formed but impossible day such as 2022-02-30 is refused here
+    #   rather than reaching the prefix builder.
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
@@ -1124,19 +1201,31 @@ def _reader_and_records(arguments: argparse.Namespace) -> tuple[RecordReader, An
         If the record name is not a registered layout, or the named layout cannot be decoded
         from text at all. The second case is raised lazily, on the first record consumed.
     """
-    # WHY : the registry is asked through ``layouts.layout`` rather than indexed into
-    #   ``layouts.LAYOUTS``, so an unknown name is refused by the same call, with the same
-    #   message and the same exception type, as the ``decode-record`` command already uses.
-    #   Indexing the mapping directly would produce a KeyError that had to be re-wrapped, and a
-    #   second wording of "that name is not registered" free to drift from the first.
+    # Alternatives Considered: the registry is asked through ``layouts.layout`` rather than indexed
+    #   into ``layouts.LAYOUTS``, so an unknown name is refused by the same call, with the same
+    #   message and the same exception type, as the ``decode-record`` command already uses. Indexing
+    #   the mapping directly would produce a KeyError that had to be re-wrapped, and a second
+    #   wording of "that name is not registered" free to drift from the first.
     layout = layouts.layout(arguments.dataset)
     reader = RecordReader(layout)
     source = Path(arguments.source)
-    # WHY : the encoding is explicit rather than sniffed from the file. The two forms are
-    #   distinguishable only by inspecting bytes for characters outside the ASCII range, and a
-    #   seed extract whose records happen to be all-ASCII would sniff as text while being an
+    # Alternatives Considered: the encoding is explicit rather than sniffed from the file. The two
+    #   forms are distinguishable only by inspecting bytes for characters outside the ASCII range,
+    #   and a seed extract whose records happen to be all-ASCII would sniff as text while being an
     #   EBCDIC dataset -- decoding it as text then yields plausible wrong values rather than an
     #   error, which is the failure this whole verification layer exists to catch.
+    # Assumptions: the choice is passed to the reader and this module holds NO per-dataset
+    #   encoding rule -- notably none forcing `SECUSER` onto the EBCDIC path, even though that
+    #   record genuinely ships in one form only and `app/data/ASCII/usrsec.txt` does not exist.
+    #   The rule is the owning reader's: `readers/usrsec.py` refuses a character entry point by
+    #   POLICY rather than by geometry, because that record carries a plaintext credential, and
+    #   the refusal arrives here as a `LayoutError` that `_STEP_ERRORS` converts to a classified
+    #   non-zero status rather than a traceback.
+    # Alternatives Considered: encoding the same rule again here, as a table mapping each layout
+    #   to its permitted seed form. Rejected because README.md section 5.2 records that the
+    #   seed-extract encodings are a documentation-owned fact with no representation in this
+    #   distribution's code; adding one would create a second authority free to disagree with
+    #   both section 6.1 and the reader, and the reader is the side that can actually enforce it.
     if arguments.encoding == "ascii":
         return reader, reader.read_ascii(source)
     return reader, reader.read_ebcdic(source)
@@ -1166,7 +1255,7 @@ def _read_back(connection: Any, target: Any) -> list[dict[str, Any]]:
     ------
     None
     """
-    # WHY : Assumptions: the read-back is restricted to the target's COMPARABLE fields, which
+    # Assumptions: the read-back is restricted to the target's COMPARABLE fields, which
     #   excludes any column holding an envelope. An envelope's initialisation vector is drawn per
     #   value, so the same identifier enciphered twice differs -- selecting such a column would
     #   make the digest comparison report a difference on every run, against a load that was
@@ -1240,7 +1329,7 @@ def _connect_for(target: TableTarget) -> Any:
         If the schema is not one of the eight, if the resolved credential is incomplete, or if
         its stored user is not the schema's login role.
     """
-    # WHY : Assumptions: the owning role is passed as an EXPECTATION rather than trusted to
+    # Assumptions: the owning role is passed as an EXPECTATION rather than trusted to
     #   follow from the schema, so the two independent resolutions have to agree before a
     #   connection is opened. `resolve_aurora_settings` reads a per-schema secret whose stored
     #   user is what the connection actually authenticates as, and `role_for_schema` states what
@@ -1248,7 +1337,7 @@ def _connect_for(target: TableTarget) -> Any:
     #   a parameter path pointing at the wrong schema's secret, would otherwise succeed as
     #   whichever role it found -- most damagingly as a superuser, which can write every table and
     #   therefore proves nothing about the least-privilege boundary the ETL claims to run inside.
-    # WHY : Refactoring Rationale: all four database commands resolve their connection here rather
+    # Refactoring Rationale: all four database commands resolve their connection here rather
     #   than each calling `connect` directly. The expectation was added to one of them first, and
     #   the asymmetry was itself the defect: the load -- the only command that WRITES -- was the
     #   one still opening an unverified connection.
@@ -1280,7 +1369,7 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     try:
         _, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
-        # WHY : Assumptions: the context is resolved BEFORE the connection is opened, so an
+        # Assumptions: the context is resolved BEFORE the connection is opened, so an
         #   environment missing a key parameter or a subject document fails without having taken a
         #   connection it would then have to close on the error path. It is also the cheaper
         #   failure: a missing parameter is an operator action, and learning it before the database
@@ -1297,12 +1386,12 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
         return EXIT_FAILED
     finally:
         connection.close()
-    # WHY : Assumptions: BOTH counts are reported rather than one. On the stage-and-merge path a
+    # Assumptions: BOTH counts are reported rather than one. On the stage-and-merge path a
     #   load that staged every row and inserted none is a success -- the seed migration had already
     #   written them -- and an operator reading a line that said only "loaded 7 row(s)" would
     #   believe seven rows had been added. The outcome renders the skipped count only when it is
     #   non-zero, so the direct path's line does not carry a number that is always zero.
-    # WHY : Refactoring Rationale: there is no DECLINED branch, and there was one. Every target now
+    # Refactoring Rationale: there is no DECLINED branch, and there was one. Every target now
     #   stages and merges, so a re-run of a completed load reports staged rows with none inserted
     #   rather than refusing to run -- the same information, reached without a row-count
     #   precondition that the identity-keyed daily feed could not be made safe by. A restart is
@@ -1348,7 +1437,7 @@ def _reconcile_sequences(arguments: argparse.Namespace) -> int:
     ------
     None
     """
-    # WHY : Assumptions: the MIGRATION credential is resolved, not the runtime one.
+    # Assumptions: the MIGRATION credential is resolved, not the runtime one.
     #   `sql/V0__schemas_and_roles.sql` grants the service role `USAGE, SELECT` on the schema's
     #   sequences, which is `nextval` and not `setval`; `setval` needs UPDATE, which only the owner
     #   holds. Resolving the runtime credential here would fail with a permission error at the one
@@ -1366,13 +1455,13 @@ def _reconcile_sequences(arguments: argparse.Namespace) -> int:
         return EXIT_FAILED
     finally:
         connection.close()
-    # WHY : Trade-offs: a run that changed nothing reports success rather than a distinct status.
+    # Trade-offs: a run that changed nothing reports success rather than a distinct status.
     #   The step is defined by its POSTCONDITION -- the allocator is past every stored identifier
     #   -- and that holds equally whether this run moved it or found it already there, which is
     #   what makes the step safe to leave in a cutover script that may be re-run. The rendered line
     #   still says which of the two happened.
     if reconciliation.would_have_collided:
-        # WHY : Assumptions: logged at WARNING, because this is the defect having been caught. An
+        # Assumptions: logged at WARNING, because this is the defect having been caught. An
         #   allocator poised to reissue a stored identifier would have failed every interactive
         #   write until it climbed past the loaded range, and an operator reading a cutover log
         #   afterwards needs to see that the step was not merely ceremonial.
@@ -1418,7 +1507,7 @@ def _verify_row_counts(arguments: argparse.Namespace) -> int:
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
-    # WHY : the decode guard is repeated around the CONSUMPTION and not only around the setup
+    # Assumptions: the decode guard is repeated around the CONSUMPTION and not only around the setup
     #   above, because ``_reader_and_records`` returns a lazy iterator: the width contract and
     #   the per-field decode are checked on the first record pulled, which happens inside
     #   ``compare_counts``, after the setup block has already returned successfully.
@@ -1432,9 +1521,11 @@ def _verify_row_counts(arguments: argparse.Namespace) -> int:
     finally:
         connection.close()
     print(outcome.describe())
-    # WHY : a difference exits FAILED rather than raising. The rubric the runners share treats
-    #   8 as a failed check, and a verification command that raised would lose the report line
-    #   an operator needs in order to see WHICH side was short.
+    # Trade-offs: a difference exits FAILED rather than raising. README.md section 5.6 assigns
+    #   8 to "the step did not complete", which is what a count mismatch is; and a verification
+    #   command that raised would lose the report line an operator needs in order to see WHICH
+    #   side was short. The cost is that no stack is printed, which this path has no use for --
+    #   the counts disagreeing is data, not a fault in the code that compared them.
     return EXIT_OK if outcome.matched else EXIT_FAILED
 
 
@@ -1464,7 +1555,7 @@ def _verify_row_count_report(arguments: argparse.Namespace) -> int:
         Every documented failure is reported as a return code, because the batch state that
         invokes this branches on one.
     """
-    # WHY : Refactoring Rationale: this command exists because the reporting-role verification
+    # Refactoring Rationale: this command exists because the reporting-role verification
     #   path was DELIVERED AND UNREACHED. verify/row_counts.py published
     #   open_reporting_connection, reporting_settings and verify_row_counts, and nothing in the
     #   distribution called any of them -- while verify-row-counts beside this command opened a
@@ -1473,7 +1564,7 @@ def _verify_row_count_report(arguments: argparse.Namespace) -> int:
     #   by hand in a Python session. Wiring it as a command is what makes the least-privilege path
     #   the one an operator and the batch chain actually take.
     #
-    # WHY : Alternatives Considered: converting the existing verify-row-counts command to this
+    # Alternatives Considered: converting the existing verify-row-counts command to this
     #   path instead of adding a second one. Rejected because the two answer different questions
     #   and need different authority: that command counts records in a LOCAL EXTRACT and compares
     #   them against one table, so it must read the extract and must know which dataset is meant;
@@ -1486,7 +1577,7 @@ def _verify_row_count_report(arguments: argparse.Namespace) -> int:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
     try:
-        # WHY : Assumptions: the option names the DISTRIBUTION ROOT and is resolved to the query
+        # Assumptions: the option names the DISTRIBUTION ROOT and is resolved to the query
         #   file here, rather than naming the file itself. That is the parameter
         #   `row_count_query_path` publishes for this purpose, and its own rationale records why
         #   one is needed: the sql tree ships BESIDE the package rather than inside it, so the
@@ -1504,14 +1595,14 @@ def _verify_row_count_report(arguments: argparse.Namespace) -> int:
         return EXIT_FAILED
     finally:
         connection.close()
-    # WHY : Assumptions: the role that certified the report is logged and is deliberately NOT
+    # Assumptions: the role that certified the report is logged and is deliberately NOT
     #   printed. An operator reading the log needs to know which authority the verdict was reached
     #   under, because that is the property this pass rests on; the printed text stays byte-stable
     #   between runs so two runs over unchanged data diff to nothing, and a role name is the kind
     #   of line that would later acquire a host or a database beside it.
     _LOGGER.info("row count report certified by role=%s", reporting_role())
     print(report.render())
-    # WHY : Trade-offs: a mismatch exits FAILED rather than raising, on the same reasoning as the
+    # Trade-offs: a mismatch exits FAILED rather than raising, on the same reasoning as the
     #   per-dataset command above: the rendered report names every short table, and a traceback
     #   would replace the one artifact an operator acts on with the place the code noticed.
     return EXIT_OK if report.verified else EXIT_FAILED
@@ -1537,7 +1628,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     try:
         reader, records = _reader_and_records(arguments)
         target = target_for(arguments.dataset)
-        # WHY : Assumptions: the context is resolved here as well as in the load handler, because
+        # Assumptions: the context is resolved here as well as in the load handler, because
         #   the source side is now projected through the target's own declarations and a
         #   SUBJECT_FOR_USER_ID projection needs the published document to produce the value the
         #   column holds. The sealing projections are excluded from the digest, so their
@@ -1549,7 +1640,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     except _STEP_ERRORS as exc:
         _LOGGER.error("%s", exc)
         return EXIT_FAILED
-    # WHY : Refactoring Rationale: the source side is digested through `prepare_record`, over the
+    # Refactoring Rationale: the source side is digested through `prepare_record`, over the
     #   target's comparable fields, where it used to digest the RAW decoded record over every
     #   mapped field. Both halves of that were wrong once the loader began projecting values. The
     #   raw record carries a description at its fixed width and the stored column holds it
@@ -1557,7 +1648,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     #   correct; and the full field set includes the envelope columns, whose bytes differ on every
     #   write by design. Digesting what was STORED, over the fields that can be stored
     #   deterministically, is the only construction that compares the two sides of the same load.
-    # WHY : Refactoring Rationale: the comparable field set is now passed through
+    # Refactoring Rationale: the comparable field set is now passed through
     #   `deterministic_field_names`, and the two digests through `compare_record_digests`. Both
     #   halves close a claim this package published and did not keep. `README.md` section 10.1
     #   states that the pass excludes the wall-clock processing stamp by reading the layout's own
@@ -1567,11 +1658,11 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     #   wrote two whole-dataset digests, so a difference was announced with nowhere to look.
     fields = deterministic_field_names(reader.layout, target.comparable_fields())
     try:
-        # WHY : the loaded rows are read back and digested through the SAME field order and the
-        #   same canonical rendering, so the comparison is between two digests of the same
-        #   construction. Comparing a source digest against a value recorded in a file would
+        # Alternatives Considered: the loaded rows are read back and digested through the SAME field
+        #   order and the same canonical rendering, so the comparison is between two digests of the
+        #   same construction. Comparing a source digest against a value recorded in a file would
         #   only prove the source had not changed, which is not what a load needs verifying.
-        # WHY : Trade-offs: the read-back is collected BEFORE the lockstep walk begins, and it is
+        # Trade-offs: the read-back is collected BEFORE the lockstep walk begins, and it is
         #   collected rather than streamed. The walk consumes both sides together, so the rows have
         #   to exist before it starts; and they are read inside this block because it is the one
         #   that closes the connection, which a lazy cursor consumed after the close could not use.
@@ -1590,7 +1681,7 @@ def _verify_checksum(arguments: argparse.Namespace) -> int:
     finally:
         connection.close()
     print(comparison.render())
-    # WHY : Trade-offs: a difference exits FAILED rather than raising, on the same reasoning as the
+    # Trade-offs: a difference exits FAILED rather than raising, on the same reasoning as the
     #   row-count report above: the rendered comparison names every located difference, and a
     #   traceback would replace the one artifact an operator acts on with the place code noticed.
     return EXIT_OK if comparison.verified else EXIT_FAILED
@@ -1627,19 +1718,19 @@ def _verify_money_parity(arguments: argparse.Namespace) -> int:
         return EXIT_OK
     failures = 0
     try:
-        # WHY : the records are collected INSIDE the block that closes the connection, and
-        #   collected rather than streamed, for two separate reasons. Inside, because draining
-        #   the lazy reader is where a width or decode failure surfaces and an early return from
-        #   outside would leak the open connection. Collected, because each money field is
-        #   totalled in its own pass and a one-shot iterator would silently total zero on every
-        #   pass after the first -- a difference of zero that reads as agreement.
+        # Alternatives Considered: the records are collected INSIDE the block that closes the
+        #   connection, and collected rather than streamed, for two separate reasons. Inside,
+        #   because draining the lazy reader is where a width or decode failure surfaces and an
+        #   early return from outside would leak the open connection. Collected, because each money
+        #   field is totalled in its own pass and a one-shot iterator would silently total zero on
+        #   every pass after the first -- a difference of zero that reads as agreement.
         collected = list(records)
         for field in money_fields:
             column = target.columns.get(field)
             if column is None:
-                # WHY : a money field the target does not map is reported and not silently
-                #   passed. It means the load is dropping a monetary value, which is a finding
-                #   even though this particular comparison cannot be made.
+                # Alternatives Considered: a money field the target does not map is reported and not
+                #   silently passed. It means the load is dropping a monetary value, which is a
+                #   finding even though this particular comparison cannot be made.
                 print(f"UNMAPPED {arguments.dataset}.{field} has no target column")
                 failures += 1
                 continue
@@ -1691,11 +1782,19 @@ def build_parser() -> argparse.ArgumentParser:
             "three independent ways -- row counts, record checksums and exact money "
             "totals."
         ),
+        # Assumptions: the epilog cites data-migration/README.md section 5.6 -- this
+        #   package's own exit contract -- and deliberately NOT the repository's graded
+        #   aggregate rubric. That rubric admits a warn tier in which 4 is a passing
+        #   state, and it is scoped to the COBOL parity oracle alone; pointing an operator
+        #   at it here would tell them a partly-completed migration step can exit non-zero
+        #   and still have passed, which is the one reading this CLI must never invite.
         epilog=(
-            "Exit codes follow tests/README.md section 8: 0 success, 2 usage, 8 the "
-            "step did not complete, 16 the environment could not be reached. Reads "
-            "CARDDEMO_ENVIRONMENT, CARDDEMO_PARAMETER_PREFIX and the TLS trust-anchor "
-            "settings from the environment; no endpoint or credential is an argument."
+            "Exit status is binary: 0 succeeded, any non-zero value did not. Failures are "
+            "classified as 2 invoked incorrectly, 8 the step did not complete, 16 the "
+            "environment could not be reached -- see data-migration/README.md section 5.6. "
+            "Reads CARDDEMO_ENVIRONMENT, CARDDEMO_PARAMETER_PREFIX and the TLS "
+            "trust-anchor settings from the environment; no endpoint or credential is an "
+            "argument."
         ),
     )
     # Assumptions: the subcommand is required and the attribute is named "handler", so
@@ -1875,9 +1974,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reconcile_sequences.set_defaults(handler=_reconcile_sequences)
 
-    # WHY : the four commands below share one option set -- --dataset, --source and --encoding
-    #   -- because they are four questions about the same pairing of a dataset and a table, and a
-    #   caller that has just loaded a record verifies it by changing only the verb.
+    # Assumptions: the four commands below share one option set -- --dataset, --source and
+    #   --encoding -- because they are four questions about the same pairing of a dataset and a
+    #   table, and a caller that has just loaded a record verifies it by changing only the verb.
     # Refactoring Rationale: the selector is spelled --dataset, matching decode-record and
     #   stage-dataset, after an earlier draft spelled it --record. That draft made --record mean
     #   two unrelated things depending on the verb: the LAYOUT NAME here, and the one-based
@@ -1940,7 +2039,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         command.set_defaults(handler=handler)
 
-    # WHY : Assumptions: this command is registered on its own rather than inside the loop above,
+    # Assumptions: this command is registered on its own rather than inside the loop above,
     #   because it takes NONE of that loop's three options. It reads a server-side aggregate over
     #   every table instead of a local extract, so it has no dataset to name, no file to read and
     #   no seed form to declare -- and accepting three options it ignored would invite an operator
@@ -1956,7 +2055,7 @@ def build_parser() -> argparse.ArgumentParser:
             "reads no local extract."
         ),
     )
-    # WHY : Trade-offs: the root is optional and defaults to resolution from the package's own
+    # Trade-offs: the root is optional and defaults to resolution from the package's own
     #   location, which is correct in a source checkout and in an editable install and is expected
     #   to fail in a plain wheel -- the sql directory ships BESIDE the package rather than inside
     #   it. Naming the option is what lets an operator running from an unpacked distribution point
@@ -1994,8 +2093,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns
     -------
     int
-        :data:`EXIT_OK`, :data:`EXIT_USAGE`, :data:`EXIT_FAILED` or
-        :data:`EXIT_FATAL`.
+        The process exit status, and it is binary in meaning: :data:`EXIT_OK` (``0``) says
+        the subcommand did what it was asked, and every other value says it did not.
+        :data:`EXIT_USAGE` (``2``), :data:`EXIT_FAILED` (``8``) and :data:`EXIT_FATAL`
+        (``16``) classify *which* failure occurred, per ``data-migration/README.md``
+        section 5.6; none of them is a pass. The repository's graded aggregate rubric, in
+        which ``4`` is a passing warn tier, is deliberately not used -- see this module's
+        docstring for why that distinction is load-bearing here.
 
     Raises
     ------
@@ -2027,4 +2131,13 @@ if __name__ == "__main__":
     #   this guard is what makes the documented invocation and the container ENTRYPOINT
     #   work. sys.exit is passed the integer directly so the process status is the
     #   return code rather than a truthiness conversion of it.
+    # Refactoring Rationale: the entry point is this guard on THIS module, and no
+    #   `__main__.py` is added to the package. pyproject.toml publishes
+    #   `python -m carddemo_migration.cli` and `carddemo-migrate = carddemo_migration.cli:main`,
+    #   and a package-level `__main__.py` would make `python -m carddemo_migration` a THIRD,
+    #   undocumented spelling -- one the runbooks, this package's README and the batch state
+    #   machine's container overrides never issue. Two entry points into one CLI drift: the
+    #   unpublished one acquires no argument handling and no exit mapping, and an operator who
+    #   found it would get argparse's bare usage error where the published form reports a
+    #   classified status.
     sys.exit(main())
