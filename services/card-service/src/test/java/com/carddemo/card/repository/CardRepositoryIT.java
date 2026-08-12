@@ -1402,22 +1402,108 @@ class CardRepositoryIT {
         }
 
         /**
-         * Confirms that the migration ran through Flyway, by reading the history it records.
+         * Confirms that the migrations ran through Flyway, by reading the history they record.
          */
         // WHY : Assumptions: this is the assertion that distinguishes a schema the migration built from
         //       one the provider generated, and it is the reason the group is worth having at all --
         //       every other assertion here would hold equally if the provider had emitted the
         //       definitions itself. The history table is placed inside the owned schema rather than
         //       wherever the connection resolved to, so reading it from `card` also confirms the
-        //       default-schema setting took effect. Exactly one version is expected because this module
-        //       holds one migration: the reference-data seed belongs to reference-service.
+        //       default-schema setting took effect.
+        // WHY : Refactoring Rationale: this expected exactly one version, on the ground that this module
+        //       held one migration. It holds two: V2 closes the card_num character domain that V1
+        //       declared a width for without constraining, and it arrived as a new version rather than
+        //       as an edit to V1 because V1's checksum is recorded in every already-migrated database.
+        //       The set is asserted in INSTALLED ORDER and closed, so a V2 that failed to apply, applied
+        //       out of order, or was joined by an unannounced V3 all fail here.
         @Test
-        void appliedTheSingleMigrationThroughFlyway() {
+        void appliedBothMigrationsThroughFlywayInVersionOrder() {
             List<String> applied = catalogStrings(
                     "SELECT version FROM card.flyway_schema_history"
                     + " WHERE success AND version IS NOT NULL ORDER BY installed_rank");
 
-            assertThat(applied).containsExactly("1");
+            assertThat(applied).containsExactly("1", "2");
+        }
+
+        /**
+         * Confirms the named card-number constraint exists and closes the domain at the column.
+         */
+        // WHY : Assumptions: the two refused shapes are the ones runtime testing was able to insert
+        //       before this constraint existed, and they are refused for two different reasons that a
+        //       width check alone would not have caught. Sixteen alphabetic characters fill the declared
+        //       width exactly, so nothing about the length is wrong with them; a fifteen-digit value is
+        //       padded to the width with a blank by the fixed-width column itself, so it arrives as
+        //       sixteen characters too. Both are unrenderable as a masked listing row, and neither is
+        //       excluded by CHAR(16).
+        // WHY : Trade-offs: the refusal is asserted at the DATABASE and not through the repository,
+        //       because closing the domain at the column is the whole point -- the bulk load in
+        //       data-migration writes these rows directly and never passes through a Java constraint, so
+        //       a rule that lived only in the application would not reach the path that populates the
+        //       table. The insert is issued as raw SQL for the same reason.
+        @Test
+        void createdTheNamedCardNumberConstraintThatClosesTheDomain() {
+            List<String> constraints = catalogStrings(
+                    "SELECT c.conname FROM pg_constraint c"
+                    + " JOIN pg_class t ON t.oid = c.conrelid"
+                    + " JOIN pg_namespace n ON n.oid = t.relnamespace"
+                    + " WHERE n.nspname = 'card' AND t.relname = 'cards'"
+                    + " AND c.contype = 'c' ORDER BY c.conname");
+
+            assertThat(constraints).contains("ck_cards_card_num_digits");
+
+            assertThat(insertFailureFor("ABCDEFGHIJKLMNOP"))
+                    .as("sixteen alphabetic characters fill the width and are still refused")
+                    .contains("ck_cards_card_num_digits");
+            assertThat(insertFailureFor("111122223333444 "))
+                    .as("a fifteen-digit value padded to the width is refused")
+                    .contains("ck_cards_card_num_digits");
+            assertThat(catalogStrings(
+                    "SELECT card_num FROM card.cards WHERE card_num !~ '^[0-9]{16}$'"))
+                    .as("neither refused row reached the table")
+                    .isEmpty();
+        }
+
+        /**
+         * Confirms the constraint admits a conforming key, so the refusals above are not vacuous.
+         */
+        // WHY : Assumptions: a constraint written to refuse everything would satisfy both refusals above
+        //       and break the whole service, so the admitted case is asserted separately rather than
+        //       being left to the other groups. The key used carries a leading zero, which is the part of
+        //       the domain a numeric column would have discarded and a numeric-cast check would have
+        //       admitted for the wrong reason.
+        @Test
+        void admitsAConformingKeyIncludingItsLeadingZero() {
+            repository.save(new Card("0100000000000002", 906L, syntheticEnvelope(),
+                    "Domain Control", LocalDate.of(2025, 1, 1), "Y"));
+
+            assertThat(repository.findById("0100000000000002")).isPresent();
+        }
+
+        /**
+         * Issues a direct insert of one card number and returns the failure it raised.
+         *
+         * @param cardNumber the sixteen stored characters to attempt, which the constraint is expected to
+         *     refuse
+         * @return the message the raised failure carried, never {@code null}
+         * @throws AssertionError if the insert succeeded, which would mean the domain is still open
+         */
+        // WHY : Assumptions: the caller asserts on the CONSTRAINT NAME appearing in this message, which
+        //       is why the constraint is named in the migration rather than taking a server-generated
+        //       name. Asserting on the name rather than on the sentence around it is what keeps the
+        //       assertion independent of the server's own wording.
+        private String insertFailureFor(String cardNumber) {
+            try (Connection connection = dataSource.getConnection();
+                    Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                        "INSERT INTO card.cards"
+                        + " (card_num, account_id, embossed_name, expiration_date, active_status)"
+                        + " VALUES ('" + cardNumber + "', 907, 'Domain Probe', DATE '2025-01-01',"
+                        + " 'Y')");
+            } catch (SQLException refused) {
+                return refused.getMessage();
+            }
+            throw new AssertionError(
+                    "the insert was accepted, so the card_num domain is not closed at the column");
         }
 
         /**

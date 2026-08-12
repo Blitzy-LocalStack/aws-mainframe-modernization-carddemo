@@ -589,12 +589,13 @@ class CardListServiceTest {
      * at {@code :906} and the final page already shown at {@code :907}. The two attention identifiers
      * those arms test are declared at {@code app/cpy/CVCRD01Y.cpy:14} and {@code :15}.
      *
-     * <p>Assumptions: the backward refusal is reached in TWO steps rather than one, and that is the
-     * reference's own shape rather than a detour. A backward step from the opening page is answered with
-     * an empty page rather than refused, because the reference's backward path sets its further-page
-     * condition unconditionally at {@code :1287} with no probe of any kind; the refusal then falls on the
-     * page that names no leading boundary. Asserting it in one step would assert a behaviour the
-     * reference does not have.
+     * <p>Refactoring Rationale: the backward refusal is asserted in ONE step, from the opening page a
+     * caller is standing on, because that is where the reference raises it -- {@code :901-902} tests the
+     * key together with the ordinal and never reads the file. This case previously asserted it in two
+     * steps, off the page a backward request from the opening page returned, and both halves of that
+     * arrangement were reported as defects: the page in question was an exhausted envelope that had
+     * already replaced the caller's rows, and the opening page itself reported no refusal at all, because
+     * every page carrying rows names its own first row.
      *
      * <p>Assumptions: both sentences are upper case with no trailing period, and each is asserted
      * against its own literal rather than against the other. They are also asserted DISTINCT from the
@@ -622,19 +623,68 @@ class CardListServiceTest {
         PageResponse<CardSummary> opening = service.list(null, null, false, SUBJECT);
         PageResponse<CardSummary> second = service.list(null, opening.lastKey(), false, SUBJECT);
         PageResponse<CardSummary> last = service.list(null, second.lastKey(), false, SUBJECT);
-        PageResponse<CardSummary> beforeTheOpening = service.list(null, opening.firstKey(), true, SUBJECT);
-
-        assertThat(CardListService.pagingRefusal(last, false))
+        assertThat(CardListService.pagingRefusal(last, false, false))
                 .contains(CardListService.MESSAGE_NO_MORE_PAGES);
-        assertThat(CardListService.pagingRefusal(beforeTheOpening, true))
+
+        // WHY : Refactoring Rationale: the backward refusal is asserted against the OPENING page held by
+        //       a caller standing on it, which is the state the reference tests. It was previously
+        //       asserted against the page a backward request from that opening page returned -- an
+        //       exhausted envelope -- and that arrangement encoded two defects at once: it read the
+        //       refusal off a page whose rows had already been replaced by nothing, and it left the
+        //       opening page itself reporting no refusal, since every page carrying rows names its own
+        //       first row. Both were reported against the service.
+        assertThat(CardListService.pagingRefusal(opening, true, true))
                 .contains(CardListService.MESSAGE_NO_PREVIOUS_PAGES);
 
-        assertThat(CardListService.pagingRefusal(opening, false))
+        assertThat(CardListService.pagingRefusal(opening, false, true))
                 .as("a page reporting a further page refuses no forward step")
                 .isEmpty();
-        assertThat(CardListService.pagingRefusal(second, true))
+        assertThat(CardListService.pagingRefusal(second, true, false))
                 .as("a page naming a leading boundary refuses no backward step")
                 .isEmpty();
+    }
+
+    /**
+     * Asserts that a backward step from the opening page keeps the caller's rows rather than blanking
+     * them, and that the refusal is available before the request is even issued.
+     *
+     * <p>Purpose: this is the runtime half of the reference's first-page arm. {@code app/cbl/COCRDLIC.cbl}
+     * pairs the backward paging key with the first-page condition at {@code :443-444}, moves the page's
+     * own first card number into the record identifier at {@code :445-446}, performs
+     * {@code 9000-READ-FORWARD} -- the FORWARD paragraph -- at {@code :449-450}, and sends the map at
+     * {@code :451-452}; {@code :901-903} adds the refusal sentence. The rows in front of the operator
+     * never change, so an exhausted envelope is the one answer that key press cannot produce.
+     *
+     * <p>Assumptions: the assertion is on the PUBLISHED identities rather than on the envelope's cursor
+     * text, because every seal carries its own nonce and two seals of one key never render identically.
+     *
+     * <p>It takes no parameter and returns no value.
+     */
+    @Test
+    @DisplayName("a backward step from the opening page returns that page rather than an empty one")
+    void aBackwardStepFromTheOpeningPageReturnsThatPage() {
+
+        CardRepository cards = keysetStore(this.corpus);
+        CardListService service = serviceOver(cards);
+
+        PageResponse<CardSummary> opening = service.list(null, null, false, SUBJECT);
+        PageResponse<CardSummary> steppedBack = service.list(null, opening.firstKey(), true, SUBJECT);
+
+        assertThat(steppedBack.items())
+                .as("the rows the caller already held are still the rows it holds")
+                .isNotEmpty();
+        assertThat(publishedIdentities(steppedBack))
+                .isEqualTo(publishedIdentities(opening));
+        assertThat(steppedBack.hasNext())
+                .as("and the page ahead of the opening page is still reported as reachable")
+                .isEqualTo(opening.hasNext());
+        assertThat(steppedBack.firstKey()).isNotNull();
+        assertThat(steppedBack.lastKey()).isNotNull();
+
+        assertThat(CardListService.pagingRefusal(opening, true, true))
+                .as("the refusal is derivable from the page in hand, before the request is issued")
+                .contains(CardListService.MESSAGE_NO_PREVIOUS_PAGES);
+        assertThat(CardListService.backwardAvailable(opening, true)).isFalse();
     }
 
     /**
@@ -780,12 +830,15 @@ class CardListServiceTest {
                 .isEqualTo("NO RECORDS FOUND FOR THIS SEARCH CONDITION.");
         assertThat(CardListService.pageMessage(page))
                 .isEqualTo(CardListService.MESSAGE_NO_RECORDS_FOUND);
-        assertThat(CardListService.backwardAvailable(page))
+        assertThat(CardListService.backwardAvailable(page, true))
                 .as("a page naming no leading boundary can be paged away from in neither direction")
                 .isFalse();
-        assertThat(CardListService.pagingRefusal(page, true))
+        assertThat(CardListService.backwardAvailable(page, false))
+                .as("and the opening-page argument cannot make a boundary-less page addressable")
+                .isFalse();
+        assertThat(CardListService.pagingRefusal(page, true, true))
                 .contains(CardListService.MESSAGE_NO_PREVIOUS_PAGES);
-        assertThat(CardListService.pagingRefusal(page, false))
+        assertThat(CardListService.pagingRefusal(page, false, true))
                 .contains(CardListService.MESSAGE_NO_MORE_PAGES);
     }
 
@@ -1001,10 +1054,14 @@ class CardListServiceTest {
         assertThat(opening.firstKey())
                 .as("the position a backward request is issued from is published on every page with rows")
                 .isNotNull();
-        assertThat(CardListService.backwardAvailable(opening))
-                .as("a backward step is ADDRESSABLE from the opening page; whether a row waits there is"
-                        + " the caller's own page ordinal to answer")
+        assertThat(CardListService.backwardAvailable(opening, false))
+                .as("a backward step is ADDRESSABLE from the opening page, which is what the leading"
+                        + " boundary reports, and what a caller past page one composes with it")
                 .isTrue();
+        assertThat(CardListService.backwardAvailable(opening, true))
+                .as("but it is NOT AVAILABLE to a caller standing on the opening page, which is the"
+                        + " condition app/cbl/COCRDLIC.cbl:238 declares over its own ordinal")
+                .isFalse();
         assertThat(CardListService.MESSAGE_NO_PREVIOUS_PAGES)
                 .as("the reference sentence a client renders when its ordinal says it is on page one")
                 .isEqualTo("NO PREVIOUS PAGES TO DISPLAY");
@@ -1036,7 +1093,7 @@ class CardListServiceTest {
         assertThat(backToOpening.hasNext())
                 .as("and it must advertise the page it stepped back from")
                 .isTrue();
-        assertThat(CardListService.pagingRefusal(backToOpening, false)).isEmpty();
+        assertThat(CardListService.pagingRefusal(backToOpening, false, true)).isEmpty();
 
         // WHY : Assumptions: the two envelopes name the SAME row at their leading boundary but cannot
         //       carry the same token text, because every seal mints a fresh nonce -- so the assertion has

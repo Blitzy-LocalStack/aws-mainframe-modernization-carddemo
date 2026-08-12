@@ -224,7 +224,7 @@
  * companion are the whole of the concern, and a third type would be either a second money
  * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
  * whole the module holds six production classes in {@code codec}, four in {@code control}, seven in
- * {@code error}, four in {@code messaging}, two in {@code money}, three in {@code observability},
+ * {@code error}, four in {@code messaging}, two in {@code money}, four in {@code observability},
  * nine in {@code security}, one in {@code time}, two in {@code validation} and four in
  * {@code web}, the package root contributing one -- the auto-configuration class that registers this package's codec
  * module, and the {@code Clock}, the cursor-token signer, the correlation filter, the meter filter
@@ -233,8 +233,8 @@
  * read back by the drift test named below:</p>
  *
  * <pre>
- * production classes:  1 + 6 + 4 + 7 + 3 + 2 + 4 + 9 + 1 + 2 + 4 = 43
- * compilation units:   43 production + 11 package descriptors = 54
+ * production classes:  1 + 6 + 4 + 7 + 4 + 2 + 4 + 9 + 1 + 2 + 4 = 44
+ * compilation units:   44 production + 11 package descriptors = 55
  * </pre>
  *
  * <p>The eleven descriptors are one for the package root and one for each of its ten subpackages.

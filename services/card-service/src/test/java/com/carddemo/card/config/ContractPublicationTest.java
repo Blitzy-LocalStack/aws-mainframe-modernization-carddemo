@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.AntPathMatcher;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -27,6 +28,15 @@ import org.yaml.snakeyaml.Yaml;
  * itself matches on.</p>
  */
 class ContractPublicationTest {
+
+    /**
+     * The path matcher whose semantics the chain's request matchers carry.
+     *
+     * <p>Assumptions: this is the same matcher {@code SecurityConfigTest} compares patterns with, so a
+     * pattern reported as covering an address here is one the chain covers at run time. Comparing
+     * spellings instead would pass for the two exact addresses and say nothing about either subtree.</p>
+     */
+    private static final AntPathMatcher MATCHER = new AntPathMatcher();
 
     /** The class-path location that must be served for the packaged contract to be reachable. */
     private static final String OPENAPI_LOCATION = "classpath:/openapi/";
@@ -119,6 +129,48 @@ class ContractPublicationTest {
                 .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
                 .as("an empty paths object would mean the generated stand-in was packaged by mistake")
                 .isNotEmpty();
+    }
+
+    /**
+     * Confirms the filter chain grants every address these keys pin, so a configured document is a
+     * reachable one.
+     *
+     * <p>Purpose: this closes the second half of the reachability problem this class was authored for.
+     * The first half was that the packaged contract was served from no static location, so it answered
+     * 404. The second was that once it was served, the chain refused it: {@code SecurityConfig} ends in a
+     * deny-all catch-all and named no documentation path, so all three of the addresses pinned here --
+     * and both of the paths a browser view derives from them -- answered 403 to a valid token of either
+     * group. Each half was individually valid configuration; only the relationship between them was
+     * wrong, which is the same failure mode the class comment describes.</p>
+     *
+     * <p>Assumptions: the addresses are READ from the profile rather than restated, and matched against
+     * the chain's own published pattern list. That is what makes this a drift check rather than a
+     * spelling comparison: moving {@code springdoc.api-docs.path} or {@code springdoc.swagger-ui.path}
+     * without extending the chain fails here, instead of returning a refusal to whatever fetches the
+     * document.</p>
+     *
+     * <p>Assumptions: the two derived paths are asserted as well as the three configured ones. The view
+     * fetches its own settings from a child of the document path and loads its assets from the webjar
+     * subtree, so a grant covering only the configured addresses would leave the page loading and then
+     * failing to render -- a harder failure to diagnose than a refusal.</p>
+     */
+    @Test
+    @DisplayName("the filter chain grants every documentation address these keys pin")
+    void filterChainGrantsEveryAddressTheseKeysPin() {
+        Map<String, Object> apiDocs = section(BASE_PROFILE, "springdoc", "api-docs");
+        Map<String, Object> swaggerUi = section(BASE_PROFILE, "springdoc", "swagger-ui");
+        String documentPath = String.valueOf(apiDocs.get("path"));
+        String viewPath = String.valueOf(swaggerUi.get("path"));
+        String contractPath = String.valueOf(swaggerUi.get("url"));
+        List<String> granted = SecurityConfig.documentationPaths();
+
+        for (String pinned : List.of(documentPath, viewPath, contractPath,
+                documentPath + "/swagger-config", "/swagger-ui/index.html")) {
+            assertThat(granted.stream().anyMatch(pattern -> MATCHER.match(pattern, pinned)))
+                    .as("%s is configured to be served but no chain rule grants it, so it answers the"
+                            + " deny-all catch-all", pinned)
+                    .isTrue();
+        }
     }
 
     /**

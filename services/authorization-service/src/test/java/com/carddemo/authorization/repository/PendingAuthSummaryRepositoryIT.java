@@ -285,6 +285,18 @@ class PendingAuthSummaryRepositoryIT {
     private static final String CHECK_VIOLATION = "23514";
 
     /**
+     * The bound every additive statement saturates its running total at.
+     *
+     * <p>Assumptions: the bound is taken from the domain type rather than written as a literal here, so a
+     * case cannot pass a ceiling the entity would disagree with. The production callers pass this same
+     * constant.</p>
+     */
+    private static final BigDecimal CEILING = PendingAuthSummary.MONEY_MAX_MAGNITUDE;
+
+    /** The negative bound the subtracting statement saturates at, being the negation of {@link #CEILING}. */
+    private static final BigDecimal FLOOR = CEILING.negate();
+
+    /**
      * The offsets that keep each case's rows to itself, one per case.
      *
      * <p>Trade-offs: eleven named constants are more verbose than one stride multiplied by a case
@@ -362,6 +374,24 @@ class PendingAuthSummaryRepositoryIT {
     //       Sharing would make the other case's assertions depend on whether this one had already run,
     //       which is exactly the coupling the per-case offsets exist to remove.
     private static final long OFFSET_GUARDED_RESERVATION = 1900L;
+
+    /**
+     * The offset owned by the additive-saturation case, whose totals begin just short of the bound.
+     */
+    // WHY : Assumptions: it takes its own offset because it seeds money values UNLIKE every other case's
+    //       -- both running totals within one accumulation of the column's greatest magnitude -- so a
+    //       shared row would make another case's amount assertions depend on whether this one had run.
+    //       Assumptions: both saturation offsets sit BELOW the two ordered walks, whose highest case
+    //       asserts its own third row is the greatest identifier the table holds.
+    private static final long OFFSET_SATURATION = 2000L;
+
+    /**
+     * The offset owned by the reversal-saturation case, whose totals are driven below the negative bound.
+     */
+    // WHY : Assumptions: the subtracting statement takes an offset separate from the additive one because
+    //       it leaves both totals at the NEGATIVE bound and both counters below zero, which is a row state
+    //       no other case's assertions would survive sharing.
+    private static final long OFFSET_SATURATION_REVERSAL = 2100L;
 
     /**
      * The offset owned by the checkpoint-walk case, which inserts three consecutive accounts.
@@ -1532,7 +1562,7 @@ class PendingAuthSummaryRepositoryIT {
                 repository -> repository.save(rehydrate(fields, OFFSET_CONTRIBUTION))).getAccountId();
 
         int updated = inTransaction(repository -> repository
-                .reserveApprovedAuthorization(accountId, new BigDecimal("25.50")));
+                .reserveApprovedAuthorization(accountId, new BigDecimal("25.50"), CEILING));
 
         assertThat(updated).as("the account had a summary, so exactly one row moved").isEqualTo(1);
         PendingAuthSummary reread = read(accountId).orElseThrow();
@@ -1573,7 +1603,7 @@ class PendingAuthSummaryRepositoryIT {
                 repository -> repository.save(rehydrate(fields, OFFSET_DECLINE))).getAccountId();
 
         int updated = inTransaction(repository -> repository
-                .addDeclinedAuthorization(accountId, new BigDecimal("30.00")));
+                .addDeclinedAuthorization(accountId, new BigDecimal("30.00"), CEILING));
 
         assertThat(updated).isEqualTo(1);
         PendingAuthSummary reread = read(accountId).orElseThrow();
@@ -1627,9 +1657,9 @@ class PendingAuthSummaryRepositoryIT {
                 .isEqualByComparingTo(seededCashBalance);
 
         inTransaction(repository -> repository
-                .reserveApprovedAuthorization(approvedAccount, new BigDecimal("25.50")));
+                .reserveApprovedAuthorization(approvedAccount, new BigDecimal("25.50"), CEILING));
         inTransaction(repository -> repository
-                .addDeclinedAuthorization(declinedAccount, new BigDecimal("25.50")));
+                .addDeclinedAuthorization(declinedAccount, new BigDecimal("25.50"), CEILING));
 
         assertThat(read(approvedAccount).orElseThrow().getCashBalance())
                 .as("L818 assigns zero on the approved arm")
@@ -1687,7 +1717,7 @@ class PendingAuthSummaryRepositoryIT {
         //       lambda whose body returns a boxed integer makes the call ambiguous at compile time. The
         //       local resolves the type before the assertion sees it.
         int firstAdmitted = inTransaction(repository -> Integer.valueOf(
-                repository.reserveApprovedAuthorization(accountId, firstReservation)));
+                repository.reserveApprovedAuthorization(accountId, firstReservation, CEILING)));
         assertThat(firstAdmitted)
                 .as("the limit admitted the first amount, so exactly one row moved")
                 .isEqualTo(1);
@@ -1701,7 +1731,7 @@ class PendingAuthSummaryRepositoryIT {
         //       that statement ran and does not fit now. That is exactly the shape of the concurrent pair
         //       this guard exists for: two decisions measured against one headroom.
         int refused = inTransaction(repository -> Integer.valueOf(
-                repository.reserveApprovedAuthorization(accountId, firstReservation)));
+                repository.reserveApprovedAuthorization(accountId, firstReservation, CEILING)));
         assertThat(refused)
                 .as("the headroom is gone, so the reservation must be refused")
                 .isZero();
@@ -1721,7 +1751,7 @@ class PendingAuthSummaryRepositoryIT {
         //       inclusive. A strict comparison would refuse this and would decline a request the reference
         //       approves at precisely the boundary both are written around.
         int boundaryAdmitted = inTransaction(repository -> Integer.valueOf(
-                repository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00"))));
+                repository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00"), CEILING)));
         assertThat(boundaryAdmitted)
                 .as("exactly the remaining headroom is admitted, matching the reference's strict decline")
                 .isEqualTo(1);
@@ -1730,7 +1760,7 @@ class PendingAuthSummaryRepositoryIT {
                 .as("the balance now equals the limit and has not passed it")
                 .isEqualByComparingTo(exhausted.getCreditLimit());
         int oneCentOver = inTransaction(repository -> Integer.valueOf(
-                repository.reserveApprovedAuthorization(accountId, new BigDecimal("0.01"))));
+                repository.reserveApprovedAuthorization(accountId, new BigDecimal("0.01"), CEILING)));
         assertThat(oneCentOver)
                 .as("one cent beyond an exhausted limit is refused")
                 .isZero();
@@ -1755,9 +1785,9 @@ class PendingAuthSummaryRepositoryIT {
         long absent = accountOf(fields, OFFSET_ABSENT_CONTRIBUTION);
 
         int approved = inTransaction(repository -> repository
-                .reserveApprovedAuthorization(absent, new BigDecimal("10.00")));
+                .reserveApprovedAuthorization(absent, new BigDecimal("10.00"), CEILING));
         int declined = inTransaction(repository -> repository
-                .addDeclinedAuthorization(absent, new BigDecimal("10.00")));
+                .addDeclinedAuthorization(absent, new BigDecimal("10.00"), CEILING));
 
         assertThat(approved).isZero();
         assertThat(declined).isZero();
@@ -1832,7 +1862,8 @@ class PendingAuthSummaryRepositoryIT {
                     new BigDecimal("7000.00"), new BigDecimal("700.00")))
                     .as("the first transaction's limit refresh reaches the row")
                     .isEqualTo(1);
-            assertThat(firstRepository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00")))
+            assertThat(firstRepository.reserveApprovedAuthorization(accountId, new BigDecimal("10.00"),
+                    CEILING))
                     .as("the first transaction's contribution reaches the row")
                     .isEqualTo(1);
             first.flush();
@@ -1848,7 +1879,8 @@ class PendingAuthSummaryRepositoryIT {
                     new BigDecimal("8000.00"), new BigDecimal("800.00")))
                     .as("the second transaction's limit refresh reaches the row")
                     .isEqualTo(1);
-            assertThat(secondRepository.reserveApprovedAuthorization(accountId, new BigDecimal("20.00")))
+            assertThat(secondRepository.reserveApprovedAuthorization(accountId, new BigDecimal("20.00"),
+                    CEILING))
                     .as("the second transaction's contribution reaches the row")
                     .isEqualTo(1);
             second.flush();
@@ -1913,7 +1945,7 @@ class PendingAuthSummaryRepositoryIT {
                 repository -> repository.save(rehydrate(fields, OFFSET_REVERSAL))).getAccountId();
 
         int updated = inTransaction(repository -> repository.reverseExpiredAuthorizations(accountId,
-                2, new BigDecimal("200.00"), 1, new BigDecimal("100.00")));
+                2, new BigDecimal("200.00"), 1, new BigDecimal("100.00"), CEILING, FLOOR));
 
         assertThat(updated).isEqualTo(1);
         PendingAuthSummary reread = read(accountId).orElseThrow();
@@ -1924,6 +1956,129 @@ class PendingAuthSummaryRepositoryIT {
         assertThat(reread.getCreditBalance())
                 .as("L287 to L292 subtract from four members and the balance is not one of them")
                 .isEqualByComparingTo("-100.00");
+    }
+
+    /**
+     * An accumulation that would pass the column's precision saturates at the bound instead of failing.
+     *
+     * <p>⚠️ Purpose: this is the engine-level half of the money-domain reduction, and it can only be
+     * asserted here. The two running totals are {@code NUMERIC(11,2)}, derived under transformation rule T1
+     * from {@code PIC S9(09)V99 COMP-3} at {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} L29 and
+     * L30, while the amounts accumulated into them come from a column one decimal order wider. Unbounded,
+     * the additive statement raised {@code 22003} -- the same refusal
+     * {@link #aTwelveDigitAmountIsRefusedByTheNarrowerSummaryPrecision()} asserts on the insert path -- and
+     * because that refusal aborts the whole transaction, the message's decision was rolled back and the
+     * requester received NO answer. The queue redelivered the request four more times and dead-lettered it.
+     * </p>
+     *
+     * <p>Assumptions: the seeded totals are one accumulation SHORT of the bound rather than already at it,
+     * so the addend crossing the boundary is what the case exercises. A row seeded at the bound would be
+     * saturated before the statement ran and would pass against an implementation that never accumulated at
+     * all.</p>
+     *
+     * <p>Assumptions: the CREDIT BALANCE is asserted to be the exact un-saturated sum. The approved
+     * statement bounds three members and only two of them are near the bound here, so asserting the balance
+     * separately is what shows the {@code case} expressions are per-column rather than a blanket clamp on
+     * everything the statement writes.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an accumulation past the column's precision saturates at the bound and does not fail")
+    void anAccumulationPastTheColumnPrecisionSaturates() {
+        long accountId = inTransaction(repository -> repository.save(nearTheBound(OFFSET_SATURATION)))
+                .getAccountId();
+
+        int approved = inTransaction(repository -> repository
+                .reserveApprovedAuthorization(accountId, new BigDecimal("5000.00"), CEILING));
+        int declined = inTransaction(repository -> repository
+                .addDeclinedAuthorization(accountId, new BigDecimal("5000.00"), CEILING));
+
+        assertThat(approved)
+                .as("the account's own headroom admits the amount, so the reservation is applied")
+                .isEqualTo(1);
+        assertThat(declined).isEqualTo(1);
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getApprovedAuthAmount())
+                .as("999999000.00 plus 5000.00 exceeds the column, so the bound is stored")
+                .isEqualByComparingTo(CEILING);
+        assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo(CEILING);
+        assertThat(reread.getCreditBalance())
+                .as("this member was nowhere near the bound, so it carries the exact sum")
+                .isEqualByComparingTo("5000.00");
+        assertThat(reread.getApprovedAuthCount())
+                .as("the counters advance whether the totals saturated or not")
+                .isEqualTo((short) 1);
+        assertThat(reread.getDeclinedAuthCount()).isEqualTo((short) 1);
+    }
+
+    /**
+     * A reversal that would pass the column's negative precision saturates at the negative bound.
+     *
+     * <p>⚠️ Purpose: the expiry sweep subtracts amounts read from {@code pending_auth_detail}, whose money
+     * columns are {@code PIC S9(10)V99} at {@code cpy/CIPAUDTY.cpy} L34 and L35 -- one decimal order wider
+     * than the totals they are subtracted from. Unbounded, one such authorization drove the total past the
+     * column's NEGATIVE bound and raised {@code 22003}, which abended the whole run: windows already
+     * committed stayed committed, so the table was left partly purged, and no later run could complete while
+     * such a row existed. The sweep could never finish.</p>
+     *
+     * <p>Assumptions: the reversal is allowed to reach a NEGATIVE total rather than being floored at zero,
+     * which is divergence D-G recorded on {@code PurgeJob}. The bound asserted is therefore the column's own
+     * negative extreme and not zero -- flooring at zero here would refuse a reversal the reference program
+     * performs without complaint.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a reversal past the column's negative precision saturates at the negative bound")
+    void aReversalPastTheColumnPrecisionSaturates() {
+        long accountId = inTransaction(
+                repository -> repository.save(nearTheBound(OFFSET_SATURATION_REVERSAL))).getAccountId();
+        BigDecimal widestDetailAmount = new BigDecimal("9999999999.99");
+
+        int updated = inTransaction(repository -> repository.reverseExpiredAuthorizations(accountId,
+                1, widestDetailAmount, 1, widestDetailAmount, CEILING, FLOOR));
+
+        assertThat(updated).isEqualTo(1);
+        PendingAuthSummary reread = read(accountId).orElseThrow();
+        assertThat(reread.getApprovedAuthAmount())
+                .as("999999000.00 less 9999999999.99 is below the column, so the negative bound is stored")
+                .isEqualByComparingTo(FLOOR);
+        assertThat(reread.getDeclinedAuthAmount()).isEqualByComparingTo(FLOOR);
+        assertThat(reread.getApprovedAuthCount())
+                .as("the counters are signed four-digit fields, so minus one is a representable state")
+                .isEqualTo((short) -1);
+        assertThat(reread.getDeclinedAuthCount()).isEqualTo((short) -1);
+        assertThat(reread.getCreditBalance())
+                .as("the reversal releases no balance, saturated or not")
+                .isEqualByComparingTo("0.00");
+    }
+
+    /**
+     * Builds a summary whose two running totals sit one accumulation short of the column's bound.
+     *
+     * <p>Assumptions: the entity's rehydration factory is used rather than the record-decoding helper
+     * beside it, because the committed fixture's amounts are ordinary four-figure values and these two
+     * cases need values the fixture does not carry. The optional status members are left absent, which the
+     * factory admits and which keeps the row's subject to the money columns alone.</p>
+     *
+     * <p>Assumptions: the credit limit is seeded AT the bound so the approved statement's own headroom guard
+     * admits the addend. Without that the reservation would be refused and the case would pass while
+     * asserting nothing about saturation.</p>
+     *
+     * @param accountOffset the offset that keeps one case's row to itself
+     * @return the entity to store, with both totals at {@code 999999000.00} and both counters at zero
+     */
+    private static PendingAuthSummary nearTheBound(long accountOffset) {
+        Map<String, Object> fields = decode(bytes(CANONICAL_FIXTURE));
+        BigDecimal justShort = new BigDecimal("999999000.00");
+        BigDecimal zero = new BigDecimal("0.00");
+        return PendingAuthSummary.rehydrated(
+                accountOf(fields, accountOffset),
+                (Long) fields.get(CUSTOMER_ID_FIELD),
+                null, null, null, null, null, null,
+                CEILING, CEILING, zero, zero,
+                Short.valueOf((short) 0), Short.valueOf((short) 0), justShort, justShort);
     }
 
     /**

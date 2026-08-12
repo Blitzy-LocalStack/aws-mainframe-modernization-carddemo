@@ -382,6 +382,69 @@ public record ApiError(
     public static final int PAYLOAD_TOO_LARGE_STATUS = 413;
 
     /**
+     * The shared machine code for a request whose body media type this system does not accept.
+     *
+     * <p>Assumptions: the 0415 suffix identifies the HTTP 415 surface, following the same convention as
+     * the codes above. It is distinct from {@link #CODE_VALIDATION} for the same reason
+     * {@link #CODE_PAYLOAD_TOO_LARGE} is: the two refusals differ in what the caller must do. A
+     * validation refusal names the offending members in {@link #fieldErrors()} and is corrected member
+     * by member; this one names no member at all, because the body was never parsed, and is corrected by
+     * changing one request header. Collapsing them would hand a client a 400 with an empty field array
+     * and no way to tell a mis-declared content type from a body it had mis-spelled.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this code exists because the condition it names was reaching the
+     * caller as a 500. The framework raises a distinct unsupported-media-type exception before any
+     * controller is entered, no advice claimed it, and the unclaimed-failure handler answered
+     * {@link #CODE_INTERNAL} with CRITICAL severity — so a caller sending {@code text/plain} was told the
+     * server had failed, and the operational record gained an alerting-grade error line for a request
+     * that was simply mis-addressed.</p>
+     *
+     * <p>Assumptions: it has no reference counterpart, and the absence is worth stating rather than
+     * leaving as a silent gap. A 3270 terminal negotiates no content type at all — the datastream's
+     * encoding is fixed by the session — so no reference program, literal or file status corresponds to
+     * this condition. It exists because a target request is composed by a caller this system does not
+     * control.</p>
+     */
+    public static final String CODE_UNSUPPORTED_MEDIA_TYPE = "CARDDEMO-0415";
+
+    /**
+     * The HTTP status a request with an unaccepted body media type carries, 415.
+     *
+     * <p>Assumptions: declared here for the same reason {@link #CONFLICT_STATUS} is —
+     * {@code services/common-lib/pom.xml} marks the web dependency optional, so this record cannot read
+     * the framework's status enumeration and the number has to be stated — and as a constant so that a
+     * test can assert the code and the status as a pair.</p>
+     */
+    public static final int UNSUPPORTED_MEDIA_TYPE_STATUS = 415;
+
+    /**
+     * The shared machine code for a request whose method the addressed path does not serve.
+     *
+     * <p>Assumptions: the 0405 suffix identifies the HTTP 405 surface. It is distinct from
+     * {@link #CODE_NOT_FOUND} because the two answers differ in what they tell a caller about the path:
+     * a 404 says the path is not served at all, while this one says the path IS served and this method is
+     * not — which is what makes the accompanying {@code Allow} header meaningful. Collapsing them would
+     * leave a client unable to discover the methods a path does serve.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: as with {@link #CODE_UNSUPPORTED_MEDIA_TYPE}, this code exists because
+     * the condition was answered as a 500. The framework's method-not-supported exception was unclaimed,
+     * so the caller received {@link #CODE_INTERNAL} with no {@code Allow} header and had no way to learn
+     * which method to use.</p>
+     *
+     * <p>Assumptions: it has no reference counterpart. A 3270 transaction is entered by identifier and a
+     * function key, not by a method against a path, so there is no baseline condition to carry across.</p>
+     */
+    public static final String CODE_METHOD_NOT_ALLOWED = "CARDDEMO-0405";
+
+    /**
+     * The HTTP status a request whose method the path does not serve carries, 405.
+     *
+     * <p>Assumptions: declared here for the same reason {@link #CONFLICT_STATUS} is, and as a constant so
+     * that a test can assert the code and the status as a pair.</p>
+     */
+    public static final int METHOD_NOT_ALLOWED_STATUS = 405;
+
+    /**
      * The CardDemo thank-you source literal from {@code CSMSG01Y}.
      *
      * <p>Assumptions: AE-12 preserves the 49-character literal at line 19 of

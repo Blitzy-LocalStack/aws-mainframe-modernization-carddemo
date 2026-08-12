@@ -13,7 +13,7 @@
  * to it mechanically:
  *
  * <pre>
- * this directory: 6 java files = 5 classes + 1 charter
+ * this directory: 7 java files = 6 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: the roster previously closed at three classes and
@@ -61,6 +61,14 @@
  *       key-management client, and no endpoint of this context returns the value it
  *       protects -- the cipher exists so the column can be written and compared, not
  *       so it can be published.</li>
+ *   <li>{@code CardRecordConflictException} is the stale-revision refusal {@code CardUpdateService}
+ *       raises, narrowing the shared contention type by carrying the card as it stood when the
+ *       conflict was detected. Assumptions: it is a member of this package rather than of the
+ *       request-and-response package because it is raised here and is part of this layer's outward
+ *       contract, in the same way the sentences above are; the SHAPE it carries belongs to the other
+ *       package and is imported from it. Refactoring Rationale: the refusal used to be the shared type,
+ *       which has no member able to hold a rendered row, so the published conflict body's refreshed
+ *       card could not be composed at all and a stale caller was told only the version number.</li>
  * </ul>
  *
  * <h2>The record contract every class here operates on</h2>

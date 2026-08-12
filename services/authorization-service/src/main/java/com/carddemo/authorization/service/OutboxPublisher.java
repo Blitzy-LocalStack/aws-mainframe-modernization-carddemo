@@ -4,6 +4,8 @@ import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.domain.OutboxMessage;
 import com.carddemo.authorization.repository.OutboxRepository;
 import com.carddemo.common.messaging.MessageExpiry;
+import com.carddemo.common.observability.FailureSummary;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +33,7 @@ import software.amazon.awssdk.core.exception.SdkServiceException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
 /**
  * Publishes the authorization replies that the deciding consumer committed into the transactional
@@ -183,13 +187,14 @@ public class OutboxPublisher {
     private static final Logger LOG = LoggerFactory.getLogger(OutboxPublisher.class);
 
     /**
-     * The reason recorded against a reply that was retired because its deadline had passed.
+     * The placeholder logged in place of a broker-assigned value the transport did not return.
      *
-     * <p>Assumptions: a retired reply is a terminal outcome and not a fault, so the text names the
-     * outcome rather than an error. It is well inside the diagnostic column's declared width, so it
-     * is stored whole rather than truncated.</p>
+     * <p>Assumptions: an absent value is named rather than rendered as {@code null}, so a reader of a
+     * publication line can tell "the transport returned nothing here" from "this field was never
+     * formatted". The sequence number is the field this is expected for: the transport assigns one only
+     * to an ordered queue, and a standard queue leaves it unset.</p>
      */
-    private static final String RETIREMENT_REASON = "expired before publication";
+    private static final String ABSENT_BROKER_VALUE = "(absent)";
 
     /**
      * The largest batch one drain may claim.
@@ -737,8 +742,8 @@ public class OutboxPublisher {
      * {@code ims/PAUTBUNL.PSB} L18 and {@code ims/DLIGSAMP.PSB} L18.</p>
      *
      * <p>Refactoring Rationale: the pass is NOT one unit of work, and this paragraph said it was. Every
-     * database touch here runs in its OWN short transaction -- the head claim, each follower claim, each
-     * publication record and each retirement -- so no row lock and no connection is held across a send. The
+     * database touch here runs in its OWN short transaction -- the head claim, each follower claim and each
+     * publication, failure or abandonment record -- so no row lock and no connection is held across a send. The
      * withdrawn sentence went on to size a connection pool from a claim that was false, which is worse than
      * saying nothing: a reader would have provisioned for one connection per publisher for the whole of a
      * retry budget, and would have believed a second publisher blocks on the row.</p>
@@ -833,12 +838,10 @@ public class OutboxPublisher {
                         this.maxRowsPerDrain);
                 break;
             }
-            RowOutcome outcome = handleRow(head);
+            boolean sent = handleRow(head);
             passBudget--;
-            if (outcome.published()) {
+            if (sent) {
                 published++;
-            }
-            if (outcome.groupContinues()) {
                 AuthReplyOutbox follower = nextInGroup(head);
                 if (follower != null) {
                     rotation.add(new GroupCursor(follower, 1));
@@ -858,14 +861,12 @@ public class OutboxPublisher {
         //       against a group that arrives in a later claim.
         while (passBudget > 0 && !rotation.isEmpty()) {
             GroupCursor cursor = rotation.poll();
-            RowOutcome outcome = handleRow(cursor.row());
+            boolean sent = handleRow(cursor.row());
             passBudget--;
-            if (outcome.published()) {
-                published++;
-            }
-            if (!outcome.groupContinues()) {
+            if (!sent) {
                 continue;
             }
+            published++;
             int handledInGroup = cursor.handledInGroup() + 1;
             if (handledInGroup >= this.perGroupRowBudget) {
                 // WHY : Assumptions: the group leaves the rotation with rows still pending and the next pass
@@ -881,27 +882,6 @@ public class OutboxPublisher {
             }
         }
         return published;
-    }
-
-    /**
-     * What one row's turn produced: whether it reached the wire, and whether its group may advance.
-     *
-     * <p>Assumptions: PUBLISHED and GROUP-CONTINUES are separate answers because they are independent, and
-     * collapsing them would break one of the two. A row that EXPIRED is retired rather than sent, so it did
-     * not reach the wire and yet its group is perfectly free to advance -- the deadline belonged to that
-     * reply, not to the card. A row whose SEND FAILED did not reach the wire either and its group must stop,
-     * because the only reply that may follow it is the one still waiting for it. Reading one flag from the
-     * other would either reorder a card's replies or strand a group behind an expiry.</p>
-     *
-     * <p>Assumptions: every turn costs exactly ONE unit of the pass budget whatever it produced, so the
-     * budget is spent from the turns taken rather than from the rows published. A budget spent from
-     * publications alone would let a group of expiring or failing rows consume an unbounded number of claims,
-     * sends and short transactions while reporting no progress at all.</p>
-     *
-     * @param published whether the row was put on the wire, which an expired or failed row was not
-     * @param groupContinues whether this row's group may be advanced again, which a failed send forbids
-     */
-    private record RowOutcome(boolean published, boolean groupContinues) {
     }
 
     /**
@@ -957,28 +937,65 @@ public class OutboxPublisher {
     }
 
     /**
-     * Takes one row's turn: judges its deadline, acts on it, and reports what that produced.
+     * Takes one row's turn: reports a passed deadline, sends the reply, and says whether it reached the
+     * wire.
      *
-     * <p>Assumptions: staleness is judged against an instant sampled HERE, once per row, rather than once
-     * per pass. A pass that publishes many rows takes real time, so a row whose deadline falls part-way
-     * through it must be judged against the clock as it stands when its turn comes -- otherwise it is sent
-     * to a requester that has already stopped waiting and its deduplication identifier is spent on an answer
-     * nobody reads.</p>
+     * <p>⚠️ Refactoring Rationale: a row whose deadline had passed used to be RETIRED here -- marked
+     * published without ever being sent, with {@code "expired before publication"} left in its
+     * diagnostic column -- and that is withdrawn outright. The arithmetic made it the normal outcome
+     * rather than an exceptional one: the reference deadline this service stamps is five seconds
+     * (<code>app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl</code> L750, denominated in tenths) and
+     * the first retry backoff is also five seconds, so ANY reply that failed its first attempt was past
+     * its deadline before its second attempt was due, and every one of them was retired unsent. The
+     * observed effect was a row reading {@code published_at} populated with zero messages delivered:
+     * the retention sweep, whose predicate is that same column, then deleted the evidence. That
+     * inverts the guarantee this outbox exists for -- §0.4.3 of the technical specification states it
+     * as "a reply is published for every committed authorization" -- and it silently converted a
+     * transport outage into permanent, unrecorded reply loss.</p>
      *
-     * <p>Assumptions: a FAILED send stops its group and an EXPIRED row does not. The ordering guarantee the
-     * group identity exists to provide is that the only reply which may follow this one is the one still
-     * waiting for it, so a group whose send failed must not advance; an expiry is a decision reached ABOUT
-     * that reply and says nothing about the next one, so the group is free to continue.</p>
+     * <p>Assumptions: the deadline is a TRANSPORT attribute the consumer honours, not a publisher gate.
+     * §0.7.6 and {@code docs/adr/ADR-004-messaging.md} both record the resolution that way: the queue
+     * service has no per-message time to live, so the deadline travels as an attribute and the
+     * RECEIVING end drops what has gone stale. A publisher that also refuses to send applies the same
+     * rule twice, and the second application is the one that destroys the row. So a late reply is still
+     * sent, and the lateness is reported instead -- a named warning an operator can alert on, carrying
+     * the deadline that passed. The receiver remains free to discard it, which is where that judgement
+     * belongs.</p>
+     *
+     * <p>Assumptions: {@link AuthReplyOutbox#isExpiredAsOf(java.time.LocalDateTime)} is retained and
+     * still called, because the QUESTION it answers is worth asking even though the answer no longer
+     * suppresses the send. It is judged against an instant sampled HERE, once per row rather than once
+     * per pass, so a row whose deadline falls part-way through a long pass is described by the clock as
+     * it stood when its turn came.</p>
+     *
+     * <p>Assumptions: a row that did not reach the wire stops its group, and after this change that is
+     * the ONLY reason a group stops -- which is why the two-flag outcome record this used to return is
+     * gone. The ordering guarantee the group identity provides is that the only reply which may follow
+     * this one is the one still waiting for it, so a group whose send failed must not advance; with the
+     * retirement arm withdrawn there is no longer any third case where a row fails to reach the wire and
+     * yet its group may continue, and a record whose two components are always equal is a record that
+     * invites them to be set inconsistently.</p>
+     *
+     * <p>Assumptions: every turn costs exactly ONE unit of the caller's pass budget whatever it produced,
+     * so the budget is spent from the turns taken rather than from the rows published. A budget spent
+     * from publications alone would let a group of failing rows consume an unbounded number of claims,
+     * sends and short transactions while reporting no progress at all.</p>
      *
      * @param row the claimed, leased row whose turn it is; must not be {@code null}
-     * @return whether the row reached the wire and whether its group may advance, never {@code null}
+     * @return {@code true} when the reply reached the wire, so its group may advance
      */
-    private RowOutcome handleRow(AuthReplyOutbox row) {
-        boolean expired = row.isExpiredAsOf(now());
-        if (!handleOne(row, expired)) {
-            return new RowOutcome(false, false);
+    private boolean handleRow(AuthReplyOutbox row) {
+        if (row.isExpiredAsOf(now())) {
+            // WHY : Assumptions: this is a WARNING and not an error, and it is emitted BEFORE the send
+            // rather than instead of it. A late reply is a service-level observation -- the requester's
+            // deadline elapsed while this reply waited -- and the reply is still owed, so the send
+            // proceeds and the receiver decides. Trade-offs: a durable transport outage produces one of
+            // these lines per attempt per row, which is noisier than a single terminal retirement line;
+            // that is accepted because the alternative was silence about a reply that was never sent.
+            LOG.warn("event=auth.reply.late outboxId={} attempts={} expiresAt={}", row.getOutboxId(),
+                    row.getAttempts(), row.getExpiresAt());
         }
-        return new RowOutcome(!expired, true);
+        return publishReply(row);
     }
 
     /**
@@ -990,7 +1007,7 @@ public class OutboxPublisher {
      * whatever its stored state currently says, so the same row cannot be handed back twice within
      * one pass.</p>
      *
-     * @param handled the row just published or retired; must not be {@code null}
+     * @param handled the row whose turn has just been taken; must not be {@code null}
      * @return the next pending row of the same group, or {@code null} when the group holds none
      * @throws org.springframework.dao.DataAccessException if the claiming statement cannot be
      *     executed
@@ -1000,49 +1017,6 @@ public class OutboxPublisher {
                 .claimGroupFollowers(handled.getOrderGroupId(), handled.getOutboxId(), 1, now(),
                         leaseUntil(), this.maxAttempts));
         return followers == null || followers.isEmpty() ? null : followers.get(0);
-    }
-
-    /**
-     * Retires an expired reply or publishes a live one, and reports whether the group may advance.
-     *
-     * <p>Assumptions: staleness is judged once by the caller and passed in rather than re-tested
-     * here, so the decision that retires a row and the decision that declines to count it as
-     * published cannot disagree about the same instant.</p>
-     *
-     * @param row the already-claimed row; must not be {@code null}
-     * @param expired whether the caller judged this row's deadline to have passed at the instant it
-     *     sampled for this row
-     * @return {@code true} when this row reached a terminal state, so its group may advance
-     */
-    private boolean handleOne(AuthReplyOutbox row, boolean expired) {
-        if (expired) {
-            retire(row);
-            return true;
-        }
-        return publishReply(row);
-    }
-
-    /**
-     * Retires a reply whose deadline passed before it could be sent, leaving the reason on its row.
-     *
-     * <p>Trade-offs: an expired reply is retired rather than sent. Sending it would deliver an answer
-     * the requester has stopped waiting for and would consume the deduplication identifier, so a
-     * legitimate retry of the same transaction would then be suppressed as a duplicate of an answer
-     * nobody read. Marking it published rather than deleting it keeps the row auditable and keeps it
-     * out of the pending index, which is the same index predicate the claim uses.</p>
-     *
-     * <p>Refactoring Rationale: retirement is now a SINGLE call on the row rather than a publication
-     * mark followed by a failure record, and the attempt counter is not advanced by it. The pair it
-     * replaces was order-dependent -- the publication mark CLEARS the diagnostic, so only one of the two
-     * orders produced the intended row -- and it also incremented the counter a second time on a path
-     * that made no attempt at all.</p>
-     *
-     * @param row the already-claimed row whose deadline has passed; must not be {@code null}
-     */
-    private void retire(AuthReplyOutbox row) {
-        transition(row, (stored, at) -> stored.retire(at, RETIREMENT_REASON));
-        LOG.warn("event=auth.reply.expired outboxId={} attempts={}", row.getOutboxId(),
-                row.getAttempts());
     }
 
     /**
@@ -1185,31 +1159,67 @@ public class OutboxPublisher {
     private boolean publishReply(AuthReplyOutbox row) {
         try {
             SendMessageRequest request = requestFor(row);
-            // WHY : Assumptions: the lambda is written as a BLOCK that discards the send's result,
-            // which selects the template's void overload. An expression lambda would be compatible
-            // with both the void and the value-returning overload and so would not compile at all;
-            // the result carries only the transport's own message identifier, which nothing here
-            // records, so discarding it loses nothing.
-            SEND_RETRIES.invoke(() -> {
+            // WHY : Assumptions: the send is wrapped in a Supplier held in a LOCAL rather than passed
+            // as a lambda literal. The template overloads `invoke` on Supplier and on Runnable, and an
+            // expression lambda returning a method-invocation result is compatible with both -- so
+            // `invoke(() -> this.sqs.sendMessage(request))` is ambiguous and does not compile at all.
+            // Refactoring Rationale: the previous form was a BLOCK lambda that discarded the result to
+            // select the void overload, and the comment justifying it said the result "carries only the
+            // transport's own message identifier, which nothing here records". That identifier is
+            // exactly what was missing: a FIFO send whose deduplication identifier matches one the
+            // broker already accepted is SUPPRESSED and answered with the identity of the message it
+            // already holds, and the publication line then read the same either way. Naming the local
+            // is what makes the value reachable without changing which overload is selected.
+            Supplier<SendMessageResponse> send = () -> {
                 // WHY : Assumptions: the attempt counter is NOT advanced here. It is advanced once by
                 // the claiming statement, so one pass over one row is one attempt however many times
                 // the transport is retried inside it. Counting per transport call instead would burn a
                 // permanently unreachable queue's whole ceiling in a handful of passes and abandon
                 // replies that were never given the tries the configuration promises -- which is the
                 // property OutboxPublisherLifecycleRepositoryIT asserts against a real engine.
-                this.sqs.sendMessage(request);
-            });
+                return this.sqs.sendMessage(request);
+            };
+            SendMessageResponse accepted = SEND_RETRIES.invoke(send);
             transition(row, AuthReplyOutbox::markPublished);
-            LOG.info("event=auth.reply.published outboxId={} attempts={}", row.getOutboxId(),
-                    row.getAttempts());
+            // WHY : Assumptions: the BROKER'S OWN identities are logged beside this service's row
+            // identity, because they are the only evidence that distinguishes a message the broker
+            // newly enqueued from one it suppressed as a duplicate of an earlier accept. Both answer
+            // 200 and both reach this line. Trade-offs: neither identity is persisted on the row --
+            // the column set is frozen by the applied migration, and adding one would change a Flyway
+            // checksum in every environment that has already run it -- so the pairing lives in the log
+            // and is joined to the row by `outboxId`, which is on both.
+            LOG.info(
+                    "event=auth.reply.published outboxId={} attempts={} brokerMessageId={} "
+                            + "brokerSequenceNumber={}",
+                    row.getOutboxId(), row.getAttempts(), brokerValue(messageIdOf(accepted)),
+                    brokerValue(sequenceNumberOf(accepted)));
             return true;
         } catch (RuntimeException failure) {
-            // WHY : Assumptions: the recorded reason is the exception's CLASS NAME and never its
-            // message. A client failure message can embed the request it was building, and this
-            // row's payload carries a primary account number, so the message is the one part that
-            // must not be persisted into a column an operator reads. The class name names the fault
-            // without carrying the data, which is the package-wide discipline for this service.
-            String reason = failure.getClass().getName();
+            // WHY : Assumptions: the reason PERSISTED on the row stays message-free -- it is the cause
+            // chain's types and frames and nothing else. A transport failure message can embed the
+            // request it was building and this row's payload carries a primary account number, so the
+            // message is the one part that is not written into a column that outlives the incident.
+            // Refactoring Rationale: it was the exception's CLASS NAME alone, which named the outermost
+            // type and discarded every cause beneath it -- an `SdkClientException` recorded that way is
+            // indistinguishable from any other, and the connect refusal, the timeout and the unresolved
+            // host underneath it are the whole diagnosis. The digest carries the chain instead.
+            String reason = ThrowableDigest.of(failure);
+            // WHY : Assumptions: the MESSAGE is logged and not persisted, and the asymmetry is the point.
+            // Alternatives Considered: persisting it too, which would put the "why" on the retained row.
+            // Rejected because an abandoned row deliberately survives the retention sweep, so persisting
+            // a message would give a transport-authored string an unbounded lifetime in the database
+            // while the log it also reaches is retained by policy. FailureSummary is what makes it
+            // sayable at all: it neutralises control characters, masks any embedded card number and
+            // bounds the length, in that order, so the value on this line is already treated exactly as
+            // every other diagnostic value in this service is.
+            String detail = FailureSummary.of(failure);
+            // WHY : ⚠️ Refactoring Rationale: the absence token comes from the shared kernel now, where
+            // this method previously rendered it through this class's own broker-value helper. The two
+            // produced the same text, and that agreement was a coincidence of two literals rather than
+            // one definition -- the queue error handler needed the same field and would have been the
+            // third site to choose a token for itself. Naming it once is what keeps one log query able
+            // to match every site's absence.
+            String sqlState = FailureSummary.sqlStateOrAbsent(failure);
             if (row.getAttempts() >= this.maxAttempts) {
                 // WHY : Assumptions: a row that has used its whole attempt budget is ABANDONED rather
                 // than failed again, and this is the only place the terminal state is entered.
@@ -1220,8 +1230,21 @@ public class OutboxPublisher {
                 // decision says was owed, which is why the row is retained with its diagnostic rather
                 // than deleted, is excluded from the retention sweep, and is logged at error.
                 transition(row, (stored, at) -> stored.abandon(at, reason));
-                LOG.error("event=auth.reply.abandoned outboxId={} attempts={} maxAttempts={} fault={}",
-                        row.getOutboxId(), row.getAttempts(), this.maxAttempts, reason);
+                // WHY : Assumptions: this ONE line also names the acquirer's TRANSACTION IDENTIFIER,
+                // and no other line in this class does. It is the terminal statement that a reply the
+                // committed decision owed will never be delivered, so it is the line an operator
+                // reaches for when a requester reports an unanswered transaction -- and an operator
+                // holding that report has the transaction identifier, not this service's surrogate
+                // row key. Trade-offs: the identifier is message metadata rather than a protected
+                // value -- the specification freezes it as the deduplication identity, so it already
+                // travels in queue telemetry on every send -- which is why naming it here discloses
+                // nothing the transport does not already carry, whereas naming the card number or the
+                // payload would.
+                LOG.error(
+                        "event=auth.reply.abandoned outboxId={} transactionId={} attempts={} "
+                                + "maxAttempts={} fault={} reason={} sqlState={}",
+                        row.getOutboxId(), row.getDeduplicationId(), row.getAttempts(),
+                        this.maxAttempts, reason, detail, sqlState);
                 // WHY : Assumptions: the group does NOT advance past an abandoned row, so this returns
                 // false. Advancing would deliver that card's later replies with a gap where the
                 // abandoned one belongs, and the whole reason a group exists is that its replies are
@@ -1232,8 +1255,9 @@ public class OutboxPublisher {
             LocalDateTime retryAt = backoffFrom(row.getAttempts());
             transition(row, (stored, at) -> stored.recordFailure(reason, retryAt));
             LOG.error(
-                    "event=auth.reply.publish-failed outboxId={} attempts={} nextAttemptAt={} fault={}",
-                    row.getOutboxId(), row.getAttempts(), retryAt, reason);
+                    "event=auth.reply.publish-failed outboxId={} attempts={} nextAttemptAt={} fault={} "
+                            + "reason={} sqlState={}",
+                    row.getOutboxId(), row.getAttempts(), retryAt, reason, detail, sqlState);
             return false;
         }
     }
@@ -1264,6 +1288,96 @@ public class OutboxPublisher {
             delay = this.maxRetryBackoff;
         }
         return now().plus(delay);
+    }
+
+    /**
+     * Reads the broker-assigned message identifier from an accepted send, tolerating an absent response.
+     *
+     * <p>Assumptions: a {@code null} response is tolerated rather than dereferenced, and the reason is a
+     * correctness one rather than defensive habit. This value is read AFTER the publication has already
+     * been committed to the row, so a null dereference here would be caught by the failure handler below
+     * and would record a failure -- or an abandonment -- against a reply that was successfully sent. A
+     * live transport never returns null; a test double that stubs the client without stubbing this one
+     * call does, which is exactly how that inversion would first reach a build.</p>
+     *
+     * @param accepted the transport's answer to an accepted send; may be {@code null}
+     * @return the broker's message identifier, or {@code null} when none was returned
+     */
+    private static String messageIdOf(SendMessageResponse accepted) {
+        return accepted == null ? null : accepted.messageId();
+    }
+
+    /**
+     * Reads the broker-assigned sequence number from an accepted send, tolerating an absent response.
+     *
+     * <p>Assumptions: absence is ORDINARY for this field rather than exceptional -- the transport assigns
+     * a sequence number only on an ordered queue -- so it is rendered as the absent placeholder and never
+     * treated as a fault. It is logged because on an ordered queue it is the broker's own statement of
+     * where in the card's sequence this reply landed, which is the one thing this service cannot derive.</p>
+     *
+     * @param accepted the transport's answer to an accepted send; may be {@code null}
+     * @return the broker's sequence number, or {@code null} when none was returned
+     */
+    private static String sequenceNumberOf(SendMessageResponse accepted) {
+        return accepted == null ? null : accepted.sequenceNumber();
+    }
+
+    /**
+     * Renders a value the broker or a driver may not have supplied, naming its absence explicitly.
+     *
+     * <p>Assumptions: an absent value is NAMED rather than rendered as {@code null}, because a log reader
+     * cannot tell a formatted {@code null} from a field the template forgot to populate, and both blank
+     * and {@code null} arrive here from the same accessors.</p>
+     *
+     * @param value the value to render; may be {@code null} or blank
+     * @return the value itself when present, otherwise the absent placeholder, never {@code null}
+     */
+    private static String brokerValue(String value) {
+        return value == null || value.isBlank() ? ABSENT_BROKER_VALUE : value;
+    }
+
+    /**
+     * Computes the deadline to STAMP on this send, rebased onto the instant the send is actually made.
+     *
+     * <p>⚠️ Refactoring Rationale: the stored absolute instant used to be sent verbatim, and that made a
+     * retried reply arrive already stale. The reference denominates its deadline as a DURATION -- fifty
+     * tenths of a second, five seconds, set on the descriptor immediately before the put at
+     * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L750 -- and the transport there starts
+     * counting it from the put. It is not an absolute wall-clock instant chosen when the decision was
+     * committed. Sending the stored instant therefore mistranslated the semantic: a reply committed at
+     * {@code T} with a five-second window and first sent at {@code T+7s} was published carrying a
+     * deadline of {@code T+5s}, so the receiving end -- which honours the attribute, as
+     * {@code docs/adr/ADR-004-messaging.md} directs -- discarded it on arrival. That turns any delay at
+     * all into guaranteed loss of a reply the committed decision says is owed.</p>
+     *
+     * <p>Assumptions: the WINDOW is preserved and the ORIGIN moves. The window is taken as the interval
+     * the deciding transaction chose, {@code expiresAt - createdAt}, and re-applied from the current
+     * instant, so a requester's five seconds stays five seconds however many attempts precede the send.
+     * Trade-offs: a reply retried for an hour is stamped with a fresh five-second window each time
+     * rather than one that expired long ago, so the attribute stops being evidence of how long the reply
+     * has been owed. That evidence is not lost -- it is the {@code event=auth.reply.late} warning and the
+     * row's own {@code created_at} and {@code attempts} columns -- and it belongs there rather than in a
+     * field whose only consumer is a receiver deciding whether to act on the message in front of it.</p>
+     *
+     * <p>Assumptions: a row with no stored deadline is stamped with no attribute, and a row whose stored
+     * deadline is at or before its creation instant is stamped with that stored value UNCHANGED. The
+     * second case is a window of zero or less, which no positive rebasing could honestly represent; the
+     * verbatim value is passed through so a receiver applies the sender's own arithmetic rather than this
+     * method's guess at it.</p>
+     *
+     * @param row the already-claimed row being sent; must not be {@code null}
+     * @return the deadline to stamp on this send, or {@code null} when the row carries none
+     */
+    private LocalDateTime sendDeadlineFor(AuthReplyOutbox row) {
+        LocalDateTime stored = row.getExpiresAt();
+        if (stored == null) {
+            return null;
+        }
+        LocalDateTime createdAt = row.getCreatedAt();
+        if (createdAt == null || !createdAt.isBefore(stored)) {
+            return stored;
+        }
+        return now().plus(Duration.between(createdAt, stored));
     }
 
     /**
@@ -1348,8 +1462,11 @@ public class OutboxPublisher {
         if (publication.hasCorrelationId()) {
             attributes.put(ATTRIBUTE_CORRELATION_ID, stringAttribute(publication.correlationId()));
         }
+        // WHY : Assumptions: the presence question is asked of the PUBLICATION -- which is the projection
+        // that has already validated the row -- and the VALUE is taken from the rebasing helper, whose
+        // reasoning about why the stored instant is not the instant to send is recorded on it.
         if (publication.expiresAt() != null) {
-            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(publication.expiresAt().toString()));
+            attributes.put(ATTRIBUTE_EXPIRES_AT, stringAttribute(sendDeadlineFor(row).toString()));
         }
         return SendMessageRequest.builder()
                 .queueUrl(publication.replyQueueUrl())

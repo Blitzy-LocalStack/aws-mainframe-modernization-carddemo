@@ -477,6 +477,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -575,6 +581,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -634,6 +646,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -705,8 +721,14 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '409':
           $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -804,6 +826,10 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '406':
+          $ref: '#/components/responses/NotAcceptable'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1190,6 +1216,92 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
+    # WHY : Refactoring Rationale: the three transport refusals below were UNDECLARED
+    #       while the service could produce all three, so a generated client had no
+    #       shape for any of them. Runtime testing then found that the service could
+    #       not produce them either: none of the three framework failures was claimed
+    #       by the shared advice, so each was answered 500 with a CRITICAL severity
+    #       and an abend block. Declaring them here and handling them there are two
+    #       halves of one correction, and declaring them alone would have documented
+    #       a response no caller receives.
+    # WHY : Assumptions: each carries the same ApiError shape as every other refusal
+    #       of this contract, with its own machine code -- CARDDEMO-0405, -0415 and
+    #       -0406. A distinct code per condition is what lets a client branch without
+    #       reading the sentence, which is the same reason the 400 and the 413 do not
+    #       share one.
+    MethodNotAllowed:
+      description: >-
+        The route addressed does not publish the method the request named. The
+        response carries an Allow header naming the methods it does publish, which is
+        where a client reads them; the body does not repeat that list, so the two
+        cannot disagree.
+
+
+        Assumptions: this has no reference counterpart. A 3270 terminal cannot address
+        a transaction with a verb the program did not define, so no reference literal
+        or condition name corresponds to this outcome. It exists because a target
+        route is addressed by a caller this system does not control.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+        Allow:
+          description: >-
+            The methods the addressed route publishes, comma separated. Present
+            whenever the framework resolved a supported set for the path. It is
+            omitted rather than sent empty when no set was resolved, because an empty
+            Allow states that the resource supports no method at all, which would be
+            a different and false claim.
+          required: false
+          schema:
+            type: string
+            example: 'GET,PUT'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    UnsupportedMediaType:
+      description: >-
+        The request carried a body in a media type this route does not accept, or
+        carried a body with no Content-Type at all. Every operation of this contract
+        that accepts a body accepts application/json and nothing else.
+
+
+        The body carries no fieldErrors entry and cannot: the refusal is raised before
+        any member has been parsed, so there is no bound object to have fields. That
+        is why this is a distinct code from CARDDEMO-0400 rather than a 400 with an
+        empty array, which a caller could not tell from a body it had mis-spelled.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+    NotAcceptable:
+      description: >-
+        The request's Accept header names no media type this route can produce. Every
+        operation of this contract produces application/json and nothing else.
+
+
+        Assumptions: the body of this response is itself application/json, which is a
+        type the caller has just said it will not accept. That is deliberate. The
+        alternative is an empty 406, which carries neither the machine code nor the
+        correlation identifier a support enquiry needs and tells the caller nothing
+        about which header to change. The content type is set explicitly by the
+        handler for a second reason recorded there: a body left to content
+        negotiation would be negotiated against the same Accept header that already
+        matched nothing, and the request would then be forwarded to the container
+        error path, which this service publishes no route for.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
     # WHY : Refactoring Rationale: this response carries a body, and for the
     #       optimistic-conflict condition that body is the refreshed card. The
     #       baseline's conflict path is deliberately retry-friendly: on
@@ -1280,10 +1392,21 @@ components:
                 The optimistic-concurrency conflict. The sentence is
                 reproduced character for character from
                 app/cbl/COCRDUPC.cbl:207-208, retaining its two-word 'some
-                one' and its absence of a closing full stop. The refreshed
-                card is carried in the field entry's value position so that a
-                caller can resubmit against the version now stored, mirroring
-                the re-snapshot the baseline performs at :1511-1517.
+                one' and its absence of a closing full stop, and it appears
+                twice: once as the body's aggregate message and once as the
+                help text of the version field entry. The refreshed card is
+                carried in the top-level card member below, where its version
+                is a number a caller can echo back directly, so a caller can
+                resubmit against the version now stored -- mirroring the
+                re-snapshot the baseline performs at :1511-1517.
+
+
+                Refactoring Rationale: this paragraph read 'the refreshed card
+                is carried in the field entry's value position', which
+                described neither this example nor the schema -- the entry has
+                no value position, only a field, a state and a message, and
+                the card is its own member. The prose is corrected to the
+                shape the example and the schema both show.
               value:
                 code: CARDDEMO-0409
                 secondaryCode: CARD-DATA-CHANGED
@@ -1370,16 +1493,37 @@ components:
         accountId:
           description: >-
             Narrows the list to the cards of one account. Eleven digit characters
-            exactly, and not all zeros, when supplied; omit it to list across all
-            accounts. This carries across the ACCTSIDI PIC X(11) filter field of
-            the list screen at app/cpy-bms/COCRDLI.CPY:66, and its constraint is
-            the one the baseline states in the message it raises for a bad value,
-            'Account number must be a non zero 11 digit number' at
-            app/cbl/COCRDUPC.cbl:189-192. Supplying it is served by the secondary
-            index idx_cards_account_id, which is the target of the VSAM alternate
-            index declared KEYS(11 16) NONUNIQUEKEY UPGRADE at
-            app/jcl/CARDFILE.jcl:85-87, so the filter is a real access path rather
-            than a scan.
+            exactly when supplied; omit it to list across all accounts. Eleven ZERO
+            digits are read as not supplied and list across all accounts too, which
+            is this screen's own reading: 2210-EDIT-ACCOUNT. at
+            app/cbl/COCRDLIC.cbl:1007-1009 places the zero-filled filter field in
+            the same disjunction as low values and spaces and sends all three to the
+            not-supplied exit at :1010-1012 without raising its input-error
+            condition, and 9500-FILTER-RECORDS. at :1385 applies the predicate only
+            when the filter flag is valid. This carries across the ACCTSIDI PIC X(11)
+            filter field of the list screen at app/cpy-bms/COCRDLI.CPY:66. Supplying
+            it is served by the secondary index idx_cards_account_id, which is the
+            target of the VSAM alternate index declared KEYS(11 16) NONUNIQUEKEY
+            UPGRADE at app/jcl/CARDFILE.jcl:85-87, so the filter is a real access
+            path rather than a scan.
+          # WHY : Refactoring Rationale: this description previously required the
+          #       value to be "not all zeros" and cited the message
+          #       'Account number must be a non zero 11 digit number' at
+          #       app/cbl/COCRDUPC.cbl:189-192 as its constraint. Both halves were
+          #       wrong for THIS operation and the mismatch was reported against the
+          #       service: that sentence belongs to the card UPDATE screen, where the
+          #       account is a mandatory field, whereas the list screen's filter is
+          #       OPTIONAL -- the two programs differ by the value each pre-sets its
+          #       flag to, blank at COCRDLIC.cbl:1004 against not-acceptable at
+          #       COCRDSLC.cbl:648 and :688. A document requiring a refusal the
+          #       screen does not make is a client binding failure waiting to happen,
+          #       so the sentence is corrected here rather than the behaviour being
+          #       changed to match it, which would have been an unregistered
+          #       divergence from the reference this service transcribes.
+          # WHY : Assumptions: the pattern below is unchanged and still admits eleven
+          #       zero digits, deliberately. Excluding them with a negative lookahead
+          #       would publish a refusal the runtime does not make, which is the same
+          #       disagreement in the other direction.
           type: string
           minLength: 11
           maxLength: 11
@@ -1671,7 +1815,17 @@ components:
         Which side of a supplied cursor to read. Reading next seeks keys strictly
         greater than the cursor in ascending order; reading previous seeks keys
         strictly less than it, which is the migrated form of the baseline
-        READPREV at app/cbl/COCRDLIC.cbl:1294.
+        READPREV at app/cbl/COCRDLIC.cbl:1294. The two spellings are exact and
+        lower case: a value outside this enumeration is refused with 400 naming
+        the direction member, and an ABSENT member takes the default below.
+      # WHY : Assumptions: the enumeration is enforced at run time by the pattern
+      #       CardPageQuery.DIRECTION_DOMAIN declares on the direction member, and
+      #       CardApiContractTest asserts this pair, so the document and the
+      #       running service state one vocabulary. It is recorded here because the
+      #       enumeration was previously declared and unenforced: every spelling
+      #       outside it read as the default and returned a forward page with no
+      #       complaint, so a caller asking to page backward in the wrong case was
+      #       silently served the page it already held.
       enum:
         - next
         - previous
@@ -2867,13 +3021,25 @@ components:
                 - type: 'null'
               description: >-
                 The card as it now stands, carrying the version token a retry
-                must echo. Present for the changed-row condition only, and null
-                for the two conditions in which the write did not proceed and
-                so left no new state to report. It is the masked CardDetail
-                shape, never the administrative one, so a failure cannot widen
-                what a response discloses: the update operation carries
-                x-required-authority carddemo-user, and no conflict body has any
-                member able to hold a full account number.
+                must echo. Present and populated for the changed-row condition
+                only, and present and null for the two conditions in which the
+                write did not proceed and so left no new state to report. It is
+                the masked CardDetail shape, never the administrative one, so a
+                failure cannot widen what a response discloses: the update
+                operation carries x-required-authority carddemo-user, and no
+                conflict body has any member able to hold a full account number.
+
+
+                Assumptions: the member is OPTIONAL rather than required, and
+                the one case that omits it entirely is worth naming. A conflict
+                the relational store itself reports -- a provider optimistic-lock
+                failure raised by the flush rather than by this service's own
+                version comparison -- is converted to a conflict inside the
+                shared error advice and answered there, and that advice has no
+                way to obtain the row because a provider exception does not
+                carry it. Such a body carries every other member of this shape
+                and omits this one. A client must therefore treat an absent
+                member and a null member alike: re-read the card.
       description: >-
         The body of the conflict response: every member of the shared error
         shape, referenced rather than restated, plus one optional card. It is

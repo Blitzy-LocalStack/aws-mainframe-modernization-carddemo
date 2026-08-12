@@ -8,6 +8,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -49,11 +50,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.domain.Limit;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.InternalErrorException;
+import software.amazon.awssdk.services.cognitoidentityprovider.model.UsernameExistsException;
 
 /**
  * Asserts the five user-administration operations and every reference sentence they report.
@@ -661,6 +664,150 @@ class UserServiceTest {
         //   no compensation is needed. Reporting the conflict sentence here would tell a caller its
         //   identifier was taken on the strength of a read that never answered.
         verifyNoInteractions(provisioning);
+    }
+
+    /**
+     * Asserts the create path folds the identifier ONCE and uses that one value for all three steps.
+     *
+     * <p>The value submitted below carries both a surrounding blank and lower case, so a single case
+     * covers the trim and the fold together -- the same pair the read case asserts, now on the path that
+     * used not to apply either.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a create folds the identifier before probing, provisioning and writing")
+    void aCreateFoldsTheIdentifierOnceForEveryStep() {
+        // Assumptions: EVERY stub below is keyed on the folded value, which is what makes this case
+        //   able to fail. A service that carried the raw value would find no stub for the probe, be
+        //   answered false by the substitute's default, then find no stub for the provisioning call and
+        //   be answered null -- and fail before it reached an assertion.
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+
+        CreatedUserResponse created = service.create(
+                new CreateUserRequest("Ada", "Lovelace", " user0042 ", "A"));
+
+        // Refactoring Rationale: this case exists because the fold used to be applied on the read,
+        //   update and delete paths and NOT here, and one missing application produced three separate
+        //   observable defects rather than one cosmetic difference. Measured against the running
+        //   service: creating "bnd00005" stored a row under that spelling and then answered not-found
+        //   for BOTH spellings on read, because the read folded and the stored key had not; creating
+        //   "BND00005" afterwards was accepted as a SECOND row rather than refused as a duplicate,
+        //   because the probe compared the raw value against a folded column; and an update addressed to
+        //   "bnd00005" folded its key, found the other row and mutated THAT one -- a caller naming one
+        //   record and altering another. The three assertions below pin the three steps that each have
+        //   to agree for none of those to be reachable.
+        assertThat(created.userId())
+                .as("the row is written under the folded key, so every later keyed request reaches it")
+                .isEqualTo("USER0042");
+
+        verify(users).existsById("USER0042");
+        verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
+        // Assumptions: the identifier argument is asserted by value while the other four are left open,
+        //   because this case is about the KEY alone -- the remaining four are asserted by the create
+        //   case above, and repeating them here would make this case fail for reasons it is not about.
+        verify(users).insertUser(eq("USER0042"), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts an identifier taken in a different case is refused as a conflict rather than accepted.
+     *
+     * <p>This is the create half of the same defect the fold case above records: the probe compared the
+     * spelling as submitted against a column holding the folded form, so an identifier already taken
+     * answered free whenever the two spellings differed.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service and captured by the
+     *     assertion below
+     */
+    @Test
+    @DisplayName("an identifier already taken in another case is refused as a duplicate")
+    void anIdentifierTakenInAnotherCaseIsRefusedAsADuplicate() {
+        when(users.existsById("USER0001")).thenReturn(true);
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "user0001", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class)
+                .hasMessage("User ID already exist...");
+
+        // Assumptions: nothing is provisioned, which is the property that separates this from a race.
+        //   The probe answered before the pool was called at all, so there is no account to withdraw
+        //   and no compensation to assert.
+        verifyNoInteractions(provisioning);
+        verify(users, never()).insertUser(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts the pool's own duplicate-username refusal is reported as the conflict, not as a fault.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service when the pool refuses the
+     *     username and captured by the assertion below
+     */
+    @Test
+    @DisplayName("a duplicate the pool decides is reported as the conflict, not as a failed add")
+    void aDuplicateDecidedByThePoolIsReportedAsTheConflict() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(UsernameExistsException.builder().message("username exists").build());
+
+        // Refactoring Rationale: this refusal used to report the add sentence with a 500, and the
+        //   condition it names is not a fault. Provisioning PRECEDES the insert on this path -- it has
+        //   to, because the row's subject column is not nullable and only the pool can mint the subject
+        //   -- so under concurrency the pool, not the primary key, is what first observes that two
+        //   callers named one identifier. Measured against six concurrent creates of one identifier
+        //   before this change: one answered 201 and the other five answered 500, with exactly one row
+        //   written; the outcome was already correct and only the status and sentence were wrong.
+        //   Answering the conflict makes the two orderings indistinguishable to a caller, which is the
+        //   property the probe and the constraint arms already have between them.
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class)
+                .hasMessage("User ID already exist...");
+
+        // Assumptions: no compensating withdrawal is asserted, and its absence is deliberate rather than
+        //   overlooked. The pool refused to CREATE an account, so this call provisioned nothing of its
+        //   own; withdrawing the username would destroy the account the caller that won the race is
+        //   about to write a row for.
+        verify(provisioning, never()).withdraw(any());
+        verify(users, never()).insertUser(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts the pool's duplicate refusal probes the row exactly once and reaches no second verdict.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws UserService.DuplicateUserException always, raised by the service and captured by the
+     *     assertion below
+     */
+    @Test
+    @DisplayName("a pool duplicate probes the row once and draws no conclusion about an orphan")
+    void aPoolDuplicateProbesTheRowExactlyOnce() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
+                .thenThrow(UsernameExistsException.builder().message("username exists").build());
+
+        assertThatThrownBy(() -> service.create(
+                        new CreateUserRequest("Ada", "Lovelace", "USER0042", "A")))
+                .isInstanceOf(UserService.DuplicateUserException.class)
+                .hasMessage("User ID already exist...");
+
+        // Refactoring Rationale: the single probe is the assertion, and it is here because a SECOND one
+        //   was briefly added and was wrong. The intent was to say in the operational record which of two
+        //   states the refusal came from -- an ordinary lost race, or a pool account left behind by an
+        //   interrupted create -- and to log the second at error level. The two are indistinguishable at
+        //   that instant: a concurrent create that has provisioned and not yet committed presents exactly
+        //   as an orphan. Measured against six concurrent creates of one identifier, the error arm fired
+        //   THREE times with no orphan present at all. A count of one is what stops that verdict being
+        //   attempted again, and it is asserted as a count rather than as an absent log line because the
+        //   probe is the observable half of the mistake.
+        verify(users, times(1)).existsById("USER0042");
+        verify(provisioning, never()).withdraw(any());
     }
 
     /**
@@ -1401,6 +1548,45 @@ class UserServiceTest {
         assertThatThrownBy(() -> service.delete("USER0001"))
                 .isExactlyInstanceOf(IllegalStateException.class)
                 .hasMessage("Unable to Update User...");
+    }
+
+    /**
+     * Asserts a removal that matched no row reports the not-found sentence rather than a failed update.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws NoSuchElementException always, raised by the service when the statement affected no row and
+     *     captured by the assertion below
+     */
+    @Test
+    @DisplayName("a delete whose statement matched no row reports the reference not-found sentence")
+    void aDeleteThatMatchedNoRowReportsNotFound() {
+        User stored = row("USER0001");
+        when(users.findById("USER0001")).thenReturn(Optional.of(stored));
+        // Assumptions: the failure is raised from the FLUSH rather than from the removal call, because
+        //   that is where the provider counts the rows its statement affected. The removal call only
+        //   marks the instance for deletion, so a substitute that threw from it would model a condition
+        //   the provider does not produce.
+        doThrow(new OptimisticLockingFailureException("row count 0, expected 1"))
+                .when(users).flush();
+
+        // Refactoring Rationale: this outcome used to fall into the arm above and report the failed-update
+        //   sentence with a 500, and the condition it names is not a fault. Two callers deleting one row
+        //   both find it, the first commits, and the second's statement matches nothing -- so the
+        //   provider raises its stale-state failure with no fault anywhere. Measured against six
+        //   concurrent deletes of one row before this change: one answered 204 and the rest split between
+        //   404 and 500 purely on thread timing, the 404s being the callers whose keyed read lost and the
+        //   500s the callers whose read won and whose statement then lost. The row is gone either way, so
+        //   both report the sentence a repeat of the same request already receives.
+        assertThatThrownBy(() -> service.delete("USER0001"))
+                .isExactlyInstanceOf(NoSuchElementException.class)
+                .hasMessage("User ID NOT found...");
+
+        // Assumptions: no withdrawal is owed and none is asserted. Nothing was deleted here, so recording
+        //   the intention would ask the reconciliation pass to withdraw an account that the caller who
+        //   DID delete the row is already withdrawing -- and the pool account belongs to that deletion,
+        //   not to this one.
+        verifyNoInteractions(provisioning);
     }
 
     /**

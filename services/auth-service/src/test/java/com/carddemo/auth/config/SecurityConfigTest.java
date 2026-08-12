@@ -254,6 +254,83 @@ class SecurityConfigTest {
     }
 
     /**
+     * Confirms a request claiming a forwarded loopback origin is refused, whatever its peer address says.
+     *
+     * <p>⚠️ Refactoring Rationale: this case exists because the rule above was NOT sufficient and the gap
+     * was reachable by anyone who could open a socket to the task. The range managers decide on the peer
+     * address the servlet request reports, and a container configured to honour forwarded headers replaces
+     * that value with whatever the request claims. On this framework version, detecting a container
+     * platform is by itself enough to switch that behaviour on with the container's own trusted-proxy
+     * list, which trusts every private range. Measured against the running service before the fix, from an
+     * ordinary pod address in that range, each of the six operator endpoints answered 401 to a plain
+     * request and <b>200</b> to the same request carrying {@code X-Forwarded-For: 127.0.0.1}, with no
+     * credential.</p>
+     *
+     * <p>Assumptions: each case sets the peer address to loopback as WELL as supplying the header, which
+     * is what the substituting container would have produced -- so a rule that only tested the peer
+     * grants every one of them. That is the point: this case cannot pass on the strength of the range
+     * test, only on the strength of the socket test added beside it.</p>
+     *
+     * <p>Assumptions: all three conventional header names are exercised, because three different
+     * mechanisms read them and the rule must not depend on which one a deployment enables. The second and
+     * third were already refused before the fix -- the container consumes only the first by default -- and
+     * they are asserted so that enabling a different mechanism cannot open the namespace silently.</p>
+     */
+    @Test
+    @DisplayName("a request claiming a forwarded origin is refused even from a loopback peer")
+    void aForwardedClaimIsRefusedEvenFromALoopbackPeer() {
+        assertThat(grantedFrom("127.0.0.1", "X-Forwarded-For", "127.0.0.1"))
+                .as("the spoof measured against the running service must no longer be granted")
+                .isFalse();
+        assertThat(grantedFrom("::1", "X-Forwarded-For", "::1"))
+                .as("the IPv6 spelling of the same spoof must be refused too")
+                .isFalse();
+        assertThat(grantedFrom("127.0.0.1", "Forwarded", "for=127.0.0.1"))
+                .as("the standardised header the framework strategy reads must not admit either")
+                .isFalse();
+        assertThat(grantedFrom("127.0.0.1", "X-Real-IP", "127.0.0.1"))
+                .as("the convention several reverse proxies set instead must not admit either")
+                .isFalse();
+        assertThat(grantedFrom("127.0.0.1", "X-Forwarded-For", "203.0.113.7, 127.0.0.1"))
+                .as("a chain naming an outside client first must be refused on presence alone")
+                .isFalse();
+    }
+
+    /**
+     * Confirms the grant additionally requires that this task ANSWERED the request on a loopback address.
+     *
+     * <p>Assumptions: this is the half of the rule that survives a container which strips the forwarded
+     * header after consuming it. The header test above cannot see a header that is no longer there, so the
+     * rule also asks a property of the socket: a caller that reached this task at its routable address is
+     * answered on that address, and only a caller that connected to loopback is answered on loopback. No
+     * proxy convention carries a header that rewrites it.</p>
+     *
+     * <p>Assumptions: the first case is the one that would have been granted before -- peer loopback,
+     * because the container substituted it, while the connection itself terminated on the task's routable
+     * address. It is the exact shape of the measured bypass with the header already removed.</p>
+     */
+    @Test
+    @DisplayName("the grant requires the connection to have terminated on a loopback address")
+    void theGrantRequiresALoopbackTerminatedConnection() {
+        assertThat(grantedOn("127.0.0.1", "10.236.2.102"))
+                .as("a substituted peer on a routable connection is the bypass with the header stripped")
+                .isFalse();
+        assertThat(grantedOn("127.0.0.1", "127.0.0.1"))
+                .as("the task-local collector connects to loopback and is answered on it")
+                .isTrue();
+        assertThat(grantedOn("::1", "::1"))
+                .as("the IPv6 loopback form is admitted on both halves of the connection")
+                .isTrue();
+        // Assumptions: the whole 127/8 range is asserted, not the single canonical literal, because the
+        //   local address is parsed rather than string-matched and a stack answering on another address in
+        //   that range is as task-local as one answering on 127.0.0.1. The PEER is still tested against
+        //   the configured ranges, which is why this case pairs it with the canonical peer literal.
+        assertThat(grantedOn("127.0.0.1", "127.0.1.1"))
+                .as("another address in the loopback range is still a loopback-terminated connection")
+                .isTrue();
+    }
+
+    /**
      * Confirms the management namespace reaches neither a business route nor an open path.
      *
      * <p>Assumptions: a namespace pattern that swept a business path in would not fail open, it would
@@ -469,8 +546,63 @@ class SecurityConfigTest {
      * @return {@code true} when the installed manager grants access from that address
      */
     private boolean grantedFrom(String remoteAddress) {
+        return granted(request(remoteAddress, null));
+    }
+
+    /**
+     * Applies the installed operator decision to a request arriving from one address and carrying one
+     * header.
+     *
+     * @param remoteAddress the address the request appears to come from; must not be {@code null}
+     * @param headerName the header to set on the request; must not be {@code null}
+     * @param headerValue the value to set it to; must not be {@code null}
+     * @return {@code true} when the installed manager grants access to that request
+     */
+    private boolean grantedFrom(String remoteAddress, String headerName, String headerValue) {
+        MockHttpServletRequest request = request(remoteAddress, null);
+        request.addHeader(headerName, headerValue);
+        return granted(request);
+    }
+
+    /**
+     * Applies the installed operator decision to a request whose peer and local addresses are both stated.
+     *
+     * <p>Assumptions: the LOCAL address is what a substituting container cannot rewrite, so stating both
+     * is how a substituted peer on a routable connection is expressed at all.</p>
+     *
+     * @param remoteAddress the address the request appears to come from; must not be {@code null}
+     * @param localAddress the address this task answered the connection on; must not be {@code null}
+     * @return {@code true} when the installed manager grants access to that request
+     */
+    private boolean grantedOn(String remoteAddress, String localAddress) {
+        return granted(request(remoteAddress, localAddress));
+    }
+
+    /**
+     * Builds a request to an operator endpoint from one peer, optionally overriding the local address.
+     *
+     * @param remoteAddress the address the request appears to come from; must not be {@code null}
+     * @param localAddress the address to answer on, or {@code null} to keep the mock's own loopback
+     *     default -- which is what an unstated local address should mean, since the cases that do not
+     *     mention it are about a task-local connection
+     * @return the request; never {@code null}
+     */
+    private static MockHttpServletRequest request(String remoteAddress, String localAddress) {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/actuator/env");
         request.setRemoteAddr(remoteAddress);
+        if (localAddress != null) {
+            request.setLocalAddr(localAddress);
+        }
+        return request;
+    }
+
+    /**
+     * Applies the installed operator decision to one request with no principal at all.
+     *
+     * @param request the request to decide about; must not be {@code null}
+     * @return {@code true} when the installed manager grants access to it
+     */
+    private static boolean granted(MockHttpServletRequest request) {
         Supplier<Authentication> noPrincipal = () -> null;
 
         AuthorizationResult result = SecurityConfig.loopbackOnly()

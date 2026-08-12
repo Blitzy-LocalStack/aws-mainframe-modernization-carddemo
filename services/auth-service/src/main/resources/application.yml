@@ -173,6 +173,44 @@ server:
   #       so the only work to drain is HTTP.
   shutdown: graceful
 
+  # WHY : (1) Refactoring Rationale: this property did not exist, and its absence
+  #       was a SECURITY defect rather than an omitted preference. Left unset, the
+  #       framework infers the strategy from the platform it detects, and on this
+  #       framework version that inference defaults to ON for every recognised
+  #       container platform -- only "no platform" turns it off. This runtime is
+  #       detected as a container platform, so the servlet container's
+  #       remote-address valve was switched on with the container's OWN default
+  #       trusted-proxy list, which trusts every private range and the loopback.
+  #       The consequence: the peer address the application reads became whatever
+  #       an X-Forwarded-For header claimed, for any caller whose address fell in
+  #       a private range -- which, inside the application subnets, is every
+  #       caller. Measured before this change, from an ordinary pod address, each
+  #       of the six operator endpoints confined to loopback answered 401 to a
+  #       plain request and 200 to the same request carrying
+  #       `X-Forwarded-For: 127.0.0.1`, with no credential at all.
+  #       (2) Assumptions: `none` is correct for THIS service specifically,
+  #       because nothing in it reads a client address, builds an absolute URL
+  #       from the request, or answers with a Location header. Sign-on, the token
+  #       exchanges and the five user operations answer with bodies and relative
+  #       identifiers only, and the one rule that does read the peer address --
+  #       the loopback confinement of the operator endpoints in SecurityConfig --
+  #       wants the TRUE peer and is actively harmed by a substituted one.
+  #       (3) Alternatives Considered: `native` with a narrowed
+  #       server.tomcat.remoteip.internal-proxies pattern, which is what
+  #       reporting-service does. Rejected here because that service has a reason
+  #       to want the forwarded values -- its published contract advertises a
+  #       server URL derived from the request and its submissions answer with a
+  #       Location header -- and this one does not. Trusting a proxy in order to
+  #       obtain values nothing consumes would accept the risk and take no
+  #       benefit.
+  #       (4) Trade-offs: setting this leaves the headers untouched in the request
+  #       rather than stripped, which is what lets SecurityConfig's own guard see
+  #       a forwarded claim and refuse it. The two are deliberately independent:
+  #       this property makes the peer address truthful, and that guard holds even
+  #       if a later deployment overrides this property back to a strategy that
+  #       trusts a proxy.
+  forward-headers-strategy: none
+
 spring:
   # WHY : (1) Assumptions: this bounds the graceful shutdown enabled above, and
   #       twenty seconds is the fleet-wide phase budget -- the same value the

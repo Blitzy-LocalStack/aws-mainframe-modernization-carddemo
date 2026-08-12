@@ -137,10 +137,12 @@ class CardUpdateHttpValidationTest {
         CardViewService views = new CardViewService(this.cards, this.mapper);
         CardAdminViewService adminViews = new CardAdminViewService(views, this.mapper);
 
+        GlobalExceptionHandler advice =
+                new GlobalExceptionHandler(Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC));
+
         this.mockMvc = MockMvcBuilders
-                .standaloneSetup(new CardController(reads, views, adminViews, writes))
-                .setControllerAdvice(
-                        new GlobalExceptionHandler(Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
+                .standaloneSetup(new CardController(reads, views, adminViews, writes, advice))
+                .setControllerAdvice(advice)
                 .build();
     }
 
@@ -362,10 +364,20 @@ class CardUpdateHttpValidationTest {
     void aStaleRevisionIsAnsweredConflictEvenWhenNothingWouldChange() throws Exception {
         when(this.cards.findById(CARD_NUMBER)).thenReturn(Optional.of(storedCard()));
 
+        // WHY : Refactoring Rationale: the refreshed card is asserted here as well as the status, and this
+        //       is the only case in the module that reaches it through the REAL update service rather than
+        //       a substituted one. That makes it the case that establishes the card in the body is rendered
+        //       from the row the service actually read, rather than from a value a test handed the
+        //       refusal. The version it reports is the STORED one, because a stale submission changes
+        //       nothing and the row it contended with is the row still there.
         this.mockMvc.perform(put(CardController.CARD_PATH, selector())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body(STORED_NAME, STORED_STATUS, "12", "2026", STALE_VERSION)))
-                .andExpect(status().isConflict());
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.fieldErrors[0].message")
+                        .value(CardUpdateService.MESSAGE_RECORD_CHANGED))
+                .andExpect(jsonPath("$.card.version").value(STORED_VERSION))
+                .andExpect(jsonPath("$.card.embossedName").value(STORED_NAME));
 
         verify(this.cards, never()).saveAndFlush(org.mockito.ArgumentMatchers.any(Card.class));
     }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import com.carddemo.common.CardDemoCommonAutoConfiguration;
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
@@ -22,6 +23,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
+import org.springframework.security.web.firewall.RequestRejectedHandler;
 import org.springframework.util.AntPathMatcher;
 
 /**
@@ -378,6 +380,43 @@ class SecurityConfigTest {
                             .as("the identity must be bound before the security chain runs")
                             .isEqualTo(CardDemoCommonAutoConfiguration.CORRELATION_FILTER_ORDER)
                             .isLessThan(SecurityFilterProperties.DEFAULT_FILTER_ORDER);
+                });
+    }
+
+    /**
+     * Confirms the shared kernel contributes the firewall refusal handler this chain relies on.
+     *
+     * <p>Purpose: the request firewall runs BEFORE this chain's rules, so a path the firewall refuses is
+     * never authorized by any rule asserted above -- the refusal is rendered by whichever
+     * {@code RequestRejectedHandler} the context holds. This chain declares none of its own, and that
+     * omission is only correct while the kernel's contribution is genuinely present, so the presence is
+     * asserted here rather than assumed.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the framework's default handler answers a bare status with no body, and
+     * the container then performs an ERROR dispatch that this chain re-authorizes as an anonymous request --
+     * which its closing {@code denyAll()} refuses. A caller that sent a malformed path therefore received a
+     * 401 naming an authentication failure it never had, with an empty correlation identifier, because the
+     * correlation filter is not replayed on an error dispatch. Rendering the refusal at the point of
+     * rejection is what keeps the answer truthful and its identifier populated.</p>
+     *
+     * <p>Assumptions: the bean is asserted as a SINGLE bean of the interface type, because the framework
+     * autowires a sole candidate onto the filter-chain proxy and silently keeps its own default when the
+     * context holds more than one. Counting is therefore part of the claim, not decoration.</p>
+     */
+    @Test
+    @DisplayName("the shared kernel contributes the firewall refusal handler this chain depends on")
+    void sharedKernelContributesTheFirewallRefusalHandler() {
+        new WebApplicationContextRunner()
+                .withConfiguration(
+                        AutoConfigurations.of(CardDemoCommonAutoConfiguration.class))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context)
+                            .as("this chain relies on the kernel's contribution instead of its own")
+                            .hasSingleBean(RequestRejectedHandler.class);
+                    assertThat(context.getBean(RequestRejectedHandler.class))
+                            .as("the contributed handler must be the one that renders the shared envelope")
+                            .isInstanceOf(ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler.class);
                 });
     }
 

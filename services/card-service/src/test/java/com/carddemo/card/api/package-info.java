@@ -35,12 +35,15 @@
  *       administrative handler. Neither the compiler nor a linter performs that comparison: an
  *       operation identifier is a string in a document and a handler is a method, and the build
  *       treats the two as unrelated artifacts.</li>
- *   <li>{@code CardDispatcherTest} asks REQUEST BEHAVIOUR on the browse route across 5 cases:
+ *   <li>{@code CardDispatcherTest} asks REQUEST BEHAVIOUR on the browse route across 8 cases:
  *       whether a request carrying no body at all is accepted as the opening screen, whether a
  *       cursor issued to one caller is refused when a different caller presents it, whether a
  *       forward cursor presented as a backward step is refused, whether an account narrowing of the
- *       wrong width is refused naming the member at fault, and whether an unreadable cursor is
- *       refused rather than answered.</li>
+ *       wrong width is refused naming the member at fault, whether an account narrowing of eleven
+ *       zero digits is accepted and reaches the query as no narrowing at all, whether a paging
+ *       direction outside the published enumeration is refused naming the member, whether both
+ *       published directions are accepted so that domain refuses nothing legitimate, and whether an
+ *       unreadable cursor is refused rather than answered.</li>
  *   <li>{@code CardUpdateHttpValidationTest} asks REQUEST BEHAVIOUR on the update route across 8
  *       cases: that a conforming submission reaches the write path, that each faulted attribute is
  *       answered with its reference sentence and its field state, that several attributes faulting
@@ -48,7 +51,7 @@
  *       first with its own, that a blank attribute stays distinguishable from an unacceptable one,
  *       that an over-width attribute is refused at the boundary, and that a stale revision is
  *       refused even when the submission changes nothing.</li>
- *   <li>{@code CardControllerTest} asks ADMITTANCE and RENDERING across 25 cases, and it is the only
+ *   <li>{@code CardControllerTest} asks ADMITTANCE and RENDERING across 27 cases, and it is the only
  *       class here that refreshes an application context. It installs the chain
  *       {@code com.carddemo.card.config.SecurityConfig} declares and the advice
  *       {@code com.carddemo.common.error.GlobalExceptionHandler} is, then drives all five operations
@@ -62,7 +65,16 @@
  *       lookup number is mandatory, that the reference clear-filter sentinel earns a refusal rather
  *       than clearing a narrowing, and that a refusal is rendered as the shared problem document
  *       carrying the reference sentence -- including the three conflict conditions kept apart from one
- *       another and the blank field state kept distinguishable from the unacceptable one.</li>
+ *       another and the blank field state kept distinguishable from the unacceptable one. The
+ *       twenty-sixth case establishes the extended conflict body: that a stale revision is answered with
+ *       the shared members and the refreshed card side by side at the top level, that the version travels
+ *       inside that card as a number, and that the card is the masked shape so a failure path cannot
+ *       widen what an ordinary caller may see. The twenty-seventh takes the opposite half of that
+ *       shape across every condition the shared contention type declares: a conflict that wrote
+ *       nothing sends the card member PRESENT AND NULL rather than omitting it, and names no card
+ *       material at all. It asserts against the rendered text because a path expression reads an
+ *       absent member and a null one alike, so it is the only form of the case that can separate
+ *       them.</li>
  * </ul>
  *
  * <p>Assumptions: the roster is stated as the MARKER LINE above rather than as a count in prose,

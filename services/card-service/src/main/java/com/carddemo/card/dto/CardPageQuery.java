@@ -36,15 +36,17 @@ import jakarta.validation.constraints.Pattern;
  * the gateway route keys nor the load-balancer rules admit it.</p>
  *
  * @param accountId the eleven-digit account to narrow the listing to, or {@code null} for the whole
- *     collection
+ *     collection; eleven zero digits are read as no narrowing, for the reference reason recorded on
+ *     {@code CardListService.accountFilterState}
  * @param cursor the opaque page cursor returned by a previous page, or {@code null} to open at the first
  *     page
- * @param direction the paging direction to apply to {@code cursor}, or {@code null} for forward
+ * @param direction the paging direction to apply to {@code cursor} -- exactly {@code next} or
+ *     {@code previous} -- or {@code null} for the published forward default
  */
 public record CardPageQuery(
         @Pattern(regexp = ACCOUNT_ID_DOMAIN) String accountId,
         String cursor,
-        String direction) {
+        @Pattern(regexp = DIRECTION_DOMAIN) String direction) {
 
     /**
      * The exact shape an account narrowing may take.
@@ -55,6 +57,33 @@ public record CardPageQuery(
      * that would answer with an empty page a caller could not distinguish from a real one.</p>
      */
     public static final String ACCOUNT_ID_DOMAIN = "^[0-9]{11}$";
+
+    /**
+     * The exact set of values the paging direction may take.
+     *
+     * <p>Refactoring Rationale: this member carried NO constraint while the narrowing beside it carried
+     * one, and the asymmetry was reported as a defect against this service. The handler compares the
+     * value against the single literal that means backward, so every other spelling -- a capitalised
+     * {@code PREVIOUS}, a mixed-case {@code Previous}, a typo, a leading space, or a word outside the
+     * vocabulary entirely -- read as forward and was answered with a forward page and no complaint. A
+     * caller asking to page backward with the wrong case was therefore served the page it already held,
+     * silently. Enforcing the domain here rather than in the handler keeps the refusal a 400 naming this
+     * member, and keeps the comparison in the handler a comparison rather than a second validation of the
+     * same vocabulary in a second place.</p>
+     *
+     * <p>Assumptions: the two spellings and their casing are the published contract's own, drawn from the
+     * {@code PageDirection} schema of {@code src/main/resources/openapi/card-api.yaml}, which declares
+     * {@code enum: [next, previous]} with {@code default: next}. They are lower case there and lower case
+     * here, and {@code CardApiContractTest} asserts the published pair, so this expression and the
+     * document cannot drift into two vocabularies.</p>
+     *
+     * <p>Assumptions: an ABSENT direction stays legal, because the declared constraint does not run on a
+     * {@code null} value and the published schema gives the absent case a defined meaning -- the forward
+     * default. A present-but-empty value is refused, which is the difference this expression draws: the
+     * caller that omitted the member said nothing, and the caller that sent two quotation marks said
+     * something outside the vocabulary.</p>
+     */
+    public static final String DIRECTION_DOMAIN = "^(next|previous)$";
 
     /**
      * Renders the query without disclosing the account it narrows to.

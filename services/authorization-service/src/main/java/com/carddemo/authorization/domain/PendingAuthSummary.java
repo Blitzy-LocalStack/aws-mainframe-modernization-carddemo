@@ -176,6 +176,37 @@ public class PendingAuthSummary {
     private static final int MONEY_SCALE = 2;
 
     /**
+     * The greatest magnitude any monetary column on this row can hold.
+     *
+     * <p>Assumptions: nine integer digits and two fractional, which is exactly {@code PIC S9(09)V99 COMP-3}
+     * as {@code cpy/CIPAUSMY.cpy} declares all six of this segment's money fields at L23 to L26 and L29 to
+     * L30, and exactly the {@code NUMERIC(11,2)} the schema derives from it under transformation rule T1.
+     * The bound is stated here so that this type refuses -- or reduces -- an out-of-domain value at the same
+     * place it refuses an out-of-domain counter, rather than leaving the database to raise on the insert.</p>
+     *
+     * <p>⚠️ Assumptions: this domain is one order of magnitude NARROWER than its neighbours, and the
+     * asymmetry is the copybook's and not this migration's. The two money columns on
+     * {@code pending_auth_detail} are {@code PIC S9(10)V99 COMP-3} at {@code cpy/CIPAUDTY.cpy} L34 to L35,
+     * the account master's own limit is {@code ACCT-CREDIT-LIMIT PIC S9(10)V99} at {@code cpy/CVACT01Y.cpy}
+     * L8, and {@code Money.MAX_MAGNITUDE} is that same ten-digit domain -- so a value this segment legally
+     * receives from any of them can be too wide for it. The reference program moves the wider field into the
+     * narrower one at {@code cbl/COPAUA0C.cbl} L810 and L811 and adds the wider transaction amount to the
+     * narrower declined total at its L821, and a COBOL {@code MOVE} or {@code ADD} into a narrower numeric
+     * field discards HIGH-ORDER digits with no diagnostic of any kind.</p>
+     *
+     * <p>⚠️ Trade-offs: this migration SATURATES at the bound where the reference truncates to it modulo
+     * ten to the ninth, and the difference is registered as divergence D-AUTH-SUMMARY-MONEY-DOMAIN in
+     * {@code docs/architecture/cobol-to-service-traceability.md}. Truncation is the more faithful arithmetic
+     * and is rejected anyway, because the two outcomes are not comparable in consequence: a credit limit of
+     * one thousand million truncates to ZERO, so the very next authorization on that account is declined for
+     * want of funds, whereas saturating leaves it one cent short of the limit and the account keeps
+     * transacting. Widening the column to match its neighbours was also considered and rejected, because
+     * transformation rule T1 makes the copybook picture normative for the column type and the sibling
+     * transaction context already recorded that same refusal as D-BILLPAY-AMOUNT-WIDTH-REFUSED.</p>
+     */
+    public static final BigDecimal MONEY_MAX_MAGNITUDE = new BigDecimal("999999999.99");
+
+    /**
      * The account this summary belongs to, and the row's whole key.
      *
      * <p>Assumptions: {@code PA-ACCT-ID PIC S9(11) COMP-3} at line 19 of the copybook, so eleven
@@ -632,8 +663,56 @@ public class PendingAuthSummary {
      * @param refreshedCashLimit the account's cash credit limit at scale two; must not be {@code null}
      */
     public void refreshLimits(BigDecimal refreshedCreditLimit, BigDecimal refreshedCashLimit) {
-        this.creditLimit = refreshedCreditLimit;
-        this.cashLimit = refreshedCashLimit;
+        // WHY : ⚠️ Refactoring Rationale: both limits are reduced to this segment's own domain before they
+        //       are held, where they were assigned as they arrived. The account master's limit is
+        //       PIC S9(10)V99 and this segment's is PIC S9(09)V99, so an account the account context can
+        //       legally hold carries a limit this row cannot store -- and the assignment then reached the
+        //       database, which refused the whole insert with a numeric-overflow error. The observable
+        //       consequence was that the account could not process ANY authorization, not even a small one:
+        //       the requester received no decision at all and the message dead-lettered after five
+        //       receives. Reducing here keeps the account transacting, and the reduction is what the
+        //       reference performs too -- differently, and worse; see MONEY_MAX_MAGNITUDE.
+        this.creditLimit = narrowedToStoredDomain(refreshedCreditLimit);
+        this.cashLimit = narrowedToStoredDomain(refreshedCashLimit);
+    }
+
+    /**
+     * Reports whether an amount is too wide for the columns this row stores money in.
+     *
+     * <p>Assumptions: this is published so that a CALLER can report the reduction, because the reduction
+     * itself has to happen inside this type and this type writes no log. The listener and the expiry sweep
+     * each name the field they were about to store when they see this return true, which is what makes a
+     * saturated value traceable to the request or the row that produced it.</p>
+     *
+     * @param amount the amount about to be stored, which may be {@code null}
+     * @return {@code true} when the amount is present and its magnitude exceeds
+     *     {@link #MONEY_MAX_MAGNITUDE}
+     */
+    public static boolean exceedsStoredDomain(BigDecimal amount) {
+        return amount != null && amount.abs().compareTo(MONEY_MAX_MAGNITUDE) > 0;
+    }
+
+    /**
+     * Reduces an amount to the greatest magnitude this row's money columns can hold, preserving its sign.
+     *
+     * <p>Assumptions: the reduction SATURATES rather than truncating, and the sign is kept, so the result is
+     * monotone in its input -- a larger amount never produces a smaller stored value. That is what
+     * distinguishes it from the reference's own narrowing, which discards high-order digits and so maps one
+     * thousand million to zero; the trade-off between the two is argued on
+     * {@link #MONEY_MAX_MAGNITUDE}.</p>
+     *
+     * <p>Assumptions: an amount already inside the domain is returned UNCHANGED, including its scale, so
+     * this cannot become a second place that rounds money. Only the magnitude is touched, and only when it
+     * is out of range.</p>
+     *
+     * @param amount the amount to store, which may be {@code null}
+     * @return the amount when it fits, the signed bound when it does not, or {@code null} for {@code null}
+     */
+    public static BigDecimal narrowedToStoredDomain(BigDecimal amount) {
+        if (!exceedsStoredDomain(amount)) {
+            return amount;
+        }
+        return amount.signum() < 0 ? MONEY_MAX_MAGNITUDE.negate() : MONEY_MAX_MAGNITUDE;
     }
 
     /**
@@ -829,8 +908,14 @@ public class PendingAuthSummary {
      */
     public void recordApproved(BigDecimal amount) {
         this.approvedAuthCount = incremented(this.approvedAuthCount, "approvedAuthCount");
-        this.approvedAuthAmount = this.approvedAuthAmount.add(amount);
-        this.creditBalance = this.creditBalance.add(amount);
+        // WHY : ⚠️ Assumptions: each running total is reduced to this segment's domain AFTER the addition
+        //       rather than the addend being reduced before it, and the order matters. Reducing the addend
+        //       would let two in-domain contributions sum past the bound and reach the database, which is
+        //       the overflow this reduction exists to prevent; reducing the sum bounds the stored value
+        //       whatever the addends were. Both totals are running aggregates the reference adds to at
+        //       cbl/COPAUA0C.cbl L815 and L817 with no size check of any kind.
+        this.approvedAuthAmount = narrowedToStoredDomain(this.approvedAuthAmount.add(amount));
+        this.creditBalance = narrowedToStoredDomain(this.creditBalance.add(amount));
         // WHY : Assumptions: the scale is set rather than left to the constant, because every other
         //       amount this type holds is at scale two and a mixed-scale member would compare equal to
         //       its siblings under compareTo while rendering differently through toString -- the one
@@ -858,7 +943,13 @@ public class PendingAuthSummary {
      */
     public void recordDeclined(BigDecimal amount) {
         this.declinedAuthCount = incremented(this.declinedAuthCount, "declinedAuthCount");
-        this.declinedAuthAmount = this.declinedAuthAmount.add(amount);
+        // WHY : ⚠️ Assumptions: the declined total is the one most exposed of the four, which is why the
+        //       reduction matters here even though the arithmetic is the same as the approved arm's. The
+        //       approved arm is gated by the account's own headroom, so its addend cannot exceed a limit
+        //       that itself fits this domain; a DECLINE has no such gate -- the requested amount is
+        //       PIC S9(10)V99 and is added whatever it is, so a single request of one thousand million
+        //       overflowed the column on its own.
+        this.declinedAuthAmount = narrowedToStoredDomain(this.declinedAuthAmount.add(amount));
     }
 
     /**

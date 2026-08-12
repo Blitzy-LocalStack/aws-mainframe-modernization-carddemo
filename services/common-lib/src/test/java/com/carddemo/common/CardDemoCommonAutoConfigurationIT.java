@@ -18,8 +18,10 @@ import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
+import org.springframework.security.web.firewall.RequestRejectedHandler;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -127,6 +129,18 @@ class CardDemoCommonAutoConfigurationIT {
                     assertThat(context).hasSingleBean(JacksonModule.class);
                     assertThat(context.getBean(JacksonModule.class)).isInstanceOf(MoneyModule.class);
                     assertThat(context).hasSingleBean(GlobalExceptionHandler.class);
+                    // WHY : Assumptions: the firewall handler is asserted HERE rather than in a case of
+                    //       its own, because it is the third member of the same refusal-rendering set as
+                    //       the advice and the two filters and its condition is evaluated in the same
+                    //       pass. It is asserted as a SINGLE bean of the framework's interface type,
+                    //       because that is the shape the framework autowires -- it takes one bean of
+                    //       that type onto the filter-chain proxy and a second would leave which one
+                    //       applies undefined -- and asserted to be the rendering implementation, because
+                    //       a bean of the interface type that answered with a bare status would satisfy a
+                    //       presence check while leaving the empty-correlation-identifier defect open.
+                    assertThat(context).hasSingleBean(RequestRejectedHandler.class);
+                    assertThat(context.getBean(RequestRejectedHandler.class))
+                            .isInstanceOf(ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler.class);
                     assertThat(context.getBeansOfType(FilterRegistrationBean.class))
                             .containsOnlyKeys("carddemoCorrelationIdFilterRegistration",
                                     "carddemoRequestBodySizeFilterRegistration");
@@ -208,6 +222,7 @@ class CardDemoCommonAutoConfigurationIT {
                     assertThat(context).hasSingleBean(JacksonModule.class);
                     assertThat(context).doesNotHaveBean(GlobalExceptionHandler.class);
                     assertThat(context).doesNotHaveBean(FilterRegistrationBean.class);
+                    assertThat(context).doesNotHaveBean(RequestRejectedHandler.class);
                 });
     }
 

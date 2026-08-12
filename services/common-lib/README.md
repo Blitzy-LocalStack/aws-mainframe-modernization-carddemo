@@ -311,7 +311,7 @@ src/main/java/com/carddemo/common/          11 packages · 40 production types
                   HtmlTextEncoder.java · InternalServiceToken.java
                   MaskedCardNumber.java · SealedSelector.java
   observability/  package-info.java · MetricsConfig.java · LogSafeText.java
-                  ThrowableDigest.java
+                  ThrowableDigest.java · FailureSummary.java
   time/           package-info.java · TimestampFormatter.java
   validation/     package-info.java · DateEditValidator.java · FieldValidationFlag.java
   control/        package-info.java · OnlineWriteGate.java
@@ -343,6 +343,7 @@ src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
                   GlobalExceptionHandlerPathMaskingTest.java
                   AbsentAndUnconvertibleValueTest.java
                   RejectedParameterOrderingTest.java
+                  ProtocolRefusalRenderingTest.java
   messaging/      package-info.java · MessageExpiryTest.java
                   MessagingCorrelationIdTest.java · QueueClientBudgetTest.java
                   RethrowingDigestErrorHandlerTest.java
@@ -356,6 +357,7 @@ src/test/java/com/carddemo/common/           12 packages · 48 *Test + 1 *IT
                   SealedSelectorTest.java
   observability/  package-info.java · LogSafeTextTest.java · MetricsConfigTest.java
                   StructuredLoggingDefaultsTest.java · ThrowableDigestTest.java
+                  FailureSummaryTest.java
   time/           package-info.java · TimestampFormatterTest.java
   validation/     package-info.java · DateEditValidatorTest.java
                   FieldValidationFlagTest.java
@@ -381,28 +383,28 @@ each case reports under, because several classes here report their cases under
 
 | Package | Classes | Executions |
 |---|---|---|
-| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `AuthorizationDisclosurePolicyTest` 13 · `InquiryRequestCodecTest` 13 | **619** |
+| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 149 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 | **622** |
 | `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
-| `error` | `GlobalExceptionHandlerTest` 32 · `ApiErrorTest` 28 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `AbsentAndUnconvertibleValueTest` 8 · `RejectedParameterOrderingTest` 5 · `ApiErrorSecurityHandlersTest` 5 | **119** |
-| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 10 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **123** |
+| `error` | `GlobalExceptionHandlerTest` 51 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `ApiErrorSecurityHandlersTest` 7 · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **161** |
+| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **139** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
-| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `CorrelationIdFilterTest` 8 | **41** |
-| `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 12 · `MessageExpiryTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **53** |
-| `observability` | `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 6 · `LogSafeTextTest` 5 | **34** |
-| `architecture` | `LayeringRulesTest` 9 · `SharedKernelInventoryTest` 7 · `PackageCharterInventoryTest` 4 · `ServiceCatalogInventoryTest` 4 · `RuntimeConfigurationContractTest` 3 · `RuntimeDeletePrivilegeContractTest` 2 | **29** |
+| `web` | `PageResponseTest` 16 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 8 | **54** |
+| `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **55** |
+| `observability` | `FailureSummaryTest` 15 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `LogSafeTextTest` 5 | **50** |
+| `architecture` | `LayeringRulesTest` 9 · `SharedKernelInventoryTest` 7 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 4 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 3 across 1 `@Nested` group · `RuntimeDeletePrivilegeContractTest` 2 | **39** |
 | `control` | `OnlineWriteGateTest` 15 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **27** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
-| | **module total** | **1232** |
+| | **module total** | **1334** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
-`DateEditValidatorTest`, both `control` classes and three of the `architecture`
-classes report `Tests run: 0` against their own class names and report their
-executions under `@Nested` or `@DisplayName` labels instead, so a reader grepping
-the console output for a class name finds a zero. The table above is therefore read
-from `target/surefire-reports/*.xml`, where each case still carries the suite it
-belongs to, and the console total agrees with it: 1084 executions report under a
-class name and 148 under a display name, summing to 1232.
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1232: it is an
+`DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
+of the `architecture` classes report `Tests run: 0` against their own class names and
+report their executions under `@Nested` or `@DisplayName` labels instead, so a reader
+grepping the console output for a class name finds a zero. The table above is
+therefore read from `target/surefire-reports/*.xml`, where each case still carries the
+suite it belongs to, and the console total agrees with it: 1180 executions report
+under a class name and 154 under a display name, summing to 1334.
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1334: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3). And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
@@ -1537,8 +1539,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 53 tests + 1 integration tests -->
-**54** test classes: **53** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 55 tests + 1 integration tests -->
+**56** test classes: **55** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.
@@ -1568,6 +1570,7 @@ its unit suites, which is why they are fast enough to run on every build.
 | `TimestampFormatterTest` | the 26-character form, and that the commentary mask is never used as a pattern |
 | `GlobalExceptionHandlerTest`, `GlobalExceptionHandlerPathMaskingTest` | the 409 mappings, the per-field error array, that no raw database text escapes, and that a card number in a request path is masked before it reaches a log line |
 | `ApiErrorTest`, `AbendDetailTest` | the three message widths and two sentinels, and the four abend components — see §6.3 |
+| `ProtocolRefusalRenderingTest` | the four PROTOCOL refusals a caller can provoke — an unpublished path, an unsupported request content type, an unsupported method and an unacceptable representation — each answered with its own status class, its own code and a sentence carrying no framework grammar, logged at warning rather than error, with `Allow` published on the 405 and an explicit JSON content type on the 406 |
 | `ApiErrorWireShapeTest` | the emitted JSON property set of both shapes, read through a real mapper: a field entry carries exactly `field`, `state` and `message`, its derived predicate stays callable but unpublished, and the problem shape writes all eleven members with `message` and `abend` present as `null` — see §6.3.1 |
 | `DateEditValidatorTest`, `FieldValidationFlagTest` | the century, leap-year, date-of-birth and month/day rules, the result envelope, the Language-Environment path, and the **three** validation states of §6.5 |
 | `JwtRoleConverterTest`, `CognitoAccessTokenValidatorTest` | the `'A'`/`'U'` group mapping, and that issuer and audience are checked before groups are trusted |

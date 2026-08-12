@@ -538,6 +538,69 @@ spring:
     #       environment needs a profile change rather than a log filter.
     show-sql: false
 
+  # ---------------------------------------------------------------------------
+  # WHY : Refactoring Rationale: this block is NEW, and its absence was a defect
+  #       rather than a preference. Every request body this context publishes is
+  #       declared with `additionalProperties: false` in
+  #       openapi/authorization-api.yaml, so the document tells a client that an
+  #       undeclared member is refused -- and the framework's own default silently
+  #       DISCARDS one instead. The measured consequence was not cosmetic: a
+  #       listing request carrying `Direction` with a capital D was answered 200
+  #       with the FORWARD page while the caller had asked to move backward,
+  #       because the misspelled member was dropped and the direction it carried
+  #       went with it. A caller cannot detect that from the response: the page it
+  #       receives is well formed, it is simply the opposite one. The sibling
+  #       contexts settled the same question the same way -- account-service and
+  #       transaction-service both set fail-on-unknown-properties in their own
+  #       base documents -- so this restores consistency rather than inventing a
+  #       policy.
+  # WHY : Assumptions: turning strictness on is only safe because every
+  #       cross-context response this service READS is declared in full on this
+  #       side. RestAccountContextClient's three wire records name every member of
+  #       account-service's CardXrefView, AccountContextView and
+  #       CustomerDisplayView schemas, all three of which are themselves closed.
+  #       transaction-service learned this the expensive way: an earlier revision
+  #       there declared a narrower subset, and with this setting on, every
+  #       successful lookup became a conversion failure answered 500. Any future
+  #       member added upstream must therefore be declared here in the same change
+  #       that starts sending it.
+  # WHY : Assumptions: that failure mode was MEASURED here rather than assumed, so
+  #       the sentence above is a fact about this service and not a caution copied
+  #       from another. An undeclared member added to the customer-display response
+  #       turns the read into AccountContextUnavailableException and the request
+  #       into 500 CARDDEMO-0500 -- the dependency-unavailable path, not a partial
+  #       read -- so the symptom an operator sees is a dependency outage and the
+  #       cause is a shape change. That is the reason this block names the three
+  #       records and their upstream schemas by name.
+  # WHY : Trade-offs: strictness over forward compatibility. Adding a member to a
+  #       request body becomes a deliberate contract change -- made in the
+  #       document and the DTO together -- rather than something a client can
+  #       start sending unilaterally. That cost is accepted because the bodies
+  #       here are closed field sets taken from the reference maps, which have no
+  #       representation for a field they do not define.
+  # ---------------------------------------------------------------------------
+  jackson:
+    deserialization:
+      # WHY : Assumptions: the framework leaves this OFF, so this key is a change
+      #       and not a pin. The trailing-token refusal is deliberately NOT
+      #       restated beside it: the current Jackson generation already enables
+      #       FAIL_ON_TRAILING_TOKENS, so a second JSON value after the body is
+      #       already refused, and writing the key here would read as though the
+      #       refusal depended on it.
+      fail-on-unknown-properties: true
+
+    read:
+      # WHY : Trade-offs: a duplicated member is ambiguous, and the streaming
+      #       default resolves the ambiguity silently by keeping the LAST
+      #       occurrence. A body naming `accountId` twice was therefore answered
+      #       200 for the second account, so a caller reading its own request back
+      #       would see the account it asked about while the answer described a
+      #       different one. Refusing the body says the two disagree instead of
+      #       picking for the caller. The cost is one extra name-set per nesting
+      #       level while parsing, which is immaterial for bodies of at most four
+      #       members.
+      strict-duplicate-detection: true
+
   security:
     oauth2:
       resourceserver:
@@ -721,6 +784,38 @@ logging:
     #       raising a broader level.
     org.hibernate.orm.jdbc.bind: WARN
     org.hibernate.SQL: WARN
+
+    # WHY : (1) Refactoring Rationale: this third pin closes the disclosure the two
+    #       above do not reach, and it was found by MEASUREMENT rather than by
+    #       reading. Planting a check constraint that one insert violated and
+    #       watching the log showed that org.hibernate.orm.jdbc.error emits the
+    #       driver's whole message at WARN, and the driver's message for a
+    #       constraint violation is the failing ROW: on that line the account
+    #       identifier, the primary account number, the amount, the merchant
+    #       identifier and the merchant name all appeared in clear. Pinning the two
+    #       loggers above keeps bound parameters out of the log on the SUCCESS path
+    #       and does nothing at all on the failure path, which is the path that
+    #       matters most, because a failure is what an operator goes to the log for.
+    # WHY : (2) Assumptions: ERROR rather than OFF. That logger's value-bearing
+    #       output is emitted at WARN, so ERROR is the lowest level that suppresses
+    #       it, and choosing ERROR over OFF leaves anything Hibernate raises at
+    #       ERROR on the same category still visible. OFF would also silence a
+    #       future diagnostic that carries no row at all.
+    # WHY : (3) Assumptions: this is safe ONLY because the condition is now stated
+    #       elsewhere. common/messaging/RethrowingDigestErrorHandler logs the
+    #       database condition and its five-character SQL state at ERROR for every
+    #       failed message, rendered through
+    #       common/observability/FailureSummary.databaseConditionOf, which replaces
+    #       every run of three or more digits with hashes and masks a card number
+    #       before that. So the operator still learns that a check constraint was
+    #       violated, which constraint, and the state code -- and learns nothing
+    #       about the customer. Before that rendering existed this pin could not
+    #       have been made: the framework's unredacted line was the ONLY statement
+    #       of the condition, and suppressing it would have traded a disclosure for
+    #       a blind spot. Trade-offs: an operator who needs the literal failing row
+    #       must reproduce against a non-production dataset, which is the same
+    #       trade the two pins above already make for bound parameters.
+    org.hibernate.orm.jdbc.error: ERROR
 
 carddemo:
   security:

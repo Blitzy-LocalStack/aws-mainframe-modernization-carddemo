@@ -16,6 +16,7 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 import org.springframework.security.oauth2.core.OAuth2Error;
+import org.springframework.security.web.firewall.RequestRejectedException;
 
 /**
  * Verifies that a request refused by the filter chain -- rather than by a handler -- is answered with the
@@ -198,6 +199,66 @@ class ApiErrorSecurityHandlersTest {
 
         assertThat(response.getStatus()).isEqualTo(200);
         assertThat(response.getContentAsString()).isEqualTo("already sent");
+    }
+
+    /**
+     * Confirms a request the HTTP firewall refuses is answered 400 with the shared envelope and a
+     * POPULATED correlation identifier.
+     *
+     * <p>⚠️ Assumptions: this handler exists because the condition was answered 401 with an EMPTY body
+     * correlation identifier, to a caller holding a valid token. The framework's default handler calls
+     * {@code sendError}, the container performs an internal ERROR dispatch, the bearer-token filter does
+     * not run on that dispatch — it is a once-per-request filter and those skip error dispatches — so the
+     * request arrives anonymous and the deny-by-default rule refuses it. Answering here means no dispatch
+     * happens, so nothing can overwrite the status.</p>
+     *
+     * <p>Assumptions: the populated identifier is asserted specifically, because that is the half of the
+     * finding a status assertion would not catch. The identifier is available on this path only because
+     * the correlation filter is ordered ahead of the security chain, so its logging context is still
+     * established when the firewall rejects; on the error dispatch it is not replayed at all, which is why
+     * the body carried an empty value before.</p>
+     *
+     * @throws IOException if writing the refusal fails, which it does not
+     */
+    @Test
+    @DisplayName("a firewall rejection is answered 400 with the shared envelope and a real correlation id")
+    void firewallRejectionCarriesTheSharedEnvelope() throws IOException {
+        MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, CORRELATION_ID);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        new ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler(CLOCK).handle(requestFor(CARD_PATH),
+                response, new RequestRejectedException(
+                        "The request was rejected because the URL contained \"//\" " + CARD_NUMBER));
+
+        assertThat(response.getStatus())
+                .as("a request line the firewall cannot route is a malformed request, not an "
+                        + "unauthenticated one")
+                .isEqualTo(400);
+        assertThat(response.getContentType()).startsWith("application/json");
+        assertThat(response.getContentAsString())
+                .contains(ApiError.CODE_VALIDATION)
+                .contains(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST)
+                .contains(CORRELATION_ID)
+                .contains(MASKED_CARD_PATH);
+        assertThat(response.getContentAsString())
+                .as("the framework composes the rejection message from the offending URL, and a path "
+                        + "segment on this system can carry a primary account number")
+                .doesNotContain(CARD_NUMBER)
+                .doesNotContain("\"correlationId\":\"\"");
+    }
+
+    /**
+     * Confirms the factory publishes the same handler the nested class implements.
+     *
+     * <p>Assumptions: the factory is asserted because it is what the shared auto-configuration publishes
+     * as a bean, and a factory returning a different implementation from the one the case above exercises
+     * would leave the tested behaviour unreachable in a running service.</p>
+     */
+    @Test
+    @DisplayName("the published factory returns the rendering firewall handler")
+    void theFactoryReturnsTheRenderingFirewallHandler() {
+        assertThat(ApiErrorSecurityHandlers.requestRejectedHandler(CLOCK))
+                .isInstanceOf(ApiErrorSecurityHandlers.ApiErrorRequestRejectedHandler.class);
     }
 
     /**

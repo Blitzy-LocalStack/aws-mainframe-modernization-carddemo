@@ -193,6 +193,16 @@ class LoadServiceTest {
     private static final int DETAIL_STRIDE = 206;
 
     /**
+     * A committed BARE detail segment whose one-byte fraud position holds a character the domain excludes.
+     *
+     * <p>⚠️ Assumptions: this fixture is two hundred bytes -- a segment with no parent-key prefix -- so it
+     * is used by copying it OVER the segment half of a well-formed prefixed record rather than by being
+     * read as a record. That is what isolates the segment rule: the prefix stays the committed extract's
+     * own well-formed packed key, so the record is refused for its segment and for nothing else.
+     */
+    private static final String SEGMENT_FRAUD_OUT_OF_DOMAIN = "pautdtl1-auth-fraud-invalid.bin";
+
+    /**
      * The parent-key prefix's width in bytes, six.
      *
      * <p>Assumptions: {@code ROOT-SEG-KEY} is {@code PIC S9(11) COMP-3}, and a packed field occupies
@@ -849,6 +859,245 @@ class LoadServiceTest {
             verify(LoadServiceTest.this.details, never()).findExistingIds(anyCollection());
         }
     }
+
+    /**
+     * Asserts the two-stream entry point records every located refusal under one queryable event.
+     *
+     * <p>⚠️ Purpose: Refactoring Rationale. Each of the three located refusal types already carried the
+     * record's ordinal as a typed field, and one of the three -- the unresolvable parent -- already wrote a
+     * line of its own. What none of them produced was a statement of the CONDITION: the refusal's cause
+     * names the field and the constraint it breached, and that text reached no log at all, so an operator
+     * holding a rejected extract of half a million records had an ordinal at best and a chain of type names
+     * at worst. The reporting added to the two-stream entry point closes that, and this class asserts it
+     * for each of the types that reaches it.
+     *
+     * <p>⚠️ Assumptions: these cases drive {@code load(root, detail)} rather than the single-pass entry
+     * points its siblings above use, because the reporting is deliberately placed at the two-stream method
+     * and NOT inside either pass. A pass is also called directly by the extract round trip, where the
+     * caller handles the refusal itself and a log line would be written for a fault that was then handled
+     * -- so a case driving a pass alone would assert the absence of the very line this class asserts the
+     * presence of, and both would be right.
+     *
+     * <p>⚠️ Trade-offs: an ordinal is asserted as a substring of the formatted line rather than by reading
+     * the refusal's accessor, which the sibling cases do. Both are needed and they check different things:
+     * the accessor states that the value reached the caller, and the line states that it reached the
+     * operator, and it was the second that was missing.
+     */
+    @Nested
+    @DisplayName("every located refusal is recorded once, naming the record and its condition")
+    class RefusalReporting {
+
+        /** The event name every located refusal shares, so one query finds all of them. */
+        private static final String REFUSAL_EVENT = "event=authorization.load.record-refused";
+
+        /**
+         * The event name a fault of the FILE is reported under, which names no record.
+         *
+         * <p>⚠️ Assumptions: a second name rather than a second field on the first. A query asking which
+         * record was refused and a query asking which file was are different questions, and one event with
+         * an optional ordinal would answer both ambiguously -- an absent ordinal would be indistinguishable
+         * from a reporting defect that forgot to render one.
+         */
+        private static final String EXTRACT_REFUSAL_EVENT = "event=authorization.load.extract-refused";
+
+        /**
+         * An undecodable parent key is recorded with its ordinal and its condition, and still propagates.
+         *
+         * <p>⚠️ Assumptions: the refusal is asserted to propagate as well as to be recorded, and the
+         * propagation is the load-bearing half. A reporting step that swallowed the refusal would turn a
+         * rejected extract into a load that reported success having written part of it, which is the one
+         * outcome this loader's transaction boundary exists to make unreachable.
+         *
+         * @throws AssertionError if the refusal is not recorded, is not located, or does not propagate
+         */
+        @Test
+        @DisplayName("an undecodable parent key is recorded with its ordinal and its condition")
+        void anUndecodablePrefixIsRecordedAndStillPropagates() {
+            byte[] corrupted = bytes(DETAIL_FIXTURE).clone();
+            corrupted[PREFIX_WIDTH - 1] = (byte) 0x05;
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(LoadService.MalformedParentKeyException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE),
+                            new ByteArrayInputStream(corrupted)));
+
+            assertThat(messagesAt(Level.ERROR))
+                    .as("an operator holding the rejected extract must be told which record and why")
+                    .anySatisfy(line -> assertThat(line)
+                            .contains(REFUSAL_EVENT)
+                            .contains("recordOrdinal=1")
+                            .contains("fault=")
+                            .contains("detail="));
+        }
+
+        /**
+         * An unresolvable parent is recorded under the shared event as well as by its own pass.
+         *
+         * <p>⚠️ Assumptions: this type is reported twice by design, and the duplication is asserted rather
+         * than tolerated silently. Its own pass writes a line saying the account had no summary row, which
+         * is the diagnosis; the shared line adds the condition and, more importantly, the shared EVENT
+         * NAME, so a single query over a run's log finds every refused record whatever refused it. A reader
+         * seeing two lines for one record is reading the same record described by two rules, not two
+         * records.
+         *
+         * @throws AssertionError if the shared record is absent, unlocated or discloses the account
+         */
+        @Test
+        @DisplayName("an unresolvable parent is recorded under the shared event and names no account")
+        void anUnresolvableParentIsRecordedUnderTheSharedEvent() {
+            when(LoadServiceTest.this.summaries.findExistingAccountIds(anyCollection()))
+                    .thenReturn(List.of());
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(LoadService.UnresolvedParentException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE), open(DETAIL_FIXTURE)));
+
+            assertThat(messagesAt(Level.ERROR))
+                    .as("one event name must find every refused record, whichever rule refused it")
+                    .anySatisfy(line -> assertThat(line)
+                            .contains(REFUSAL_EVENT)
+                            .contains("recordOrdinal=1"));
+            // WHY : ⚠️ Assumptions: the disclosure rule is re-asserted on THIS line rather than relying on
+            //       the sibling case that asserts it for the pass's own line. The condition rendered here
+            //       comes from the refusal's message, which is composed over a record that carries the
+            //       account identifier, so the new line is a new opportunity for the value to escape and
+            //       the case that would notice has to be the one that reads the new line.
+            assertThat(messagesAt(Level.ERROR))
+                    .as("an account identifier may not appear in a durable diagnostic")
+                    .noneMatch(line -> line.contains(String.valueOf(ACCOUNT_ONE)));
+        }
+
+        /**
+         * A malformed segment is recorded with the OFFENDING record's ordinal, not the first record's.
+         *
+         * <p>⚠️ Assumptions: the corruption is written into the SECOND record of a two-record extract, and
+         * that placement is the point of the case rather than an incidental choice. The two sibling cases
+         * above corrupt the first record, where the offending record's position and the count of records
+         * successfully read are both one -- so an implementation that reported either would pass both. A
+         * fault in record two distinguishes them: an ordinal of one would mean the reporting was counting
+         * what it had read rather than naming what it had refused.
+         *
+         * <p>⚠️ Assumptions: the record is synthesised from the committed extract's own second prefix and a
+         * committed out-of-domain segment, rather than by mutating a byte at a computed offset. The prefix
+         * is therefore a well-formed packed account identifier and the segment is the only thing wrong with
+         * the record, which is what makes the refusal attributable to the segment rule; a hand-computed
+         * offset would also silently relocate if the layout registry moved the field.
+         *
+         * @throws AssertionError if the segment refusal reaches no log line, or names the wrong record
+         */
+        @Test
+        @DisplayName("a malformed segment is recorded with the offending record's own ordinal")
+        void aMalformedSegmentIsRecordedWithTheOffendingOrdinal() {
+            byte[] extract = Arrays.copyOf(bytes(DETAIL_FIXTURE), DETAIL_STRIDE * 2);
+            byte[] outOfDomainSegment = bytes(SEGMENT_FRAUD_OUT_OF_DOMAIN);
+            System.arraycopy(outOfDomainSegment, 0, extract, DETAIL_STRIDE + PREFIX_WIDTH,
+                    outOfDomainSegment.length);
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(LoadService.MalformedSegmentException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE),
+                            new ByteArrayInputStream(extract)));
+
+            assertThat(messagesAt(Level.ERROR))
+                    .as("the line must name the record that was refused, not the number read before it")
+                    .anySatisfy(line -> assertThat(line)
+                            .contains(REFUSAL_EVENT)
+                            .contains("recordOrdinal=2")
+                            .contains("detail="));
+        }
+
+        /**
+         * A whole-file length fault is deliberately NOT recorded as a refused record.
+         *
+         * <p>⚠️ Purpose: this asserts the SCOPE of the reporting rather than its content, and the scope is
+         * a decision that would otherwise be invisible. An extract whose total length is not a multiple of
+         * the stride is a fault of the FILE -- it was truncated in transit, or handed to the wrong reader
+         * -- and no single record is at fault. Reporting it under the refused-record event would name a
+         * record that is well formed, sending an operator to inspect bytes that are correct, and would also
+         * make the event's own meaning unreliable: a query for refused records would return files.
+         *
+         * <p>⚠️ Assumptions: the absence is asserted rather than left implicit, because the natural way to
+         * write the reporting is to catch the widest refusal type the pass raises -- and every one of the
+         * located refusals is a subtype of the platform's illegal-argument type, which the stride fault
+         * also raises. A reporting step written that way would pass every other case in this class and
+         * quietly invent an ordinal here.
+         *
+         * <p>⚠️ Assumptions: the fault is nonetheless RECORDED, under the file-scope event, and both halves
+         * are asserted together. Withholding the ordinal was only half of what this fault needed: before the
+         * file-scope line existed, a truncated extract reached an operator as a chain of type names, and the
+         * one sentence that says which stride the file failed to be a multiple of -- the sentence that turns
+         * "the load failed" into "you were handed a truncated file" -- was composed, raised and never
+         * logged. A case asserting the absence alone would have been satisfied by silence.
+         *
+         * @throws AssertionError if the stride fault does not propagate, is recorded as a refused RECORD, or
+         *     is not recorded at all
+         */
+        @Test
+        @DisplayName("a whole-file length fault is recorded at file scope, naming no record")
+        void aWholeFileLengthFaultIsNotRecordedAsARefusedRecord() {
+            byte[] whole = bytes(DETAIL_FIXTURE);
+            byte[] truncated = Arrays.copyOf(whole, whole.length - 1);
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE),
+                            new ByteArrayInputStream(truncated)))
+                    .withMessageContaining("whole number of " + DETAIL_STRIDE + "-byte records");
+
+            assertThat(messagesAt(Level.ERROR))
+                    .as("no record is at fault here, so no record may be named")
+                    .noneMatch(line -> line.contains(REFUSAL_EVENT));
+            // WHY : ⚠️ Trade-offs: the line is asserted by its WORDS and not by the stride, because the
+            //       redaction that keeps identifiers out of this field is content-blind and replaces every
+            //       run of three or more digits -- so the harmless 206 is hashed along with anything
+            //       harmful. That cost is accepted knowingly: a rule that could tell a record length from
+            //       an account identifier would have to understand the message, and the message is composed
+            //       in a dozen places. The reader still learns the decisive fact, that the file is not a
+            //       whole number of records and is therefore truncated or mis-handed, and the stride itself
+            //       is a layout constant available from the copybook. The RAISED message is asserted with
+            //       the stride just above, which is where an exact figure belongs.
+            assertThat(messagesAt(Level.ERROR))
+                    .as("the file-level condition must still reach the operator who holds the file")
+                    .anySatisfy(line -> assertThat(line)
+                            .contains(EXTRACT_REFUSAL_EVENT)
+                            .contains("must hold a whole number of")
+                            .contains("-byte records"));
+        }
+
+        /**
+         * An unreadable extract is recorded under the same file-scope event as a mis-handed one.
+         *
+         * <p>⚠️ Assumptions: an unreadable stream is a file-scope fault by the same test as a wrong total
+         * length -- the extract could not be consumed and no record is to blame -- so it is asserted to
+         * reach the same event rather than a third one. It is raised as a distinct TYPE in the source only
+         * because a read failure is not an illegal argument and cannot share that clause, and a reader
+         * comparing the two clauses should see one event name across both.
+         *
+         * @throws AssertionError if the read failure is unrecorded, or is recorded as a refused record
+         */
+        @Test
+        @DisplayName("an unreadable extract is recorded under the file-scope event too")
+        void anUnreadableExtractIsRecordedAtFileScope() {
+            LoadService subject = loader();
+            InputStream unreadable = new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    throw new IOException("the extract could not be read");
+                }
+            };
+
+            assertThatExceptionOfType(UncheckedIOException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE), unreadable));
+
+            assertThat(messagesAt(Level.ERROR))
+                    .as("one event name must cover both ways an extract can be unusable")
+                    .anySatisfy(line -> assertThat(line).contains(EXTRACT_REFUSAL_EVENT));
+            assertThat(messagesAt(Level.ERROR))
+                    .as("a read failure names no record either")
+                    .noneMatch(line -> line.contains(REFUSAL_EVENT));
+        }
+    }
+
 
     /**
      * Asserts an unexpected read condition is a failure here, where the reference wrote a line and went on.

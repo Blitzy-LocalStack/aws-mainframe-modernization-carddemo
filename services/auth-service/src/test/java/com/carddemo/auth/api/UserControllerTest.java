@@ -34,6 +34,7 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
@@ -43,8 +44,10 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.UUID;
@@ -353,6 +356,47 @@ class UserControllerTest {
      * first.</p>
      */
     private static final String MESSAGE_IDENTIFIER_REQUIRED = "User ID can NOT be empty...";
+
+    /**
+     * The width a user identifier carries, restated here so the over-length case is built from a bound.
+     *
+     * <p>Assumptions: eight is {@code SEC-USR-ID PIC X(08)} at {@code app/cpy/CSUSR01Y.cpy} L18 and the
+     * maximum the committed contract declares for the path parameter. It is restated rather than read
+     * from the adapter because the adapter's own constant is private to it, and a test that reached
+     * around that visibility would agree with the adapter by construction instead of asserting the
+     * published figure.</p>
+     */
+    private static final int USER_ID_WIDTH = 8;
+
+    /**
+     * The authored sentence a path identifier longer than its key reports.
+     *
+     * <p>Assumptions: the width is interpolated from {@link #USER_ID_WIDTH} exactly as the adapter
+     * interpolates it from its own constant, so the two cannot state different numbers while both
+     * claiming to be the published figure.</p>
+     */
+    private static final String MESSAGE_IDENTIFIER_TOO_LONG =
+            "User ID must be at most " + USER_ID_WIDTH + " characters...";
+
+    /** The authored sentence an unopenable page position reports, naming no internal bound. */
+    private static final String MESSAGE_CURSOR_TOO_LONG =
+            "Page position is not valid. Please start again ...";
+
+    /** The authored sentence a direction outside the published enumeration reports. */
+    private static final String MESSAGE_DIRECTION_DOMAIN =
+            "Page direction must be next or previous ...";
+
+    /** The authored sentence an absent or negative deletion confirmation reports. */
+    private static final String MESSAGE_CONFIRMATION_REQUIRED =
+            "Confirm the deletion to delete this user ...";
+
+    /**
+     * The regular expression that enforces the direction domain, which no response body may disclose.
+     *
+     * <p>Assumptions: this is the value the framework's own default refusal interpolated into the message
+     * it sent callers, so it is named here as a forbidden fragment rather than as an expected one.</p>
+     */
+    private static final String DIRECTION_DOMAIN_EXPRESSION = "next|previous";
 
     /**
      * A store diagnostic that must never reach a response body.
@@ -850,9 +894,74 @@ class UserControllerTest {
                         .param("cursor", SEALED_SUPPLIED_CURSOR)
                         .param("direction", DIRECTION_UNSUPPORTED)
                         .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isBadRequest())
+                // Refactoring Rationale: the sentence is asserted as well as the status, and it was not
+                //   before. The status alone passed while the body carried the framework's own default --
+                //   'must match "next|previous"' -- which put a regular expression in front of a caller
+                //   and read in a different voice from every other refusal this adapter emits.
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(MESSAGE_DIRECTION_DOMAIN));
 
         verify(users, never()).list(any(), any(), any());
+    }
+
+    /**
+     * Asserts every parameter refusal carries an authored sentence and none carries constraint grammar.
+     *
+     * <p>⚠️ Refactoring Rationale: this case exists because the four parameter constraints on the adapter
+     * carried no sentence of their own while every member of every request record beside them carried
+     * one, so bean validation's own default text reached callers in the same {@code fieldErrors} array as
+     * the reference's authored wording. Measured against the running service, the five refusals below
+     * answered {@code 'must match "next|previous"'}, {@code 'size must be between 0 and 256'},
+     * {@code 'size must be between 0 and 8'}, {@code 'must not be null'} and {@code 'must be true'}.
+     * Two of those disclosed an internal bound and one disclosed the expression enforcing a domain.</p>
+     *
+     * <p>Assumptions: the assertion has two halves and needs both. Asserting the authored sentence proves
+     * the message reaches the body; asserting the ABSENCE of the framework's vocabulary proves no second
+     * constraint on the same parameter is still answering in its own voice, which is exactly the state a
+     * partially-annotated parameter would be in and which the first half alone cannot detect -- the
+     * ordering of two violations on one parameter is not fixed.</p>
+     *
+     * <p>Assumptions: the forbidden fragments are matched as substrings of the WHOLE body rather than of
+     * the one entry, so a default arriving under a different key is caught too.</p>
+     *
+     * @throws Exception if a request cannot be performed
+     */
+    @Test
+    @DisplayName("every parameter refusal carries an authored sentence and no constraint grammar")
+    void everyParameterRefusalCarriesAnAuthoredSentence() throws Exception {
+        stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
+
+        // Assumptions: the over-length values are built from the bound rather than written out, so the
+        //   case cannot silently stop exercising the constraint if a bound moves. One character past the
+        //   limit is the smallest input that violates it, which keeps the case about the boundary.
+        Map<MockHttpServletRequestBuilder, String> refusals = new LinkedHashMap<>();
+        refusals.put(listRequest().param("direction", DIRECTION_UNSUPPORTED), MESSAGE_DIRECTION_DOMAIN);
+        refusals.put(listRequest().param("cursor", "c".repeat(CursorToken.MAX_TOKEN_LENGTH + 1)),
+                MESSAGE_CURSOR_TOO_LONG);
+        refusals.put(readRequest("A".repeat(USER_ID_WIDTH + 1)), MESSAGE_IDENTIFIER_TOO_LONG);
+        refusals.put(delete(UserController.COLLECTION_PATH + "/" + STORED_IDENTIFIER),
+                MESSAGE_CONFIRMATION_REQUIRED);
+        refusals.put(delete(UserController.COLLECTION_PATH + "/" + STORED_IDENTIFIER)
+                .param("confirmed", "false"), MESSAGE_CONFIRMATION_REQUIRED);
+
+        for (Map.Entry<MockHttpServletRequestBuilder, String> refusal : refusals.entrySet()) {
+            String body = mockMvc
+                    .perform(refusal.getKey().header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                    .andExpect(status().isBadRequest())
+                    .andReturn().getResponse().getContentAsString();
+
+            assertThat(body)
+                    .as("the authored sentence must reach the body for %s", refusal.getValue())
+                    .contains(refusal.getValue());
+            assertThat(body)
+                    .as("no refusal may answer in the constraint framework's own voice")
+                    .doesNotContain("must match", "size must be between", "must not be null",
+                            "must be true", DIRECTION_DOMAIN_EXPRESSION);
+        }
+
+        verify(users, never()).list(any(), any(), any());
+        verify(users, never()).read(any());
+        verify(users, never()).delete(any());
     }
 
     /**
@@ -1574,6 +1683,60 @@ class UserControllerTest {
                 .containsAll(memberNamesOf(body));
         assertThat(declaredComponentsOf(CreateUserRequest.class))
                 .containsAll(fieldErrorKeysOf(body));
+    }
+
+    /**
+     * Asserts the container's ERROR dispatch is not refused by the chain, so a rendering failure cannot
+     * be reported to the caller as an authorization failure.
+     *
+     * <p>Refactoring Rationale: this case exists because that is exactly what happened. This chain
+     * authorizes every dispatcher type, and when the framework could not write a response -- reachable
+     * by a caller whose accept header admits nothing the converters produce -- the container
+     * re-dispatched to its own error path, no rule matched it, and the denying catch-all answered a
+     * caller holding a valid administrator token with 403 "not authorized", on the path {@code /error}
+     * rather than its own, with an empty correlation identifier.</p>
+     *
+     * <p>Assumptions: the assertion is that the answer is NOT the authorization refusal, not that it is
+     * any particular status. What the error dispatch renders depends on what is mounted at that path,
+     * which a slice does not have; what matters here is that the decision is no longer taken by the
+     * security chain.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an error dispatch is not refused as an authorization failure")
+    void anErrorDispatchIsNotRefusedAsAnAuthorizationFailure() throws Exception {
+        int status = mockMvc.perform(get("/error").with(request -> {
+                    request.setDispatcherType(DispatcherType.ERROR);
+                    return request;
+                }))
+                .andReturn()
+                .getResponse()
+                .getStatus();
+
+        assertThat(status).isNotEqualTo(HttpStatus.FORBIDDEN.value());
+        assertThat(status).isNotEqualTo(HttpStatus.UNAUTHORIZED.value());
+    }
+
+    /**
+     * Asserts a caller addressing the error path DIRECTLY is still refused, so the rule above widened
+     * nothing.
+     *
+     * <p>Assumptions: the permit matches the dispatcher TYPE and not the path, and this case is what
+     * makes that distinction observable. A path-based permit would let any caller provoke the
+     * container's own error body, which is not the shape any published contract of this service
+     * declares.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a direct request to the error path is still refused by the catch-all")
+    void aDirectRequestToTheErrorPathIsStillRefused() throws Exception {
+        stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
+
+        mockMvc.perform(get("/error").header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(GlobalExceptionHandler.CODE_FORBIDDEN));
     }
 
     /**

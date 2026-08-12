@@ -219,16 +219,20 @@ public class UserMapper {
      *
      * @param request the validated {@code CreateUserRequest} whose four components have already
      *     satisfied their declared constraints, so none is re-checked here
+     * @param userId the stored key the row is to carry, already folded and trimmed by
+     *     {@code com.carddemo.auth.service.UserService}; supplied separately from the request for the
+     *     reason recorded in the body below
      * @param cognitoSub the {@code UUID} subject of the pool account created for this user, as
      *     returned by {@code com.carddemo.auth.service.CognitoUserProvisioningService}
-     * @return a transient {@code User} carrying the four submitted values and that subject, ready to
-     *     be persisted and holding no generated state of its own
-     * @throws NullPointerException when {@code request} or {@code cognitoSub} is null, either of
-     *     which would otherwise produce a row violating a {@code NOT NULL} column at flush time and
-     *     report the fault a transaction away from the code that caused it
+     * @return a transient {@code User} carrying the supplied key, the three remaining submitted values
+     *     and that subject, ready to be persisted and holding no generated state of its own
+     * @throws NullPointerException when {@code request}, {@code userId} or {@code cognitoSub} is null,
+     *     any of which would otherwise produce a row violating a {@code NOT NULL} column at flush time
+     *     and report the fault a transaction away from the code that caused it
      */
-    public User toEntity(CreateUserRequest request, UUID cognitoSub) {
+    public User toEntity(CreateUserRequest request, String userId, UUID cognitoSub) {
         Objects.requireNonNull(request, "request must not be null when building a user row");
+        Objects.requireNonNull(userId, "userId must not be null when building a user row");
         Objects.requireNonNull(cognitoSub, "cognitoSub must not be null when building a user row");
         // Refactoring Rationale: this write path has no credential step, and that is the single
         //   place where parity with the baseline is declined deliberately rather than preserved. The
@@ -280,8 +284,28 @@ public class UserMapper {
         //   app/cbl/COUSR01C.cbl L153 to L160 writing five moves at L154 to L158 of which none names
         //   it. With four of the six fields carried across, L21 and L23 are the two omissions, and
         //   both are accounted for immediately above.
+        // Refactoring Rationale: the key is taken from the userId parameter and NOT from
+        //   request.userId(), and that substitution is the whole reason the parameter exists. The
+        //   stored key is the case-folded, trimmed form of what the caller typed, and the calling
+        //   service derives it once so that its duplicate probe, its pool-account username and this
+        //   row all name the same value. Reading the raw request component here would have written a
+        //   row under a key the probe had already answered "free" for a different spelling of, which
+        //   is the defect that let two rows exist for one identifier and let a later update reach
+        //   the wrong one.
+        // Alternatives Considered: folding the value HERE instead, so the mapper owned the
+        //   derivation. Rejected because the probe and the provider call happen before this method is
+        //   reached, so a fold applied only here would still leave those two using the unfolded form
+        //   -- the invariant has to hold across all three uses, and only the service sees all three.
+        //   A mapper that re-derived a value its caller had already derived would also be a second
+        //   definition of what a key is, which is precisely what the single named derivation on the
+        //   service replaced.
+        // Assumptions: passing a service-derived identifier into a mapper is the established shape in
+        //   this codebase rather than a local exception -- com.carddemo.transaction.mapper's
+        //   bill-payment and transaction-add mappers each take a transaction identifier their service
+        //   generated, for the same reason: the value is decided by the caller and the mapper must not
+        //   invent or re-derive it.
         return new User(
-                request.userId(),
+                userId,
                 request.firstName(),
                 request.lastName(),
                 request.userType(),

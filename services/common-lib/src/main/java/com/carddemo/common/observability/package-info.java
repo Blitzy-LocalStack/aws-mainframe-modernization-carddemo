@@ -185,12 +185,33 @@
  *
  * <h2>Contents of this package</h2>
  *
- * <p>This package holds <b>three</b> production classes. {@code MetricsConfig} contributes the three
+ * <p>This package holds <b>four</b> production classes. {@code MetricsConfig} contributes the three
  * tags named above to the meter registry. {@code LogSafeText} neutralises the control characters that
  * would let a value of external provenance forge a second log record, which is the concern named
  * CWE-117. {@code ThrowableDigest} reduces a caught failure to its chain of type names and originating
- * frames so that no library-composed message text reaches a log line. With this descriptor beside them
- * the directory holds four {@code .java} files and no subdirectory.</p>
+ * frames so that no library-composed message text reaches a log line. {@code FailureSummary} renders the
+ * one thing that chain omits -- the failure's own deepest message -- bounded, sanitised through
+ * {@code LogSafeText} and card-masked, because a generic transport type carries its whole diagnosis in
+ * its message and a digest of it names only that a client-side fault occurred. With this descriptor
+ * beside them the directory holds five {@code .java} files and no subdirectory.</p>
+ *
+ * <p>⚠️ Assumptions: {@code FailureSummary} offers TWO renderings of that message and the difference
+ * between them is who composed it. Its plain rendering serves a failure whose message was written by a
+ * TRANSPORT -- endpoints, host names, certificate subjects -- where card masking is sufficient. Its
+ * redacting rendering additionally replaces every run of three or more digits, and serves a failure whose
+ * message was written by a DATABASE DRIVER, a CODEC or a VALIDATION LIBRARY over a record this process
+ * received, because those messages quote the values they could not handle and on this schema those values
+ * are account identifiers at eleven digits and transaction identifiers at nine -- neither of which the
+ * card-number rule touches, by that rule's own deliberate design. Refactoring Rationale: the redacting
+ * rendering was added because two sites had been choosing between a line with no message at all and a
+ * line that could quote a key value, and both had chosen the first, leaving an operator with a driver
+ * exception type and no way to learn that the condition was a numeric overflow.</p>
+
+ * <p>Assumptions: the two failure renderings are SEPARATE types and the separation is the point. A
+ * caller reaching for the safe rendering must not be able to reach the text-carrying one by accident,
+ * and a single class answering both questions would leave every call site's disclosure decision implicit
+ * in which overload it happened to pick. Two names make the decision visible in the code that takes
+ * it.</p>
  *
  * <p>Refactoring Rationale: this paragraph read "exactly one production class, {@code MetricsConfig}"
  * and declared that pair "the closed set: a second production class here would mean either a fourth tag
@@ -208,19 +229,20 @@
  * service token, a keyset cursor token, a message-expiry rule, a messaging correlation identifier, a
  * masked card number, a sealed selector, an inquiry request codec, a record-conflict signal, a
  * client-input signal, a field-ordering rule, a security error handler pair and the two named above --
- * and the online-write gate with its three companions -- so the delivered tree holds
- * <strong>forty production classes, eleven package descriptors and fifty-one compilation
+ * and the online-write gate with its three companions, and the bounded failure-message rendering beside
+ * the digest -- so the delivered tree holds
+ * <strong>forty-four production classes, eleven package descriptors and fifty-five compilation
  * units</strong>:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 3 + time 1 + validation 2 + messaging 4 + control 4 = 43
- * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 4 + time 2 + validation 3 + messaging 5 + control 5 = 54
+ * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
+ * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
  * </pre>
  *
  * <p>This package's own share of that total is:
  *
  * <pre>
- * this package: observability 3 production + 1 charter = 4 compilation units
+ * this package: observability 4 production + 1 charter = 5 compilation units
  * </pre>
  *
  * <p>Refactoring Rationale: this paragraph previously reported that five sibling charters still

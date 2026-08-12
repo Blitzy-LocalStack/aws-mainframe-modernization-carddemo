@@ -16,13 +16,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.context.MessageSourceResolvable;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.ObjectError;
 import org.springframework.validation.method.ParameterErrors;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingMatrixVariableException;
 import org.springframework.web.bind.MissingRequestCookieException;
@@ -31,8 +37,14 @@ import org.springframework.web.bind.MissingRequestValueException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
+import tools.jackson.databind.exc.UnrecognizedPropertyException;
 
 /**
  * The single advice that renders every failed request of every migrated service as an
@@ -75,13 +87,20 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
  * do and disclose the internal shape of the store to an untrusted caller.</p>
  *
  * <p>Assumptions: the request path is the one caller-influenced value this class carries, and it is
- * narrowed once at {@link #pathOf(HttpServletRequest)} rather than at each of the eighteen sites that
- * read it. A resolved path can hold a primary account number in full -- the published card contract
- * declares its path parameter {@code pattern '^[0-9]{16}$'} -- so an unnarrowed read would put that
- * number into nine operational log lines as well as nine response bodies. Narrowing at the sink is
- * what makes the guarantee survive the next handler added to this advice: a new site inherits the
- * masking instead of having to remember it, which is the same reason this class exists rather than an
- * emission call written at each error path.</p>
+ * narrowed once at {@link #pathOf(HttpServletRequest)} rather than at each site that reads it. A
+ * resolved path can hold a primary account number in full -- the published card contract declares its
+ * path parameter {@code pattern '^[0-9]{16}$'} -- so an unnarrowed read would put that number into an
+ * operational log line and a response body at every one of them. Narrowing at the sink is what makes
+ * the guarantee survive the next handler added to this advice: a new site inherits the masking instead
+ * of having to remember it, which is the same reason this class exists rather than an emission call
+ * written at each error path.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph used to state the number of reading sites and the number of
+ * log lines and response bodies an unnarrowed read would reach. Both figures had already drifted from
+ * the class as handlers were added, and neither was checked by anything. They are removed rather than
+ * corrected, because the guarantee does not depend on how many sites there are -- it depends on there
+ * being one sink -- and a figure nothing re-measures is a figure that will be wrong again after the
+ * next handler.</p>
  *
  * <p>Assumptions: a machine-readable code and the sentence a person reads are separate members of the
  * emitted shape, never one composed string, because the baseline's own structured error record keeps
@@ -383,6 +402,39 @@ public class GlobalExceptionHandler {
     public static final String MESSAGE_NOT_FOUND = "The requested record was not found";
 
     /**
+     * The sentence a request whose body media type this system does not accept is answered with.
+     *
+     * <p>Assumptions: the sentence names the HEADER at fault and not the value the caller sent, so no
+     * caller-authored text is echoed into a response body. What is acceptable is not restated here
+     * either, because each service's OpenAPI document declares the media type of every operation and a
+     * sentence repeating it would be a second place for that to drift; the {@code Accept} response header
+     * this advice sets carries the machine-readable answer.</p>
+     */
+    public static final String MESSAGE_UNSUPPORTED_MEDIA_TYPE =
+            "The request Content-Type is not supported";
+
+    /**
+     * The sentence a request whose method the addressed path does not serve is answered with.
+     *
+     * <p>Assumptions: the sentence does not name the method the caller used, so an unusual or invented
+     * method token is not echoed into a response body. The methods that ARE served travel in the
+     * {@code Allow} header this advice sets, which is where a client looks for them.</p>
+     */
+    public static final String MESSAGE_METHOD_NOT_ALLOWED =
+            "The request method is not allowed for this path";
+
+    /**
+     * The sentence a request addressing a path this service does not serve is answered with.
+     *
+     * <p>Assumptions: this is deliberately DISTINCT from {@link #MESSAGE_NOT_FOUND}, which is the answer
+     * to a record that does not exist. Both are 404s and both carry {@link ApiError#CODE_NOT_FOUND},
+     * because from a client's position each says "there is nothing here", but the two are different
+     * failures with different corrections — one is a wrong identifier and the other a wrong path — and a
+     * single sentence would leave a caller unable to tell which it had.</p>
+     */
+    public static final String MESSAGE_NO_SUCH_PATH = "The requested path is not served";
+
+    /**
      * The message returned when an authenticated caller is not permitted the operation.
      *
      * <p>Assumptions: the message says the caller is not permitted and never says why, and it is the
@@ -400,6 +452,43 @@ public class GlobalExceptionHandler {
      * each correspond to a shape a service builds directly.</p>
      */
     public static final String CODE_FORBIDDEN = "CARDDEMO-0403";
+
+    /**
+     * The message returned when the caller will accept no representation this service can produce.
+     *
+     * <p>Assumptions: the sentence states what this service produces rather than what the caller asked
+     * for, because echoing the requested type would put a caller-supplied header value into a response
+     * body, and the narrowing this advice applies to the request path exists precisely so that
+     * caller-supplied text does not travel back out.</p>
+     */
+    public static final String MESSAGE_NOT_ACCEPTABLE = "This service can answer only with JSON";
+
+    /**
+     * The code borne by a request that will accept no representation this service can produce.
+     *
+     * <p>Assumptions: distinct from {@link ApiError#CODE_UNSUPPORTED_MEDIA_TYPE} because the two describe
+     * opposite directions of one negotiation -- what the caller SENT against what the caller will
+     * ACCEPT -- and a caller that collapsed them would retry with a corrected body when the body was
+     * never the problem.</p>
+     */
+    public static final String CODE_NOT_ACCEPTABLE = "CARDDEMO-0406";
+
+    /**
+     * The message returned when a request body carries a member the request shape does not declare.
+     *
+     * <p>Assumptions: the same sentence serves as the aggregate and as the field entry's help text,
+     * which is the one place in this class where those two coincide. It is deliberate: the aggregate
+     * summarises what is wrong with the body and the entry says what is wrong with that member, and for
+     * this refusal those are the same statement -- the member should not be there. A different aggregate
+     * would have to say something the entry does not, and there is nothing further to say.</p>
+     *
+     * <p>Assumptions: the sentence does not name the members the shape DOES declare. The published
+     * contract is where a caller reads them, and a body may declare a dozen, so a response enumerating
+     * them would be both wider than the rendering band and a second place able to disagree with the
+     * contract.</p>
+     */
+    public static final String MESSAGE_UNKNOWN_MEMBER =
+            "That member is not part of this request body";
 
     /**
      * The message returned when a mutating request arrives while the online-write window is closed.
@@ -552,8 +641,8 @@ public class GlobalExceptionHandler {
      * those identifiers are themselves protected, and the routes that carry them are exactly the ones
      * a diagnostic must not disclose. The consequence was concrete: {@code /api/v1/customers/123456789}
      * and {@code /api/v1/accounts/12345678901} were published in full, in a response body and in a log
-     * line, on every 400, 401, 403, 404 and 409 those routes can return. Nine is the width of
-     * {@code CUST-ID PIC 9(09)} at line 4 of {@code app/cpy/CVCUS01Y.cpy}, the NARROWEST protected
+     * line, on every 400, 401, 403, 404, 405, 406, 409 and 415 those routes can return. Nine is the
+     * width of {@code CUST-ID PIC 9(09)} at line 4 of {@code app/cpy/CVCUS01Y.cpy}, the NARROWEST protected
      * numeric identifier in the migration, so a threshold there is the first one that covers all three
      * of customer, account and card.</p>
      *
@@ -894,7 +983,8 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Renders an unreadable request body as HTTP 400 without a per-field array.
+     * Renders an unreadable request body as HTTP 400, naming the offending member when the body carried
+     * one the request shape does not declare.
      *
      * <p>Assumptions: the caught exception's own text is never returned. A body that fails to parse
      * produces a message naming the offending token and the position, which for a payload carrying a
@@ -903,10 +993,20 @@ public class GlobalExceptionHandler {
      * one layer down, where the money deserialiser reports a stable reason instead of the value it
      * could not read.</p>
      *
-     * @param failure the parse failure the framework raised; logged, never rendered
+     * <p>Refactoring Rationale: an unknown member is separated out of the generic case here because
+     * every published contract seals its request schemas against unknown properties, and a caller that
+     * sends one has to be told which one. Runtime testing found the cost of not doing so: a search body
+     * carrying three members the shape does not declare was answered HTTP 200 with a page assembled from
+     * the defaults, so a client that had mistaken this system's paging model for an offset one received
+     * a plausible answer to a question it had not asked and had nothing in the response to tell it
+     * so.</p>
+     *
+     * @param failure the parse failure the framework raised; its cause is examined for an unknown-member
+     *     report and its own text is never rendered
      * @param request the request that failed, read only for its path
-     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}, the malformed-request sentence and an
-     *     empty field array, never {@code null}
+     * @return HTTP 400 carrying {@link ApiError#CODE_VALIDATION}; with one field entry naming the
+     *     offending member when the cause reported one, and the malformed-request sentence with an empty
+     *     field array otherwise. Never {@code null}
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiError> onUnreadableBody(HttpMessageNotReadableException failure,
@@ -920,9 +1020,65 @@ public class GlobalExceptionHandler {
         LOG.warn("event=api.request.unreadable code={} status=400 path={} exception={}",
                 ApiError.CODE_VALIDATION, pathOf(request), failure.getClass().getName());
 
+        // WHY : Assumptions: the cause is examined by TYPE rather than the message being pattern-matched
+        //       for a member name, and the examination is a test rather than a catch -- this class's
+        //       charter records why no handler here wraps its body in a try-catch. The unknown-member
+        //       report is the one part of a parse failure that is safe to reflect, because a property NAME
+        //       is a key the caller chose and never a value it sent; the position, the token and the
+        //       surrounding text all belong to the value and none of them is read.
+        String member = unknownMemberOf(failure);
+        if (member != null) {
+            List<ApiError.FieldError> fieldErrors = List.of(new ApiError.FieldError(member,
+                    FieldValidationFlag.NOT_OK, MESSAGE_UNKNOWN_MEMBER));
+
+            return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(MESSAGE_UNKNOWN_MEMBER,
+                    HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
+                    this.clock));
+        }
+
         return ResponseEntity.badRequest().body(ApiError.of(ApiError.CODE_VALIDATION,
                 MESSAGE_MALFORMED_REQUEST, HttpStatus.BAD_REQUEST.value(), correlationId(),
                 pathOf(request), this.clock));
+    }
+
+    /**
+     * Extracts the name of an undeclared body member from a parse failure, when that is what failed.
+     *
+     * <p>Assumptions: the returned name is sanitised of control characters and bounded to the published
+     * rendering width, because it is caller-supplied text on its way into a response body. It is the
+     * second such value this class carries, the request path being the first, and it is admitted on a
+     * narrower ground: a member NAME is a key the caller chose, so it cannot be the account number or
+     * the amount that the value beside it might be.</p>
+     *
+     * <p>Trade-offs: only the FIRST undeclared member is reported, even when a body carries several. The
+     * deserialiser stops at the first one it cannot bind, so the others have not been seen and reporting
+     * them would mean parsing the body a second time with the rule relaxed -- which is the one thing
+     * this refusal exists to avoid doing.</p>
+     *
+     * @param failure the parse failure to examine, which may carry no cause at all
+     * @return the sanitised, bounded name of the undeclared member; {@code null} when the failure is not
+     *     an undeclared-member report or when the reported name is absent or blank, in which case the
+     *     caller falls back to the generic refusal
+     */
+    private static String unknownMemberOf(HttpMessageNotReadableException failure) {
+        if (!(failure.getCause() instanceof UnrecognizedPropertyException unknown)) {
+            return null;
+        }
+
+        String sanitized = LogSafeText.sanitize(unknown.getPropertyName());
+        if (sanitized == null || sanitized.isBlank()) {
+            return null;
+        }
+
+        // WHY : Assumptions: the bound is the published rendering width rather than a number written
+        //       here, and the choice of that width is the argument for it: a member name wider than the
+        //       whole message band cannot be a member of any published body, and truncating there keeps
+        //       the entry inside the one width contract this package states. The alternative -- refusing
+        //       an over-wide name outright and falling back to the generic sentence -- was rejected
+        //       because the leading characters are usually enough for a caller to recognise its own typo.
+        return sanitized.length() <= ApiError.MESSAGE_RENDERING_WIDTH
+                ? sanitized
+                : sanitized.substring(0, ApiError.MESSAGE_RENDERING_WIDTH);
     }
 
     /**
@@ -957,6 +1113,213 @@ public class GlobalExceptionHandler {
                 rendered == null ? MESSAGE_NOT_FOUND : rendered, HttpStatus.NOT_FOUND.value(),
                 correlationId(), pathOf(request), this.clock));
     }
+
+    /**
+     * Renders a request naming a path no operation is mounted at as HTTP 404.
+     *
+     * <p>Refactoring Rationale: this arm did not exist, and every request for an unpublished path was
+     * therefore answered by {@link #onUnexpectedFailure(Exception, HttpServletRequest)} as HTTP 500 with
+     * the critical severity and the abend block reserved for a service that has actually broken -- and
+     * logged at error level with an abend code. Two separate things were wrong with that. A path that does
+     * not exist is not a fault in this service, so the status class told the caller to retry a request
+     * that can never succeed; and the error stream then carried one critical record for every mistyped
+     * URL, every unpublished management id a probe reaches for and every scanner sweep, which is the
+     * condition under which a genuine 500 goes unnoticed in the channel meant to surface it.
+     *
+     * <p>Assumptions: the two declared types are the two the framework can raise for this one condition,
+     * and both are claimed because which of them fires is decided by configuration this advice cannot
+     * see. A service that serves static resources -- which every online service here does, each declaring
+     * its own static locations -- resolves an unmatched path to the resource handler, which raises the
+     * resource type; a service that switched resource handling off would instead reach the dispatcher's
+     * own no-handler condition. Claiming one and not the other would leave the same condition answered
+     * two different ways depending on a property in a file.
+     *
+     * <p>Assumptions: the parameter type is the checked-and-unchecked parent rather than a shared
+     * supertype of the two, because they have none below {@link Exception} -- the resource type is a
+     * runtime status exception and the dispatcher type is a servlet exception. The framework selects this
+     * method from the types named on the annotation rather than from the parameter's own type, so the
+     * mapping stays exact while the signature is loose.
+     *
+     * <p>Assumptions: the sentence is {@link #MESSAGE_NO_SUCH_PATH} rather than the record sentence,
+     * and the distinction is stated on that constant. The code is the shared 404 code, because the code
+     * exists for a client to branch on a STATUS class and both conditions are the same class.
+     *
+     * <p>Trade-offs: the record is written at warning level rather than error, so the two conditions this
+     * advice answers with a 404 -- an absent row and an absent route -- sit at the same level. That gives
+     * up the ability to alert on an unpublished path being probed, which is deliberate: it is ordinary
+     * background traffic on any exposed listener, and an alert that fires on it is an alert that gets
+     * muted.
+     *
+     * @param failure the absent-path failure the framework raised; its type is logged, its message never
+     *     rendered. The declared type is the parent of both claimed types, and the type actually reaching
+     *     this method is the resource handler's own absent-resource exception in every service configured
+     *     as these are
+     * @param request the request that failed, read only for its path
+     * @return HTTP 404 carrying {@link ApiError#CODE_NOT_FOUND}, {@link #MESSAGE_NO_SUCH_PATH} and an
+     *     empty field array, never {@code null}
+     */
+    @ExceptionHandler({NoResourceFoundException.class, NoHandlerFoundException.class})
+    public ResponseEntity<ApiError> onAbsentPath(Exception failure, HttpServletRequest request) {
+
+        // WHY : Assumptions: the path is logged through the same narrowing every other site here uses,
+        //       because an unmatched path is entirely caller-composed and is the one value on this path
+        //       that can carry a primary account number -- a caller reaching for /api/v1/cards/<pan> with
+        //       a typo lands exactly here.
+        LOG.warn("event=api.request.path-absent code={} status=404 path={} exception={}",
+                ApiError.CODE_NOT_FOUND, pathOf(request), failure.getClass().getName());
+
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiError.of(ApiError.CODE_NOT_FOUND,
+                MESSAGE_NO_SUCH_PATH, HttpStatus.NOT_FOUND.value(), correlationId(),
+                pathOf(request), this.clock));
+    }
+
+    /**
+     * Renders a body media type this system does not accept as HTTP 415.
+     *
+     * <p>⚠️ Refactoring Rationale: nothing claimed this condition, so it fell to
+     * {@link #onUnexpectedFailure(Exception, HttpServletRequest)} and a caller declaring
+     * {@code Content-Type: text/plain} was answered <b>500 {@link ApiError#CODE_INTERNAL}</b> with
+     * CRITICAL severity and an abend block. Two things were wrong with that at once, and each is a
+     * failure of a different kind. The caller was told the server had broken when in fact the request was
+     * unacceptable, so a client with retry logic would retry a request that can never succeed. And the
+     * operational record gained an alerting-grade error line for a mis-addressed request, which is
+     * exactly the noise that makes a genuine 500 harder to see. The framework raises this before any
+     * controller is entered, which is why only an advice can answer it.</p>
+     *
+     * <p>Assumptions: the acceptable media types are echoed in the {@code Accept} response header rather
+     * than described in the sentence. That mirrors the framework's own choice in its
+     * {@code ResponseEntityExceptionHandler}, and the values are SERVER-authored — they come from the
+     * handler mappings, not from the request — so echoing them discloses nothing the published contract
+     * does not already state. Alternatives Considered: naming them in the message instead, rejected
+     * because a client parses a header and reads a sentence, and only one of the two can be acted on
+     * automatically.</p>
+     *
+     * <p>Assumptions: the value the caller SENT is neither rendered nor logged. A content type is
+     * caller-authored text, and a request that got this far has had nothing else validated, so it is
+     * treated exactly as the unreadable-body advice above treats a parse token.</p>
+     *
+     * @param failure the media-type refusal the framework raised, read only for the types it supports
+     * @param request the request that failed, read only for its path
+     * @return HTTP 415 carrying {@link ApiError#CODE_UNSUPPORTED_MEDIA_TYPE}, the unsupported-media-type
+     *     sentence and an empty field array, never {@code null}
+     */
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ApiError> onUnsupportedMediaType(HttpMediaTypeNotSupportedException failure,
+            HttpServletRequest request) {
+
+        LOG.warn("event=api.request.unsupported-media-type code={} status={} path={} exception={}",
+                ApiError.CODE_UNSUPPORTED_MEDIA_TYPE, ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS,
+                pathOf(request), failure.getClass().getName());
+
+        ApiError problem = ApiError.of(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE,
+                MESSAGE_UNSUPPORTED_MEDIA_TYPE, ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS,
+                correlationId(), pathOf(request), this.clock);
+
+        // WHY : Assumptions: the header is set only when the framework reported at least one supported
+        // type. An empty Accept header would assert "nothing is acceptable", which is both untrue and
+        // unactionable, so its absence is preferred to an empty value.
+        List<MediaType> supported = failure.getSupportedMediaTypes();
+        if (supported == null || supported.isEmpty()) {
+            return ResponseEntity.status(ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS).body(problem);
+        }
+        return ResponseEntity.status(ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS)
+                .header(HttpHeaders.ACCEPT, MediaType.toString(supported))
+                .body(problem);
+    }
+
+    /**
+     * Renders a method the addressed path does not serve as HTTP 405, naming the methods it does.
+     *
+     * <p>⚠️ Refactoring Rationale: this condition too fell to the unclaimed-failure handler, so a
+     * {@code DELETE} against a path that serves only {@code POST} was answered <b>500</b> with <b>no
+     * {@code Allow} header at all</b>. The missing header is the substantive part: 405 exists precisely to
+     * tell a caller which methods the path serves, and a 500 tells it nothing while implying the server is
+     * at fault.</p>
+     *
+     * <p>Assumptions: the {@code Allow} header is required by the HTTP specification on a 405 and is
+     * composed from the methods the framework's handler mapping reports, which are SERVER-authored. The
+     * method the caller USED is not echoed anywhere, because an invented method token is caller-authored
+     * text and a response header is a place it must not reach.</p>
+     *
+     * @param failure the method refusal the framework raised, read only for the methods it supports
+     * @param request the request that failed, read only for its path
+     * @return HTTP 405 carrying {@link ApiError#CODE_METHOD_NOT_ALLOWED}, the method-not-allowed sentence
+     *     and an empty field array, never {@code null}
+     */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiError> onMethodNotAllowed(HttpRequestMethodNotSupportedException failure,
+            HttpServletRequest request) {
+
+        LOG.warn("event=api.request.method-not-allowed code={} status={} path={} exception={}",
+                ApiError.CODE_METHOD_NOT_ALLOWED, ApiError.METHOD_NOT_ALLOWED_STATUS, pathOf(request),
+                failure.getClass().getName());
+
+        ApiError problem = ApiError.of(ApiError.CODE_METHOD_NOT_ALLOWED, MESSAGE_METHOD_NOT_ALLOWED,
+                ApiError.METHOD_NOT_ALLOWED_STATUS, correlationId(), pathOf(request), this.clock);
+
+        // WHY : Assumptions: the header is omitted rather than emitted empty when the framework reported
+        // no supported method, for the same reason the Accept header above is. An empty Allow header is a
+        // valid HTTP construction meaning "no method is allowed", which would be a stronger claim than
+        // this handler is in a position to make about a path it cannot see the mapping for.
+        Set<HttpMethod> supported = failure.getSupportedHttpMethods();
+        if (supported == null || supported.isEmpty()) {
+            return ResponseEntity.status(ApiError.METHOD_NOT_ALLOWED_STATUS).body(problem);
+        }
+        List<String> allowed = supported.stream().map(HttpMethod::name).toList();
+        return ResponseEntity.status(ApiError.METHOD_NOT_ALLOWED_STATUS)
+                .header(HttpHeaders.ALLOW, String.join(", ", allowed))
+                .body(problem);
+    }
+
+    /**
+     * Renders a request that will accept no representation this service produces as HTTP 406, as JSON
+     * whatever the request asked for.
+     *
+     * <p>Refactoring Rationale: this arm did not exist, and its absence produced the single most
+     * misleading answer this advice could give. The framework raised the condition as a servlet
+     * exception, so the unclaimed-failure handler built a 500 -- and then that response could not be
+     * written either, because the caller's own accept header still admitted nothing the converters
+     * produce. The framework logged a failure inside the handler and handed the request to the
+     * container's error dispatch, which the security chain refused, so a caller holding a perfectly valid
+     * administrator token was told HTTP 403 "not authorized", on the path {@code /error} rather than its
+     * own, with an EMPTY correlation identifier because the filter that publishes it had already
+     * completed. A browser sending its default accept header saw that. Three separate contracts broke at
+     * once: the status class, the authorization semantics and the correlation guarantee.
+     *
+     * <p>Assumptions: the content type is set EXPLICITLY on the response, and that single call is what
+     * makes this arm work at all. The framework's converter selection uses a concrete content type
+     * already present on the response instead of negotiating one against the request, so stating it here
+     * takes the accept header out of the decision; without it this handler would fail exactly where the
+     * generic one did, and the misleading 403 would survive the fix.
+     *
+     * <p>Alternatives Considered: leaving the negotiation alone and instead permitting the container's
+     * error dispatch in each service's security chain, which is the other half of what was observed.
+     * Rejected as the whole answer, and adopted as a complement: permitting the dispatch stops a
+     * rendering failure from being reported as an authorization failure, but it still answers with the
+     * container's own error body rather than the problem shape every published contract declares, and it
+     * still loses the correlation identifier. Both changes are made -- this one so the correct body is
+     * produced, that one so no future rendering failure can masquerade as a refusal.
+     *
+     * @param failure the negotiation refusal the framework raised; its type is logged and its message,
+     *     which enumerates the producible types, is never rendered
+     * @param request the request that failed, read only for its path
+     * @return HTTP 406 carrying {@link #CODE_NOT_ACCEPTABLE}, {@link #MESSAGE_NOT_ACCEPTABLE}, an empty
+     *     field array and an explicit JSON content type, never {@code null}
+     */
+    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
+    public ResponseEntity<ApiError> onUnacceptableRepresentation(
+            HttpMediaTypeNotAcceptableException failure, HttpServletRequest request) {
+
+        LOG.warn("event=api.request.not-acceptable code={} status=406 path={} exception={}",
+                CODE_NOT_ACCEPTABLE, pathOf(request), failure.getClass().getName());
+
+        return ResponseEntity.status(HttpStatus.NOT_ACCEPTABLE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(ApiError.of(CODE_NOT_ACCEPTABLE, MESSAGE_NOT_ACCEPTABLE,
+                        HttpStatus.NOT_ACCEPTABLE.value(), correlationId(), pathOf(request),
+                        this.clock));
+    }
+
 
     /**
      * Renders the three PROVIDER-RAISED conflict conditions as HTTP 409 and every other runtime failure
@@ -2043,9 +2406,9 @@ public class GlobalExceptionHandler {
      * because this advice is the only place that composes it and no mapper runs on a failed request.
      * The card contract selects a card by its primary account number in the path and justifies that
      * selector on the stated guarantee that the diagnostic path member is masked, so the guarantee has
-     * to be kept where the member is built. Without it every card failure -- 400, 401, 403, 404 and
-     * 409 alike -- returned the sixteen digits inside a response body, and a body travels further than
-     * a URL does: into client logs, error trackers and support tickets.</p>
+     * to be kept where the member is built. Without it every card failure -- 400, 401, 403, 404,
+     * 405, 406, 409 and 415 alike -- returned the sixteen digits inside a response body, and a body
+     * travels further than a URL does: into client logs, error trackers and support tickets.</p>
      *
      * <p>Assumptions: what this returns is safe to place in a JSON body and in a log line, and is NOT
      * escaped for HTML. Three things are done to it and they are the three that matter for those two

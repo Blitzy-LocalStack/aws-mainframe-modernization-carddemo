@@ -23,6 +23,7 @@ import com.carddemo.card.dto.CardUpdateRequest;
 import com.carddemo.card.mapper.CardMapper;
 import com.carddemo.card.service.CardAdminViewService;
 import com.carddemo.card.service.CardListService;
+import com.carddemo.card.service.CardRecordConflictException;
 import com.carddemo.card.service.CardUpdateService;
 import com.carddemo.card.service.CardViewService;
 import com.carddemo.common.error.ApiError;
@@ -54,6 +55,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -1076,12 +1078,17 @@ class CardControllerTest {
      *
      * @throws Exception if the request cannot be performed
      */
+    // WHY : Refactoring Rationale: the field entry's message is asserted to be the SENTENCE, where this
+    //       case previously pinned the bare version number the shared renderer writes there. The
+    //       published contract's own conflict example shows the sentence in that position and the version
+    //       inside a card object, and the response now matches the document; the expectation that
+    //       encoded the old behaviour is corrected rather than kept, because keeping it would hold the
+    //       implementation to a shape the contract does not declare.
     @Test
     @DisplayName("a stale revision answers 409 with the reference sentence, character for character")
     void aStaleRevisionIsAnsweredWithTheReferenceSentence() throws Exception {
-        when(writes.update(anyString(), any(CardUpdateRequest.class))).thenThrow(
-                new RecordConflictException(RecordConflictException.Kind.STALE_VERSION,
-                        (long) (STORED_VERSION + 1)));
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(staleRevisionRefusal());
 
         mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1092,8 +1099,7 @@ class CardControllerTest {
                 .andExpect(jsonPath("$.message").value(MESSAGE_RECORD_CHANGED))
                 .andExpect(jsonPath("$.fieldErrors[0].field")
                         .value(GlobalExceptionHandler.FIELD_VERSION))
-                .andExpect(jsonPath("$.fieldErrors[0].message")
-                        .value(String.valueOf(STORED_VERSION + 1)));
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(MESSAGE_RECORD_CHANGED));
 
         assertThat(MESSAGE_RECORD_CHANGED)
                 .isEqualTo(ApiError.COACTUPC_RECORD_CHANGED)
@@ -1101,6 +1107,112 @@ class CardControllerTest {
                 .doesNotEndWith(".");
         assertThat(MESSAGE_RECORD_CHANGED.length())
                 .isLessThanOrEqualTo(ApiError.MESSAGE_RENDERING_WIDTH);
+    }
+
+    /**
+     * The conflict body carries the refreshed card, and the version travels inside it.
+     *
+     * <p>Purpose: the published contract declares the conflict body as the shared error shape plus a
+     * {@code card} member, and its example shows the version inside that member. Runtime testing found
+     * neither: the response was the shared shape alone, with the version formatted into the field entry's
+     * help text, so a client following the document looked for a member that was never sent.</p>
+     *
+     * <p>Assumptions: the shape is asserted as FLAT -- the shared members and {@code card} side by side at
+     * the top level -- because that is what the contract's {@code allOf} composition declares and what a
+     * generated client will bind. A nested {@code error} object would satisfy the Java type and none of
+     * the consumers.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    // WHY : Assumptions: the card's own account number is asserted MASKED. The conflict arises on a route
+    //       carrying the ordinary user authority, so a body that carried the administrative shape would
+    //       let any caller obtain a full account number by provoking a conflict -- which is a disclosure
+    //       widened by a failure path, the least likely place anyone would look for one.
+    @Test
+    @DisplayName("the conflict body carries the refreshed card with the version inside it")
+    void theConflictBodyCarriesTheRefreshedCard() throws Exception {
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(staleRevisionRefusal());
+
+        mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedEdit(STORED_VERSION))
+                        .with(callerWithAuthority(JwtRoleConverter.USER_AUTHORITY)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.card").exists())
+                .andExpect(jsonPath("$.card.version").value(STORED_VERSION + 1))
+                .andExpect(jsonPath("$.card.displayCardNumber")
+                        .value(CardNumberMasker.mask(cardNumber(1))))
+                .andExpect(jsonPath("$.card.cvv").doesNotExist())
+                .andExpect(jsonPath("$.card.cardNumber").doesNotExist())
+                .andExpect(jsonPath("$.error").doesNotExist())
+                .andExpect(jsonPath("$.correlationId").exists())
+                .andExpect(jsonPath("$.abend").doesNotExist());
+    }
+
+    /**
+     * A condition that writes nothing still sends the card member, as null.
+     *
+     * <p>Purpose: the published contract declares the {@code card} member on every conflict body this
+     * route can answer with, and its examples for the conditions that write nothing show it present and
+     * null rather than absent. A body that omitted the member entirely would leave a generated client's
+     * field unset for one condition and populated for another, which is the harder of the two shapes to
+     * consume and the one a reader of the document would not expect.</p>
+     *
+     * <p>Assumptions: presence is asserted against the SERIALISED body rather than through a path
+     * expression, because a path expression cannot separate a member that is present and null from one
+     * that is absent -- both read as no value, so a case written that way would pass against an
+     * implementation that dropped the member. The rendered text can separate them, and it is the text a
+     * caller receives.</p>
+     *
+     * <p>Assumptions: every condition the shared contention type declares is exercised, including the two
+     * this route has no way to raise today, so a condition added to that type later is covered by this
+     * case from the day it is added rather than from the day someone remembers to widen a list.</p>
+     *
+     * @param raised the condition the substituted edit service reports for this run
+     * @throws Exception if the request cannot be performed
+     */
+    // WHY : Assumptions: the body is additionally asserted to carry NO masked card material, because the
+    //       member being null is only half of what matters here. A condition that wrote nothing has no
+    //       refreshed row to report, so a body that named a card at all for one of these would be
+    //       reporting a state that was never read.
+    @ParameterizedTest(name = "{0} sends the card member as null")
+    @EnumSource(RecordConflictException.Kind.class)
+    @DisplayName("a conflict that writes nothing still carries the card member, as null")
+    void aConditionWithNoRefreshedRowStillCarriesTheMemberAsNull(RecordConflictException.Kind raised)
+            throws Exception {
+        when(writes.update(anyString(), any(CardUpdateRequest.class)))
+                .thenThrow(new RecordConflictException(raised));
+
+        MvcResult answered = mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedEdit(STORED_VERSION))
+                        .with(callerWithAuthority(JwtRoleConverter.USER_AUTHORITY)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_CONFLICT))
+                .andExpect(jsonPath("$.abend").doesNotExist())
+                .andReturn();
+
+        assertThat(answered.getResponse().getContentAsString())
+                .contains("\"card\":null")
+                .doesNotContain(CardNumberMasker.mask(cardNumber(1)));
+    }
+
+    /**
+     * Builds the stale-revision refusal the update service raises, carrying a refreshed card.
+     *
+     * @return the refusal naming the version the row now holds and the card as it now stands; never
+     *     {@code null}
+     */
+    // WHY : Assumptions: the refreshed card names a version one higher than the submitted one, which is
+    //       the state a competing write leaves behind. Using the submitted version would make the case
+    //       pass against an implementation that echoed the caller's own number back.
+    // WHY : Assumptions: the card is built by the same helper every other case in this class builds a
+    //       detail with, so its masked member is produced by the masker rather than written by hand and
+    //       cannot drift from what the response record's own constructor accepts.
+    private static CardRecordConflictException staleRevisionRefusal() {
+        return new CardRecordConflictException((long) (STORED_VERSION + 1),
+                savedDetail(1, STORED_VERSION + 1));
     }
 
     /**
@@ -1654,12 +1766,19 @@ class CardControllerTest {
          * @param views the substituted masked-read service; must not be {@code null}
          * @param adminViews the substituted administrative-read service; must not be {@code null}
          * @param writes the substituted edit service; must not be {@code null}
+         * @param conflicts the shared error advice, which composes the shared half of a conflict body;
+         *     must not be {@code null}
          * @return the adapter; never {@code null}
          */
+        // WHY : Assumptions: the advice arrives as a parameter rather than being constructed here, so the
+        //       instance the adapter composes conflict bodies through is the SAME instance this context
+        //       registers as its advice. Two instances would each hold their own clock and would stamp two
+        //       timestamps for one refusal.
         @Bean
         CardController cardController(CardListService reads, CardViewService views,
-                CardAdminViewService adminViews, CardUpdateService writes) {
-            return new CardController(reads, views, adminViews, writes);
+                CardAdminViewService adminViews, CardUpdateService writes,
+                GlobalExceptionHandler conflicts) {
+            return new CardController(reads, views, adminViews, writes, conflicts);
         }
 
         /**

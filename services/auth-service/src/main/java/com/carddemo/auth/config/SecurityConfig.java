@@ -4,6 +4,10 @@ import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.web.CorrelationIdFilter;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.http.HttpServletRequest;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Objects;
@@ -11,6 +15,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.server.PathContainer;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -174,7 +179,8 @@ import org.springframework.web.util.pattern.PathPatternParser;
 public class SecurityConfig {
 
     /**
-     * Builds the authorization decision that admits only the task-local loopback addresses.
+     * Builds the authorization decision that admits only a connection that terminated on the loopback
+     * interface and whose peer is one of the task-local loopback addresses.
      *
      * <p>Assumptions: the ranges are combined with {@code anyOf} rather than tested in sequence, so a
      * stack presenting either address family satisfies the rule and neither has to be guessed at
@@ -187,7 +193,32 @@ public class SecurityConfig {
      * inspectable rule table in this class exists to foreclose; the transaction context exposes its
      * own catch-all decision for exactly that reason.</p>
      *
-     * @return a manager granting access from any address in {@link #LOOPBACK_RANGES}; never {@code null}
+     * <p>⚠️ Refactoring Rationale: the range test alone was NOT sufficient, and the gap was reachable
+     * from anywhere that could open a socket to this task. The range managers decide on the peer address
+     * the servlet request reports, and that value is not necessarily the peer: a servlet container
+     * configured to honour forwarded headers replaces it with whatever the request claims. This runtime
+     * detects a container platform, and on this framework version that detection alone switches the
+     * remote-address valve on with the container's own default trusted-proxy list -- which includes
+     * every private range. Measured before this change, from an ordinary pod address in that range, each
+     * of the six operator endpoints this rule guards answered 401 to a plain request and <b>200</b> to
+     * the same request carrying {@code X-Forwarded-For: 127.0.0.1}, unauthenticated. The valve is now
+     * switched off explicitly in this module's own configuration document, and this decision no longer
+     * depends on that setting being right.</p>
+     *
+     * <p>Assumptions: the added test is that the connection TERMINATED on loopback, which is a property
+     * of the socket rather than of any header, and it is what makes the rule hold even if a deployment
+     * re-enables the valve. A caller that reached this task at its routable address is answered on that
+     * address, so the local address of its connection is the routable one; only a caller that connected
+     * to {@code 127.0.0.1} is answered on {@code 127.0.0.1}. No forwarded header rewrites the local
+     * address, because no proxy convention carries one.</p>
+     *
+     * <p>Assumptions: this costs nothing the existing rule did not already cost, so it cannot break a
+     * consumer that works today. The only configured consumer scrapes {@code https://127.0.0.1} -- see
+     * {@link #LOOPBACK_RANGES} -- and a consumer that instead reached the task's routable address would
+     * already be refused by the peer test, since its peer would be a routable address too.</p>
+     *
+     * @return a manager granting access only to a loopback-terminated connection whose peer is in
+     *     {@link #LOOPBACK_RANGES}; never {@code null}
      */
     public static AuthorizationManager<RequestAuthorizationContext> loopbackOnly() {
         @SuppressWarnings("unchecked")
@@ -195,7 +226,67 @@ public class SecurityConfig {
                 .map(IpAddressAuthorizationManager::hasIpAddress)
                 .toArray(AuthorizationManager[]::new);
 
-        return AuthorizationManagers.anyOf(byRange);
+        AuthorizationManager<RequestAuthorizationContext> peerInRange =
+                AuthorizationManagers.anyOf(byRange);
+
+        // WHY : Assumptions: the two tests are composed by hand rather than with allOf, because the
+        //       socket test is not an AuthorizationManager and wrapping it in one to satisfy that
+        //       combinator would add a type whose only purpose is to be combined. Composing here also
+        //       fixes the ORDER: the socket test is the cheaper of the two and the one a spoofed request
+        //       fails, so it is asked first and the range managers are never consulted for a request
+        //       that cannot be task-local.
+        return (authentication, context) -> {
+            if (!terminatedOnLoopback(context.getRequest())) {
+                return new AuthorizationDecision(false);
+            }
+            return peerInRange.authorize(authentication, context);
+        };
+    }
+
+    /**
+     * Reports whether a request arrived over a connection this task answered on its own loopback
+     * interface, carrying no claim to have been forwarded.
+     *
+     * <p>Assumptions: a forwarded-address header is treated as DISQUALIFYING rather than as information
+     * to interpret. The one configured consumer of the endpoints this guards is task-local and sends no
+     * such header, so its presence means the request passed through something -- and a request that
+     * passed through something is not task-local whatever the header says. Interpreting the header
+     * instead would put this rule back in the business of deciding which hop to believe, which is the
+     * decision that was wrong.</p>
+     *
+     * <p>Assumptions: all three conventional headers are named, not just the one the container's valve
+     * consumes by default. The valve's header name is configurable, the framework's own forwarded-header
+     * handling reads the standardised {@code Forwarded} header instead, and reverse proxies commonly set
+     * {@code X-Real-IP}; naming one would leave the rule dependent on which mechanism a future
+     * deployment enables.</p>
+     *
+     * <p>Assumptions: the local address is parsed rather than string-matched against
+     * {@code "127.0.0.1"}, so the whole {@code 127/8} range and every spelling of the IPv6 loopback are
+     * recognised. The servlet contract specifies this value as a numeric address, so the parse performs
+     * no name resolution; a value that will not parse is treated as not loopback, which refuses rather
+     * than grants.</p>
+     *
+     * @param request the request whose connection is being characterised; must not be {@code null}
+     * @return {@code true} when the request carries no forwarded-address header and this task answered
+     *     it on a loopback address, {@code false} otherwise
+     */
+    private static boolean terminatedOnLoopback(HttpServletRequest request) {
+        for (String claimedOrigin : FORWARDED_ADDRESS_HEADERS) {
+            if (request.getHeader(claimedOrigin) != null) {
+                return false;
+            }
+        }
+
+        try {
+            return InetAddress.getByName(request.getLocalAddr()).isLoopbackAddress();
+        } catch (UnknownHostException | NullPointerException unparseable) {
+            // WHY : Assumptions: an address this task cannot characterise is treated as NOT loopback, so
+            //       the failure mode of the guard is refusal. The alternative -- granting when the value
+            //       cannot be read -- would turn an unfamiliar container stack into an open operator
+            //       namespace, and the cost of being wrong the other way is a metrics scrape that stops,
+            //       which is visible in the collector.
+            return false;
+        }
     }
 
     /**
@@ -336,6 +427,28 @@ public class SecurityConfig {
      * lose its metrics.</p>
      */
     private static final List<String> LOOPBACK_RANGES = List.of("127.0.0.1/32", "::1/128");
+
+    /**
+     * The headers by which a request claims to have been forwarded, any one of which disqualifies it
+     * from the task-local grant above.
+     *
+     * <p>Assumptions: these are claims and not facts. Every one is set by a caller or an intermediary
+     * and none is verifiable by this task, which is precisely why the rule treats their PRESENCE as
+     * disqualifying rather than reading a value out of them. The task-local collector sends none.</p>
+     *
+     * <p>Assumptions: three names are listed because three different mechanisms read them. The servlet
+     * container's remote-address valve consumes {@code X-Forwarded-For} by default; the framework's own
+     * forwarded-header handling reads the standardised {@code Forwarded} header of RFC 7239; and
+     * {@code X-Real-IP} is the convention several reverse proxies set instead of either. Listing only
+     * the one a given deployment happens to enable would make this rule depend on that choice.</p>
+     *
+     * <p>Trade-offs: a genuine operator who reached loopback through a tool that adds one of these
+     * headers unbidden is refused and has to stop adding it. That is accepted: the cost of being wrong
+     * in the other direction is an unauthenticated caller reading the operator namespace from anywhere
+     * that can open a socket to this task, which is what was measured before this list existed.</p>
+     */
+    private static final List<String> FORWARDED_ADDRESS_HEADERS =
+            List.of("X-Forwarded-For", "Forwarded", "X-Real-IP");
 
     /**
      * The sign-on path, reachable without a token.
@@ -719,6 +832,30 @@ public class SecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(requests -> {
+                    // WHY : Refactoring Rationale: the container's ERROR dispatch is admitted, and this
+                    //       rule exists because its absence turned a rendering failure into a refusal.
+                    //       This chain authorizes every dispatcher type, so when the framework cannot
+                    //       write a response -- a caller whose accept header admits nothing the
+                    //       converters produce is the reachable case -- the container re-dispatches the
+                    //       request to its own error path, that path matches no rule below, and the
+                    //       catch-all denies it. A caller holding a valid administrator token was
+                    //       therefore answered 403 "not authorized", on the path /error rather than its
+                    //       own, with an empty correlation identifier because the filter publishing it
+                    //       had already completed. The authorization decision for the original request
+                    //       has already been taken by the time an ERROR dispatch runs, so admitting it
+                    //       grants nothing: it re-renders a response this chain already decided.
+                    // WHY : Assumptions: the rule matches the DISPATCHER TYPE and not the path, which is
+                    //       what keeps a direct request to /error refused by the catch-all exactly as it
+                    //       is today. A path-based permit would open that path to any caller, and the
+                    //       framework's own error body is not the shape this service's contract
+                    //       publishes, so an unauthenticated caller could provoke a body no operation
+                    //       declares.
+                    // WHY : Alternatives Considered: narrowing the chain to the REQUEST dispatch alone,
+                    //       which would have the same effect on this condition. Rejected because it
+                    //       silently withdraws authorization from ASYNC dispatches as well, and an
+                    //       asynchronous handler added later would then run outside every rule in this
+                    //       chain -- a much wider change than the one condition being fixed.
+                    requests.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll();
                     requests.requestMatchers(HEALTH_PATH).permitAll();
                     // WHY : Refactoring Rationale: this rule is built from OPERATOR_PATHS, whose last
                     //       entry is the management NAMESPACE. The preceding revision named only the

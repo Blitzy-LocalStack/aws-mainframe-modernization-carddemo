@@ -26,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -638,10 +639,12 @@ public class UserService {
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if a submitted field is blank or the user type is outside the two
      *     admitted values, carrying the FIRST failing field's own reference sentence and that field's key
-     * @throws DuplicateUserException if a row already carries the submitted identifier, carrying the
-     *     reference sentence for that condition
+     * @throws DuplicateUserException if the identifier is already taken -- by a row this method probed
+     *     for, by a row a concurrent create committed first, or by a pool account under that username --
+     *     carrying the reference sentence for that condition
      * @throws IllegalStateException if the row could not be written or the pool account could not be
-     *     created, carrying the reference sentence for a failed add
+     *     created for any reason other than the identifier being taken, carrying the reference sentence
+     *     for a failed add
      */
     // WHY : Trade-offs: this boundary, and the two other write boundaries in this class, are a decision
     //       taken here rather than a constraint carried over. None of the four user programs issues
@@ -660,7 +663,25 @@ public class UserService {
 
         checkCreateOrder(request);
 
-        String userId = request.userId();
+        // WHY : Refactoring Rationale: the identifier is FOLDED here, and this one line is the whole of a
+        //       defect that could destroy the wrong row. This method used to carry request.userId()
+        //       through unchanged into the duplicate probe, the pool account's username and the inserted
+        //       row, while every other operation in this class folds the identifier it is given -- so a
+        //       user created as "bnd00005" was stored as "bnd00005", could be read by NEITHER case
+        //       because the read folded and missed it, could never sign on because the sign-on path folds
+        //       too, and did not collide with a later create of "BND00005", which then existed alongside
+        //       it. Worse, an update or a delete addressed to the lower-case form folded to the OTHER
+        //       row: DELETE /users/bnd00005 answered 204 having destroyed BND00005.
+        // WHY : Assumptions: the fold belongs at the FIRST use rather than at each of the three, so the
+        //       probe, the provider call and the row cannot disagree about what the key is. Folding at the
+        //       insert alone would leave the pool account under the submitted spelling, and the sign-on
+        //       path -- which folds before calling the provider -- would then present a username the pool
+        //       does not hold.
+        // WHY : Assumptions: it is folded AFTER checkCreateOrder rather than before, because that chain
+        //       reports the reference's blank sentence for an identifier that was never filled in, and a
+        //       fold applied first would turn a blank submission into an empty string with the same
+        //       outcome but one more step between the caller's value and the refusal.
+        String userId = foldedKey(request.userId());
 
         if (exists(userId)) {
             LOG.info("event=auth.user.create-refused reason=duplicate userId={}", userId);
@@ -677,9 +698,15 @@ public class UserService {
         //       previous arrangement could not claim. This method was annotated transactional, so the
         //       provider call and the insert shared one transaction and a connection was held for the
         //       duration of a network round trip to the provider.
-        ProvisionedIdentity identity = provision(request);
+        ProvisionedIdentity identity = provision(userId, request);
 
-        User candidate = this.mapper.toEntity(request, identity.subject());
+        // WHY : Assumptions: the folded key is handed to the mapper EXPLICITLY rather than the mapper
+        //       reading it from the request, so the row carries the same key the probe and the pool call
+        //       used. The sibling contexts pass a service-derived identifier to their mappers the same way
+        //       -- the bill-payment and transaction-add mappers each take a derived transaction id -- so
+        //       this is the established shape for a value the service canonicalises and the mapper must
+        //       not re-derive.
+        User candidate = this.mapper.toEntity(request, userId, identity.subject());
 
         try {
             // WHY : Refactoring Rationale: the row is written by an INSERT statement rather than by the
@@ -737,11 +764,11 @@ public class UserService {
 
             // WHY : Refactoring Rationale: the compensating withdrawal is what makes provisioning before
             //       writing safe. Without it a failed insert would leave a pool account that can
-            //       authenticate and has no row, so a later create for the same identifier would fail on
-            //       the pool's own duplicate-username condition -- which this service deliberately does
-            //       NOT translate into a client-facing conflict, because the authority for a duplicate
-            //       identifier is the primary key on auth.users. The identifier would have become
-            //       permanently unusable through a path no operator could see.
+            //       authenticate and has no row, so a later create for the same identifier would be
+            //       refused on the pool's own duplicate-username condition -- which now answers the
+            //       caller-facing conflict, so the identifier would appear taken while no row named it,
+            //       and only the error-level line that arm writes would say otherwise. The withdrawal is
+            //       what stops that state from arising at all rather than being diagnosed after it has.
         } catch (DataAccessException unwritable) {
             compensateProvisioning(userId, "insert-failed");
             throw unableTo(MESSAGE_UNABLE_TO_ADD, "insert-" + unwritable.getClass().getSimpleName());
@@ -977,7 +1004,9 @@ public class UserService {
      * @param userId the identifier of the row to delete, from the request path; must not be {@code null}
      * @throws NullPointerException if {@code userId} is {@code null}
      * @throws ClientInputException if the identifier is blank
-     * @throws NoSuchElementException if no row carries the identifier
+     * @throws NoSuchElementException if no row carries the identifier, INCLUDING the case where a
+     *     concurrent caller removed it between this call's read and its delete -- the row is absent either
+     *     way, so both report the reference's not-found sentence
      * @throws IllegalStateException if the row could not be deleted, carrying the reference sentence the
      *     delete program writes for that condition -- which names "Update", as that program writes it
      */
@@ -1029,6 +1058,28 @@ public class UserService {
                 //       client may match on. Parity wins because the wording is externally observable and
                 //       the confusion is not, being confined to one failure path whose internal reason
                 //       names the operation exactly.
+                // WHY : ⚠️ Refactoring Rationale: a deletion that removes NO ROW is answered as an absent
+                //       record and not as a failed one, and it used to fall into the arm below. The
+                //       persistence provider counts the rows its statement affected and raises its stale-
+                //       state failure when the count is zero, which is reachable without any fault at all:
+                //       two callers deleting one row both find it, the first commits, and the second's
+                //       statement matches nothing. Measured against six concurrent deletes, one answered
+                //       204 and the rest split between 404 and 500 by thread timing alone. The row is gone
+                //       either way, so the honest answer is the reference's own not-found sentence, which
+                //       is also what a repeat of the same request already receives.
+                // WHY : Assumptions: the stale-state family is caught SEPARATELY and ahead of the general
+                //       store-failure arm rather than by testing a count, because the repository's inherited
+                //       delete returns nothing to count and the provider has already made the judgement. It
+                //       is the narrower type, so the order is required rather than stylistic.
+                // WHY : Assumptions: the ledger entry is NOT written on this path. Nothing was deleted, so
+                //       there is no pool account owed a withdrawal, and recording one would ask the
+                //       reconciliation pass to withdraw an account another caller's deletion is already
+                //       withdrawing.
+            } catch (OptimisticLockingFailureException alreadyGone) {
+                LOG.info("event=auth.user.not-found reason=delete-lost-race userId={}",
+                        row.getUserId());
+                throw new NoSuchElementException(MESSAGE_USER_ID_NOT_FOUND);
+
             } catch (DataAccessException undeletable) {
                 throw unableTo(MESSAGE_UNABLE_TO_UPDATE,
                         "delete-" + undeletable.getClass().getSimpleName());
@@ -1414,7 +1465,7 @@ public class UserService {
                     MESSAGE_USER_ID_REQUIRED);
         }
 
-        String key = userId.trim().toUpperCase(Locale.ROOT);
+        String key = foldedKey(userId);
 
         Optional<User> found;
         try {
@@ -1437,7 +1488,12 @@ public class UserService {
     /**
      * Reports whether a row already carries the identifier, translating a store failure.
      *
-     * @param userId the identifier to probe for
+     * <p>Assumptions: the identifier arrives ALREADY FOLDED. The primary key stores the folded form, so a
+     * probe with an unfolded one answers no for a key that is taken -- which is precisely the defect that
+     * let two rows exist for one identifier. The fold is applied once by the caller rather than here so
+     * that the value this probe answers about is the same value the pool call and the insert use.</p>
+     *
+     * @param userId the folded identifier to probe for
      * @return {@code true} when a row exists for it
      * @throws IllegalStateException if the store could not be read, carrying the reference sentence for a
      *     failed add, because on the only path that probes, a failure means the add cannot proceed
@@ -1454,11 +1510,28 @@ public class UserService {
     /**
      * Provisions the pool account a new row will be bound to, translating a provider failure.
      *
-     * <p>Assumptions: the pool's own duplicate-username condition is translated to a FAULT and not to the
-     * caller-facing conflict, because the authority on whether a user identifier is taken is the primary
-     * key on {@code auth.users} and the probe above has already found no row. Reaching this condition
-     * therefore means an account exists whose row was never written -- an inconsistency an operator has
-     * to resolve, not something a caller can correct by choosing another identifier.
+     * <p>⚠️ Refactoring Rationale: the pool's own duplicate-username condition is translated to the
+     * caller-facing CONFLICT, and it used to be translated to a fault. The reasoning for the fault was
+     * that the authority on whether an identifier is taken is the primary key on {@code auth.users}, and
+     * that the probe having found no row meant an account existed whose row was never written -- an
+     * operator's inconsistency rather than a caller's mistake. That reasoning missed the ordinary case.
+     * Two callers creating one identifier at the same moment BOTH pass the probe, because neither has
+     * committed a row yet, and then the pool decides between them: the loser reaches this condition on a
+     * perfectly consistent system, and answering it with a server fault told a client its request had
+     * broken the service when the truthful answer is that the identifier is already taken. Measured
+     * against six concurrent creates, one answered 201 and five answered 500 where the sequential path
+     * answers 409 with the reference's own sentence.
+     *
+     * <p>Assumptions: the two situations remain distinguishable where the distinction matters, which is
+     * the operational record and not the response. The caller is answered the same way in both cases,
+     * because from outside they are the same fact -- the identifier cannot be had -- while the log line
+     * below reports whether a row now exists for it, so an orphaned pool account is still visible to
+     * whoever has to resolve one. Nothing about the pool's own state is disclosed to the caller.
+     *
+     * <p>Alternatives Considered: re-probing for the row and answering the conflict only when one is
+     * found, keeping the fault otherwise. Rejected because the race it exists for is exactly the window
+     * in which the winner has not committed yet, so the re-probe would answer 500 or 409 depending on
+     * thread timing -- a status a client cannot code against.
      *
      * <p>Alternatives Considered: having the caller supply the subject reference on the create body, so that
      * this service wrote a row and provisioned nothing. Rejected because the subject is minted by the pool
@@ -1481,21 +1554,53 @@ public class UserService {
      * {@code app/cbl/COSGN00C.cbl} line 223: no column of {@code auth.users} holds a credential, and no
      * verification anywhere in this service sees one.
      *
+     * @param userId the FOLDED identifier the row will carry, so the pool account's username and the
+     *     primary key are one value; must not be {@code null}
      * @param request the validated new row's values
      * @return the subject the provider minted and the one-time credential the account was created with;
      *     never {@code null}
-     * @throws IllegalStateException if the account could not be created, carrying the reference sentence
-     *     for a failed add
+     * @throws DuplicateUserException if the pool already holds an account under that username, carrying
+     *     the reference sentence for a taken identifier
+     * @throws IllegalStateException if the account could not be created for any other reason, carrying the
+     *     reference sentence for a failed add
      */
-    private ProvisionedIdentity provision(CreateUserRequest request) {
+    private ProvisionedIdentity provision(String userId, CreateUserRequest request) {
         try {
-            return this.provisioning.provision(request.userId(), request.firstName(),
+            return this.provisioning.provision(userId, request.firstName(),
                     request.lastName(), request.userType());
 
-        } catch (UsernameExistsException orphaned) {
-            LOG.error("event=auth.user.create-failed reason=pool-account-orphaned userId={}",
-                    request.userId());
-            throw unableTo(MESSAGE_UNABLE_TO_ADD, "pool-account-orphaned");
+        } catch (UsernameExistsException taken) {
+            // WHY : Refactoring Rationale: the pool's refusal is translated into the CALLER-FACING
+            //       conflict rather than into a fault, and that is the whole point of this arm.
+            //       Provisioning has to precede the insert on this path -- the row's subject column is
+            //       not nullable and only the pool can mint the subject -- so under concurrency it is the
+            //       POOL, not the primary key, that first observes two callers naming one identifier.
+            //       Reported as a fault, the loser of an ordinary race was told the add had failed, with
+            //       a 500 and the add sentence, for a condition whose honest answer is "that identifier
+            //       is taken". Measured against six concurrent creates of one identifier: one answered
+            //       201 and the other five answered 500, with exactly one row written -- the outcome was
+            //       already correct and only the status and sentence were wrong.
+            // WHY : Assumptions: the log line reports what was OBSERVED and does not claim to know which
+            //       of two states produced it, because at this instant they are indistinguishable. The
+            //       pool holds the username and this context may or may not yet hold a row: a concurrent
+            //       create that has provisioned and not yet committed presents exactly as an account left
+            //       behind by an interrupted one. Only the passage of time separates them, so the verdict
+            //       belongs to the reconciliation pass over the ledger rather than to this line.
+            // WHY : ⚠️ Refactoring Rationale: this line was briefly split in two by a second probe of the
+            //       row, logging at ERROR when the probe found none -- and the level was the defect. In
+            //       the six-way race above that arm fired THREE times with no orphan present at all,
+            //       because the winner had provisioned and not yet committed each time: three error-level
+            //       records of a fault that did not exist, on a service whose observability contract is
+            //       that an error line means a real one. The probe is withdrawn along with the level.
+            // WHY : Trade-offs: what the withdrawn probe bought was an immediate hint that a pool account
+            //       might have no row behind it, and the cost was a false alarm on every lost race. The
+            //       hint is not lost, only relocated: an interrupted create records a durable withdrawal
+            //       intention in the ledger through compensateProvisioning, so a genuinely orphaned
+            //       account presents as a pending ledger row the reconciliation pass retries and an
+            //       operator can query -- a record that outlives the request, which a log line at the
+            //       moment of refusal does not.
+            LOG.warn("event=auth.user.create-refused reason=duplicate-in-pool userId={}", userId);
+            throw new DuplicateUserException(MESSAGE_USER_ID_EXISTS);
 
         } catch (SdkException providerFault) {
             throw unableTo(MESSAGE_UNABLE_TO_ADD,
@@ -1511,9 +1616,41 @@ public class UserService {
             //       rather than for the compiler.
         } catch (IllegalStateException unreadableSubject) {
             LOG.error("event=auth.user.create-failed reason=subject-unreadable userId={}",
-                    request.userId(), unreadableSubject);
+                    userId, unreadableSubject);
             throw unableTo(MESSAGE_UNABLE_TO_ADD, "provision-subject-unreadable");
         }
+    }
+
+    /**
+     * Derives the stored key from an identifier as a caller supplied it.
+     *
+     * <p>Purpose: this is the ONE definition of what the key of a user row is, and every path in this
+     * class reaches it -- the create path's duplicate probe, the pool account's username and the inserted
+     * row, and the read, update and delete paths' lookups. The sign-on adapter applies the identical
+     * fold before its own provider call, and that is the property being preserved: an operator who typed
+     * a lower-case identifier at the terminal types one here and reaches the same row, which the
+     * divergence register records as the intended behaviour.
+     *
+     * <p>Refactoring Rationale: this method exists because the fold used to be written inline at the
+     * lookup and NOT at the create, and one missing application produced rows reachable by neither
+     * spelling, duplicate identities for one key, and updates and deletes that silently hit a different
+     * row. A single named derivation is what makes the invariant checkable rather than remembered; the
+     * database guard added alongside it -- {@code CHECK (user_id = upper(user_id))} in
+     * {@code V4__auth_folded_user_id.sql} -- is what makes it unbreakable by any writer, including one
+     * that bypasses this class.
+     *
+     * <p>Assumptions: the fold is applied under the ROOT locale rather than the platform default,
+     * because the default derives a different upper-case form for some characters -- the dotless i of a
+     * Turkish locale being the standard example -- so the key a row is stored under would depend on the
+     * locale of the task that wrote it. The trim is applied as well as the fold because a fixed-width
+     * key is blank-padded in the column and a caller may submit either form, and because the sign-on
+     * path has always trimmed.
+     *
+     * @param submitted the identifier as the caller supplied it; must not be {@code null}
+     * @return the folded, trimmed key the primary key stores, never {@code null}
+     */
+    private static String foldedKey(String submitted) {
+        return submitted.trim().toUpperCase(Locale.ROOT);
     }
 
     /**

@@ -1593,13 +1593,13 @@ a claim of registration that names nothing cannot be checked, and a difference t
 nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
 the other way round — identifier first, then cited from the published reference contract —
 which is the discipline this section asks of everything added after them. Assumptions:
-eighty-nine is a measured count of the `####` headings in **the whole document** and not a
+ninety is a measured count of the `####` headings in **the whole document** and not a
 running tally kept by hand, so a reader adding an entry updates one number here and nothing
 else. Count them document-wide and not within `## 7` alone: the register
 continues past the horizontal rule that follows *Related documents*, where entries were
 appended after this section had already been closed, so a count confined to `## 7` -- its
 five subsections 7.1 through 7.5, which is the quantity the paragraph after next calls the
-section-confined one -- omits those eleven and returns **seventy-eight**. Refactoring Rationale:
+section-confined one -- omits those eleven and returns **seventy-nine**. Refactoring Rationale:
 that instruction read "the body between this heading and `## 8`", which is a THIRD quantity
 again and returns sixty-five, because it excludes the seven headings in 7.1 and 7.2. The
 figure quoted beside it was always the whole of `## 7`, so the instruction is corrected to
@@ -1607,8 +1607,8 @@ name the population the figure counts rather than the figure being changed to ma
 population nobody meant. Count the `####`
 headings themselves rather than the ones beginning `D-`: one entry is identified
 `C-ROUNDING`, so a count restricted to a `D-` identifier is short by one and returns
-**eighty-eight**. Assumptions: a literal search for lines beginning `#### D-` returns
-**eighty-seven** rather than eighty-eight, because two headings carry their identifier in
+**eighty-nine**. Assumptions: a literal search for lines beginning `#### D-` returns
+**eighty-eight** rather than eighty-nine, because two headings carry their identifier in
 backticks -- `C-ROUNDING` and `D-REJECT-109-DURABLE` -- so the second is a `D-` entry that
 the naive pattern misses. The two figures are stated together so that the search result a
 reader gets is predicted here rather than read as drift.
@@ -1637,9 +1637,9 @@ figure was recounted. All four were re-measured a fifth time when
 `D-EXPORT-STAGED-THROUGH-A-FILE` were added, and this time the recount was performed as part
 of adding them rather than afterwards. All four were re-measured a sixth time, and this
 time the measurement was taken from the file rather than adjusted: the population of this
-subsection reads eighty, the document-wide count eighty-nine, the section-confined count
-seventy-eight and the count of `D-`-identified entries eighty-eight. Assumptions: a naive
-search for `^#### D-` returns eighty-seven rather than eighty-eight, because two headings
+subsection reads eighty-one, the document-wide count ninety, the section-confined count
+seventy-nine and the count of `D-`-identified entries eighty-nine. Assumptions: a naive
+search for `^#### D-` returns eighty-eight rather than eighty-nine, because two headings
 carry their identifier inside backticks; the figure stated is the count of entries a
 `D-` identifier NAMES, not the count of lines a literal search matches. Assumptions: the
 recount was needed because several entries landed at once from independent work -- two register
@@ -1658,8 +1658,8 @@ count, the section-confined count and the `D-`-prefixed count — were re-measur
 against the current file when `D-EXPORT-RECORD-TYPES` and `D-IMPORT-TRUNCATED-ARTEFACT` were
 appended, and the two subtractions above were
 evaluated to confirm they agree. Assumptions: this section's population and the
-section-confined count are DIFFERENT quantities and they have now DIVERGED, at eighty
-against seventy-eight, exactly as the sentence after next predicts they would: the two entries
+section-confined count are DIFFERENT quantities and they have now DIVERGED, at eighty-one
+against seventy-nine, exactly as the sentence after next predicts they would: the two entries
 named above were appended after *Related documents*, so they join this section's population
 without joining the whole of `## 7`. The gap has stayed at two while both figures moved,
 because the entries added after them — `D-BILLPAY-AMOUNT-WIDTH-REFUSED` and
@@ -1676,7 +1676,14 @@ inside this section's body so that "this section" became true. That was rejected
 larger and riskier change for the smaller gain — it relocates several hundred lines and
 every anchor a reader may have bookmarked, to fix a sentence rather than a fact — and it
 would leave the same trap for the next appender, whereas naming the population removes the
-trap whether or not the entries are ever moved.
+trap whether or not the entries are ever moved. All four figures were re-measured together
+against the file a seventh time when `D-AUTH-SUMMARY-MONEY-DOMAIN` was added, and the two
+subtractions were evaluated to confirm they still agree: ninety less the eleven appended after
+*Related documents* is seventy-nine, and ninety less the single `C-ROUNDING` heading is
+eighty-nine. Assumptions: that entry was placed INSIDE this section's body, so it joins both this
+section's population and the section-confined count and the gap between them stays at two --
+which is the cheap half of the trade-off recorded above, taken deliberately rather than by
+default.
 
 Assumptions: several entries carry TWO identifiers in one heading, and both are the
 identifier used in shipped source character for character. The four purge entries that
@@ -1937,6 +1944,77 @@ a register of this size stays true.
   their sum.
 * **Files.**
   `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`.
+
+#### D-AUTH-SUMMARY-MONEY-DOMAIN — the summary's money columns saturate where the baseline truncates
+
+* **Baseline behaviour.** Every money field of the pending-authorization summary segment is
+  `PIC S9(09)V99 COMP-3` — the two limits and the two balances at **L23-L26** of
+  [`app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy)
+  and the two running totals at its **L29-L30** — while three of the fields those members
+  receive their values from are one decimal order **wider**. `ACCT-CREDIT-LIMIT` and
+  `ACCT-CASH-CREDIT-LIMIT` are `PIC S9(10)V99` at **L8** and **L9** of
+  [`app/cpy/CVACT01Y.cpy`](../../app/cpy/CVACT01Y.cpy), and `PA-TRANSACTION-AMT` and
+  `PA-APPROVED-AMT` are `PIC S9(10)V99 COMP-3` at **L34** and **L35** of
+  [`CIPAUDTY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy).
+  [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) crosses that
+  boundary four times in one paragraph: `MOVE ACCT-CREDIT-LIMIT TO PA-CREDIT-LIMIT` at
+  **L810**, `MOVE ACCT-CASH-CREDIT-LIMIT TO PA-CASH-LIMIT` at **L811**,
+  `ADD WS-APPROVED-AMT TO PA-APPROVED-AUTH-AMT` and `TO PA-CREDIT-BALANCE` at **L815** and
+  **L817**, and `ADD PA-TRANSACTION-AMT TO PA-DECLINED-AUTH-AMT` at **L821**. A COBOL `MOVE`
+  or `ADD` into a narrower numeric field discards **high-order** digits and reports nothing, so
+  a credit limit of one thousand million is stored as **zero**.
+* **Target behaviour.** Each value is reduced to the segment's own domain by **saturation** —
+  bounded at ±999,999,999.99 with its sign and scale preserved — and the reduction is reported
+  as `event=auth.summary.money-narrowed` on the decision path and
+  `event=authorization.purge.money-narrowed` on the expiry sweep, each naming the member and the
+  bound and never the value. The bound is published once, as
+  `PendingAuthSummary.MONEY_MAX_MAGNITUDE`, and is passed into the three arithmetic statements
+  that accumulate, so the reduction holds whether the write goes through the entity or through a
+  statement the database evaluates.
+* **Category.** Documented divergence — narrowing arithmetic at a width boundary the copybook
+  itself declares.
+* **Why the difference is accepted.** The two narrowings are not comparable in consequence.
+  Truncation maps one thousand million to zero, so the very next authorization on that account is
+  declined for want of funds and the account is effectively frozen by a limit **increase**;
+  saturation leaves the stored limit one cent short of a thousand million and the account keeps
+  transacting. Saturation is also monotone in its input, where truncation is not — under
+  truncation a larger limit can produce a smaller stored value — and a running total that is
+  monotone is the only kind a reader of the summary screen can reason about at all.
+* **What the divergence replaced, which was worse than either.** Before the reduction the
+  out-of-domain value reached the database, which refused the whole statement with SQLSTATE
+  `22003`. The refusal aborted the message's unit of work, so the requester received **no reply
+  of any kind** — not a decline — and the request was redelivered four more times and
+  dead-lettered. An account holding a large limit could not authorize even a small amount, and
+  the same refusal aborted the expiry sweep mid-run, leaving the table partly purged with no
+  later run able to complete while such a row existed. So this entry registers a divergence from
+  the baseline that was chosen over a state the baseline does not have.
+* **Why the columns are not widened instead.** Transformation rule T1 makes the copybook picture
+  normative for the column type, and the schema's `NUMERIC(11,2)` is exactly what `S9(09)V99`
+  derives to — the mapping is published in
+  [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md). The sibling transaction
+  context refused the same widening for the same reason, recorded below as
+  `D-BILLPAY-AMOUNT-WIDTH-REFUSED`. `PendingAuthSummaryRepositoryIT` additionally asserts the
+  column refuses a twelve-digit value, so widening would have to change that case too.
+* **What is deliberately *not* affected.** The **decision** is taken from the account master's
+  full-width limit and the request's full-width amount before any narrowing, so a saturated limit
+  never changes an approve into a decline. `pending_auth_detail` is `NUMERIC(12,2)` from its own
+  wider picture, so the authorization itself is stored whole — the reply the requester receives
+  and the row the detail screen renders both carry the amount as sent. Only the summary's
+  **aggregates** are bounded.
+* **Where it is verified.** `PendingAuthSummaryMoneyDomainTest` asserts the boundary in both
+  signs, that the bound itself is admitted and one cent past it is not, and that accumulation
+  rather than the addend is what saturates. `AuthorizationRequestListenerTest` asserts both write
+  arms reduce an over-wide limit and that a requested amount of one thousand million is answered
+  with an ordinary insufficient-funds decline whose detail row keeps the amount whole.
+  `PendingAuthSummaryRepositoryIT` asserts the saturation against a real engine in both
+  directions, beside the case that asserts the same column refuses a twelve-digit insert.
+  `PurgeJobTest` asserts the sweep passes the segment's own bound and not the detail table's
+  wider one.
+* **Files.**
+  `services/authorization-service/src/main/java/com/carddemo/authorization/domain/PendingAuthSummary.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/repository/PendingAuthSummaryRepository.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/AuthorizationRequestListener.java`,
+  `services/authorization-service/src/main/java/com/carddemo/authorization/service/PurgeJob.java`.
 
 #### D-AMOUNT-RECORD-WIDTH — the transaction amount is bounded by the record, not the screen
 

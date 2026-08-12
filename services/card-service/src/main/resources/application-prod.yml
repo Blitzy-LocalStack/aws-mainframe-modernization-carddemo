@@ -33,8 +33,9 @@
 #   requires rather than files it has inspected: the HEALTHCHECK in
 #   services/card-service/Dockerfile, which is required to poll the health
 #   endpoint named below, and
-#   services/card-service/src/main/resources/db/migration/V1__card.sql, the
-#   versioned migration whose destructive counterpart the clean flag refuses.
+#   services/card-service/src/main/resources/db/migration/V1__card.sql together
+#   with V2__card_num_digit_domain.sql beside it, the versioned migrations whose
+#   destructive counterpart the clean flag refuses.
 #
 # Parameters:
 #   Environment variables are named and never valued: no value for any of them

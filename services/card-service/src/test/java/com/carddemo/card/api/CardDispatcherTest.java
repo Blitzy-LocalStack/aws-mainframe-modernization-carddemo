@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -33,6 +34,8 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.data.domain.Limit;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
@@ -131,12 +134,14 @@ class CardDispatcherTest {
         JacksonJsonHttpMessageConverter converter = new JacksonJsonHttpMessageConverter(
                 JsonMapper.builder().addModule(new MoneyModule()).build());
 
+        GlobalExceptionHandler advice =
+                new GlobalExceptionHandler(Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC));
+
         this.mockMvc = MockMvcBuilders
                 .standaloneSetup(new CardController(reads, mock(CardViewService.class),
-                        mock(CardAdminViewService.class), mock(CardUpdateService.class)))
+                        mock(CardAdminViewService.class), mock(CardUpdateService.class), advice))
                 .setMessageConverters(converter)
-                .setControllerAdvice(new GlobalExceptionHandler(
-                        Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
+                .setControllerAdvice(advice)
                 .build();
     }
 
@@ -271,6 +276,99 @@ class CardDispatcherTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
+    }
+
+    /**
+     * An account narrowing of eleven zero digits is accepted over HTTP and narrows nothing.
+     *
+     * <p>Purpose: this pins the reference reading at the layer a caller reaches, so that the published
+     * document and the running service state one rule. {@code 2210-EDIT-ACCOUNT.} places
+     * {@code CC-ACCT-ID-N EQUAL ZEROS} in the same disjunction as low values and spaces at
+     * {@code app/cbl/COCRDLIC.cbl:1007-1009} and sends all three to the not-supplied exit at
+     * {@code :1010-1012} without raising its input-error condition, and {@code 9500-FILTER-RECORDS.}
+     * applies its predicate only when the flag is valid at {@code :1385}. So a zero-filled filter field
+     * lists across all accounts on this screen.</p>
+     *
+     * <p>Assumptions: the absent predicate is asserted at the STORE rather than only by the status,
+     * because a 200 alone would also be returned by a narrowing on account zero over a corpus that
+     * happened to match nothing. Asserting that the query was issued with no account is what distinguishes
+     * "not supplied" from "supplied and matched nothing".</p>
+     *
+     * <p>Refactoring Rationale: the published description of this member previously required it to be
+     * "not all zeros" and cited the card UPDATE screen's mandatory-field sentence at
+     * {@code app/cbl/COCRDUPC.cbl:189-192}. The document has been corrected to this screen's own
+     * paragraph rather than the behaviour being changed to match it, which would have been an
+     * unregistered divergence from the reference; this case is what keeps the two agreeing.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an account narrowing of eleven zero digits is accepted and narrows nothing")
+    void anAllZeroAccountNarrowingIsReadAsNotSupplied() throws Exception {
+        stubForwardRead(rows(CardListService.PAGE_SIZE));
+
+        this.mockMvc.perform(post(CardController.SEARCH_PATH)
+                        .contentType("application/json")
+                        .principal(OPERATOR)
+                        .content("{\"accountId\":\"00000000000\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(CardListService.PAGE_SIZE));
+
+        verify(this.cards).findForwardFromCursor(isNull(), isNull(), isNull(), any(Limit.class));
+    }
+
+    /**
+     * A paging direction outside the published enumeration is refused 400 naming the member, rather than
+     * being read as the forward default.
+     *
+     * <p>Purpose: the published {@code PageDirection} schema enumerates exactly {@code next} and
+     * {@code previous} with {@code next} as its default, and the handler compares the submitted value
+     * against the single backward literal. Without a declared domain on the member every other spelling
+     * satisfied that comparison as "not backward" and was answered with a forward page and no complaint,
+     * so a caller asking to page backward in the wrong case was silently served the page it already held.
+     * This case pins each spelling a client actually produces.</p>
+     *
+     * <p>Assumptions: the offending member is asserted by NAME, because a status-only assertion would
+     * pass against a body that named nothing -- and the whole defect being closed here is a caller unable
+     * to tell which member it got wrong.</p>
+     *
+     * @param direction a spelling outside the published enumeration
+     * @throws Exception if the request cannot be performed
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"PREVIOUS", "Previous", "NEXT", "sideways", "", " previous", "previous "})
+    @DisplayName("a paging direction outside the published enumeration is refused 400 naming it")
+    void anUnpublishedPagingDirectionIsRefused(String direction) throws Exception {
+        this.mockMvc.perform(post(CardController.SEARCH_PATH)
+                        .contentType("application/json")
+                        .principal(OPERATOR)
+                        .content("{\"direction\":\"" + direction + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("direction"));
+    }
+
+    /**
+     * Both published paging directions are accepted, so the domain above refuses nothing legitimate.
+     *
+     * <p>Assumptions: this is the positive control for the refusals above. Without it a constraint that
+     * refused every value, including the two the contract publishes, would satisfy every negative case
+     * completely. The backward member is exercised with no cursor, which the service answers with the
+     * opening page, so the case turns on the member's domain rather than on a token.</p>
+     *
+     * @param direction one of the two spellings the contract enumerates
+     * @throws Exception if the request cannot be performed
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"next", "previous"})
+    @DisplayName("both published paging directions are accepted")
+    void bothPublishedPagingDirectionsAreAccepted(String direction) throws Exception {
+        this.mockMvc.perform(post(CardController.SEARCH_PATH)
+                        .contentType("application/json")
+                        .principal(OPERATOR)
+                        .content("{\"direction\":\"" + direction + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items").isArray());
     }
 
     /**

@@ -196,6 +196,18 @@ logging:
     org.hibernate.SQL: WARN
     org.hibernate.orm.jdbc.bind: WARN
 
+    # WHY : Assumptions: the third pin is restated here for the same reason as the
+    #       two above -- so the level this profile runs at is legible without being
+    #       inferred from an absence -- and it governs the FAILURE path where those
+    #       two govern the success path. The base document argues the choice in
+    #       full; the fact worth having in front of a production reader is that this
+    #       logger emits the driver's message, and a constraint violation's driver
+    #       message is the failing ROW, so at WARN it would put an account
+    #       identifier, a primary account number and a merchant name into log
+    #       storage. The condition itself is not lost: the shared messaging error
+    #       handler states it at ERROR with the SQL state, digit-redacted.
+    org.hibernate.orm.jdbc.error: ERROR
+
 management:
   # WHY : Assumptions: only the health endpoint's detail breadth is set here. The
   #       exposure list, which decides WHICH endpoints answer at all, is

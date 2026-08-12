@@ -24,6 +24,13 @@
 #        defaulted here.
 #     4. OpenTelemetry export defaults -- traces, logs and OTLP metrics stay off
 #        outside a deployment that explicitly supplies the task-local collector.
+#     5. The two REFUSAL-RENDERING defaults: what the framework's fallback error
+#        body may disclose (server.error.*, below) and which dispatcher types the
+#        security filter chain applies to
+#        (spring.security.filter.dispatcher-types, below). Both are cross-cutting
+#        in exactly the same sense as the first four -- eight services must answer
+#        a refused request identically -- and both were reached by review finding
+#        one service answering wrongly rather than by design.
 #
 # How a service consumes it:
 #   One line in the service's own application.yml:
@@ -207,6 +214,43 @@ logging:
     #       service uses. A rename upstream, a moved class or an edited key each
     #       fail there rather than silently restoring the exposure.
     io.awspring.cloud.sqs.listener.sink.AbstractMessageProcessingPipelineSink: "off"
+
+spring:
+  security:
+    filter:
+      # WHY : (1) ⚠️ Refactoring Rationale: the security filter chain is taken OFF
+      #       the container's internal ERROR dispatch, and it was on it -- the
+      #       framework's default for this key is REQUEST, ASYNC, ERROR. With ERROR
+      #       included, a request that was refused before reaching a controller and
+      #       then routed to the error path was authorised a SECOND time, and the
+      #       second decision replaced the first. The observed case: a doubled path
+      #       separator is refused by the HTTP firewall, the container dispatches to
+      #       the error path, the bearer-token filter does NOT run there -- it is a
+      #       once-per-request filter and those skip error dispatches by default --
+      #       so the request arrives anonymous, the deny-by-default rule refuses it,
+      #       and a caller holding a valid token is answered 401 for a request whose
+      #       real fault was a 400. The status, the code and the severity were all
+      #       wrong, and a client with token-refresh logic would refresh a token that
+      #       was never the problem.
+      #       (2) Assumptions: this does NOT make the error path reachable. A caller
+      #       addressing it directly arrives on a REQUEST dispatch, which is still
+      #       secured and still refused by each service's deny-by-default rule; only
+      #       the container's own internal dispatch is exempt, and that dispatch is by
+      #       construction preceded by the original request's authorisation decision.
+      #       (3) Assumptions: the fallback body that dispatch renders discloses
+      #       nothing, which is the other half of why this is safe -- every
+      #       server.error.include-* key below is withheld, so the body carries a
+      #       status and a timestamp and no request-authored value.
+      #       (4) Alternatives Considered: a per-service authorisation rule permitting
+      #       the ERROR dispatch type, which is the more commonly written form.
+      #       Rejected because it restates one decision in eight files and a service
+      #       added later would inherit the wrong default again -- the same reason
+      #       every other value in this file is here. Also considered: leaving this
+      #       alone and relying solely on the shared firewall-rejection handler, which
+      #       answers the observed case before any dispatch happens. Rejected as a fix
+      #       for one path rather than for the class: any other refusal that reaches
+      #       the container as an error would still be re-authorised and mislabelled.
+      dispatcher-types: REQUEST, ASYNC
 
 server:
   error:

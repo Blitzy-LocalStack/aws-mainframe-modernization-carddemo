@@ -311,6 +311,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -365,6 +369,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -434,6 +440,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -534,6 +542,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -663,8 +673,12 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
         '409':
           $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -905,6 +919,102 @@ components:
                     state: NOT_OK
                     message: 'Acct Id must be Numeric ...'
                 abend: null
+
+    # ⚠️ Refactoring Rationale: this response and UnsupportedMediaType below were
+    #   BOTH absent, and their absence was not merely a documentation gap -- the
+    #   service answered neither condition. No handler claimed the framework's
+    #   method-not-supported and media-type-not-supported exceptions, so each fell
+    #   to the unclaimed-failure advice and was answered 500 CARDDEMO-0500 with
+    #   CRITICAL severity: a caller using the wrong method was told the server had
+    #   failed, received no Allow header, and had no way to discover the right one.
+    #   The handler now answers both, and they are published here because a status a
+    #   service can return and a client must handle belongs in the contract the
+    #   client is generated from.
+    # Assumptions: the Allow header is REQUIRED on this response rather than
+    #   optional. It is what makes a 405 actionable -- the whole difference between
+    #   this and a 404 is that the path exists and this method is not one it serves
+    #   -- and a client cannot discover the served methods any other way.
+    # Assumptions: the body names neither the method the caller used nor the path
+    #   it addressed beyond the masked request path every refusal carries. An
+    #   invented method token is caller-authored text and a response body is not a
+    #   place for it.
+    MethodNotAllowed:
+      description: >-
+        The addressed path is served by this service but not by the method the
+        request used. The body carries code CARDDEMO-0405 and the sentence "The
+        request method is not allowed for this path", and the Allow header names
+        every method the path does serve.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+        Allow:
+          required: true
+          description: >-
+            The comma-separated methods the addressed path serves, composed from
+            this service's own handler mappings.
+          schema:
+            type: string
+          example: 'GET, HEAD'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: CARDDEMO-0405
+            secondaryCode: ''
+            message: The request method is not allowed for this path
+            severity: WARNING
+            subsystem: APPLICATION
+            status: 405
+            correlationId: 4F1C0E423A554D219B7E6C0F
+            path: /api/v1/authorizations/search
+            timestamp: '2026-08-06 09:15:02.117640'
+            fieldErrors: []
+            abend: null
+
+    # Assumptions: this response is attached ONLY to the two operations that take a
+    #   request body, because it is the body's declared media type that is refused.
+    #   Attaching it to a bodyless operation would publish a status that operation
+    #   cannot produce.
+    # Assumptions: the acceptable media types travel in an Accept response header
+    #   rather than in the sentence, which mirrors the framework's own choice for
+    #   this status. The values are composed from this service's handler mappings,
+    #   so they restate what each operation's requestBody already declares and
+    #   disclose nothing further.
+    UnsupportedMediaType:
+      description: >-
+        The request declared a body media type this operation does not accept. The
+        body carries code CARDDEMO-0415 and the sentence "The request Content-Type
+        is not supported", and the Accept header names the media types the
+        operation does accept. The body was never parsed, so the per-field array is
+        empty -- which is what distinguishes this from a 400.
+      headers:
+        X-Correlation-Id:
+          $ref: '#/components/headers/XCorrelationId'
+        Accept:
+          required: true
+          description: >-
+            The comma-separated media types the operation accepts, composed from
+            this service's own handler mappings.
+          schema:
+            type: string
+          example: application/json
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: CARDDEMO-0415
+            secondaryCode: ''
+            message: The request Content-Type is not supported
+            severity: WARNING
+            subsystem: APPLICATION
+            status: 415
+            correlationId: 4F1C0E423A554D219B7E6C0F
+            path: /api/v1/authorizations/search
+            timestamp: '2026-08-06 09:15:02.117640'
+            fieldErrors: []
+            abend: null
 
     # Assumptions: the correlation identifier in the body is the SAME value as
     #   the header beside it and as the log line for this refusal, the renderer
@@ -2158,6 +2268,32 @@ components:
         #   as the program found it. Requiring the member would force a caller
         #   to tell an empty sentence from an absent one, a distinction the
         #   reference screen never draws.
+        # WHY : Refactoring Rationale: the sentence describing what accompanies this
+        #   member was WRONG, and wrong in the direction that misleads a client
+        #   author into a visible defect. It read "the page above still carries the
+        #   rows that were on display", which describes a response this service does
+        #   not send: a move that is already at a boundary answers page.items empty,
+        #   page.firstKey and page.lastKey null and page.hasNext false, on BOTH
+        #   boundary arms. A client generated from that sentence renders whatever the
+        #   page member holds, so it blanks its table at a boundary -- the one moment
+        #   the reference screen leaves the rows exactly where they are.
+        # WHY : Assumptions: the BEHAVIOUR is correct and only the description is
+        #   corrected, which is a decision about where the state lives rather than a
+        #   preference. Section 0.7.1 removes the pseudo-conversational structure the
+        #   reference used to redisplay a screen: this service holds nothing about
+        #   what a caller currently has on display, so "leave the rows in place" is
+        #   an instruction to the CLIENT and cannot be an assertion about the
+        #   response. Answering the rows again would mean re-reading the page from
+        #   the cursor inclusive and would make a refused move indistinguishable
+        #   from a successful one -- the caller would receive a full page with a
+        #   message and could not tell whether it had moved.
+        # WHY : Trade-offs: the corrected contract puts an obligation on the client
+        #   that the reference put on the terminal -- retain the rows and the cursor
+        #   you already hold. The recovery path is stated in the text below because
+        #   the boundary response carries no cursor to recover FROM, which is the one
+        #   genuine sharp edge here: a client that overwrites its state with the
+        #   boundary envelope has discarded its own position and must re-issue the
+        #   unanchored request to get page one back.
         screenMessage:
           oneOf:
             - $ref: '#/components/schemas/NavigationBoundaryMessage'
@@ -2165,8 +2301,21 @@ components:
           description: >-
             The navigation-boundary sentence for this request, present only when a
             paging move was already at a boundary and null otherwise. When it is
-            present the page above still carries the rows that were on display,
-            because the reference program leaves them in place in that arm.
+            present the requested move did NOT happen and no rows are returned for
+            it: page.items is empty, page.firstKey and page.lastKey are null and
+            page.hasNext is false. Render the sentence on the message line and leave
+            the rows already on display exactly as they are, which is what the
+            reference screen does in that arm -- this service is stateless and holds
+            nothing about what is on display, so redisplaying them is the client's
+            part. Keep the cursor that was sent, because the boundary envelope
+            carries none: a client that has discarded its position recovers by
+            re-issuing the request with no cursor and no direction, which returns
+            page one.
+            Refactoring Rationale: this description previously said "the page above
+            still carries the rows that were on display", and that sentence is
+            WITHDRAWN because it described a response this service does not send. It
+            is quoted here rather than deleted silently so that a client written
+            against it can tell which of the two statements to trust.
 
 
     # Assumptions: this schema mirrors the migrated detail table column for

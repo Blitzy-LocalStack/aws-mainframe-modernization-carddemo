@@ -222,7 +222,12 @@ class ApiErrorTest {
         GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED,
         GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST,
         GlobalExceptionHandler.MESSAGE_NOT_FOUND,
-        GlobalExceptionHandler.MESSAGE_FORBIDDEN})
+        GlobalExceptionHandler.MESSAGE_FORBIDDEN,
+        GlobalExceptionHandler.MESSAGE_NO_SUCH_PATH,
+        GlobalExceptionHandler.MESSAGE_UNSUPPORTED_MEDIA_TYPE,
+        GlobalExceptionHandler.MESSAGE_METHOD_NOT_ALLOWED,
+        GlobalExceptionHandler.MESSAGE_NOT_ACCEPTABLE,
+        GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER})
     @DisplayName("every published aggregate message fits the 75-character rendering band")
     void everyPublishedMessageFitsTheRenderingBand(String message) {
         assertThat(message).isNotBlank();
@@ -383,5 +388,39 @@ class ApiErrorTest {
         assertThat(notOk.isError()).isTrue();
         assertThat(blank.screenMarker()).isEqualTo(FieldValidationFlag.BLANK_SCREEN_MARKER);
         assertThat(notOk.screenMarker()).isEqualTo(FieldValidationFlag.NO_SCREEN_MARKER);
+    }
+
+    /**
+     * Confirms each published code carries the status its own suffix names.
+     *
+     * <p>Assumptions: the code and the status are asserted as a PAIR because the suffix convention is the
+     * only thing that makes a code readable without a lookup table -- {@code CARDDEMO-0415} says 415 and
+     * nothing else -- so a pair that disagreed would make every code in the family untrustworthy. The two
+     * newest members of the family are covered alongside the two that already had constants, so the
+     * convention is asserted rather than assumed.</p>
+     *
+     * <p>Assumptions: the derived SEVERITY is asserted on both new codes too. Both are client conditions,
+     * and either arriving as CRITICAL would put a mis-addressed request into the alert channel a genuine
+     * server failure is filtered from -- which is the exact defect that made these two codes necessary,
+     * since before them both conditions were answered as 500 CRITICAL.</p>
+     */
+    @Test
+    @DisplayName("each code carries the status its suffix names, at client severity")
+    void eachCodeCarriesTheStatusItsSuffixNames() {
+        assertThat(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE).isEqualTo("CARDDEMO-0415");
+        assertThat(ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS).isEqualTo(415);
+        assertThat(ApiError.CODE_METHOD_NOT_ALLOWED).isEqualTo("CARDDEMO-0405");
+        assertThat(ApiError.METHOD_NOT_ALLOWED_STATUS).isEqualTo(405);
+        assertThat(ApiError.CODE_PAYLOAD_TOO_LARGE).isEqualTo("CARDDEMO-0413");
+        assertThat(ApiError.PAYLOAD_TOO_LARGE_STATUS).isEqualTo(413);
+        assertThat(ApiError.CODE_WRITES_QUIESCED).isEqualTo("CARDDEMO-0503");
+        assertThat(ApiError.SERVICE_UNAVAILABLE_STATUS).isEqualTo(503);
+
+        assertThat(ApiError.of(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE, "m",
+                ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS, CORRELATION_ID, PATH, CLOCK).severity())
+                .isEqualTo(ApiError.Severity.WARNING);
+        assertThat(ApiError.of(ApiError.CODE_METHOD_NOT_ALLOWED, "m",
+                ApiError.METHOD_NOT_ALLOWED_STATUS, CORRELATION_ID, PATH, CLOCK).severity())
+                .isEqualTo(ApiError.Severity.WARNING);
     }
 }

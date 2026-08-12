@@ -1,0 +1,133 @@
+-- =============================================================================
+-- V4__auth_folded_user_id.sql
+--
+-- Purpose
+--   Enforce, in the database, that auth.users.user_id is stored in its FOLDED
+--   form -- the upper-case, blank-trimmed spelling every read path derives
+--   before it looks a row up. The invariant is asserted by
+--   ck_users_user_id_folded so that it holds for every writer of this table,
+--   including one that does not go through the service.
+--
+-- What went wrong without it
+--   The service applied the fold on its read, update and delete paths and NOT on
+--   its create path, so a row could be written under a spelling no later request
+--   could reach. Measured against the running service before this migration:
+--   creating 'bnd00005' stored [bnd00005] and then answered 404 for BOTH
+--   spellings on read; creating 'BND00005' afterwards was accepted as a second
+--   row rather than refused as a duplicate; and an update or delete addressed to
+--   'bnd00005' folded its key, found [BND00005], and mutated or destroyed THAT
+--   row -- a caller naming one record and altering another. The service now
+--   derives the key in exactly one place (UserService#foldedKey), and this
+--   constraint is what makes that derivation an invariant of the data rather
+--   than a property of one class's discipline.
+--
+-- Why this exists as a fourth migration rather than an edit to V1
+--   Assumptions: V1__auth.sql is already applied on every deployed database and
+--   its checksum is recorded, so editing it in place would make the migration
+--   engine refuse to run against any of them -- turning a schema correction into
+--   a failed deployment. A new version expresses the change once and leaves
+--   every applied history valid. V3__auth_identity_sync_operations.sql took the
+--   same course for the same reason and records it at length.
+--
+-- Why the constraint is added NOT VALID
+--   Assumptions: a database on which the defective create path ran ALREADY HOLDS
+--   unfolded rows, and this is measured rather than assumed -- the verification
+--   database used to reproduce the defect held exactly one, [bnd00005]. A
+--   validating ADD scans the table and fails when it finds one, and a failed
+--   migration stops the service from starting at all. That would replace a
+--   data defect a query can find with an outage, on precisely the databases
+--   most likely to be affected.
+--   Assumptions: NOT VALID skips only the initial full-table scan. Every
+--   subsequent INSERT and every UPDATE of an existing row IS checked, so the
+--   invariant holds from this migration forward whether or not the historical
+--   rows have been reconciled. What NOT VALID gives up is the guarantee about
+--   rows already present, which is exactly the set the operator step below
+--   exists to settle.
+--   Alternatives Considered: folding the offending rows in place here with an
+--   UPDATE and then adding the constraint VALID. Rejected because the fold can
+--   COLLIDE: the defect's characteristic outcome is two rows for one key, one
+--   folded and one not, and folding the unfolded one violates the primary key.
+--   The migration would then either fail anyway or have to choose which of two
+--   user records survives -- a decision about a person's access that belongs to
+--   an operator with the audit trail, not to a schema migration running
+--   unattended at start-up.
+--   Alternatives Considered: a BEFORE INSERT OR UPDATE trigger that folded the
+--   value silently instead of refusing it. Rejected because a writer whose key
+--   is quietly rewritten cannot tell that the row it reads back is not the row
+--   it wrote, and because it would make the database a second place where the
+--   fold is defined -- the duplicate definition that caused this defect in the
+--   first place.
+--
+-- Operator step: reconciling rows written before this migration
+--   Detection -- lists every row that violates the invariant, and is empty on a
+--   database the defect never ran on:
+--
+--     SELECT user_id, first_name, last_name, user_type, cognito_sub
+--       FROM auth.users
+--      WHERE user_id <> upper(user_id)
+--      ORDER BY user_id;
+--
+--   For each row found, check whether the folded spelling is also present:
+--
+--     SELECT u.user_id AS unfolded, f.user_id AS folded
+--       FROM auth.users u
+--       LEFT JOIN auth.users f ON f.user_id = upper(u.user_id)
+--      WHERE u.user_id <> upper(u.user_id);
+--
+--   When "folded" is NULL the row is simply unreachable and is corrected by
+--   folding its key, which also moves the pool account's username -- see the
+--   runbook at docs/runbooks/data-migration.md for the provider side:
+--
+--     UPDATE auth.users SET user_id = upper(user_id)
+--      WHERE user_id = '<the unfolded key>';
+--
+--   When "folded" is NOT NULL there are two rows for one identifier and one of
+--   them must be withdrawn. Which one is a business decision: compare their
+--   names, type and cognito_sub against the identity pool, delete the row whose
+--   pool account is to be withdrawn, and withdraw that account. Do NOT resolve
+--   it by folding, which the primary key refuses.
+--
+--   Once the detection query returns no rows, promote the constraint so that it
+--   is enforced for the historical rows too and a later reader is not misled by
+--   a constraint marked NOT VALID:
+--
+--     ALTER TABLE auth.users VALIDATE CONSTRAINT ck_users_user_id_folded;
+--
+--   Assumptions: VALIDATE is left as an operator step rather than added as a
+--   fifth migration because it cannot be made to succeed unattended -- it fails
+--   on exactly the databases that still hold an unreconciled row, which is the
+--   outage this migration is written to avoid.
+-- =============================================================================
+
+-- WHY : Assumptions: the comparison is written against the column directly even
+--   though it is CHAR(8) and therefore blank-padded in storage. Converting a
+--   fixed-width value to the type upper() takes strips its trailing blanks, and
+--   the comparison that follows strips them from the left side too, so a padded
+--   key compares on its significant characters alone. This was verified against
+--   the engine rather than reasoned about: 'ABC     ' and '00000001' satisfy the
+--   predicate, while 'abc     ' and 'AbC00001' do not. An explicit rtrim() would
+--   add a term that changes no outcome.
+-- WHY : Assumptions: LEADING blanks are deliberately NOT constrained here. They
+--   are a different property from the fold -- the service trims as well as folds,
+--   but a leading blank survives upper() unchanged, so this predicate admits it.
+--   Constraining it would widen a targeted guard into a general well-formedness
+--   check, and the identifier's shape is already asserted at the adapter where it
+--   arrives. The omission is recorded because an absent term leaves nothing in
+--   the source for a reader to question.
+ALTER TABLE auth.users
+    ADD CONSTRAINT ck_users_user_id_folded
+    CHECK (user_id = upper(user_id))
+    NOT VALID;
+
+-- WHY : Assumptions: the comment is written in the same migration that adds the
+--   constraint, because the constraint alone does not tell an operator who trips
+--   it what to do. A refusal on INSERT reports a constraint name; this is where
+--   that name explains itself, and it names the service method that derives the
+--   key so the two definitions cannot drift apart unnoticed.
+COMMENT ON CONSTRAINT ck_users_user_id_folded ON auth.users IS
+    'user_id is stored FOLDED: upper-case and blank-trimmed, the spelling '
+    'UserService#foldedKey derives before every probe, provider call, insert and '
+    'keyed lookup. A refusal here means a writer supplied an unfolded key; fold '
+    'it rather than relaxing the constraint. Added NOT VALID because databases on '
+    'which the earlier create path ran may hold unfolded rows -- see the '
+    'reconciliation and VALIDATE steps in V4__auth_folded_user_id.sql.';

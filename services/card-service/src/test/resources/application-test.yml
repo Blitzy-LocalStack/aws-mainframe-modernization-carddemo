@@ -334,9 +334,13 @@ spring:
     # Assumptions: this location resolves inside this module's own build output,
     #   which is what makes the migration travel with the code that maps it. It
     #   is restated because it answers the first question a migration failure
-    #   raises -- which file ran -- and because the directory holds exactly one
-    #   migration, V1__card.sql. There is no V2 here: the reference data seed
-    #   belongs to reference-service, which owns the lookup data.
+    #   raises -- which file ran -- and because the directory holds two
+    #   migrations applied in version order: V1__card.sql, which creates the
+    #   schema's objects, and V2__card_num_digit_domain.sql, which closes the
+    #   card_num character domain V1 declared a width for but did not constrain.
+    #   Assumptions: this module's V2 is unrelated to reference-service's
+    #   V2__seed_reference.sql -- a version is scoped to the history table of the
+    #   schema it is applied into, so the two never meet.
     locations: classpath:db/migration
 
     # Assumptions: card is the only schema this module touches and it holds

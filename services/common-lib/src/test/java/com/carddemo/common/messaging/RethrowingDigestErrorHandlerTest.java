@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.common.observability.FailureSummary;
 import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.listener.ListenerExecutionFailedException;
 import io.awspring.cloud.sqs.listener.MessageProcessingException;
@@ -16,6 +17,7 @@ import io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Type;
+import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -188,7 +190,7 @@ class RethrowingDigestErrorHandlerTest {
     }
 
     /**
-     * The written record names the failure's types and frames and carries none of its message text.
+     * The written record names the failure's types and frames and carries no unredacted message text.
      *
      * <p>Refactoring Rationale: the absence assertion is paired with a presence assertion on the SAME
      * failure. An empty or truncated record would satisfy "does not contain the card number" while telling
@@ -196,10 +198,19 @@ class RethrowingDigestErrorHandlerTest {
      * makes it actionable — and the rethrown throwable is required to still carry the text, which is what
      * proves the handler withheld it rather than lost it.</p>
      *
+     * <p>⚠️ Refactoring Rationale: what this case asserts absent narrowed from the whole message to the
+     * message's VALUES, because the line now carries a redacted rendering of the message beside the digest.
+     * The digest still carries no message text at all — that is asserted below by comparing the record
+     * against the digest of the same failure — and the sensitive literal is still asserted absent, which is
+     * the claim that matters: it is a card-number-shaped run, so the redaction must remove it. The previous
+     * form of this case asserted that the record contained no part of the message, and a line that carries
+     * the condition without its values cannot satisfy that while still being the line an operator needs.
+     * See {@code theRecordCarriesTheRedactedConditionAndTheStateCode} for the presence half.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the record carries the type chain and no exception message text")
+    @DisplayName("the record carries the type chain and no unredacted message values")
     void theRecordCarriesTheTypeChainAndNoMessageText() {
         Message<String> message = messageOn(QUEUE);
         RuntimeException failure =
@@ -217,7 +228,7 @@ class RethrowingDigestErrorHandlerTest {
 
         assertThat(record.getFormattedMessage())
                 .as("this is the whole point of the class: the rendered record must not be able to"
-                        + " publish text written by a driver, a codec or a validation library")
+                        + " publish a VALUE written by a driver, a codec or a validation library")
                 .doesNotContain(SENSITIVE_TEXT)
                 .doesNotContain("4111111111111111")
                 .contains(RethrowingDigestErrorHandler.EVENT)
@@ -233,6 +244,87 @@ class RethrowingDigestErrorHandlerTest {
                 .as("the throwable is deliberately NOT passed as a trailing argument, because that is"
                         + " exactly what makes the facade render every message in the chain")
                 .isNull();
+    }
+
+    /**
+     * The record carries the failure's condition in words, with every value-shaped run replaced.
+     *
+     * <p>⚠️ Purpose: this is the presence half of the pair whose absence half is above, and it is the
+     * reason the two extra fields exist. A persistence failure reaches this handler as one driver
+     * exception type whatever went wrong, so a line carrying only the type chain records a numeric
+     * overflow, a unique violation and a serialisation conflict identically — and the operator response to
+     * each differs. The condition is words; the values are digits.</p>
+     *
+     * <p>⚠️ Assumptions: the failure is built to look exactly like the driver message that prompted this,
+     * carrying a state code, a constraint name, a table-and-column tuple and the two values that broke it
+     * — an eleven-digit account identifier and a five-digit ordinal date. Neither is card-number shaped, so
+     * neither is touched by the masking the sibling rendering applies, and both are what this case requires
+     * to be gone.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the record carries the redacted condition and the database state code")
+    void theRecordCarriesTheRedactedConditionAndTheStateCode() {
+        Message<String> message = messageOn(QUEUE);
+        SQLException driverFailure = new SQLException(
+                "ERROR: duplicate key value violates unique constraint \"pk_pending_auth_detail\""
+                        + "  Detail: Key (account_id, auth_date)=(20000000005, 99366) already exists",
+                "23505");
+        RuntimeException failure =
+                new IllegalStateException("could not execute statement", driverFailure);
+
+        assertThatExceptionOfType(RuntimeException.class)
+                .isThrownBy(() -> this.handler.handle(message, failure));
+
+        String rendered = this.captured.list.get(0).getFormattedMessage();
+
+        assertThat(rendered)
+                .as("the words are what make the condition actionable, so they must survive")
+                .contains("duplicate key value violates unique constraint")
+                .contains("pk_pending_auth_detail")
+                .contains("(account_id, auth_date)");
+        assertThat(rendered)
+                .as("the values are what must not survive, and neither is card-number shaped")
+                .doesNotContain("20000000005")
+                .doesNotContain("99366")
+                .contains("(###########, #####)");
+        assertThat(rendered)
+                .as("the state code is a fixed five-character class name that no requester can influence")
+                .contains("sqlState=23505");
+    }
+
+    /**
+     * A failure that is not a database one renders the absence of a state code as a stable token.
+     *
+     * <p>⚠️ Assumptions: the token is asserted rather than the absence of the field, because a structured
+     * field rendered as the literal {@code null} — which is what an unset formatter argument produces —
+     * cannot be told apart from a field the emitter failed to populate. That was the state this line was
+     * first written in, and it is the reason the shared kernel names the token once.</p>
+     *
+     * <p>⚠️ Assumptions: the MESSAGE is asserted withheld on the same failure, because the two go
+     * together: no state code is the evidence that nothing in the chain was composed by a driver, and a
+     * message of unestablished provenance is the one this handler must not show. Asserting the absence of
+     * the message text as well is what keeps the two halves of that rule from being changed apart.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a non-database failure renders the state code as the shared absence token")
+    void aNonDatabaseFailureRendersTheAbsenceToken() {
+        Message<String> message = messageOn(QUEUE);
+        RuntimeException failure = new IllegalStateException("the listener could not reach the account"
+                + " context");
+
+        assertThatExceptionOfType(RuntimeException.class)
+                .isThrownBy(() -> this.handler.handle(message, failure));
+
+        assertThat(this.captured.list.get(0).getFormattedMessage())
+                .contains("sqlState=" + FailureSummary.NO_SQL_STATE)
+                .doesNotContain("sqlState=null")
+                .as("a message whose composer cannot be established is withheld, not shown")
+                .contains("detail=" + FailureSummary.WITHHELD)
+                .doesNotContain("could not reach the account context");
     }
 
     /**

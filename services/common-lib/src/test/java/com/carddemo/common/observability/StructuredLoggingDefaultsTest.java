@@ -217,6 +217,46 @@ class StructuredLoggingDefaultsTest {
     }
 
     /**
+     * The shipped defaults keep the security filter chain off the container's ERROR dispatch and keep the
+     * fallback error body free of the request path.
+     *
+     * <p>Assumptions: this case lives in this class rather than in one of its own, and the placement is
+     * argued rather than incidental. This class is the ONLY place that resolves the shipped defaults file
+     * through the same config-data import a service uses, so an assertion about any value that file ships
+     * belongs beside the runner that can see it; a second class would duplicate the runner in order to
+     * assert two keys. The class's name names the largest of the file's concerns rather than all of them
+     * — the file also ships the two refusal-rendering defaults asserted here.</p>
+     *
+     * <p>⚠️ Assumptions: the dispatcher-type value is the substance. The framework's own default is
+     * {@code REQUEST, ASYNC, ERROR}, and with ERROR included a request refused before reaching a
+     * controller was authorised a SECOND time on the container's internal error dispatch — where the
+     * bearer-token filter does not run, because it is a once-per-request filter and those skip error
+     * dispatches — so the request arrived anonymous and a caller holding a valid token was answered 401
+     * for a fault that was really a 400. Reverting this key reopens exactly that, silently, so it is
+     * asserted rather than trusted.</p>
+     *
+     * <p>Assumptions: the two keys are asserted together because they are two halves of one guarantee.
+     * Exempting the error dispatch is only safe because the body that dispatch renders discloses nothing;
+     * if the path were ever restored to that body, the exemption would begin echoing a caller-supplied
+     * address on every unmatched request.</p>
+     */
+    @Test
+    @DisplayName("the shared defaults exempt the error dispatch and withhold the fallback path")
+    void sharedDefaultsCarryTheRefusalRenderingValues() {
+        this.runner.run(context -> {
+            Environment environment = context.getEnvironment();
+            assertThat(environment.getProperty("spring.security.filter.dispatcher-types"))
+                    .as("including ERROR re-authorises a refused request on the container's own error "
+                            + "dispatch, where the bearer-token filter does not run")
+                    .isEqualTo("REQUEST, ASYNC");
+            assertThat(environment.getProperty("server.error.include-path"))
+                    .as("the exemption above is only safe while the fallback body echoes no "
+                            + "caller-supplied address")
+                    .isEqualTo("never");
+        });
+    }
+
+    /**
      * Encodes one logging event through the encoder the shared defaults select.
      *
      * <p>Assumptions: the environment is supplied to the logger context under the key the encoder

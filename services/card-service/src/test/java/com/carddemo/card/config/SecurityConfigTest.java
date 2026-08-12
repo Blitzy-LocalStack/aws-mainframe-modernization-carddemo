@@ -169,6 +169,71 @@ class SecurityConfigTest {
     }
 
     /**
+     * Confirms the documentation paths are covered by their own rule and by no other, and that they and
+     * the published operations cannot reach each other's grants.
+     *
+     * <p>Purpose: runtime testing found every address this service serves its own API description at
+     * answering 403 to a valid token of either group, because the chain's catch-all denies and no rule
+     * above it named one. This case fixes the inventory: the five patterns are asserted present, each of
+     * the three configured addresses and both of the paths a browser view derives from them are asserted
+     * matched, and the separation from every other rule is asserted in both directions.</p>
+     *
+     * <p>Assumptions: the negative half is the load-bearing half, exactly as it is for the telemetry case
+     * above. A documentation pattern that also matched an API path would grant an operation the
+     * ordinary-user authority through a rule the contract census never reads, so the operation's
+     * published authority and its enforced one could differ with nothing failing; and an API pattern that
+     * matched a documentation path would put the document behind whichever rule happened to be ordered
+     * first.</p>
+     *
+     * <p>Assumptions: {@code requiredAuthorityFor} is asserted to answer null for these paths, which is
+     * the property that keeps the published-operation table complete on its own terms. A documentation
+     * path appearing in that table would be read by the contract census as an operation the contract
+     * failed to declare.</p>
+     */
+    @Test
+    @DisplayName("the documentation paths are granted by their own rule and are disjoint from the rest")
+    void documentationPathsAreNamedByTheChainAndDisjointFromEveryOtherRule() {
+        List<String> patterns = SecurityConfig.documentationPaths();
+
+        assertThat(patterns)
+                .as("three configured addresses need five patterns: each of the two views has a subtree")
+                .containsExactly("/v3/api-docs", "/v3/api-docs/**", "/card-api.yaml",
+                        "/swagger-ui.html", "/swagger-ui/**");
+
+        for (String documentationPath : List.of("/v3/api-docs", "/v3/api-docs/swagger-config",
+                "/card-api.yaml", "/swagger-ui.html", "/swagger-ui/index.html")) {
+            assertThat(patterns.stream().anyMatch(p -> MATCHER.match(p, documentationPath)))
+                    .as("%s must be granted by a documentation pattern, or it answers the catch-all",
+                            documentationPath)
+                    .isTrue();
+            assertThat(MATCHER.match(SecurityConfig.HEALTH_PATH, documentationPath))
+                    .as("%s must not be granted by the open health rule", documentationPath)
+                    .isFalse();
+            for (String operationPattern : List.of(SecurityConfig.ADMIN_CARD_PATH_PATTERN,
+                    SecurityConfig.CARD_COLLECTION_PATH_PATTERN,
+                    SecurityConfig.CARD_SUBTREE_PATH_PATTERN)) {
+                assertThat(MATCHER.match(operationPattern, documentationPath))
+                        .as("%s must not be granted by the operation pattern %s", documentationPath,
+                                operationPattern)
+                        .isFalse();
+            }
+            assertThat(SecurityConfig.requiredAuthorityFor(documentationPath))
+                    .as("%s is not a published operation, so the operation table must not claim it",
+                            documentationPath)
+                    .isNull();
+        }
+
+        for (String servedPath : List.of("/api/v1/cards", "/api/v1/cards/search",
+                "/api/v1/cards/" + SAMPLE_CARD_SELECTOR,
+                "/api/v1/admin/cards/" + SAMPLE_CARD_SELECTOR, "/actuator/health",
+                SecurityConfig.BUILD_IDENTITY_PATH, SecurityConfig.METRIC_SCRAPE_PATH)) {
+            assertThat(patterns.stream().noneMatch(p -> MATCHER.match(p, servedPath)))
+                    .as("%s must not be granted by a documentation pattern", servedPath)
+                    .isTrue();
+        }
+    }
+
+    /**
      * Confirms a valid token carrying no recognised group, or an unrecognised one, receives no CardDemo
      * authority -- which is what makes the chain's authority rules and its deny-all catch-all a real
      * boundary rather than a formality.

@@ -171,6 +171,14 @@ public class AuthReplyOutbox {
      * <p>Assumptions: publication is recorded by setting this member rather than by deleting the row,
      * so a published reply remains auditable and a partial index over the null values keeps the
      * publisher's claim query reading only the pending rows.</p>
+     *
+     * <p>⚠️ Assumptions: this member is set ONLY by an accepted send. Nothing else may populate it.
+     * Refactoring Rationale: a {@code retire} transition set it for a reply whose deadline had passed
+     * WITHOUT sending anything, and the effect was a row asserting a publication that never happened --
+     * which the retention sweep, whose predicate is this same column, then deleted. Both the transition
+     * and its caller are withdrawn; a reply that cannot be delivered within its attempt budget reaches
+     * {@link #abandon(java.time.LocalDateTime, String)} instead, which leaves this member null and is
+     * excluded from that sweep for exactly this reason.</p>
      */
     @Column(name = "published_at")
     private LocalDateTime publishedAt;
@@ -182,8 +190,9 @@ public class AuthReplyOutbox {
      * {@code OutboxRepository} advanced it, {@code OutboxPublisher} advanced it again when a send failed,
      * and it advanced a third time when an expired row was retired without being sent at all -- so its
      * value was neither a claim count nor a send count and answered no operational question. The claim
-     * transition moved to {@link #claimVersion} and the retirement of an expired row no longer touches
-     * this member, so one increment now corresponds to one transport call.</p>
+     * transition moved to {@link #claimVersion}, and the third event no longer exists at all: a row whose
+     * deadline has passed is now SENT with the lateness reported rather than retired unsent, so one
+     * increment corresponds to one transport call.</p>
      *
      * <p>Assumptions: the type is {@code Integer} and the column INTEGER, widened from a small integer by
      * {@code V2__authorization_outbox_claim_version.sql}. The old width was reachable: a permanently
@@ -493,40 +502,19 @@ public class AuthReplyOutbox {
     }
 
     /**
-     * Retires a reply whose deadline passed before it could be sent, recording why.
-     *
-     * <p>Refactoring Rationale: this is ONE call rather than a publication mark followed by a failure
-     * record, and the consolidation is recorded because the pair it replaces was order-dependent in a
-     * way nothing enforced. {@link #markPublished(java.time.LocalDateTime)} CLEARS the diagnostic, which
-     * is right for a reply that succeeded after failing and exactly wrong for one retired for staleness,
-     * so the two calls only produced the intended row in one of their two possible orders and a reader
-     * had to be told which. Retirement is a single fact about the row, so it is now a single method and
-     * the order cannot be got wrong.</p>
-     *
-     * <p>Assumptions: retirement sets the PUBLICATION instant even though nothing was sent, because that
-     * column is also the predicate that removes a row from the pending indexes and from the claim's
-     * candidate set. The reason column is what distinguishes a retired row from a delivered one, which is
-     * why it is written in the same call rather than left optional.</p>
-     *
-     * @param retiredAt the instant the retirement is recorded at, in coordinated universal time; must
-     *     not be {@code null}
-     * @param reason why the reply was retired; may be {@code null}, and is truncated to the column width
-     */
-    public void retire(LocalDateTime retiredAt, String reason) {
-        this.publishedAt = retiredAt;
-        if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
-            this.lastError = reason;
-        } else {
-            this.lastError = reason.substring(0, LAST_ERROR_MAX_LENGTH);
-        }
-    }
-
-    /**
      * Abandons this reply permanently, leaving the reason that ended it on the row.
      *
      * <p>Assumptions: abandonment does NOT set the publication instant, so an abandoned reply can
      * never be counted as delivered. It is removed from the ready set by the terminal column alone,
      * which is why that column and the publication column are distinct.</p>
+     *
+     * <p>⚠️ Assumptions: this is now the ONLY terminal outcome for a reply that never reached the wire,
+     * and a passed deadline no longer produces one of its own. Refactoring Rationale: a withdrawn
+     * {@code retire} transition ended a stale reply by marking it published, which both asserted a
+     * delivery that had not occurred and exposed the row to the retention sweep. Every undeliverable
+     * reply now arrives here instead, so the two properties that make an undelivered reply investigable
+     * -- a null publication instant and exclusion from the sweep -- hold for all of them rather than for
+     * the subset whose queue was unreachable rather than slow.</p>
      *
      * <p>Trade-offs: the payload and the diagnostic are retained rather than cleared, so an operator
      * can see which reply was given up on and why. The accepted cost is that a row carrying a primary

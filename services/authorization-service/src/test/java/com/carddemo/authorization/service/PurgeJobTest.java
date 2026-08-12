@@ -150,6 +150,19 @@ class PurgeJobTest {
     /** An exact zero at the scale every money column stores. */
     private static final BigDecimal ZERO = new BigDecimal("0.00");
 
+    /**
+     * The bound the reversal statement saturates the summary's two totals at.
+     *
+     * <p>Assumptions: the verifications name this constant rather than matching any value, because WHICH
+     * bound the sweep passes is part of what is under test -- passing the detail table's wider domain would
+     * let a subtraction drive a total past what its own column can hold, which is the failure that abended
+     * the whole run.</p>
+     */
+    private static final BigDecimal CEILING = PendingAuthSummary.MONEY_MAX_MAGNITUDE;
+
+    /** The negative bound the reversal saturates at, being the negation of {@link #CEILING}. */
+    private static final BigDecimal FLOOR = CEILING.negate();
+
     /** Ordinal 24095, the built children's authorization date: day 95 of 2024. */
     private static final int AUTH_DATE = 24_095;
 
@@ -278,6 +291,26 @@ class PurgeJobTest {
                         ? chunk(children, invocation.getArgument(1), invocation.getArgument(2),
                                 invocation.getArgument(3))
                         : List.of());
+    }
+
+    /**
+     * States how many authorizations the child table still holds once a window's deletes have been made.
+     *
+     * <p>Assumptions: this is stubbed rather than derived from the child list the other doubles answer,
+     * because the two describe different populations. The child list is what the walk READS from a fixed
+     * starting position; this count is what the table HOLDS at the moment the parent delete is decided, and
+     * it therefore includes an authorization committed after the walk began -- the population the parent's
+     * cascade would destroy and the walk cannot see. A double that computed one from the other could not
+     * express that difference at all, which is the difference the guard exists for.</p>
+     *
+     * <p>Assumptions: it is lenient, so a case that never reaches the parent-delete decision does not fail
+     * on an unused stubbing. The value the mock returns when this is not called is zero, which is the
+     * ordinary state for a fixture whose every child expired.</p>
+     *
+     * @param remaining how many rows the count query reports for any account
+     */
+    private void givenRemainingChildren(long remaining) {
+        Mockito.lenient().when(this.details.countByIdAccountId(any())).thenReturn(remaining);
     }
 
     /**
@@ -623,7 +656,7 @@ class PurgeJobTest {
             //       read off the statement because the reversal no longer touches the loaded entity.
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.signum() > 0), eq(0),
-                    argThat(amount -> amount.signum() == 0));
+                    argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR));
         }
     }
 
@@ -735,7 +768,7 @@ class PurgeJobTest {
             assertThat(outcome.detailsDeleted()).isZero();
             verify(PurgeJobTest.this.details, never()).delete(any());
             verify(PurgeJobTest.this.summaries, never())
-                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any());
+                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any());
             assertThat(outcome.summariesDeleted()).isZero();
         }
     }
@@ -804,7 +837,8 @@ class PurgeJobTest {
             assertThat(outcome.detailsDeleted()).isEqualTo(2);
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
-                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0));
+                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
+                    eq(CEILING), eq(FLOOR));
             // WHY : Assumptions: the parent SURVIVES, and that is a consequence of the arithmetic rather
             //       than a separate rule. Two minus one leaves one on each side, and one is not at or below
             //       zero, so the guard the group below asserts does not fire. Naming it here is what stops
@@ -847,7 +881,8 @@ class PurgeJobTest {
 
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("100.00")) == 0),
-                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("50.00")) == 0));
+                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("50.00")) == 0),
+                    eq(CEILING), eq(FLOOR));
         }
 
         /**
@@ -883,7 +918,7 @@ class PurgeJobTest {
             ArgumentCaptor<BigDecimal> approved = ArgumentCaptor.forClass(BigDecimal.class);
             ArgumentCaptor<BigDecimal> declined = ArgumentCaptor.forClass(BigDecimal.class);
             verify(PurgeJobTest.this.summaries).reverseExpiredAuthorizations(eq(accountId), eq(1),
-                    approved.capture(), eq(1), declined.capture());
+                    approved.capture(), eq(1), declined.capture(), eq(CEILING), eq(FLOOR));
             assertThat(approved.getValue().scale()).isEqualTo(Money.SCALE);
             assertThat(declined.getValue().scale()).isEqualTo(Money.SCALE);
         }
@@ -932,7 +967,8 @@ class PurgeJobTest {
             //       expired children carried.
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
-                    eq(2), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0));
+                    eq(2), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
+                    eq(CEILING), eq(FLOOR));
             assertThat(outcome.summariesDeleted()).isEqualTo(1);
         }
     }
@@ -1014,7 +1050,8 @@ class PurgeJobTest {
 
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(1), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
-                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0));
+                    eq(1), argThat(amount -> amount.compareTo(new BigDecimal("150.00")) == 0),
+                    eq(CEILING), eq(FLOOR));
             verify(PurgeJobTest.this.summaries, never()).save(any());
             assertThat(parent.getApprovedAuthCount())
                     .as("the instance is untouched; the ROW is what the statement reduces")
@@ -1083,7 +1120,7 @@ class PurgeJobTest {
             givenChildren(List.of(expiring));
             doThrow(new IllegalStateException("reduction failed"))
                     .when(PurgeJobTest.this.summaries)
-                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any());
+                    .reverseExpiredAuthorizations(any(), anyInt(), any(), anyInt(), any(), any(), any());
 
             PurgeJob job = job();
             PurgeJob.PurgeParameters parameters =
@@ -1164,7 +1201,7 @@ class PurgeJobTest {
             //       to the instance.
             verify(PurgeJobTest.this.summaries, times(1)).reverseExpiredAuthorizations(eq(accountId),
                     eq(2), argThat(amount -> amount.compareTo(new BigDecimal("300.00")) == 0),
-                    eq(0), argThat(amount -> amount.signum() == 0));
+                    eq(0), argThat(amount -> amount.signum() == 0), eq(CEILING), eq(FLOOR));
             assertThat(outcome.summariesDeleted()).isZero();
             verify(PurgeJobTest.this.summaries, never()).delete(any());
         }
@@ -1229,6 +1266,151 @@ class PurgeJobTest {
             order.verify(PurgeJobTest.this.details).delete(third);
             order.verify(PurgeJobTest.this.details).delete(fourth);
             order.verify(PurgeJobTest.this.summaries).delete(any());
+        }
+
+        /**
+         * A summary whose counters have fallen away survives while the child table still holds rows.
+         *
+         * <p>Purpose: this is the second half of the delete guard, and it exists because the counter test
+         * alone could destroy live authorizations. The detail table's foreign key cascades on delete, so a
+         * parent removed while children remain takes them with it -- and the counters can reach zero while
+         * real, unexpired rows sit beneath them: this very job decrements them and the schema admits their
+         * negative half, an extract load restores summaries and children from two separate files so a
+         * partial load commits one without the other, and nothing reconciles them afterwards. In that state
+         * the previous guard deleted the parent and the cascade silently took rows the run had judged NOT to
+         * have expired, while the run reported none removed.
+         *
+         * <p>Assumptions: the state is arranged by stubbing the remaining-row count rather than by expiring
+         * a subset of the children, and the two are not interchangeable. Expiring a subset leaves the
+         * counters non-zero, which the FIRST half of the guard already refuses -- so the case would pass
+         * whether the second half existed or not. Stubbing the count is the only way to reach a decision
+         * that the counter test allows and the row test forbids.
+         *
+         * <p>Assumptions: the deleted children are still asserted, so the case cannot pass by the run
+         * having done nothing at all.
+         */
+        @Test
+        @DisplayName("counters at zero do not remove a summary whose child table still holds rows")
+        void countersAtZeroDoNotRemoveASummaryWithRemainingChildren() {
+            Long accountId = committedParentAccountId();
+            PendingAuthSummary parent = committedParent(accountId);
+            givenSummaries(List.of(parent));
+            PendingAuthDetail expiring = child(AUTH_DATE, 91_500_000, APPROVED, "100.00", "100.00");
+            givenChildren(List.of(expiring));
+            givenRemainingChildren(2L);
+
+            PurgeJob.PurgeOutcome outcome = job().purge(
+                    PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(10)));
+
+            verify(PurgeJobTest.this.details).delete(expiring);
+            assertThat(outcome.detailsDeleted()).isEqualTo(1);
+            assertThat(outcome.summariesDeleted()).isZero();
+            verify(PurgeJobTest.this.summaries, never()).delete(any());
+        }
+
+        /**
+         * The remaining population is READ from the child table rather than inferred from the run's tallies.
+         *
+         * <p>Assumptions: the read is asserted to happen, and it is asserted for the account being purged,
+         * because the arithmetic alternative -- children read minus children deleted -- is the plausible
+         * implementation and is wrong in a way no other case here would expose. The sweep walks each account
+         * newest-first from a fixed position, so an authorization committed after that walk began carries a
+         * newer key than anything the walk visits and is invisible to it; the subtraction would therefore
+         * report zero survivors for an account that had just acquired one, and the cascade would delete it.
+         */
+        @Test
+        @DisplayName("the survivor test queries the child table for the account being purged")
+        void theSurvivorTestQueriesTheChildTable() {
+            Long accountId = committedParentAccountId();
+            givenSummaries(List.of(committedParent(accountId)));
+            givenChildren(List.of(child(AUTH_DATE, 91_500_000, APPROVED, "100.00", "100.00")));
+
+            job().purge(PurgeJob.PurgeParameters.forBusinessDate(AUTHORIZED_ON.plusDays(10)));
+
+            verify(PurgeJobTest.this.details).countByIdAccountId(accountId);
+        }
+    }
+
+    /**
+     * Asserts that the stored ordinal date decodes for every value the key column admits.
+     *
+     * <p>Purpose: the expiry test resolves each child's five-digit {@code YYDDD} key component into a
+     * calendar date, which is divergence D-E. The resolution has to be TOTAL over what the column can hold,
+     * because {@code hasExpired} decodes every child before testing any of them -- so one value it cannot
+     * resolve ends the whole run for every account on every business date.
+     *
+     * <p>Refactoring Rationale: the schema deliberately admits day 366 for EVERY two-digit year. The
+     * constraint {@code ck_pending_auth_detail_auth_date_domain} in
+     * {@code db/migration/V1__authorization.sql} bounds the day component at 366 and records why it does not
+     * resolve leap years: doing so needs a century pivot the baseline never chose, and inventing one would
+     * reject a genuine leap-day authorization whose century the schema cannot know. The decode DOES pivot,
+     * so the two disagreed about exactly one value per non-leap year, and such a value is reachable through
+     * the extract load. The fix belongs in the reader for that reason -- a tightened constraint could not
+     * repair a row already stored, which the reader must still be able to read.
+     */
+    @Nested
+    @DisplayName("the stored ordinal date decodes for every value the column admits")
+    class OrdinalDateDecoding {
+
+        /**
+         * Day 366 of a non-leap year completes the run instead of ending it.
+         *
+         * <p>Assumptions: {@code 99366} is used because it is literally the upper bound of the column's own
+         * check constraint, so it is the value most certain to be admitted, and 2099 is not a leap year. The
+         * business date is one on which nothing can qualify, so the case isolates the DECODE: before this
+         * fix the run raised regardless of the business date, because every child is decoded before its age
+         * is tested.
+         *
+         * <p>Assumptions: the row is additionally asserted NOT to be deleted. A decode that resolved the
+         * value to something in the past would complete the run and then expire a row dated in 2099, which
+         * would pass a test that only asserted completion.
+         */
+        @Test
+        @DisplayName("day 366 of a non-leap year completes the run and expires nothing")
+        void dayThreeSixtySixOfANonLeapYearIsResolved() {
+            Long accountId = committedParentAccountId();
+            givenSummaries(List.of(committedParent(accountId)));
+            givenChildren(List.of(child(99_366, 12_000_000, APPROVED, "10.00", "10.00")));
+
+            // WHY : Assumptions: the run is invoked DIRECTLY rather than through an assertion that it does
+            //       not raise. Before this fix it raised PurgeAbendException here, so the call itself is
+            //       the assertion -- and calling it directly leaves the outcome available to assert on,
+            //       where a does-not-throw wrapper would discard it and need a second run to recover it.
+            PurgeJob.PurgeOutcome outcome = job().purge(
+                    PurgeJob.PurgeParameters.forBusinessDate(LocalDate.of(2020, 1, 1)));
+
+            assertThat(outcome.detailsRead()).isEqualTo(1);
+            assertThat(outcome.detailsDeleted()).isZero();
+            verify(PurgeJobTest.this.details, never()).delete(any());
+            verify(PurgeJobTest.this.summaries, never()).delete(any());
+        }
+
+        /**
+         * Day 366 of a LEAP year is the genuine leap day and is resolved without adjustment.
+         *
+         * <p>Assumptions: this case is what keeps the clamp from being applied indiscriminately. The
+         * conservative reading of an out-of-range day is the year's final day, and a clamp written without a
+         * length test would apply it to 29 February as well -- moving a real leap-day authorization to 31
+         * December and changing which business dates expire it. {@code 28366} is day 366 of 2028, a leap
+         * year, and it therefore denotes 31 December 2028 by resolution rather than by clamping; the case
+         * asserts the age arithmetic that follows from it, which is what a wrong resolution would disturb.
+         */
+        @Test
+        @DisplayName("day 366 of a leap year resolves to that year's real final day")
+        void dayThreeSixtySixOfALeapYearIsTheLeapDay() {
+            Long accountId = committedParentAccountId();
+            givenSummaries(List.of(committedParent(accountId)));
+            PendingAuthDetail leapDayChild = child(28_366, 12_000_000, APPROVED, "10.00", "10.00");
+            givenChildren(List.of(leapDayChild));
+
+            PurgeJob.PurgeOutcome fourDaysLater = job().purge(
+                    PurgeJob.PurgeParameters.forBusinessDate(LocalDate.of(2029, 1, 4)));
+            assertThat(fourDaysLater.detailsDeleted()).isZero();
+
+            PurgeJob.PurgeOutcome fiveDaysLater = job().purge(
+                    PurgeJob.PurgeParameters.forBusinessDate(LocalDate.of(2029, 1, 5)));
+            assertThat(fiveDaysLater.detailsDeleted()).isEqualTo(1);
+            verify(PurgeJobTest.this.details).delete(leapDayChild);
         }
     }
 
@@ -1781,9 +1963,9 @@ class PurgeJobTest {
             verify(PurgeJobTest.this.summaries).findByAccountId(populated);
             verify(PurgeJobTest.this.details).delete(expiring);
             verify(PurgeJobTest.this.summaries, never())
-                    .reverseExpiredAuthorizations(eq(childless), anyInt(), any(), anyInt(), any());
+                    .reverseExpiredAuthorizations(eq(childless), anyInt(), any(), anyInt(), any(), any(), any());
             verify(PurgeJobTest.this.summaries, times(1))
-                    .reverseExpiredAuthorizations(eq(populated), eq(1), any(), eq(0), any());
+                    .reverseExpiredAuthorizations(eq(populated), eq(1), any(), eq(0), any(), any(), any());
         }
 
         /**

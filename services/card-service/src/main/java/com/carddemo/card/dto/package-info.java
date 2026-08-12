@@ -3,17 +3,26 @@
  *
  * <h2>What this package contains</h2>
  *
- * <p>Seven compilation units sit in this directory: this charter, and the six records
- * {@code AdminCardDetail}, {@code CardDetail}, {@code CardLookupRequest}, {@code CardPageQuery},
- * {@code CardSummary} and {@code CardUpdateRequest}. Every inventory, type name and count in this
- * charter is a measurement of that directory and of the contract named below, so a reader can check
- * any figure here by listing the package or by reading the contract.</p>
+ * <p>Eight compilation units sit in this directory: this charter, and the seven records
+ * {@code AdminCardDetail}, {@code CardConflictError}, {@code CardDetail}, {@code CardLookupRequest},
+ * {@code CardPageQuery}, {@code CardSummary} and {@code CardUpdateRequest}. Every inventory, type name
+ * and count in this charter is a measurement of that directory and of the contract named below, so a
+ * reader can check any figure here by listing the package or by reading the contract.</p>
  *
- * <p>Assumptions: the set is closed, so a record added beside those six without amending this
+ * <p>Assumptions: the set is closed, so a record added beside those seven without amending this
  * charter is an ungoverned exception to it. Closure matters more here than it would in most
- * packages, because the disclosure boundary rests on it: exactly one of the six shapes is able to
- * carry an unmasked primary account number, and a seventh shape introduced quietly is how that
+ * packages, because the disclosure boundary rests on it: exactly one of the seven shapes is able to
+ * carry an unmasked primary account number, and a further shape introduced quietly is how that
  * property would be lost without any single edit looking like it lost it.</p>
+ *
+ * <p>Refactoring Rationale: the roster closed at six records until {@code CardConflictError} landed. It
+ * is the body of the conflict response, which the contract declares as the shared error shape plus one
+ * refreshed card, and it had no Java form at all -- the update route answered with the shared shape,
+ * which structurally cannot carry the extra member, so a caller following the document found a member
+ * that was never sent. It is admitted to this package rather than placed beside the advice that renders
+ * it because it is a response shape of this contract, and this package holds those. Its card component
+ * is the masked {@code CardDetail} and never {@code AdminCardDetail}, so admitting it does not widen the
+ * disclosure boundary the paragraph above rests on.</p>
  *
  * <h2>Purpose, and where every shape comes from</h2>
  *
@@ -97,7 +106,7 @@
  * schema names so that the two can be read against each other:</p>
  *
  * <pre>
- * this directory: 7 java files = 6 classes + 1 charter
+ * this directory: 8 java files = 7 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: the enumeration below closed at four records and omitted the two request

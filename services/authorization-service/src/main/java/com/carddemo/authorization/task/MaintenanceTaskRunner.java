@@ -1,8 +1,11 @@
 package com.carddemo.authorization.task;
 
 import com.carddemo.authorization.AuthorizationApplication;
+import com.carddemo.authorization.service.PurgeJob;
 import com.carddemo.authorization.service.UnloadService;
+import com.carddemo.common.observability.FailureSummary;
 import com.carddemo.common.observability.LogSafeText;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
@@ -61,6 +64,31 @@ public final class MaintenanceTaskRunner {
     /** The argument prefix carrying the export's record form, which the export alone accepts. */
     public static final String EXTRACT_FORM_OPTION = "--extract-form=";
 
+    /**
+     * The argument prefix carrying the purge's expiry threshold in days.
+     *
+     * <p>⚠️ Refactoring Rationale: this option and the two below exist because the purge's own validation
+     * and ceilings were unreachable from any runtime entry point. {@code PurgeJob} publishes
+     * {@code MAX_EXPIRY_DAYS}, the shared {@code MAX_CARD_FREQUENCY} and a documented refusal of a zero
+     * threshold, and the reference program takes all three values on its control card at
+     * {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} L98 to L108 -- but the task passed the three
+     * defaults unconditionally, so a run could only ever expire at five days and commit every five
+     * summaries. An orchestrator state expressing the reference's parameter card had nothing to write into,
+     * and the refusals the job documents could not be provoked by any operator.</p>
+     *
+     * <p>Assumptions: all three are OPTIONAL and are absent from the parameter map when the operator omits
+     * them, so the defaults stay published by {@code PurgeJob} and are not restated here. A copy of a
+     * default in this class would be a second place to change it, which is the same reasoning the export
+     * form's own optionality already follows.</p>
+     */
+    public static final String EXPIRY_DAYS_OPTION = "--expiry-days=";
+
+    /** The argument prefix carrying how many summaries the purge commits per window. */
+    public static final String CHECKPOINT_FREQUENCY_OPTION = "--checkpoint-frequency=";
+
+    /** The argument prefix carrying how many committed windows fall between purge progress reports. */
+    public static final String PROGRESS_LOG_FREQUENCY_OPTION = "--progress-log-frequency=";
+
     /** The parameter name the business date is published under. */
     public static final String BUSINESS_DATE_PARAMETER = "businessDate";
 
@@ -72,6 +100,15 @@ public final class MaintenanceTaskRunner {
 
     /** The parameter name the export's record form is published under. */
     public static final String EXTRACT_FORM_PARAMETER = "extractForm";
+
+    /** The parameter name the purge's expiry threshold is published under. */
+    public static final String EXPIRY_DAYS_PARAMETER = "expiryDays";
+
+    /** The parameter name the purge's commit window size is published under. */
+    public static final String CHECKPOINT_FREQUENCY_PARAMETER = "checkpointFrequency";
+
+    /** The parameter name the purge's progress-report interval is published under. */
+    public static final String PROGRESS_LOG_FREQUENCY_PARAMETER = "progressLogFrequency";
 
     /** The job name of the extract load. */
     public static final String LOAD_JOB = "load-authorizations";
@@ -195,13 +232,52 @@ public final class MaintenanceTaskRunner {
                     LogSafeText.sanitize(jobName), EXIT_STATUS_CLEAN);
             return EXIT_STATUS_CLEAN;
         } catch (Exception failure) {
-            LOG.error("event=authorization.task.failed code={} job={} exception={}",
+            // WHY : ⚠️ Refactoring Rationale: the whole CAUSE CHAIN is now recorded, where this line named
+            //       only the outermost class. A maintenance job's failure is nearly always wrapped -- the
+            //       purge raises its own abend type around a date-resolution or database fault, and the load
+            //       raises a segment fault around a parse fault -- so the outermost name was the one piece of
+            //       information an operator already had from the job they started, and the fault itself, the
+            //       thing they needed, was discarded. The digest carries the chain of TYPES and the frames
+            //       that raised them, plus the SQL state when a database link is in the chain, which is what
+            //       turns "the purge failed" into "the purge failed on a numeric overflow at this
+            //       statement".
+            // WHY : ⚠️ Refactoring Rationale: the paragraph above claimed the digest carried "the SQL
+            //       state when a database link is in the chain", and it did not -- the digest is a chain of
+            //       type names and frames and holds no state code at all. The claim is corrected by making
+            //       it true: the state code is now a field of its own, and the failure's own deepest
+            //       message is a second field beside it. What the digest still does not carry is message
+            //       text, which remains right for the digest and was wrong as the whole of this line.
+            // WHY : ⚠️ Refactoring Rationale: getMessage() is still not used, and the reason the
+            //       previous paragraph gave for that stands -- a driver's unique-violation message quotes
+            //       the offending KEY VALUES, and on this schema those are a primary account number and an
+            //       acquirer transaction identifier. What has changed is that withholding the message is no
+            //       longer the only alternative: FailureSummary.databaseConditionOf shows a message only
+            //       when some link in the chain carries a database state code, and then sanitises it, masks
+            //       a card-shaped run and replaces every run of three or more digits -- so the WORDS reach
+            //       the line and the VALUES do not. That is what turns "the purge failed" into "the purge
+            //       failed on a numeric field overflow", which was the measured gap: diagnosing one
+            //       otherwise meant re-running the job with driver debug logging enabled.
+            // WHY : ⚠️ Assumptions: the message is DEFAULT-WITHHELD rather than default-shown, and this
+            //       runner is exactly the site that needs that discipline -- it wraps whatever a task
+            //       raised, so it cannot know who composed what it is holding. A cloud-client failure
+            //       quotes credentials and signed locations that no digit rule recognises. The two tasks
+            //       whose faults carry a field name worth reading log it themselves, where the provenance
+            //       IS known: LoadService names the refused record's ordinal beside its mapper's own
+            //       account of what was wrong, and PurgeJob names the window and account ordinals.
+            LOG.error("event=authorization.task.failed code={} job={} failure={} detail={} sqlState={}",
                     ERROR_CODE_TASK_FAILED, LogSafeText.sanitize(jobName),
-                    failure.getClass().getName());
+                    ThrowableDigest.of(failure), FailureSummary.databaseConditionOf(failure),
+                    FailureSummary.sqlStateOrAbsent(failure));
             return EXIT_STATUS_HARD_FAILURE;
         } catch (Error fatal) {
-            LOG.error("event=authorization.task.fatal code={} job={} error={}",
-                    ERROR_CODE_TASK_FAILED, LogSafeText.sanitize(jobName), fatal.getClass().getName());
+            // WHY : ⚠️ Assumptions: the fatal arm carries the same two fields as the arm above, in the
+            //       same positions, so one log query serves both. A virtual-machine error carries its own
+            //       diagnosis in its message as often as a transport fault does -- an out-of-memory error
+            //       names the pool it exhausted -- and there is no reason for the more serious arm to be the
+            //       less informative one.
+            LOG.error("event=authorization.task.fatal code={} job={} failure={} detail={} sqlState={}",
+                    ERROR_CODE_TASK_FAILED, LogSafeText.sanitize(jobName), ThrowableDigest.of(fatal),
+                    FailureSummary.databaseConditionOf(fatal), FailureSummary.sqlStateOrAbsent(fatal));
             return EXIT_STATUS_HARD_FAILURE;
         }
     }
@@ -247,8 +323,24 @@ public final class MaintenanceTaskRunner {
         //       and appeared to work while silently skipping any validation of its own -- and a fourth job
         //       wanting different options would have been handed the load's.
         switch (jobName) {
-            case PURGE_JOB -> parameters.put(
-                    BUSINESS_DATE_PARAMETER, requiredDate(args, BUSINESS_DATE_OPTION));
+            case PURGE_JOB -> {
+                parameters.put(BUSINESS_DATE_PARAMETER, requiredDate(args, BUSINESS_DATE_OPTION));
+                // WHY : Assumptions: each of the three is put only when the operator wrote it, so an
+                //       omitted option leaves the map without the key and the task applies the default the
+                //       job publishes. Putting a default here instead would make this class a second
+                //       publisher of three values PurgeJob already owns.
+                // WHY : Assumptions: the value is validated as a positive integer HERE and its RANGE is
+                //       left to PurgeParameters, which is the same division the business date already
+                //       follows -- parsed here so a typo reaches the operator as a usage message naming the
+                //       option, and bounded there so the ceiling stays stated once, beside the reference
+                //       card field whose width it is.
+                putIfPresent(parameters, EXPIRY_DAYS_PARAMETER,
+                        optionalCount(args, EXPIRY_DAYS_OPTION));
+                putIfPresent(parameters, CHECKPOINT_FREQUENCY_PARAMETER,
+                        optionalCount(args, CHECKPOINT_FREQUENCY_OPTION));
+                putIfPresent(parameters, PROGRESS_LOG_FREQUENCY_PARAMETER,
+                        optionalCount(args, PROGRESS_LOG_FREQUENCY_OPTION));
+            }
             case LOAD_JOB -> {
                 parameters.put(ROOT_EXTRACT_PARAMETER, requiredValue(args, ROOT_EXTRACT_OPTION));
                 parameters.put(CHILD_EXTRACT_PARAMETER, requiredValue(args, CHILD_EXTRACT_OPTION));
@@ -269,6 +361,60 @@ public final class MaintenanceTaskRunner {
                     "no parameters are declared for job " + jobName);
         }
         return parameters;
+    }
+
+    /**
+     * Records a parameter only when the operator supplied it.
+     *
+     * <p>Assumptions: an absent value leaves the key out of the map entirely rather than storing an empty
+     * string, because the consuming task distinguishes "not stated" from "stated as nothing" by presence
+     * alone -- a key holding an empty string would be parsed and would fail as a malformed number after the
+     * container had started, which is precisely the class of refusal this runner exists to catch first.</p>
+     *
+     * @param parameters the map being assembled; must not be {@code null}
+     * @param name the parameter name to record under; must not be {@code null}
+     * @param value the value the operator wrote, or {@code null} when the option was omitted
+     */
+    private static void putIfPresent(Map<String, String> parameters, String name, String value) {
+        if (value != null) {
+            parameters.put(name, value);
+        }
+    }
+
+    /**
+     * Reads an optional count option and refuses one that is not a positive whole number.
+     *
+     * <p>Assumptions: only the SHAPE is checked here and the range is not, for the reason recorded at the
+     * call site: the ceilings are properties of the reference parameter card's field widths and are stated
+     * once, on the purge's own parameter type. What this method rules out is the class of mistake an
+     * operator makes at the keyboard -- a non-numeric value, a negative one, a zero, or a value too wide for
+     * an {@code int} -- so those reach them as a usage message naming the option rather than as a job
+     * failure raised after a container has started.</p>
+     *
+     * @param args the process arguments; must not be {@code null}
+     * @param option the option prefix to read; must not be {@code null}
+     * @return the value as the operator wrote it, or {@code null} when the option was omitted
+     * @throws IllegalArgumentException if the option is present but empty, not a whole number, or not
+     *     positive
+     */
+    private static String optionalCount(String[] args, String option) {
+        String value = valueOf(args, option);
+        if (value == null) {
+            return null;
+        }
+        if (value.isEmpty()) {
+            throw new IllegalArgumentException(option + " must not be empty when it is stated");
+        }
+        final int parsed;
+        try {
+            parsed = Integer.parseInt(value);
+        } catch (NumberFormatException malformed) {
+            throw new IllegalArgumentException(option + " must be a whole number", malformed);
+        }
+        if (parsed <= 0) {
+            throw new IllegalArgumentException(option + " must be greater than zero");
+        }
+        return value;
     }
 
     /**
@@ -367,7 +513,10 @@ public final class MaintenanceTaskRunner {
                 + "  " + JOB_OPTION + UNLOAD_JOB + " " + ROOT_EXTRACT_OPTION + "<location> "
                 + CHILD_EXTRACT_OPTION + "<location> ["
                 + EXTRACT_FORM_OPTION + String.join("|", UnloadService.UnloadForm.WIRE_VALUES) + "]\n"
-                + "  " + JOB_OPTION + PURGE_JOB + " " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD>\n"
+                + "  " + JOB_OPTION + PURGE_JOB + " " + BUSINESS_DATE_OPTION + "<YYYY-MM-DD> ["
+                + EXPIRY_DAYS_OPTION + "<1-" + PurgeJob.MAX_EXPIRY_DAYS + ">] ["
+                + CHECKPOINT_FREQUENCY_OPTION + "<1-" + PurgeJob.MAX_CARD_FREQUENCY + ">] ["
+                + PROGRESS_LOG_FREQUENCY_OPTION + "<1-" + PurgeJob.MAX_CARD_FREQUENCY + ">]\n"
                 + "\n"
                 + "a <location> is either s3://bucket/key or a filesystem path";
     }

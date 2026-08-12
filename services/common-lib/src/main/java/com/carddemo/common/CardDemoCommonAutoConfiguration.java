@@ -2,6 +2,7 @@ package com.carddemo.common;
 
 import com.carddemo.common.control.OnlineWriteGate;
 import com.carddemo.common.control.OnlineWriteGateInterceptor;
+import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.observability.MetricsConfig;
@@ -22,6 +23,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.Ordered;
+import org.springframework.security.web.firewall.RequestRejectedHandler;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import software.amazon.awssdk.services.ssm.SsmClient;
@@ -561,17 +563,28 @@ public class CardDemoCommonAutoConfiguration {
      * Contains request-error rendering only when the servlet, web and security contracts it handles
      * are present.
      *
-     * <p>Assumptions: all three names are checked together because the advice's public handler
-     * signatures use the servlet request, its type carries the web advice annotation and one handler
-     * claims Spring Security's access-denial exception. Loading the advice with any one absent would
+     * <p>Assumptions: all four names are checked together because the advice's public handler
+     * signatures use the servlet request, its type carries the web advice annotation, one handler
+     * claims Spring Security's access-denial exception and one claims the dispatcher's own
+     * absent-resource exception. Loading the advice with any one absent would
      * fail during handler introspection instead of cleanly omitting a bean. Online services declare
-     * all three contracts; the batch task declares none.</p>
+     * all four contracts; the batch task declares none.</p>
+     *
+     * <p>Refactoring Rationale: the fourth name was added with the arm that answers an unpublished path
+     * as a 404 rather than as a server fault. It is the only name in this list that comes from the
+     * dispatcher module rather than from the web module, and naming it is what keeps the omission clean:
+     * a consumer holding the web contracts but no dispatcher -- which is how a service exposing no
+     * request mapping would be assembled -- would otherwise fail while the framework introspected that
+     * handler's declared exception types, rather than simply not receiving the bean. Its sibling
+     * no-handler exception, claimed by the same arm, ships in that same module, so one name settles
+     * both.</p>
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(name = {
         "jakarta.servlet.http.HttpServletRequest",
         "org.springframework.web.bind.annotation.RestControllerAdvice",
-        "org.springframework.security.access.AccessDeniedException"
+        "org.springframework.security.access.AccessDeniedException",
+        "org.springframework.web.servlet.resource.NoResourceFoundException"
     })
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     static final class ServletErrorConfiguration {
@@ -593,6 +606,52 @@ public class CardDemoCommonAutoConfiguration {
         @ConditionalOnMissingBean(GlobalExceptionHandler.class)
         public GlobalExceptionHandler carddemoGlobalExceptionHandler(Clock clock) {
             return new GlobalExceptionHandler(clock);
+        }
+    }
+
+    /**
+     * Registers the handler that answers a request the HTTP firewall refuses to route.
+     *
+     * <p>Assumptions: this is a SEPARATE configuration rather than a bean on
+     * {@link ServletErrorConfiguration}, because the type it publishes lives in the security web module
+     * while that configuration's conditions name the security core module. Conditioning the bean method
+     * itself was rejected for the reason that configuration's own note gives: Spring decides eligibility
+     * from class metadata before resolving a method's return type, so a condition on the method could not
+     * protect a context in which the return type is absent, and the whole error configuration would fail
+     * during introspection instead of cleanly omitting one bean.</p>
+     *
+     * <p>⚠️ Assumptions: a bean is the right mechanism here even though the sibling entry point and
+     * access-denied handler must be set on the builder instead. The reason they are set explicitly is that
+     * Spring Security does not resolve either from the context for a resource-server chain; this type is
+     * different — the framework's own web-security configuration autowires a single
+     * {@code RequestRejectedHandler} bean onto the filter-chain proxy — so publishing it once here gives
+     * every service the same answer with nothing to remember per service. It is the only one of the three
+     * for which a bean is effective, and the asymmetry is stated so a reader does not try to move the
+     * other two here.</p>
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = {
+        "jakarta.servlet.http.HttpServletRequest",
+        "org.springframework.security.web.firewall.RequestRejectedHandler"
+    })
+    @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
+    static final class ServletFirewallConfiguration {
+
+        /**
+         * Registers the shared firewall-rejection handler.
+         *
+         * <p>Assumptions: guarded on absence so a service needing a different refusal — a different status,
+         * or a body shape its own contract publishes — replaces it by declaring its own bean rather than by
+         * editing this one.</p>
+         *
+         * @param clock the clock the rendered problem shape reads its failure instant from, resolved from
+         *     the context so a test can substitute a fixed reading
+         * @return the handler bean, never {@code null}
+         */
+        @Bean
+        @ConditionalOnMissingBean(RequestRejectedHandler.class)
+        public RequestRejectedHandler carddemoRequestRejectedHandler(Clock clock) {
+            return ApiErrorSecurityHandlers.requestRejectedHandler(clock);
         }
     }
 }

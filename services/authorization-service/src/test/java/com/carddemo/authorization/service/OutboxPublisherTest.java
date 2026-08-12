@@ -7,6 +7,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.authorization.domain.AuthReplyOutbox;
 import com.carddemo.authorization.repository.OutboxRepository;
 import java.lang.reflect.Field;
+import java.net.ConnectException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -285,6 +286,25 @@ class OutboxPublisherTest {
      * well-formed payload never can, because a well-formed payload survives a re-encode.</p>
      */
     private static final String MALFORMED_PAYLOAD = "not-a-reply";
+
+    /**
+     * The message identity a broker returns for an accepted send.
+     *
+     * <p>Assumptions: this is shaped as the transport's own identity -- a version-4 identifier -- rather
+     * than as anything this service could have derived, which is the point of asserting it. A value this
+     * service could compute would not distinguish a line that read the broker's answer from one that
+     * re-rendered its own row.</p>
+     */
+    private static final String BROKER_MESSAGE_ID = "3f9c1d84-1c2b-4e77-9a05-6de2b31c7f10";
+
+    /**
+     * The sequence number a broker returns for an accepted send on an ordered queue.
+     *
+     * <p>Assumptions: the value is a long decimal string rather than a number, because the transport
+     * models it as text and it exceeds the range a signed 64-bit integer would hold. Treating it as a
+     * number is the mistake this constant's shape is here to discourage.</p>
+     */
+    private static final String BROKER_SEQUENCE_NUMBER = "18860000000000000101";
 
     /** The outbox repository mock, backed by the simulated table below. */
     private OutboxRepository outbox;
@@ -841,7 +861,20 @@ class OutboxPublisherTest {
                 .claimGroupFollowers(anyString(), anyLong(), anyInt(), any(), any(), anyInt());
         verify(this.sqs, times(1)).sendMessage(any(SendMessageRequest.class));
         assertThat(head.getPublishedAt()).isNull();
-        assertThat(head.getLastError()).isEqualTo(IllegalStateException.class.getName());
+        // WHY : Refactoring Rationale: this asserted EQUALITY with the exception's class name, which is
+        //       what the publisher used to persist. The recorded value is now the cause chain's types and
+        //       frames, so the assertion is on the type BEING NAMED rather than on it being the whole
+        //       string -- and it additionally asserts that no message text was persisted, which is the
+        //       property the digest exists to guarantee and the one an equality check on a class name
+        //       happened to imply without stating.
+        assertThat(head.getLastError())
+                .as("the persisted diagnostic names the fault's type and the frames it was raised at")
+                .startsWith(IllegalStateException.class.getName() + "@")
+                .contains(".java:");
+        assertThat(head.getLastError())
+                .as("a transport-authored message must not be persisted into a column that outlives the "
+                        + "incident, because it can quote the reply it was building")
+                .doesNotContain("queue unreachable");
         assertThat(head.getNextAttemptAt())
                 .as("a failed reply is deferred to a backoff rather than left immediately eligible")
                 .isAfter(fixedNow());
@@ -876,31 +909,33 @@ class OutboxPublisherTest {
     }
 
     /**
-     * An expired reply is retired unsent, and the retirement is both recorded and logged.
+     * A reply whose deadline has passed is STILL SENT, and the lateness is reported rather than acted on.
      *
-     * <p>Assumptions: an expired reply is withheld rather than sent, because sending it would deliver an
-     * answer the requester has stopped waiting for AND would consume the deduplication identity, so a
-     * legitimate retry of the same transaction would afterwards be suppressed as a duplicate of an answer
-     * nobody read. The deadline itself originates at {@code COPAUA0C.cbl} L750, {@code MOVE 50 TO
-     * MQMD-EXPIRY}, whose unit is TENTHS of a second -- so fifty of them is five seconds, a distinct unit
-     * from the receive wait at L242, which is denominated in milliseconds.</p>
+     * <p>⚠️ Refactoring Rationale: this case asserted the exact opposite. It required that a stale row was
+     * withheld from the transport, marked published without being sent, and stamped
+     * {@code "expired before publication"} -- and it passed, because that is what the publisher did. The
+     * arithmetic is what makes that behaviour a defect rather than a policy: the deadline this service
+     * stamps is five seconds ({@code COPAUA0C.cbl} L750, {@code MOVE 50 TO MQMD-EXPIRY}, denominated in
+     * TENTHS of a second, a distinct unit from the receive wait at L242 which is in milliseconds) and the
+     * first retry backoff is also five seconds, so EVERY reply that failed one attempt was past its
+     * deadline before its next attempt fell due and was then discarded unsent, with a row asserting a
+     * publication that never happened and a retention sweep keyed on that same column deleting the
+     * evidence. §0.4.3 of the technical specification states the guarantee this outbox exists for as "a
+     * reply is published for every committed authorization", and the withdrawn behaviour inverted it.</p>
      *
-     * <p>Assumptions: retirement is asserted to be both DURABLE and AUDIBLE, and one without the other
-     * would be a defect. A reply dropped with no record is indistinguishable from one that was never
-     * written, so the reason is asserted on the row and the warning is asserted on the log. The ordering of
-     * the two writes the publisher makes is load-bearing and is what the reason pins: marking a row
-     * published RESETS its diagnostic, which is right for a reply that finally succeeded after failing, so
-     * a retirement that recorded its reason before marking would leave the column empty.</p>
-     *
-     * <p>Assumptions: honouring a deadline on the RECEIVING side belongs to
-     * {@code AuthorizationRequestListenerTest}, not here. This case asserts only the publisher's half,
-     * which is that a stale row is withheld rather than published.</p>
+     * <p>Assumptions: the deadline is a TRANSPORT attribute the RECEIVER honours, which is how
+     * §0.7.6 and {@code docs/adr/ADR-004-messaging.md} both record the resolution of the reference's
+     * per-message expiry against a transport that has none. So the publisher's half of the contract is to
+     * SEND and to say that it is late; the receiving half belongs to
+     * {@code AuthorizationRequestListenerTest}. This case asserts three things together because any one
+     * without the others would be a defect: the reply reaches the transport, the row ends genuinely
+     * published with NO diagnostic, and the lateness is on the log where an operator can alert on it.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("an expired reply is retired unsent, recorded on its row and logged")
-    void anExpiredReplyIsRetiredRecordedAndLogged() {
+    @DisplayName("a reply past its deadline is still sent, and the lateness is logged not enacted")
+    void aReplyPastItsDeadlineIsStillSentAndTheLatenessIsLogged() {
         AuthReplyOutbox stale = rowWith(1L, CARD_NUM, FIRST_TRANSACTION_ID, REPLY_QUEUE,
                 CORRELATION_ID, APPROVED_PAYLOAD, fixedNow().minusSeconds(1L));
         Logger publisherLogger = (Logger) LoggerFactory.getLogger(OutboxPublisher.class);
@@ -915,21 +950,149 @@ class OutboxPublisherTest {
         Level previousLevel = publisherLogger.getLevel();
         publisherLogger.setLevel(Level.WARN);
         try {
-            assertThat(this.publisher.drain()).isZero();
+            assertThat(this.publisher.drain())
+                    .as("a reply the committed decision says is owed is delivered late rather than lost")
+                    .isOne();
 
-            verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
-            assertThat(stale.isPublished()).isTrue();
-            assertThat(stale.getLastError()).isEqualTo("expired before publication");
+            verify(this.sqs, times(1)).sendMessage(any(SendMessageRequest.class));
+            assertThat(stale.isPublished())
+                    .as("the publication column must mean an accepted send and nothing else")
+                    .isTrue();
+            assertThat(stale.getLastError())
+                    .as("a successful send leaves no diagnostic, however late it was")
+                    .isNull();
             List<String> lines =
                     captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
             assertThat(lines)
-                    .as("a retirement that is not logged leaves an operator no way to explain a "
-                            + "reply that never arrived")
-                    .anyMatch(line -> line.contains("event=auth.reply.expired"));
+                    .as("lateness an operator cannot see is lateness nobody can act on")
+                    .anyMatch(line -> line.contains("event=auth.reply.late")
+                            && line.contains("expiresAt=" + stale.getExpiresAt()));
+            assertThat(lines)
+                    .as("the withdrawn retirement event must not come back under its old name")
+                    .noneMatch(line -> line.contains("event=auth.reply.expired"));
         } finally {
             publisherLogger.setLevel(previousLevel);
             publisherLogger.detachAppender(captured);
         }
+    }
+
+    /**
+     * The deadline stamped on a send is the row's WINDOW re-applied from the send instant.
+     *
+     * <p>⚠️ Refactoring Rationale: the stored absolute instant was sent verbatim, and that mistranslated
+     * the reference semantic in a way that guaranteed loss under any delay. The reference sets a DURATION
+     * on the descriptor immediately before its put ({@code COPAUA0C.cbl} L750) and the transport counts it
+     * from the put; it is not a wall-clock instant fixed when the decision was committed. So a reply
+     * committed with a five-second window and first sent seven seconds later went out carrying a deadline
+     * one second in the PAST, and the receiving end -- which honours the attribute, as the messaging
+     * decision record directs -- discarded it on arrival. Late delivery became guaranteed non-delivery.</p>
+     *
+     * <p>Assumptions: the window is asserted rather than the instant, because the window is what the
+     * reference chose and the instant is derived from it. This row's window is five seconds and the fixed
+     * clock does not move, so the sent value equals the row's own stored deadline here -- which is why the
+     * case ALSO drives a row whose window is wider, so that a publisher which simply echoed the stored
+     * value could not satisfy both halves at once.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the sent deadline is the row's window re-applied from the send instant")
+    void theSentDeadlineIsTheRowsWindowRebasedOnTheSendInstant() {
+        AuthReplyOutbox punctual = rowWith(1L, CARD_NUM, FIRST_TRANSACTION_ID, REPLY_QUEUE,
+                CORRELATION_ID, APPROVED_PAYLOAD, liveDeadline());
+        AuthReplyOutbox wideWindow = rowWith(2L, OTHER_CARD_NUM, SECOND_TRANSACTION_ID, REPLY_QUEUE,
+                CORRELATION_ID, APPROVED_PAYLOAD, fixedNow().plusSeconds(30L));
+
+        assertThat(this.publisher.drain()).isEqualTo(2);
+
+        List<SendMessageRequest> sent = sentRequests(2);
+        assertThat(sent).extracting(SendMessageRequest::messageGroupId)
+                .as("the heads are claimed in ascending identity order, so the rows are positional here")
+                .containsExactly(CARD_NUM, OTHER_CARD_NUM);
+        assertThat(sentDeadlineOf(sent.get(0)))
+                .as("a five-second window re-applied from an unmoved clock is the stored instant")
+                .isEqualTo(fixedNow().plusSeconds(5L).toString())
+                .isEqualTo(punctual.getExpiresAt().toString());
+        assertThat(sentDeadlineOf(sent.get(1)))
+                .as("a thirty-second window must stay thirty seconds and not collapse onto five")
+                .isEqualTo(fixedNow().plusSeconds(30L).toString())
+                .isEqualTo(wideWindow.getExpiresAt().toString());
+    }
+
+    /**
+     * A successful publish logs the BROKER'S own identities beside this service's row identity.
+     *
+     * <p>⚠️ Refactoring Rationale: the send's response was discarded, and the comment justifying that said
+     * it "carries only the transport's own message identifier, which nothing here records". That
+     * identifier is the one piece of evidence the publication line was missing. A first-in-first-out send
+     * whose deduplication identifier matches one the broker already accepted is SUPPRESSED and answered
+     * with the identity of the message the broker already holds -- both outcomes return success and both
+     * reach this line -- so a replay of a prompt reply was indistinguishable from a fresh delivery in the
+     * log, while the row claimed a publication either way. Logging the returned identity is what makes
+     * the two tellable apart at all.</p>
+     *
+     * <p>Assumptions: the identities are logged and NOT persisted. The row's column set is frozen by an
+     * applied migration and adding one would change a Flyway checksum in every environment that has
+     * already run it, so the pairing lives in the log and is joined to the row by the outbox identity,
+     * which is on both lines.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a successful publish logs the broker's message identity and sequence number")
+    void aSuccessfulPublishLogsTheBrokerIdentity() {
+        approvedRow(1L, CARD_NUM, FIRST_TRANSACTION_ID);
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder()
+                        .messageId(BROKER_MESSAGE_ID)
+                        .sequenceNumber(BROKER_SEQUENCE_NUMBER)
+                        .build());
+        Logger publisherLogger = (Logger) LoggerFactory.getLogger(OutboxPublisher.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        publisherLogger.addAppender(captured);
+        Level previousLevel = publisherLogger.getLevel();
+        publisherLogger.setLevel(Level.INFO);
+        try {
+            assertThat(this.publisher.drain()).isOne();
+
+            List<String> lines =
+                    captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+            assertThat(lines)
+                    .as("a publication line that omits the broker's answer cannot distinguish a fresh "
+                            + "enqueue from a deduplication-suppressed replay")
+                    .anyMatch(line -> line.contains("event=auth.reply.published")
+                            && line.contains("brokerMessageId=" + BROKER_MESSAGE_ID)
+                            && line.contains("brokerSequenceNumber=" + BROKER_SEQUENCE_NUMBER));
+        } finally {
+            publisherLogger.setLevel(previousLevel);
+            publisherLogger.detachAppender(captured);
+        }
+    }
+
+    /**
+     * A publication that succeeds while the transport answers nothing is still recorded as published.
+     *
+     * <p>Assumptions: the broker identities are read from the response AFTER the row has been committed as
+     * published, so a null-tolerant read is a CORRECTNESS requirement rather than defensive habit. A null
+     * dereference at that point would be caught by the failure handler and would record a failure -- or,
+     * at the attempt ceiling, an abandonment -- against a reply that was successfully sent. This case
+     * leaves the client stub unstubbed, which is exactly the shape that produces a null response.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a send whose response carries no identity is still recorded as published")
+    void aSendWithNoBrokerResponseIsStillPublished() {
+        AuthReplyOutbox row = approvedRow(1L, CARD_NUM, FIRST_TRANSACTION_ID);
+
+        assertThat(this.publisher.drain()).isOne();
+
+        assertThat(row.isPublished())
+                .as("an unreadable broker answer must not turn an accepted send into a failure")
+                .isTrue();
+        assertThat(row.getLastError()).isNull();
+        assertThat(row.isAbandoned()).isFalse();
     }
 
     /**
@@ -1369,6 +1532,161 @@ class OutboxPublisherTest {
     }
 
     /**
+     * An abandoned reply is announced with the ACQUIRER'S TRANSACTION IDENTIFIER and the cause.
+     *
+     * <p>Assumptions: abandonment is the terminal statement that a reply the committed decision owed will
+     * never be delivered, so it is the one line an operator reaches for when a requester reports an
+     * unanswered transaction -- and the operator holding that report has the transaction identifier, not
+     * this service's surrogate row key. The identifier is message metadata rather than a protected value:
+     * the technical specification freezes it as the deduplication identity, so it already travels in queue
+     * telemetry on every send, which is why naming it here discloses nothing the transport does not
+     * already carry.</p>
+     *
+     * <p>Assumptions: the terminal state itself is asserted alongside the line, because a diagnosis with
+     * the wrong row state behind it is worse than none. A publication instant must NOT be set -- that is
+     * the property the withdrawn retirement transition violated and the reason the retention sweep could
+     * delete the evidence -- and the abandonment instant must be.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an abandoned reply names its transaction identifier and its cause")
+    void anAbandonedReplyNamesItsTransactionAndCause() {
+        AuthReplyOutbox doomed = approvedRow(1L, CARD_NUM, FIRST_TRANSACTION_ID);
+        // WHY : Assumptions: the row is placed AT the ceiling rather than driven to it. The attempt
+        //       counter is advanced by the claiming statement alone, which this simulated table does not
+        //       reproduce, so a case that only lowered the ceiling would never reach the terminal branch
+        //       at all. Setting the counter to the ceiling states the precondition the branch tests --
+        //       "this row has used its whole budget" -- and leaves the ladder that produces that state to
+        //       OutboxPublisherLifecycleRepositoryIT, which drives it against a real engine.
+        assignAttempts(doomed, 1);
+        OutboxPublisher atCeiling = new OutboxPublisher(this.outbox, this.sqs, this.clock, txManager(),
+                VALID_BATCH_SIZE, VALID_POLL_INTERVAL_MILLIS, VALID_RETENTION_DAYS,
+                VALID_MAX_ROWS_PER_DRAIN, 1);
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(SdkClientException.builder()
+                        .message("Unable to execute HTTP request")
+                        .cause(new ConnectException("Connection refused"))
+                        .build());
+        Logger publisherLogger = (Logger) LoggerFactory.getLogger(OutboxPublisher.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        publisherLogger.addAppender(captured);
+        Level previousLevel = publisherLogger.getLevel();
+        publisherLogger.setLevel(Level.ERROR);
+        try {
+            assertThat(atCeiling.drain()).isZero();
+
+            List<String> lines = captured.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(line -> line.contains("event=auth.reply.abandoned"))
+                    .toList();
+            assertThat(lines).hasSize(1);
+            assertThat(lines.get(0))
+                    .as("an operator holding an unanswered-transaction report has the transaction "
+                            + "identifier, not this service's row key")
+                    .contains("transactionId=" + FIRST_TRANSACTION_ID)
+                    .contains("reason=Connection refused")
+                    .contains("sqlState=(absent)");
+            assertThat(doomed.isAbandoned()).isTrue();
+            assertThat(doomed.isPublished())
+                    .as("an abandoned reply must never read as delivered, or the retention sweep "
+                            + "deletes the only evidence that it was owed")
+                    .isFalse();
+        } finally {
+            publisherLogger.setLevel(previousLevel);
+            publisherLogger.detachAppender(captured);
+        }
+    }
+
+    /**
+     * A failed publication names the deepest cause's MESSAGE on the log, masked and bounded.
+     *
+     * <p>⚠️ Refactoring Rationale: the failure line carried {@code fault=} and nothing else, and its value
+     * was the outermost exception's class name. Against a live queue that produced
+     * {@code fault=software.amazon.awssdk.core.exception.SdkClientException} twice for the same reply, with
+     * no statement anywhere of WHY the client could not reach the queue -- and a client exception is a
+     * connect refusal, a timeout or an unresolved host, so the cause beneath it IS the diagnosis. The line
+     * now carries three values: the cause chain's types and frames, the deepest message, and the SQLSTATE
+     * where the chain carries one.</p>
+     *
+     * <p>Assumptions: the message is asserted to arrive MASKED and control-free, not merely present. It is
+     * written by a transport, a driver or a codec and can quote the value it was handling, so it passes
+     * {@code FailureSummary} first -- control characters neutralised, any embedded card number reduced to
+     * its last four digits, length bounded. This case seeds a cause whose message embeds this row's own
+     * card number and a carriage return, and asserts that neither reaches the line, which is the only form
+     * in which "safe to log" is provable rather than claimed.</p>
+     *
+     * <p>Assumptions: the LOG carries the message and the ROW does not, and both halves are asserted here
+     * because the asymmetry is deliberate. An abandoned row deliberately outlives the retention sweep, so
+     * persisting a transport-authored string would give it an unbounded lifetime in the database, whereas
+     * the log is retained by policy.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a failed publication logs the deepest cause message, masked, and persists none of it")
+    void aFailedPublicationLogsTheMaskedCauseMessage() {
+        AuthReplyOutbox head = approvedRow(1L, CARD_NUM, FIRST_TRANSACTION_ID);
+        Throwable rootCause = new ConnectException(
+                "Connection refused to " + CARD_NUM + "\rhost sqs.local:9324");
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(SdkClientException.builder()
+                        .message("Unable to execute HTTP request")
+                        .cause(rootCause)
+                        .build());
+        Logger publisherLogger = (Logger) LoggerFactory.getLogger(OutboxPublisher.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        publisherLogger.addAppender(captured);
+        Level previousLevel = publisherLogger.getLevel();
+        publisherLogger.setLevel(Level.ERROR);
+        try {
+            assertThat(this.publisher.drain()).isZero();
+
+            List<String> failures = captured.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(line -> line.contains("event=auth.reply.publish-failed"))
+                    .toList();
+            assertThat(failures)
+                    .as("a publication failure with no stated cause is a failure nobody can act on")
+                    .hasSize(1);
+            String line = failures.get(0);
+            assertThat(line)
+                    .as("the deepest cause is the diagnosis; the outer client exception is only its wrapper")
+                    .contains("reason=")
+                    .contains("Connection refused to ")
+                    .contains("host sqs.local:9324");
+            assertThat(line)
+                    .as("an unmasked primary account number must never reach a log line")
+                    .doesNotContain(CARD_NUM)
+                    .contains(CARD_NUM.substring(CARD_NUM.length() - 4));
+            assertThat(line)
+                    .as("a carriage return would let a transport message forge a second log record")
+                    .doesNotContain("\r");
+            assertThat(line)
+                    .as("no SQLSTATE is carried by a transport chain, and its absence is named")
+                    .contains("sqlState=(absent)");
+            assertThat(head.getLastError())
+                    .as("the message is logged and never persisted")
+                    .doesNotContain("Connection refused");
+        } finally {
+            publisherLogger.setLevel(previousLevel);
+            publisherLogger.detachAppender(captured);
+        }
+    }
+
+    /**
+     * Reads the staleness deadline a send request carries.
+     *
+     * @param sent the captured {@code SendMessageRequest}; must not be {@code null}
+     * @return the deadline attribute's value as a {@code String}, never {@code null}
+     */
+    private static String sentDeadlineOf(SendMessageRequest sent) {
+        return sent.messageAttributes().get(OutboxPublisher.ATTRIBUTE_EXPIRES_AT).stringValue();
+    }
+
+    /**
      * Writes one pending reply row carrying an approved body into the simulated table.
      *
      * @param outboxId the identity to assign, as a {@code long}, standing in for the generated key
@@ -1453,6 +1771,32 @@ class OutboxPublisherTest {
         } catch (ReflectiveOperationException unreachable) {
             throw new IllegalStateException(
                     "AuthReplyOutbox.outboxId is no longer reachable, so this helper is stale",
+                    unreachable);
+        }
+    }
+
+    /**
+     * Places a row's attempt counter at a stated value.
+     *
+     * <p>Assumptions: the counter is set reflectively for the same reason the identity is -- it is advanced
+     * by the CLAIMING STATEMENT and the entity deliberately exposes no way to advance it, which is the
+     * invariant that stopped one failed publication being counted twice. A case that needs a row already at
+     * its attempt ceiling therefore has no other way to say so. Alternatives Considered: adding a setter to
+     * the entity; rejected because it would reopen exactly the double-counting the absent setter closes.</p>
+     *
+     * @param row the {@code AuthReplyOutbox} row to adjust; must not be {@code null}
+     * @param attempts the attempt count to place on it, as an {@code int}
+     * @throws IllegalStateException if the field cannot be reached, which would mean the entity's counter
+     *     had been renamed and this helper had not been updated with it
+     */
+    private static void assignAttempts(AuthReplyOutbox row, int attempts) {
+        try {
+            Field field = AuthReplyOutbox.class.getDeclaredField("attempts");
+            field.setAccessible(true);
+            field.set(row, attempts);
+        } catch (ReflectiveOperationException unreachable) {
+            throw new IllegalStateException(
+                    "AuthReplyOutbox.attempts is no longer reachable, so this helper is stale",
                     unreachable);
         }
     }

@@ -19,12 +19,22 @@
 #
 #   The artifacts this document names, all of which exist, stated once here rather
 #   than repeated at every key that names one of them:
-#     - db/migration/V1__card.sql, the single Flyway migration this module owns, so
-#       the configured location below resolves to real DDL and a start-up applies
-#       it into the `card` schema. Assumptions: this is worth confirming rather
+#     - db/migration/V1__card.sql and db/migration/V2__card_num_digit_domain.sql,
+#       the two Flyway migrations this module owns, so the configured location
+#       below resolves to real DDL and a start-up applies them into the `card`
+#       schema in version order. Assumptions: this is worth confirming rather
 #       than assuming, because Flyway does not fail on a location that resolves to
 #       nothing -- a service whose migration is absent starts and reports zero
 #       migrations applied.
+#       WHY : Refactoring Rationale: V1 was the only migration when this document
+#       was authored and several keys below said so. V2 arrived because runtime
+#       testing found that a card_num outside the published sixteen-digit domain
+#       cannot be rendered into a listing row, and V1 declared the width without
+#       constraining the characters. V1 is NOT edited to add the check: its
+#       checksum is recorded in the history table of every database already
+#       migrated, and altering an applied migration makes `flyway validate` fail
+#       there. A correction therefore arrives as a new version, which is what V1's
+#       own header instructs at its lines 111 to 118.
 #     - openapi/card-api.yaml, the hand-authored contract of record, together with
 #       the com.carddemo.card.config classes that bind these keys -- CardSelectorConfig,
 #       DataSourceConfig, KmsConfig, OpenApiConfig and SecurityConfig -- and
@@ -555,11 +565,13 @@ spring:
       #   numeric column and store the value in the clear.
       #
       #   Flyway therefore owns every DDL statement, and Hibernate validates
-      #   nothing and emits nothing. db/migration/V1__card.sql is the single
-      #   migration this module owns, and it is the only DDL this service applies.
-      #   There is no V2__ migration here:
-      #   V2__seed_reference.sql belongs to reference-service alone, which owns
-      #   the lookup data it seeds.
+      #   nothing and emits nothing. db/migration/V1__card.sql and
+      #   db/migration/V2__card_num_digit_domain.sql are the two migrations this
+      #   module owns, and they are the only DDL this service applies. Assumptions:
+      #   the V2 in this module is a card_num character-domain check and is
+      #   unrelated to reference-service's V2__seed_reference.sql -- a version
+      #   number is scoped to the history table of the schema it is applied into,
+      #   so the two are independent rather than competing.
       ddl-auto: none
 
     # Trade-offs: Spring Boot leaves this true by default, which binds the
@@ -787,6 +799,39 @@ spring:
         - classpath:/public/
         - classpath:/openapi/
 
+  jackson:
+    deserialization:
+
+      # Refactoring Rationale: this key was absent while every request schema in
+      #   openapi/card-api.yaml declares additionalProperties: false, so the
+      #   contract sealed its bodies and nothing enforced the seal. Runtime testing
+      #   found what that cost: a search body carrying pageNumber, size and offset
+      #   -- none of them declared, and all three the shape of an OFFSET paging
+      #   model this service deliberately does not implement -- was answered 200
+      #   with the default first page, so a client that had guessed the wrong
+      #   paging model received a plausible answer and nothing to tell it the three
+      #   members had been discarded. The framework default here is off, which is
+      #   why the absence of the key and the absence of the behaviour are the same
+      #   thing.
+      # Trade-offs: strictness over forward compatibility. The accepted cost is
+      #   that adding a request member becomes a deliberate contract change, made
+      #   in openapi/card-api.yaml and the request record together, and that a
+      #   client sending a member from a newer contract version to an older
+      #   deployment is refused rather than served. That cost is accepted because
+      #   the alternative is worse on this module's own update route: silently
+      #   dropping a member the caller believed it was setting would leave the card
+      #   master holding something other than what the caller submitted, and the
+      #   409 that guards concurrent edits would not fire because the version it
+      #   compares was carried correctly.
+      # Assumptions: the refusal is contained to request bodies. This module reads
+      #   no other JSON -- it declares no ObjectMapper and no HTTP client in main
+      #   sources -- so the only deserialisation this key reaches is the three
+      #   routes that accept a body.
+      # Assumptions: the sibling account-service and transaction-service configure
+      #   the identical key, so this is an existing convention being extended to
+      #   this module rather than a new policy introduced by it.
+      fail-on-unknown-properties: true
+
 
 # -----------------------------------------------------------------------------
 # Trade-offs: (1) the health path is a deployment contract and is documented as one,
@@ -884,6 +929,18 @@ springdoc:
   #   is the adapter springdoc generates from, which CardApiContractTest holds to
   #   the published path set in both directions. The keys below therefore describe
   #   a comparison that runs rather than one waiting on a side.
+  # Refactoring Rationale: the three addresses pinned below are also the three the
+  #   filter chain must grant, and for a while it granted none of them. Every one
+  #   answered 403 to a valid token of either group, because
+  #   com.carddemo.card.config.SecurityConfig ends in a deny-all catch-all and no
+  #   rule above it named a documentation path -- so the keys here described a
+  #   document that was configured, generated, packaged and reachable by nobody.
+  #   The chain now carries a documentation rule, granted to the ordinary-user
+  #   authority so an unauthenticated fetch is still refused, and
+  #   ContractPublicationTest reads the three addresses out of THIS file and
+  #   requires that a chain pattern cover each of them. Moving a path below
+  #   therefore fails a build rather than quietly un-publishing the document
+  #   again.
   api-docs:
 
     # Assumptions: stated explicitly because the library's two defaults for this

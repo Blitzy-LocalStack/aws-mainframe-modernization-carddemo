@@ -7,6 +7,8 @@ import com.carddemo.card.dto.CardUpdateRequest;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.SealedSelector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import com.carddemo.common.web.PageResponse;
 import java.time.LocalDate;
@@ -14,6 +16,7 @@ import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * The anti-corruption layer between the stored card row and the bodies this context publishes.
@@ -121,6 +124,39 @@ public class CardMapper {
      * {@code app/cpy/CVACT02Y.cpy:9}, holding a hyphen-separated year, month and day.</p>
      */
     private static final int EXPIRATION_DATE_WIDTH = 10;
+
+    /**
+     * The domain a stored card number belongs to for this class to be able to render it.
+     *
+     * <p>Assumptions: sixteen digit characters, being the width of {@code CARD-NUM PIC X(16)} at
+     * {@code app/cpy/CVACT02Y.cpy:5} and the pattern the contract declares for every property and path
+     * parameter carrying a full number. Three independent statements of the same rule agree with this
+     * one and none of them is derived from it: {@code card-api.yaml} declares {@code ^[0-9]{16}$} on the
+     * lookup property and on the administrative detail member, {@code CardLookupRequest} constrains its
+     * one component to it, and {@code ck_cards_card_num_digits} in
+     * {@code src/main/resources/db/migration/V2__card_num_digit_domain.sql} closes it at the column.</p>
+     *
+     * <p>Alternatives Considered: reading the rule from {@code CardLookupRequest} instead of stating it
+     * here, so one constant would serve both. Declined because the two guard opposite directions and a
+     * shared constant would tie them together: that record constrains what a CALLER may submit and is
+     * free to narrow further, while this constant describes what STORAGE may hold and must not narrow
+     * without a migration behind it. The sibling {@code TransactionMapper} publishes its own width
+     * constant for the same reason. What is given up is that a future change to the stored domain has to
+     * be made in both places, and the check installed by the migration is what would catch a
+     * disagreement.</p>
+     */
+    public static final String CARD_NUMBER_DOMAIN = "^[0-9]{16}$";
+
+    /**
+     * The compiled form of {@link #CARD_NUMBER_DOMAIN}.
+     *
+     * <p>Assumptions: compiled once into a static field because the listing conversion applies it per
+     * row, and a page carries one row per card.</p>
+     */
+    private static final Pattern CARD_NUMBER_DOMAIN_PATTERN = Pattern.compile(CARD_NUMBER_DOMAIN);
+
+    /** Records that a stored row could not be rendered, and never any part of the value. */
+    private static final Logger LOG = LoggerFactory.getLogger(CardMapper.class);
 
     /**
      * Seals and opens the opaque row selector, and is the only collaborator this class holds.
@@ -376,22 +412,47 @@ public class CardMapper {
     }
 
     /**
-     * Converts a page of stored cards into a page of listing rows.
+     * Converts a page of stored cards into a page of listing rows, omitting any row whose stored key is
+     * outside the published card-number domain.
      *
-     * <p>Assumptions: the row count and the row order are preserved exactly, one listing row per
-     * stored card, so a page that satisfied the envelope's own contract on the way in still satisfies
-     * it on the way out. That is what makes carrying the two boundary tokens across unchanged sound:
-     * the envelope requires a page with rows to name both of its boundaries, and this conversion
-     * neither adds a row nor removes one.</p>
+     * <p>Assumptions: the row ORDER is preserved exactly and one listing row is produced per convertible
+     * stored card, so the boundary tokens stay sound: the envelope requires a page with rows to name both
+     * of its boundaries, the tokens are sealed from the stored rows before this conversion runs, and each
+     * still names a row of the ordered set whether or not this method could render it. A page therefore
+     * remains continuable in both directions even when a row is omitted from it.</p>
+     *
+     * <p>Refactoring Rationale: an unrenderable row is OMITTED here, where this method previously let the
+     * refusal from {@link #toSummary(Card)} propagate and take the whole page with it. Runtime testing
+     * reported the consequence: a single stored key that is not sixteen digit characters -- an alphabetic
+     * sixteen, or a fifteen-digit value blank-padded into the fixed-width column -- cannot satisfy the
+     * masked rendering the listing row's own constructor requires, so every caller of the browse received
+     * a server failure and no rows at all, including callers narrowing to accounts the offending row has
+     * nothing to do with. One row of one account denying the endpoint to everybody is a worse answer than
+     * a page missing that row, so the page is served and the row is recorded.</p>
+     *
+     * <p>Assumptions: this path is unreachable in a conforming database and is defence in depth rather
+     * than a substitute for the guard that closes it. The domain is closed at the point data enters, by
+     * {@code ck_cards_card_num_digits} in
+     * {@code src/main/resources/db/migration/V2__card_num_digit_domain.sql}, which the bulk load also
+     * passes through -- and that ordering matters: a check the loader cannot bypass is what makes a
+     * non-conforming key impossible, while this branch only decides what happens if one exists anyway,
+     * from a database migrated before that constraint or altered outside the migration.</p>
+     *
+     * <p>Trade-offs: the single-row conversions are deliberately NOT given the same treatment. A request
+     * naming exactly one card has no remaining rows to serve, so {@link #toSummary(Card)} and
+     * {@link #toDetail(Card)} keep refusing, and the refusal is honest rather than an empty body a caller
+     * would read as a card with no members. What is accepted here is that a page can be one row shorter
+     * than the query selected, without the response saying so: the envelope has no member able to report a
+     * row it could not render, and adding one would change a shape every consumer of it declares. The
+     * omission is therefore reported to the operational record instead, which is where a data fault this
+     * service cannot repair belongs.</p>
      *
      * @param page the page of stored cards as the caller's query settled it, which must not be
      *     {@code null}
-     * @return a page carrying one listing row per stored card and the same boundary tokens and
+     * @return a page carrying one listing row per convertible stored card and the same boundary tokens and
      *     further-page indication, never {@code null}
      * @throws NullPointerException if {@code page} is {@code null}, or if any column the contract marks
      *     required is unset on one of its rows
-     * @throws IllegalArgumentException if a row cannot be rendered into the shape the listing row's own
-     *     constructor accepts
      */
     public PageResponse<CardSummary> toSummaryPage(PageResponse<Card> page) {
         Objects.requireNonNull(page, "page must not be null");
@@ -399,6 +460,27 @@ public class CardMapper {
         List<Card> rows = page.items();
         List<CardSummary> items = new ArrayList<>(rows.size());
         for (Card row : rows) {
+
+            // WHY : Assumptions: the test is on the STORED key's own characters and not on a caught
+            //       refusal from the conversion. Catching would also swallow a rendering failure with a
+            //       different cause -- a sealer that has come apart from the selector shape its consumers
+            //       declare, say -- and turn a defect in this service into rows quietly missing from a
+            //       page. Testing the one condition that is a property of the DATA keeps every other
+            //       cause loud.
+            if (!renderableCardNumber(row.getCardNum())) {
+
+                // WHY : Assumptions: the record names the account and the stored width and NOTHING of the
+                //       key itself. A value reaching this branch is not a card number, but it is a value
+                //       from the card master and may be a mistyped or mis-offset one, so quoting it would
+                //       write cardholder credential material into a durable record -- the one destination
+                //       the masking everywhere else in this class exists to keep it out of. The account
+                //       and the width are what an operator needs to find the row with the query the
+                //       migration's own header states.
+                LOG.warn("event=card.list.row.unrenderable reason=card-number-outside-domain"
+                        + " accountId={} storedWidth={}", row.getAccountId(),
+                        row.getCardNum() == null ? 0 : row.getCardNum().length());
+                continue;
+            }
             items.add(toSummary(row));
         }
 
@@ -484,6 +566,28 @@ public class CardMapper {
     //       stability is a property of the sealer under a fixed key and purpose, not of this class.
     private String sealCardSelector(String cardNumber) {
         return cardSelectorSealer.seal(SELECTOR_PURPOSE, cardNumber);
+    }
+
+    /**
+     * Reports whether a stored card number is inside the domain this class can render.
+     *
+     * <p>Assumptions: the test is on the stored characters and answers one question only -- whether
+     * masking this value yields the shape {@code CardSummary} accepts. It does so for a value of exactly
+     * sixteen digit characters and for nothing else: the masker preserves the width of what it hides, so
+     * a narrower value masks to a narrower rendering and a value carrying a non-digit in its last four
+     * positions masks to a rendering with a non-digit in them, and the response record refuses both.</p>
+     *
+     * <p>Trade-offs: this reports rather than throws, so the caller decides what an out-of-domain row
+     * means. That is the whole point of separating it: the paged conversion omits such a row and serves
+     * the page, while the two single-row conversions have nothing left to serve and let the response
+     * record's own refusal stand.</p>
+     *
+     * @param cardNumber the stored card number to test, which may be {@code null}
+     * @return {@code true} when the value is exactly sixteen digit characters; {@code false} when it is
+     *     {@code null} or anything else
+     */
+    private static boolean renderableCardNumber(String cardNumber) {
+        return cardNumber != null && CARD_NUMBER_DOMAIN_PATTERN.matcher(cardNumber).matches();
     }
 
     /**

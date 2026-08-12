@@ -240,6 +240,45 @@ class AuthConfigPackageTest {
     }
 
     /**
+     * Confirms the base profile pins the forwarded-headers strategy off rather than leaving it inferred.
+     *
+     * <p>⚠️ Refactoring Rationale: this property was ABSENT, and its absence was a security defect rather
+     * than an omitted preference. Left unset, the framework infers the strategy from the platform it
+     * detects, and on this version that inference is ON for every recognised container platform -- only
+     * "no platform" turns it off -- so the servlet container's remote-address valve ran with the
+     * container's own trusted-proxy list, which trusts every private range and the loopback. The peer
+     * address the application read therefore became whatever an {@code X-Forwarded-For} header claimed,
+     * for any caller inside the application subnets. Measured against the running service before the fix,
+     * each of the six operator endpoints confined to loopback answered 401 to a plain request from a pod
+     * address and <b>200</b> to the same request carrying {@code X-Forwarded-For: 127.0.0.1}.</p>
+     *
+     * <p>Assumptions: the assertion is that the key is PRESENT and equals {@code none}, not merely that it
+     * is not one of the trusting values. An absent key is exactly the state that produced the defect, so a
+     * test satisfied by absence would be satisfied by the defect.</p>
+     *
+     * <p>Assumptions: {@code none} is right for this service specifically, because nothing in it reads a
+     * client address, builds an absolute URL from the request or answers with a Location header. The one
+     * rule that does read the peer address -- the loopback confinement in {@code SecurityConfig} -- wants
+     * the true peer and is actively harmed by a substituted one. The reporting context sets {@code native}
+     * with a narrowed proxy pattern instead, and correctly: its published contract advertises a server URL
+     * derived from the request. Trusting a proxy to obtain values nothing consumes would take the risk and
+     * none of the benefit.</p>
+     */
+    @Test
+    @DisplayName("the base profile pins the forwarded-headers strategy off rather than inferring it")
+    void baseProfilePinsTheForwardedHeadersStrategyOff() {
+        Map<String, Object> server = mapping(profile(), "server");
+
+        assertThat(server)
+                .as("an ABSENT key is the defective state, so presence is part of the assertion")
+                .containsKey("forward-headers-strategy");
+        assertThat(String.valueOf(server.get("forward-headers-strategy")))
+                .as("this service consumes no forwarded value and one rule is harmed by a substituted"
+                        + " peer address")
+                .isEqualTo("none");
+    }
+
+    /**
      * Confirms a connection resolving the owned schema is accepted.
      * @throws SQLException never in practice; declared because the stubbing helper declares it
      */

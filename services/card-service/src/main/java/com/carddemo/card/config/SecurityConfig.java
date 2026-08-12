@@ -250,6 +250,50 @@ public class SecurityConfig {
      */
 
     /**
+     * The paths this service publishes its own API description at.
+     *
+     * <p>Refactoring Rationale: this list exists because the chain granted none of these paths and the
+     * catch-all below denies, so every one of them answered 403 to a valid token of either group and 401
+     * without one -- while {@code springdoc} in {@code application.yml} pins all three of the addresses
+     * they are served at and {@code spring.web.resources.static-locations} was extended specifically so
+     * the packaged contract could be reached. Runtime testing found the whole of that arrangement
+     * unreachable. The configuration and the chain now agree, and the agreement is asserted rather than
+     * assumed: {@code ContractPublicationTest} reads the three pinned addresses out of the profile and
+     * requires that a pattern here covers each of them, so moving a springdoc key without extending this
+     * list fails the build instead of returning a refusal to whoever fetches the document.</p>
+     *
+     * <p>Assumptions: five patterns are needed for three configured addresses. The generated document
+     * has a subtree beneath it because the browser view fetches its own configuration from
+     * {@code /v3/api-docs/swagger-config}, and the view has an asset subtree because its markup, script
+     * and stylesheet ship inside a webjar served from {@code /swagger-ui/}. Granting only the three
+     * configured addresses would leave the page loading and then failing to render, which is a harder
+     * failure to read than a refusal.</p>
+     *
+     * <p>Alternatives Considered: {@code permitAll}, which is what most deployments give a
+     * documentation path and which would make the view usable from a browser with no further work.
+     * Rejected because it would publish the complete shape of every operation, every field width and
+     * every authority requirement of this service to anything that can reach the load balancer, and this
+     * chain's whole posture is that nothing is reachable without a rule granting it. The document is not
+     * a secret -- it is committed to the repository -- but publishing it anonymously from the running
+     * service widens the reachable surface for no operational gain.</p>
+     *
+     * <p>Alternatives Considered: gating these on the administrator authority alone, on the reasoning
+     * that reading an API description is an operator activity. Rejected because the description is the
+     * contract an ordinary integrator writes a client against, and refusing it to the group that may
+     * call every operation but one would make the document harder to obtain than the data it
+     * describes.</p>
+     *
+     * <p>Trade-offs: because the grant is by authority, a browser opened straight at the view is
+     * refused -- a navigation carries no bearer token. The page is reachable to a caller that presents
+     * one, which is how the document is fetched for a contract comparison and how an operator reaches it
+     * through a proxy that attaches a token. The accepted cost is that the view is not a
+     * click-and-read page; the alternative was to make the entire API description anonymous, which the
+     * paragraph above declines.</p>
+     */
+    private static final List<String> DOCUMENTATION_PATHS = List.of(
+            "/v3/api-docs", "/v3/api-docs/**", "/card-api.yaml", "/swagger-ui.html", "/swagger-ui/**");
+
+    /**
      * The one path that renders a primary account number in full.
      *
      * <p>Assumptions: the pattern carries the deployed {@code /api/v1} prefix because the service
@@ -398,6 +442,22 @@ public class SecurityConfig {
     }
 
     /**
+     * Reports the paths this service serves its own API description at.
+     *
+     * <p>Assumptions: these are deliberately NOT members of {@link #authorityRules()}, even though the
+     * chain grants them the same way. That table is the published-OPERATION table: a test reads it
+     * against the contract's operation list in both directions, and a documentation path -- which the
+     * contract does not and should not declare as an operation -- would appear there as an operation the
+     * contract is missing. Keeping the two lists separate is what lets each be complete on its own
+     * terms.</p>
+     *
+     * @return the documentation paths, in the order the chain grants them; never {@code null} or empty
+     */
+    public static List<String> documentationPaths() {
+        return DOCUMENTATION_PATHS;
+    }
+
+    /**
      * Reports the authority a caller must hold to reach one concrete request path.
      *
      * <p>Assumptions: the FIRST matching rule wins, which is how a filter chain behaves, so this
@@ -405,9 +465,12 @@ public class SecurityConfig {
      *
      * @param requestPath the concrete path of a request, beginning with a solidus; must not be
      *     {@code null}
-     * @return the minimum authority required, or {@code null} when no rule matches, which means the
-     *     path falls through to the chain's catch-all and requires authentication without requiring
-     *     any particular group
+     * @return the minimum authority required, or {@code null} when no rule in the published-operation
+     *     table matches. A {@code null} answer does NOT mean the path is unreachable: the chain also
+     *     grants health, the two telemetry endpoints and the documentation paths of
+     *     {@link #documentationPaths()} by rules that are not members of this table. It means only that
+     *     the path is not a published operation, and a path that is neither an operation nor one of
+     *     those is denied outright by the catch-all
      * @throws NullPointerException if {@code requestPath} is {@code null}
      */
     public static String requiredAuthorityFor(String requestPath) {
@@ -498,9 +561,22 @@ public class SecurityConfig {
      * membership of neither group still satisfies {@code authenticated()}.</p>
      *
      * <p>Assumptions: with the catch-all denying, every reachable path must be granted by a rule
-     * ABOVE it, so the rule list is now the complete statement of what this service serves. That is
-     * the property being bought: a route added without a rule fails closed and is discovered
-     * immediately, rather than inheriting the widest grant in the chain.</p>
+     * ABOVE it, so the rules stated below are the complete statement of what this service serves.
+     * There are four groups of them and each is granted on its own terms: health openly, because a
+     * load-balancer probe presents no token; the two telemetry endpoints by network position, because
+     * their only consumer is task-local; the published operations by the authority table; and the
+     * documentation paths of {@link #documentationPaths()} by the ordinary-user authority. That is the
+     * property being bought: a route added without a rule fails closed and is discovered immediately,
+     * rather than inheriting the widest grant in the chain.</p>
+     *
+     * <p>Refactoring Rationale: the documentation group was the one that had to be added after the
+     * catch-all was tightened. Closing the catch-all made every path without a rule unreachable, which
+     * is the intended outcome, and the paths this service serves its own API description at had no rule
+     * -- so tightening the chain silently withdrew the document that {@code springdoc} in
+     * {@code application.yml} is configured at some length to publish. Runtime testing found all three
+     * configured addresses answering 403 to a valid token. The lesson recorded here is that a fail-closed
+     * catch-all makes the grant list a complete inventory, and an inventory has to include the paths a
+     * library serves on this service's behalf as well as the ones its own controllers do.</p>
      *
      * <p>Assumptions: the administrative gate below is decided SERVER-SIDE from a claim the identity
      * provider signed, and there is no parameter anywhere in this chain through which a caller could
@@ -553,6 +629,18 @@ public class SecurityConfig {
                         requests.requestMatchers(rule.pathPattern())
                                 .hasAnyAuthority(acceptedAuthorities(rule.requiredAuthority()));
                     }
+                    // WHY : Assumptions: the documentation grant is stated AFTER the operation rules
+                    //       and its position is immaterial, because the two path sets are disjoint --
+                    //       no documentation path begins with the versioned API prefix and no
+                    //       operation pattern can match one. That disjointness is asserted in
+                    //       SecurityConfigTest rather than left to inspection, so a future pattern
+                    //       that broke it could not silently reorder the effective rules.
+                    // WHY : Assumptions: the required authority is the ordinary-user one, which
+                    //       acceptedAuthorities widens to both CardDemo groups, so an administrator
+                    //       reaches the document as well. The rationale for granting by authority at
+                    //       all rather than openly is recorded on DOCUMENTATION_PATHS.
+                    requests.requestMatchers(DOCUMENTATION_PATHS.toArray(String[]::new))
+                            .hasAnyAuthority(acceptedAuthorities(JwtRoleConverter.USER_AUTHORITY));
                     // WHY : Assumptions: denyAll and NOT authenticated, so that a principal holding
                     //       a valid token but neither CardDemo group reaches nothing at all. Every
                     //       path this service serves is granted by a rule above.

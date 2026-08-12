@@ -1,5 +1,6 @@
 package com.carddemo.common.messaging;
 
+import com.carddemo.common.observability.FailureSummary;
 import com.carddemo.common.observability.ThrowableDigest;
 import io.awspring.cloud.sqs.listener.ListenerExecutionFailedException;
 import io.awspring.cloud.sqs.listener.errorhandler.ErrorHandler;
@@ -23,16 +24,44 @@ import org.springframework.messaging.MessageHeaders;
  * throwable so the delivery outcome is byte for byte what it would have been with no handler registered
  * at all.</p>
  *
- * <h2>Why the message text cannot be logged</h2>
+ * <h2>Why the message text is redacted rather than withheld</h2>
  *
  * <p>The exception messages on a listener failure are not written by this repository. They come from a
  * JDBC driver quoting the statement it could not run, a codec quoting the bytes it could not read, or a
  * validation library naming the value it rejected — and the values in a queue payload here are primary
- * account numbers, account identifiers and whole request records. Rendering the chain's messages
- * therefore publishes exactly the data that {@code com.carddemo.common.error.GlobalExceptionHandler}
- * refuses to publish on the servlet side. {@link ThrowableDigest} is the rendering that was written for
- * that servlet-side exposure, and this handler is its queue-side counterpart: the same digest, applied at
- * the other transport.</p>
+ * account numbers, account identifiers and whole request records. Rendering the chain's messages as
+ * written therefore publishes exactly the data that
+ * {@code com.carddemo.common.error.GlobalExceptionHandler} refuses to publish on the servlet side.
+ * {@link ThrowableDigest} is the rendering written for that exposure, and this handler carries it for the
+ * same reason: it names every type in the chain and the frame each was raised at, and no message text at
+ * all.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the digest alone was NOT enough, and this line carried nothing else for
+ * long enough to be measured. A persistence failure reaches this handler as one driver exception type
+ * whatever went wrong, so a numeric overflow, a unique violation and a serialisation conflict were all
+ * recorded identically — and the operator response to each is different. Diagnosing one required turning
+ * on driver debug logging against a live consumer, which is a worse disclosure than the one being
+ * avoided. The line therefore now carries two further fields: the database state code through
+ * {@link FailureSummary#sqlStateOrAbsent(Throwable)}, which is a fixed five-character class name no
+ * requester can influence; and the failure's condition through
+ * {@link FailureSummary#databaseConditionOf(Throwable)}.</p>
+ *
+ * <p>⚠️ Assumptions: that second field is DEFAULT-WITHHELD and admitted only on evidence, which is the
+ * property that makes it safe on a handler that cannot know what it is holding. A chain carrying a state
+ * code was composed by a JDBC driver, whose messages quote DDL names and record values — the names are
+ * letters and survive, the values are digit runs and are replaced. A chain carrying none could have been
+ * composed by anything, and this handler's own test set already held the case that proves why that matters:
+ * a transport failure reporting {@code connect failed to https://... using key AKIA...} carries an
+ * access-key identifier, which contains no digit run and would pass any digit rule untouched. Such a
+ * message renders as {@link FailureSummary#WITHHELD}, and the digest still names every type in the
+ * chain.</p>
+ *
+ * <p>⚠️ Trade-offs: a diagnostic message from a non-database failure is therefore lost at this line, and
+ * a digit run of three or more is lost from the ones that are shown — a byte offset, a record length. Both
+ * are accepted because the located facts are this line's own structured fields: the broker's message
+ * identifier, the queue and the redelivery count. A site that DOES know what composed its failure renders
+ * the message itself and does not rely on this one; the authorization listener's wire-format refusal is
+ * the example, and it names the copybook field the payload broke.</p>
  *
  * <h2>Why it must rethrow, and what happens if it does not</h2>
  *
@@ -306,9 +335,19 @@ public final class RethrowingDigestErrorHandler<T> implements ErrorHandler<T> {
             throw rethrowable(failure, message);
         }
 
-        LOG.error("{} source={} messageId={} queue={} receiveCount={} failure={} messageCount=1",
+        // WHY : ⚠️ Refactoring Rationale: this line carries the failure's own deepest MESSAGE and its
+        //       database state code beside the type chain, where it previously carried the chain alone.
+        //       The chain names what threw and where; it does not name the CONDITION, and for a
+        //       persistence failure the condition is the whole diagnosis -- a numeric overflow, a unique
+        //       violation and a serialisation conflict all arrive as one driver exception type. An
+        //       operator reading the previous line could not tell them apart, and the measured cost of
+        //       that was a diagnosis that required enabling driver debug logging on a live consumer.
+        //       See the section above for why the message is REDACTED rather than logged as written.
+        LOG.error("{} source={} messageId={} queue={} receiveCount={} failure={} detail={} sqlState={}"
+                        + " messageCount=1",
                 EVENT, this.source, identifierOf(message), queueOf(message),
-                receiveCountOf(message), ThrowableDigest.of(failure));
+                receiveCountOf(message), ThrowableDigest.of(failure),
+                FailureSummary.databaseConditionOf(failure), FailureSummary.sqlStateOrAbsent(failure));
 
         throw rethrowable(failure, message);
     }
@@ -368,9 +407,15 @@ public final class RethrowingDigestErrorHandler<T> implements ErrorHandler<T> {
             throw rethrowable(failure, messages);
         }
 
-        LOG.error("{} source={} messageId={} queue={} receiveCount={} failure={} messageCount={}",
+        // WHY : ⚠️ Assumptions: the batch line carries the same two additional fields as the
+        //       single-message line above, in the same positions, so one query serves both overloads.
+        //       The failure is one throwable whatever the batch size, so there is one condition to
+        //       report and it is reported once.
+        LOG.error("{} source={} messageId={} queue={} receiveCount={} failure={} detail={} sqlState={}"
+                        + " messageCount={}",
                 EVENT, this.source, identifiers, queue, receiveCounts,
-                ThrowableDigest.of(failure), messages.size());
+                ThrowableDigest.of(failure), FailureSummary.databaseConditionOf(failure),
+                FailureSummary.sqlStateOrAbsent(failure), messages.size());
 
         throw rethrowable(failure, messages);
     }

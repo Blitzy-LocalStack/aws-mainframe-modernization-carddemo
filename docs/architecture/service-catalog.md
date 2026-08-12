@@ -502,14 +502,14 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
-| `common-lib` | 43 | none — it owns no schema |
-| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql` |
+| `common-lib` | 44 | none — it owns no schema |
+| `auth-service` | 29 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql` |
 | `account-service` | 43 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
-| `card-service` | 23 | `V1__card.sql` |
+| `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
 | `transaction-service` | 37 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql` |
 | `reference-service` | 59 | `V1__reference.sql`, `V2__seed_reference.sql` |
 | `batch-service` | 60 | `V1__batch.sql` |
-| `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
+| `authorization-service` | 58 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql` |
 | `reporting-service` | 53 | none by design — it owns no table, only read-only views |
 
 Refactoring Rationale: this paragraph reported that "only `batch-service` and
@@ -527,6 +527,29 @@ documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib
 asserts every count in this table against the module it names, so a figure here that
 drifts from the tree fails the build — which is what a countable claim in a document
 has to be to be worth stating.
+
+Refactoring Rationale: `common-lib` reads 44 where it read 43. One class was added,
+`com.carddemo.common.observability.FailureSummary`, and it exists because the two
+things a failure log has to carry — what failed and why — could not both be carried by
+the one type that existed. `ThrowableDigest` renders a cause chain of types and frames
+and its charter forbids message text outright, because the messages in a chain are
+written by a JDBC driver, a codec or a validation library and can quote a request value
+verbatim; that prohibition is the whole point of it and is asserted by a disclosure
+test. But a failure log that names only `SdkClientException` and its frames tells an
+operator nothing they can act on, which is exactly the finding this class answers: a
+reply publication failed twice against a live queue and the record of it named the
+exception class and nothing else. `FailureSummary` carries the deepest non-blank message
+in the chain through the same two controls every other diagnostic value passes —
+control-character neutralisation, then embedded-card-number masking, then a length bound
+— so the message becomes sayable rather than withheld. Alternatives Considered: relaxing
+`ThrowableDigest` to admit an optional message, which would have needed no new class.
+Rejected because its charter, its tests and three call sites all rest on the guarantee
+that it cannot disclose one, and an option that defeats a guarantee is a guarantee only
+until someone passes the option. Trade-offs: two types now describe one throwable and a
+caller that wants both must name both, which is duplication accepted on purpose — the
+alternative is one type whose safety depends on how it is called. It also carries
+`sqlStateOf`, because a persistence failure's actionable content is its SQLSTATE and that
+code is a fixed five-character class name, not a request value.
 
 Refactoring Rationale: two figures moved, and each moved because a class was removed
 rather than because it had been miscounted. The `reference-service` figure went from 55
@@ -1065,7 +1088,7 @@ its columns are specified in
 token from its send-attempt counter and widens the latter, and
 `V3__authorization_outbox_fifo_identities.sql`, which renames the outbox's two
 first-in-first-out identity columns to `order_group_id` and `deduplication_id`,
-together with 57 non-`package-info.java` main-source classes — the count tabulated
+together with 58 non-`package-info.java` main-source classes — the count tabulated
 for it earlier in this document.
 
 Refactoring Rationale: this sentence read "49" while claiming to restate the count
@@ -1079,6 +1102,21 @@ figure as a table's is two statements, and only the table's was being kept curre
 the prose had been six behind before this checkpoint touched it. It is stated as one
 number in one place now, and the mechanical check that guards the table is the reason
 the table itself was right.
+
+Refactoring Rationale: `authorization-service` reads 58 where it read 57. One class was
+added, `com.carddemo.authorization.config.JsonReadConfig`, which holds the module's
+request reader to the character domains its published contract declares — a JSON number
+reaching a member the document declares `type: string` is refused rather than converted.
+It is a class rather than a configuration key because the refusal has to be ASYMMETRIC:
+the single property that withdraws scalar coercion withdraws it in both directions, and
+the opposite direction is load-bearing here, since money crosses every boundary as a
+string and is read into an exact decimal. Assumptions: it is recorded as an addition
+rather than as a correction — the previous figure was accurate for the tree it was
+measured against. Trade-offs: two of the three decisions that configure this module's
+reader now live in `application.yml` and the third in Java, so a reader has two places to
+look; the class header names the two keys beside it, and
+`config/JsonReadConfigTest.packagedConfigurationSetsTheTwoReaderKeys` asserts that the
+document really sets them, so neither half can drift from the other unnoticed.
 
 Refactoring Rationale: the third migration is recorded here as well because the
 columns it renames were named for a mechanism that no longer exists. They held keyed

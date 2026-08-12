@@ -18,13 +18,25 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.exc.UnrecognizedPropertyException;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Verifies that the shared advice never lets a primary account number out of the process, through
@@ -1062,5 +1074,593 @@ class GlobalExceptionHandlerTest {
         assertThat(loggedMessages()).anySatisfy(line -> assertThat(line)
                 .contains(IllegalStateException.class.getName())
                 .contains(NumberFormatException.class.getName()));
+    }
+
+    /**
+     * Confirms an unaccepted body media type is answered 415, not 500, and names what IS accepted.
+     *
+     * <p>⚠️ Assumptions: the STATUS is the substance of this case rather than the body. Nothing claimed
+     * this condition, so it reached the unclaimed-failure advice and a caller declaring
+     * {@code text/plain} was answered 500 with CRITICAL severity and an abend block -- told the server
+     * had broken when the request was simply unacceptable, and a client with retry logic would retry a
+     * request that can never succeed.</p>
+     *
+     * <p>Assumptions: the {@code Accept} header is asserted because it is the only machine-readable part
+     * of the answer. The sentence deliberately does not name the acceptable types, so a response without
+     * the header would leave a generated client with nothing to act on.</p>
+     */
+    @Test
+    @DisplayName("an unaccepted body media type is answered 415 with the accepted types in Accept")
+    void unacceptedMediaTypeIsAnswered415() {
+        HttpMediaTypeNotSupportedException failure = new HttpMediaTypeNotSupportedException(
+                MediaType.TEXT_PLAIN, java.util.List.of(MediaType.APPLICATION_JSON));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnsupportedMediaType(failure, requestFor("/api/v1/authorizations/search"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.ACCEPT))
+                .as("a 415 whose sentence names no acceptable type and whose header names none either "
+                        + "leaves a client no way to correct the request")
+                .isEqualTo(MediaType.APPLICATION_JSON_VALUE);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+        assertThat(response.getBody().abend())
+                .as("an unacceptable request is not an abend, and an abend block would send an operator "
+                        + "looking for a server fault that did not occur")
+                .isNull();
+    }
+
+    /**
+     * Confirms the 415 answer records the refusal at WARN and never echoes the media type the caller sent.
+     */
+    @Test
+    @DisplayName("the 415 answer logs at warning level and echoes no caller-supplied media type")
+    void unacceptedMediaTypeLogsWithoutEchoingTheRequestValue() {
+        HttpMediaTypeNotSupportedException failure = new HttpMediaTypeNotSupportedException(
+                MediaType.valueOf("application/vnd.invented+xml"),
+                java.util.List.of(MediaType.APPLICATION_JSON));
+
+        this.handler.onUnsupportedMediaType(failure, requestFor(CARD_PATH));
+
+        assertThat(loggedMessages()).anySatisfy(line -> assertThat(line)
+                .contains("event=api.request.unsupported-media-type")
+                .contains(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE)
+                .contains(MASKED_CARD_PATH));
+        assertThat(loggedMessages()).allSatisfy(line -> assertThat(line)
+                .as("a content type is caller-authored text on a request nothing else has validated")
+                .doesNotContain("vnd.invented")
+                .doesNotContain(CARD_NUMBER));
+        assertThat(this.captured.list).allSatisfy(event -> assertThat(event.getLevel())
+                .as("an unacceptable request is a client condition, not an alerting-grade server fault")
+                .isEqualTo(Level.WARN));
+    }
+
+    /**
+     * Confirms an unaccepted media type with no reported alternatives omits the header rather than
+     * emitting it empty.
+     *
+     * <p>Assumptions: an empty {@code Accept} header asserts that nothing is acceptable, which is both
+     * untrue and unactionable. Omitting it is the honest answer, and the status still tells the caller
+     * what kind of failure it had.</p>
+     */
+    @Test
+    @DisplayName("a 415 with no reported alternatives omits Accept rather than sending it empty")
+    void unacceptedMediaTypeWithNoAlternativesOmitsTheHeader() {
+        HttpMediaTypeNotSupportedException failure =
+                new HttpMediaTypeNotSupportedException("no supported types reported");
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnsupportedMediaType(failure, requestFor("/api/v1/authorizations/search"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(ApiError.UNSUPPORTED_MEDIA_TYPE_STATUS);
+        assertThat(response.getHeaders().containsHeader(HttpHeaders.ACCEPT)).isFalse();
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /**
+     * Confirms a method the path does not serve is answered 405 with the served methods in Allow.
+     *
+     * <p>⚠️ Assumptions: the {@code Allow} header is the substantive part of this case. This condition
+     * also reached the unclaimed-failure advice, so a {@code DELETE} against a path serving only
+     * {@code POST} was answered 500 with no {@code Allow} header at all -- and 405 exists precisely to
+     * tell a caller which methods the path serves. The HTTP specification requires the header on this
+     * status.</p>
+     */
+    @Test
+    @DisplayName("a method the path does not serve is answered 405 with the served methods in Allow")
+    void unsupportedMethodIsAnswered405() {
+        HttpRequestMethodNotSupportedException failure =
+                new HttpRequestMethodNotSupportedException("DELETE", java.util.List.of("POST"));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onMethodNotAllowed(failure, requestFor("/api/v1/authorizations/search"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(ApiError.METHOD_NOT_ALLOWED_STATUS);
+        assertThat(response.getHeaders().getFirst(HttpHeaders.ALLOW))
+                .as("the specification requires Allow on a 405, and it is the whole difference between "
+                        + "this answer and a 404")
+                .isEqualTo("POST");
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_METHOD_NOT_ALLOWED);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_METHOD_NOT_ALLOWED);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+        assertThat(response.getBody().abend()).isNull();
+    }
+
+    /**
+     * Confirms several served methods are rendered as one comma-separated header, and the method the
+     * caller used is echoed nowhere.
+     */
+    @Test
+    @DisplayName("a 405 lists every served method and echoes the attempted one nowhere")
+    void unsupportedMethodListsEveryServedMethod() {
+        HttpRequestMethodNotSupportedException failure =
+                new HttpRequestMethodNotSupportedException("PROPFIND", java.util.List.of("GET", "HEAD"));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onMethodNotAllowed(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getHeaders().getFirst(HttpHeaders.ALLOW)).isEqualTo("GET, HEAD");
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .as("an invented method token is caller-authored text and must not be echoed")
+                .doesNotContain("PROPFIND");
+        assertThat(loggedMessages()).anySatisfy(line -> assertThat(line)
+                .contains("event=api.request.method-not-allowed")
+                .contains(MASKED_CARD_PATH));
+        assertThat(loggedMessages()).allSatisfy(line -> assertThat(line)
+                .doesNotContain("PROPFIND")
+                .doesNotContain(CARD_NUMBER));
+    }
+
+    /**
+     * Confirms a 405 with no reported methods omits Allow rather than emitting it empty.
+     *
+     * <p>Assumptions: an empty {@code Allow} header is a valid construction meaning "no method is
+     * allowed", which is a stronger claim than an advice that cannot see the handler mapping is in a
+     * position to make.</p>
+     */
+    @Test
+    @DisplayName("a 405 with no reported methods omits Allow rather than sending it empty")
+    void unsupportedMethodWithNoReportedMethodsOmitsTheHeader() {
+        HttpRequestMethodNotSupportedException failure =
+                new HttpRequestMethodNotSupportedException("DELETE");
+
+        ResponseEntity<ApiError> response =
+                this.handler.onMethodNotAllowed(failure, requestFor("/api/v1/authorizations/search"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(ApiError.METHOD_NOT_ALLOWED_STATUS);
+        assertThat(response.getHeaders().containsHeader(HttpHeaders.ALLOW)).isFalse();
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_METHOD_NOT_ALLOWED);
+    }
+
+    /**
+     * Confirms a path no handler serves is answered 404 with the no-such-path sentence, not 500.
+     *
+     * <p>⚠️ Assumptions: this arrived as a 500 because the framework's no-resource type is a runtime
+     * exception that reached the runtime advice, matched none of its conflict tests and was forwarded to
+     * the unclaimed-failure handler. A mistyped address is the most ordinary client error there is, and
+     * answering it as a server failure put an alerting-grade line in the operational record for every
+     * scanner and stale bookmark.</p>
+     *
+     * <p>Assumptions: the code is the SAME one an absent record carries while the sentence differs, so a
+     * client handles one code and a human reading the body can still tell a wrong identifier from a wrong
+     * path.</p>
+     */
+    @Test
+    @DisplayName("a path no handler serves is answered 404 with the no-such-path sentence")
+    void unservedPathIsAnswered404() {
+        NoResourceFoundException failure =
+                new NoResourceFoundException(HttpMethod.GET, "/api/v1/authorizations", "");
+
+        ResponseEntity<ApiError> response =
+                this.handler.onAbsentPath(failure, requestFor("/api/v1/authorizations"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_NOT_FOUND);
+        assertThat(response.getBody().message())
+                .as("a wrong path and a wrong identifier are different corrections")
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_NO_SUCH_PATH)
+                .isNotEqualTo(GlobalExceptionHandler.MESSAGE_NOT_FOUND);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+    }
+
+    /**
+     * Confirms the 404 answer masks the path and never renders the framework's own message, which the
+     * framework composes from the requested address.
+     */
+    @Test
+    @DisplayName("the unserved-path answer masks the path and renders no framework message")
+    void unservedPathMasksThePath() {
+        NoResourceFoundException failure = new NoResourceFoundException(HttpMethod.GET, CARD_PATH, "");
+
+        ResponseEntity<ApiError> response = this.handler.onAbsentPath(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+        assertThat(response.getBody().message()).doesNotContain(CARD_NUMBER);
+        assertThat(loggedMessages()).anySatisfy(line -> assertThat(line)
+                .contains("event=api.request.path-absent")
+                .contains(MASKED_CARD_PATH));
+        assertThat(loggedMessages())
+                .allSatisfy(line -> assertThat(line).doesNotContain(CARD_NUMBER));
+    }
+
+    /**
+     * Confirms an unpublished method is answered 405 with the published methods in the {@code Allow}
+     * header and a warning-level body carrying no abend block.
+     *
+     * <p>Purpose: runtime testing observed this condition answered as HTTP 500 with a CRITICAL severity
+     * and an abend block, and with no {@code Allow} header at all, so a client was told a correctable
+     * mistake of its own was a server fault and was given nothing to correct it with.</p>
+     */
+    // WHY : Assumptions: the header and the severity are asserted TOGETHER rather than in two cases,
+    //       because they are the two halves of the same defect -- the status alone was never the whole
+    //       of what was wrong. A 405 whose severity still read CRITICAL would keep filing caller
+    //       mistakes in the record an operator reads for real failures.
+    @Test
+    @DisplayName("an unpublished method is answered 405 with an Allow header and no abend block")
+    void anUnpublishedMethodIsAnsweredWithTheAllowedSet() {
+        HttpRequestMethodNotSupportedException failure =
+                new HttpRequestMethodNotSupportedException("DELETE",
+                        java.util.List.of("GET", "PUT"));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onMethodNotAllowed(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.METHOD_NOT_ALLOWED);
+        assertThat(response.getHeaders().getAllow())
+                .containsExactlyInAnyOrder(HttpMethod.GET, HttpMethod.PUT);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_METHOD_NOT_ALLOWED);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_METHOD_NOT_ALLOWED);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+    }
+
+    /**
+     * Confirms the {@code Allow} header is omitted rather than sent empty when no set was resolved.
+     *
+     * <p>Assumptions: an empty {@code Allow} states that the resource supports no method at all, which is
+     * a different and false claim from the set being unknown, so the absent header is the truthful
+     * rendering.</p>
+     */
+    @Test
+    @DisplayName("an unresolved supported set omits the Allow header instead of sending it empty")
+    void anUnresolvedSupportedSetOmitsTheAllowHeader() {
+        HttpRequestMethodNotSupportedException failure =
+                new HttpRequestMethodNotSupportedException("TRACE");
+
+        ResponseEntity<ApiError> response =
+                this.handler.onMethodNotAllowed(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.METHOD_NOT_ALLOWED);
+        assertThat(response.getHeaders().containsHeader(org.springframework.http.HttpHeaders.ALLOW))
+                .isFalse();
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().abend()).isNull();
+    }
+
+    /**
+     * Confirms an unaccepted request body media type is answered 415 with no abend block.
+     *
+     * <p>Purpose: runtime testing observed a {@code text/plain} body answered as HTTP 500 with a CRITICAL
+     * severity, so a caller that had merely mis-declared its content type could not tell its own mistake
+     * from an outage.</p>
+     */
+    @Test
+    @DisplayName("an unaccepted body media type is answered 415 as a warning")
+    void anUnacceptedBodyMediaTypeIsAnsweredAsAWarning() {
+        HttpMediaTypeNotSupportedException failure =
+                new HttpMediaTypeNotSupportedException(MediaType.TEXT_PLAIN,
+                        java.util.List.of(MediaType.APPLICATION_JSON));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnsupportedMediaType(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code())
+                .isEqualTo(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+    }
+
+    /**
+     * Confirms neither media-type refusal echoes the caller's own header value into the body or the log.
+     *
+     * <p>Assumptions: a header value is text of external provenance, and a caller can put a card number
+     * in one, so a refusal that quoted it would place that number in a response body and an operational
+     * record alike -- which is the one destination the masking applied at the API edge does not
+     * reach.</p>
+     */
+    @Test
+    @DisplayName("neither media-type refusal echoes the caller's header value")
+    void neitherMediaTypeRefusalEchoesTheCallersHeaderValue() {
+
+        // WHY : Assumptions: the declared type carries a CARD NUMBER in its subtype, which is a valid
+        //       media type and is the worst case rather than a contrived one -- a header is text the
+        //       caller composes, so anything it can hold it can hold. Asserting on that value rather than
+        //       on the literal "text/plain" is what makes the case prove the guarantee that matters.
+        MediaType carrying =
+                MediaType.parseMediaType("application/vnd.carddemo." + CARD_NUMBER + "+xml");
+        ResponseEntity<ApiError> unsupported = this.handler.onUnsupportedMediaType(
+                new HttpMediaTypeNotSupportedException(carrying,
+                        java.util.List.of(MediaType.APPLICATION_JSON)),
+                requestFor("/api/v1/cards/search"));
+        ResponseEntity<ApiError> unacceptable = this.handler.onUnacceptableRepresentation(
+                new HttpMediaTypeNotAcceptableException(java.util.List.of(MediaType.APPLICATION_JSON)),
+                requestFor("/api/v1/cards/search"));
+
+        assertThat(unsupported.getBody()).isNotNull();
+        assertThat(unsupported.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_UNSUPPORTED_MEDIA_TYPE)
+                .doesNotContain(CARD_NUMBER);
+        assertThat(unacceptable.getBody()).isNotNull();
+        assertThat(unacceptable.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_NOT_ACCEPTABLE);
+        assertThat(loggedMessages())
+                .isNotEmpty()
+                .allSatisfy(line -> assertThat(line).doesNotContain(CARD_NUMBER));
+    }
+
+    /**
+     * Confirms an unacceptable {@code Accept} header is answered 406 with the content type set
+     * explicitly, so the response is not renegotiated.
+     *
+     * <p>Purpose: this is the assertion that closes the observed failure rather than only its status.
+     * Runtime testing saw an unacceptable {@code Accept} answered HTTP 403 with the container error path
+     * in the body and an empty correlation identifier, because a body left to negotiation is negotiated
+     * against the same header that already matched nothing and the request is then forwarded to a route
+     * no service publishes. A preset content type takes negotiation out of the path.</p>
+     */
+    // WHY : Assumptions: the content type is read from the response's own headers rather than from a
+    //       served request, because presetting it is a property of what this handler RETURNS. A test
+    //       driving a full servlet stack would prove the same thing and would also fail for any of the
+    //       other reasons a filter chain can refuse a request, which is what made the original symptom
+    //       so hard to read.
+    @Test
+    @DisplayName("an unacceptable Accept header is answered 406 with the content type preset")
+    void anUnacceptableAcceptHeaderIsAnsweredWithThePresetContentType() {
+        HttpMediaTypeNotAcceptableException failure =
+                new HttpMediaTypeNotAcceptableException(java.util.List.of(MediaType.APPLICATION_JSON));
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnacceptableRepresentation(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_ACCEPTABLE);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(GlobalExceptionHandler.CODE_NOT_ACCEPTABLE);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(response.getBody().path()).isEqualTo(MASKED_CARD_PATH);
+    }
+
+    /**
+     * Confirms a path publishing no route is answered 404 as a warning, with its own sentence.
+     *
+     * <p>Purpose: this condition reached the unclaimed-failure handler and was answered HTTP 500 with a
+     * CRITICAL severity and an abend block, so every mistyped URL was filed as a server fault.</p>
+     *
+     * <p>Assumptions: the sentence is asserted to be the route sentence and NOT the record sentence,
+     * because both are 404 and the distinction between a wrong address and an absent row is the only
+     * thing a caller can act on.</p>
+     */
+    @Test
+    @DisplayName("a path publishing no route is answered 404 with the route sentence")
+    void aPathPublishingNoRouteIsAnsweredWithTheRouteSentence() {
+        NoResourceFoundException failure =
+                new NoResourceFoundException(HttpMethod.GET, "/api/v1/cards", "/api/v1/cards");
+
+        ResponseEntity<ApiError> response =
+                this.handler.onAbsentPath(failure, requestFor("/api/v1/cards"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_NOT_FOUND);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_NO_SUCH_PATH)
+                .isNotEqualTo(GlobalExceptionHandler.MESSAGE_NOT_FOUND);
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(loggedMessages())
+                .anySatisfy(line -> assertThat(line).contains("event=api.request.path-absent"));
+    }
+
+    /**
+     * Confirms every one of the four transport refusals is recorded at warning level and never at error.
+     *
+     * <p>Assumptions: the level is asserted as well as the body, because the level is half of what the
+     * original defect cost. All four conditions previously reached the unclaimed-failure handler, which
+     * records at error, so an operational record filtered to errors carried a steady stream of caller
+     * mistakes and a real failure had to be found among them.</p>
+     */
+    @Test
+    @DisplayName("all four transport refusals are recorded at warning level")
+    void allFourTransportRefusalsAreRecordedAtWarningLevel() {
+        this.handler.onMethodNotAllowed(
+                new HttpRequestMethodNotSupportedException("DELETE", java.util.List.of("GET")),
+                requestFor(CARD_PATH));
+        this.handler.onUnsupportedMediaType(
+                new HttpMediaTypeNotSupportedException(MediaType.TEXT_PLAIN,
+                        java.util.List.of(MediaType.APPLICATION_JSON)),
+                requestFor(CARD_PATH));
+        this.handler.onUnacceptableRepresentation(
+                new HttpMediaTypeNotAcceptableException(java.util.List.of(MediaType.APPLICATION_JSON)),
+                requestFor(CARD_PATH));
+        this.handler.onAbsentPath(
+                new NoResourceFoundException(HttpMethod.GET, "/api/v1/cards", "/api/v1/cards"),
+                requestFor("/api/v1/cards"));
+
+        assertThat(this.captured.list)
+                .hasSize(4)
+                .allSatisfy(event -> {
+                    assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                    assertThat(event.getThrowableProxy()).isNull();
+                });
+    }
+
+    /**
+     * Confirms an undeclared body member is answered 400 naming that member.
+     *
+     * <p>Purpose: runtime testing found a search body carrying three undeclared members answered HTTP 200
+     * with the default page, so a client that had mistaken this system's paging model for an offset one
+     * received a plausible answer to a question it had not asked. Naming the member is what lets it find
+     * out.</p>
+     */
+    // WHY : Assumptions: the cause is constructed as the deserialiser's own unrecognised-property report
+    //       and wrapped as the framework wraps it, rather than the handler being given a bare parse
+    //       failure. The wrapping is the part under test: this handler is reached only through the
+    //       framework's own message-conversion failure, so a case that bypassed the wrapper would assert
+    //       a path no request takes.
+    @Test
+    @DisplayName("an undeclared body member is answered 400 naming that member")
+    void anUndeclaredBodyMemberIsAnsweredNamingThatMember() {
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", unrecognisedProperty("pageNumber"), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().code()).isEqualTo(ApiError.CODE_VALIDATION);
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER);
+        assertThat(response.getBody().fieldErrors())
+                .singleElement()
+                .satisfies(entry -> {
+                    assertThat(entry.field()).isEqualTo("pageNumber");
+                    assertThat(entry.message())
+                            .isEqualTo(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER);
+                });
+        assertThat(response.getBody().abend()).isNull();
+    }
+
+    /**
+     * Confirms a parse failure that is not an undeclared member keeps the generic field-less refusal.
+     *
+     * <p>Assumptions: this is the counterweight to the case above. A handler that named a member for
+     * every unreadable body would have to invent one for a truncated document, and the generic sentence
+     * with an empty array is the honest answer where no member can be identified.</p>
+     */
+    @Test
+    @DisplayName("a parse failure with no named member keeps the generic refusal")
+    void aParseFailureWithNoNamedMemberKeepsTheGenericRefusal() {
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", new java.io.IOException("truncated"), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+    }
+
+    /**
+     * Confirms an over-wide member name is bounded to the published rendering width.
+     *
+     * <p>Assumptions: the name is caller-supplied text on its way into a response body, so its width is
+     * bounded rather than trusted. The bound is read from the published constant instead of written as a
+     * figure here, so the two cannot drift.</p>
+     */
+    @Test
+    @DisplayName("an over-wide member name is bounded to the published rendering width")
+    void anOverWideMemberNameIsBoundedToTheRenderingWidth() {
+        String overWide = "m".repeat(ApiError.MESSAGE_RENDERING_WIDTH + 40);
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", unrecognisedProperty(overWide), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().fieldErrors())
+                .singleElement()
+                .satisfies(entry -> assertThat(entry.field())
+                        .hasSize(ApiError.MESSAGE_RENDERING_WIDTH));
+    }
+
+    /**
+     * Confirms a member name carrying a control character is sanitised before it is rendered.
+     *
+     * <p>Assumptions: a control character in a value of external provenance is what lets a caller forge
+     * a line in a structured record, and a member name is the second such value this advice carries, so
+     * it passes the same narrowing the rest of them do.</p>
+     */
+    @Test
+    @DisplayName("a member name carrying a control character is sanitised before rendering")
+    void aMemberNameCarryingAControlCharacterIsSanitised() {
+        HttpMessageNotReadableException failure = new HttpMessageNotReadableException(
+                "unreadable", unrecognisedProperty("page\\nNumber"), null);
+
+        ResponseEntity<ApiError> response =
+                this.handler.onUnreadableBody(failure, requestFor("/api/v1/cards/search"));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().fieldErrors())
+                .singleElement()
+                .satisfies(entry -> assertThat(entry.field())
+                        .isEqualTo("page Number")
+                        .doesNotContain("\n"));
+    }
+
+    /**
+     * Obtains the deserialiser's own report that a body carried a member the shape does not declare, by
+     * deserialising such a body.
+     *
+     * @param propertyName the undeclared member's name, already escaped for inclusion in a JSON document
+     * @return the unrecognised-property report a strict deserialiser produced for that member
+     * @throws AssertionError if the deserialiser accepted the body, which would mean strictness is off
+     *     and every case built on this helper is asserting nothing
+     */
+    // WHY : Assumptions: the report is OBTAINED from a real deserialisation rather than constructed or
+    //       mocked, so the accessor this advice reads is the accessor the deserialiser populates. The
+    //       type's own factory cannot be called directly here -- it dereferences the parser it is handed
+    //       -- and a mock would pass even if the advice read a member the real type leaves unset.
+    // WHY : Assumptions: strictness is switched on for this mapper explicitly rather than relied upon.
+    //       The library default is off, which is the very gap the configuration key in each service's
+    //       application.yml closes, so a mapper built with defaults here would parse the body happily and
+    //       this helper would have nothing to return.
+    private static UnrecognizedPropertyException unrecognisedProperty(String propertyName) {
+        ObjectMapper strict = JsonMapper.builder()
+                .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .build();
+        try {
+            strict.readValue("{\"" + propertyName + "\": 1}", DeclaredOnly.class);
+        } catch (UnrecognizedPropertyException reported) {
+            return reported;
+        }
+        throw new AssertionError(
+                "the deserialiser accepted an undeclared member, so strictness is not in force");
+    }
+
+    /**
+     * A request shape declaring exactly one member, so that any other member is undeclared.
+     *
+     * <p>Assumptions: one declared member rather than none, because a shape with no member at all would
+     * also reject a well-formed body and would leave the positive half of the rule unexercised.</p>
+     *
+     * @param declared the single member this shape admits
+     */
+    private record DeclaredOnly(String declared) {
     }
 }

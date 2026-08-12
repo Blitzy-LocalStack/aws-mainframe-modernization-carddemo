@@ -1439,10 +1439,17 @@ public class CardUpdateService {
      *
      * @param stored the row as it currently stands; must not be {@code null}
      * @param submitted the token the caller echoed back, which may be {@code null}
-     * @throws RecordConflictException if the token is absent or is not the row's current version, which
-     *     the shared advice renders as HTTP 409 carrying {@link #MESSAGE_RECORD_CHANGED}
+     * @throws CardRecordConflictException if the token is absent or is not the row's current version,
+     *     which the controller-local handler renders as HTTP 409 carrying
+     *     {@link #MESSAGE_RECORD_CHANGED} and the refreshed card
      */
-    private static void checkChangeInRecord(Card stored, Integer submitted) {
+    // WHY : Refactoring Rationale: this is an instance method where it was static, and it raises the
+    //       card-specific subtype where it raised the shared contention type. Both changes serve one
+    //       purpose: the refusal now carries the freshly read row RENDERED, which the published contract
+    //       declares as a required part of the changed-row body and which the shared type has no member
+    //       for. Rendering needs the mapper, and the mapper is an instance collaborator, so the method
+    //       cannot stay static. Nothing outside this class called it, so the change costs no caller.
+    private void checkChangeInRecord(Card stored, Integer submitted) {
 
         int current = stored.getVersion();
 
@@ -1470,7 +1477,12 @@ public class CardUpdateService {
         //       unit of work, which is the target's expression of the reference's SYNCPOINT ROLLBACK. A
         //       manual rollback call would additionally mark the transaction dead while returning
         //       normally, which would hide the refusal from the caller.
-        throw new RecordConflictException(RecordConflictException.Kind.STALE_VERSION, (long) current);
+        // WHY : Assumptions: the row is rendered HERE, inside the refusal, rather than being re-read when
+        //       the response is composed. This is the same row the reference re-snapshots from at lines
+        //       1512 to 1517 before redisplaying the screen, so rendering the one in hand carries that
+        //       across exactly; re-reading later could observe a third caller's write and hand back a
+        //       version that never contended with this submission.
+        throw new CardRecordConflictException((long) current, this.mapper.toDetail(stored));
     }
 
     /**

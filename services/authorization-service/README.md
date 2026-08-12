@@ -345,8 +345,8 @@ own key the accepted one.
 
 ## Build and Test
 
-<!-- test-inventory: 68 tests + 10 integration tests -->
-**78** test classes across ten subpackages: **68** matching `*Test`, run by
+<!-- test-inventory: 71 tests + 10 integration tests -->
+**81** test classes across ten subpackages: **71** matching `*Test`, run by
 Surefire, and **10** matching `*IT`, run by Failsafe against Testcontainers-backed
 PostgreSQL. Every test package carries a `package-info.java`, because the
 documentation gate audits test sources. That census is machine-checked —
@@ -355,22 +355,22 @@ re-measures both figures against this module's test tree.
 
 | Package | `*Test` | `*IT` | What the integration tier proves here |
 |---|---|---|---|
-| `service` | 14 | 4 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, and that a purge window rolls back as one |
+| `service` | 15 | 4 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, and that a purge window rolls back as one |
 | `fixtures` | 11 | 1 | The fraud-domain fixtures against real columns |
 | `mapper` | 10 | — | |
-| `config` | 10 | — | |
-| `dto` | 8 | — | |
-| `domain` | 7 | — | |
+| `config` | 11 | — | |
+| `dto` | 9 | — | |
+| `domain` | 8 | — | |
 | `repository` | — | 5 | Composite keys, key and reply-code domains, parentage, keyset paging, the fraud index order, and the outbox claim |
 | `api` | 2 | — | |
 | `contract` | 1 | — | |
-| `task` | 1 | — | |
+| `task` | 4 | — | |
 
 ```bash
 # WHAT: run every test in this module, unit and integration alike.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to
 #       `integration-test` and `verify`. Refactoring Rationale: this page used to
-#       document `test` alone, which exercises 64 of the 74 classes and silently
+#       document `test` alone, which exercises 71 of the 81 classes and silently
 #       skips all TEN Testcontainers-backed classes — every assertion about the
 #       single-transaction decision, the outbox drain and the purge rollback, which
 #       are precisely the properties D-5 and D-6 exist for. A container runtime is

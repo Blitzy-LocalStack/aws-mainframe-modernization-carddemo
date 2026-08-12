@@ -3,6 +3,7 @@ package com.carddemo.authorization.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.carddemo.authorization.service.PurgeJob;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -264,6 +265,88 @@ class MaintenanceTaskWiringTest {
                 .filter(job -> !usage.contains(job)).toList();
 
         assertThat(missing).as("the usage text must name every job it will accept").isEmpty();
+    }
+
+    /**
+     * The purge accepts its three control values and publishes them under the names its task reads.
+     *
+     * <p>Purpose: the reference program takes an expiry threshold and two frequencies on its control card at
+     * {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} L98 to L108, so an operator must be able to
+     * state all three. Before this they were unreachable: the task passed the three published defaults
+     * unconditionally, which fixed the expiry at five days and made the job's own ceilings and its
+     * documented refusal of a zero threshold impossible to provoke from any runtime entry point.</p>
+     *
+     * <p>Assumptions: each is asserted to be ABSENT when omitted rather than present with a default,
+     * because the default belongs to the purge, which publishes it, and a copy of it in the runner would be
+     * a second place to change it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the purge accepts its expiry threshold and both frequencies, and omits what is unstated")
+    void thePurgeAcceptsItsThreeControlValues() {
+        Map<String, String> stated = MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.PURGE_JOB, new String[] {
+                    "--business-date=2022-07-18", "--expiry-days=30",
+                    "--checkpoint-frequency=250", "--progress-log-frequency=4"});
+
+        assertThat(stated).containsExactly(
+                Map.entry(MaintenanceTaskRunner.BUSINESS_DATE_PARAMETER, "2022-07-18"),
+                Map.entry(MaintenanceTaskRunner.EXPIRY_DAYS_PARAMETER, "30"),
+                Map.entry(MaintenanceTaskRunner.CHECKPOINT_FREQUENCY_PARAMETER, "250"),
+                Map.entry(MaintenanceTaskRunner.PROGRESS_LOG_FREQUENCY_PARAMETER, "4"));
+
+        Map<String, String> omitted = MaintenanceTaskRunner.taskParameters(
+                MaintenanceTaskRunner.PURGE_JOB, new String[] {"--business-date=2022-07-18"});
+        assertThat(omitted).doesNotContainKeys(MaintenanceTaskRunner.EXPIRY_DAYS_PARAMETER,
+                MaintenanceTaskRunner.CHECKPOINT_FREQUENCY_PARAMETER,
+                MaintenanceTaskRunner.PROGRESS_LOG_FREQUENCY_PARAMETER);
+    }
+
+    /**
+     * A control value that is not a positive whole number is refused with the option named.
+     *
+     * <p>Assumptions: the refusal happens in the runner, before any container starts, so an operator sees
+     * the option they must correct rather than a job failure. The RANGE is deliberately not tested here --
+     * the ceilings are properties of the reference card's field widths and are enforced by the purge's own
+     * parameter type, so a value inside {@code int} but above a ceiling is that type's refusal to make.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a non-numeric, zero, negative or empty control value is refused by option name")
+    void aMalformedControlValueIsRefusedByOptionName() {
+        for (String malformed : List.of("--expiry-days=", "--expiry-days=abc", "--expiry-days=0",
+                "--expiry-days=-1", "--checkpoint-frequency=0", "--progress-log-frequency=x")) {
+            assertThatThrownBy(() -> MaintenanceTaskRunner.taskParameters(
+                    MaintenanceTaskRunner.PURGE_JOB,
+                    new String[] {"--business-date=2022-07-18", malformed}))
+                    .as("%s must be refused", malformed)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining(malformed.substring(0, malformed.indexOf('=') + 1));
+        }
+    }
+
+    /**
+     * The usage text names all three purge control options, so an operator can discover them.
+     *
+     * <p>Assumptions: the ceilings are asserted to appear as well as the option names. An option published
+     * without its admitted range leaves an operator to discover the bound by being refused, and both bounds
+     * are facts about the reference card's field widths rather than local policy.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the usage text names the three purge control options and their ranges")
+    void theUsageTextNamesTheThreePurgeControlOptions() {
+        String usage = MaintenanceTaskRunner.usage();
+
+        assertThat(usage)
+                .contains(MaintenanceTaskRunner.EXPIRY_DAYS_OPTION)
+                .contains(MaintenanceTaskRunner.CHECKPOINT_FREQUENCY_OPTION)
+                .contains(MaintenanceTaskRunner.PROGRESS_LOG_FREQUENCY_OPTION)
+                .contains(String.valueOf(PurgeJob.MAX_EXPIRY_DAYS))
+                .contains(String.valueOf(PurgeJob.MAX_CARD_FREQUENCY));
     }
 
     /**

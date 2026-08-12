@@ -515,6 +515,47 @@ class PendingAuthControllerTest {
         }
 
         /**
+         * An all-blank account scope is refused ONCE, in the never-supplied state, exactly as an empty one.
+         *
+         * <p>Purpose: eleven spaces is what a fixed-width screen field sends when the operator types
+         * nothing into it and the client forwards the field untouched, so it is the shape a form most often
+         * produces for "no account given". It has to be answered as the same refusal as an empty string,
+         * because it means the same thing.</p>
+         *
+         * <p>⚠️ Refactoring Rationale: the observed behaviour was TWO per-field entries for one field --
+         * the presence constraint refused the value as blank, and the domain pattern refused it a second
+         * time because its widening admitted only the EMPTY string and not an all-whitespace one. Both
+         * entries were keyed {@code accountId}, so a form binding an error to a control by field name had
+         * two messages for one control and no rule for which to draw. The length assertion below is the
+         * substance of this case: pinning the first entry alone -- which the sibling cases above do -- would
+         * have passed against the defect, because the first entry was always the right one.</p>
+         *
+         * <p>Assumptions: the state asserted is the never-supplied one rather than the not-acceptable one,
+         * because the value IS absent as far as the reference edit is concerned; the reference tests blank
+         * before numeric and never reaches the numeric edit for a value it has already refused as blank.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an all-blank account scope is refused once, in the same state as an empty one")
+        void anAllBlankAccountScopeIsRefusedExactlyOnce() throws Exception {
+            PendingAuthControllerTest.this.mockMvc.perform(post(LIST_ROUTE)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(listBody("           ", null))
+                            .principal(PRINCIPAL))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message").value(S0C_L269_ENTER_ACCOUNT))
+                    .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"))
+                    .andExpect(jsonPath("$.fieldErrors[0].state")
+                            .value(FieldValidationFlag.BLANK.name()))
+                    .andExpect(jsonPath("$.fieldErrors[0].message").value(S0C_L269_ENTER_ACCOUNT));
+
+            verifyNoInteractions(PendingAuthControllerTest.this.summaries);
+        }
+
+        /**
          * A non-digit account scope is refused with the summary program's second sentence.
          *
          * <p>Assumptions: the single space before the ellipsis is part of the expectation, and it is the
@@ -1453,6 +1494,13 @@ class PendingAuthControllerTest {
          * what would NOT satisfy it is a member that reached an authority decision, and comparing whole
          * bodies is what excludes that without depending on which of the two outcomes the binder chooses.
          *
+         * <p>⚠️ Assumptions: which of the two outcomes the DEPLOYED reader chooses is now settled, and it is
+         * refusal -- this module's {@code application.yml} refuses an undeclared member. The reader used here
+         * is built by hand in {@code setUp} and is deliberately left at its defaults, because this class
+         * exercises one controller rather than the module's configuration; the refusal is asserted where the
+         * configuration is, in {@code config/JsonReadConfigTest}. The claim above is unaffected either way,
+         * which is why this case is stated to survive both.
+         *
          * @throws Exception if either request cannot be performed
          */
         @Test
@@ -1606,12 +1654,38 @@ class PendingAuthControllerTest {
                         .as("the unmasked primary account number must appear in no body")
                         .doesNotContain(CARD_NUMBER)
                         .contains(MASKED_CARD_NUMBER);
-                assertThat(body.toLowerCase(Locale.ROOT))
+                // WHY : ⚠️ Refactoring Rationale: the member-name scan runs over the body with the SEALED
+                //       SELECTOR TOKENS removed, and the exclusion is a correctness fix rather than a
+                //       convenience. A selector is base64url material minted fresh per response with a
+                //       random nonce, so any three-letter sequence -- "cvv" among them -- occurs in it by
+                //       chance, and this assertion failed on a run whose token happened to contain
+                //       "...oycvvdzuq...". A test that fails on a coin flip stops being read as a signal,
+                //       and it was asserting nothing about the token: the claim is that no MEMBER NAME on
+                //       any representation declares a verification value, and a token carries no member
+                //       names. The account-number assertion above is deliberately left over the WHOLE body,
+                //       because that one searches for a VALUE and a token could in principle carry it.
+                assertThat(withoutSelectorTokens(body).toLowerCase(Locale.ROOT))
                         .as("no representation in this context declares a verification value at all")
                         .doesNotContain("cvv")
                         .doesNotContain("verificationvalue")
                         .doesNotContain("cardverification");
             }
+        }
+
+        /**
+         * Replaces every sealed selector token in a body with a fixed placeholder.
+         *
+         * <p>Assumptions: the tokens are matched by the published selector shape -- the version prefix, the
+         * nonce and the sealed material, all base64url -- rather than by JSON member name, because they
+         * appear under two different names across these four bodies ({@code key} on a row and a detail,
+         * nested under {@code authorization} on the paging move) and a name-based edit would have to know all
+         * of them.</p>
+         *
+         * @param body one serialised response body; must not be {@code null}
+         * @return the same body with each selector's characters replaced, never {@code null}
+         */
+        private String withoutSelectorTokens(String body) {
+            return body.replaceAll("v2\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "v2.SEALED.SEALED");
         }
     }
 

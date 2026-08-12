@@ -47,9 +47,10 @@
  *   <li><b>{@code observability}</b> -- the Micrometer common tag set
  *       {@code service}, {@code environment} and {@code version}, the decision
  *       about what a rendered value may contain before it reaches a log line, and
- *       the failure rendering that carries a type chain and no message text. Three
- *       production classes: {@code MetricsConfig}, {@code LogSafeText},
- *       {@code ThrowableDigest}.</li>
+ *       the two failure renderings -- one carrying a type chain and no message text,
+ *       the other carrying the bounded message that chain omits. Four production
+ *       classes: {@code MetricsConfig}, {@code LogSafeText}, {@code ThrowableDigest},
+ *       {@code FailureSummary}.</li>
  *   <li><b>{@code time}</b> -- the exact 26-character
  *       {@code YYYY-MM-DD HH:MM:SS.mmmmmm} form. One production class:
  *       {@code TimestampFormatter}.</li>
@@ -138,27 +139,27 @@
  * common.messaging                       4         1                   5
  * common.web                             4         1                   5
  * common.security                        9         1                  10
- * common.observability                   3         1                   4
+ * common.observability                   4         1                   5
  * common.time                            1         1                   2
  * common.validation                      2         1                   3
  * common.control                         4         1                   5
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 6 + 7 + 4 + 4 + 9 + 3 + 1 + 2 + 4 = 43, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 7 + 8 + 5 + 5 + 10 + 4 + 2 + 3 + 5 = 54. Both totals agree,
+ * 1 + 2 + 6 + 7 + 4 + 4 + 9 + 4 + 1 + 2 + 4 = 44, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 7 + 8 + 5 + 5 + 10 + 5 + 2 + 3 + 5 = 55. Both totals agree,
  * and this file is one of the eleven charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>43 production classes
- * across 10 subpackages and the root, in 54 compilation units, of which 11 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>44 production classes
+ * across 10 subpackages and the root, in 55 compilation units, of which 11 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 43 fails both sums and is wrong.
+ * other than 44 fails both sums and is wrong.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -181,8 +182,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>43</b>. The
- * difference is 26 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>44</b>. The
+ * difference is 27 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -247,6 +248,17 @@
  *       the chain of types that produced it and carries no message text, because a
  *       provider's exception message routinely quotes the value that failed and a log
  *       line is durable.</li>
+ *   <li>{@code observability.FailureSummary} -- renders the bounded, sanitised and
+ *       card-masked message that the digest beside it withholds, plus the database
+ *       state code when the chain carries one, and a second rendering that also
+ *       replaces every run of three or more digits for the sites whose message text
+ *       was composed by a driver or a codec over a record rather than by a transport.
+ *       It is in the kernel because three
+ *       different contexts log a failure they did not raise -- the queue listener
+ *       adapter, the maintenance task runner and the outbox publisher -- and a
+ *       per-context copy of "how much of a message may be logged" is a rule that can
+ *       disagree with itself, which is the one thing a data-exposure rule must not
+ *       do.</li>
  *   <li>{@code codec.InquiryRequestCodec} -- the fixed-width request and reply
  *       framing the two request/reply inquiry flows share. Two independently written
  *       framings would agree until the day one padded a field differently, and the

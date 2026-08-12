@@ -372,6 +372,11 @@ class PendingAuthDetailProjectionTest {
     @Test
     @DisplayName("the forward step reads strictly older rows and never the ascending predicate")
     void theForwardStepReadsStrictlyOlderRowsAndNeverTheAscendingPredicate() {
+        // WHY : ⚠️ Refactoring Rationale: the anchor is stubbed present because the step now RESOLVES it
+        //       before advancing, and an unstubbed repository answers an empty optional -- which would make
+        //       this case exercise the not-found outcome while claiming to assert the step's predicate.
+        //       The stub is the premise of the assertion below, not scaffolding.
+        when(this.details.findById(any(PendingAuthDetailKey.class))).thenReturn(Optional.of(row()));
         when(this.details.findOlderThan(anyLong(), anyInt(), anyInt(), any(Limit.class)))
                 .thenReturn(List.of(row()));
 
@@ -399,6 +404,10 @@ class PendingAuthDetailProjectionTest {
     @Test
     @DisplayName("an exhausted forward step carries the verbatim message and does not raise")
     void anExhaustedForwardStepCarriesTheVerbatimMessage() {
+        // WHY : ⚠️ Assumptions: exhaustion is asserted with the anchor PRESENT, because that is what makes
+        //       it exhaustion. An absent anchor and an empty successor list are two different conditions
+        //       with two different outcomes, and the case below asserts the other one.
+        when(this.details.findById(any(PendingAuthDetailKey.class))).thenReturn(Optional.of(row()));
         when(this.details.findOlderThan(anyLong(), anyInt(), anyInt(), any(Limit.class)))
                 .thenReturn(List.of());
 
@@ -410,6 +419,38 @@ class PendingAuthDetailProjectionTest {
         assertThat(next.message()).isEqualTo("Already at the last Authorization...");
         assertThat(PendingAuthDetailService.LAST_AUTHORIZATION_REACHED)
                 .isEqualTo("Already at the last Authorization...");
+    }
+
+    /**
+     * A forward step from an anchor the sweep has removed is not found, and no step is attempted.
+     *
+     * <p>⚠️ Refactoring Rationale: this case exists because the step previously ADVANCED from a position
+     * that need not exist. It read the successor of a key without ever asking whether the key named a row,
+     * so a selector whose authorization the expiry sweep had removed was answered 200 with the next older
+     * authorization -- while the same selector on the keyed read and on the screen read answered 404. The
+     * caller received a real authorization it had not asked for and nothing said the one it asked for was
+     * gone.
+     *
+     * <p>⚠️ Assumptions: the second assertion is the substance. Asserting only that the call raises would
+     * pass against an implementation that resolved the anchor AFTER stepping, which would still touch a
+     * chain the caller has no position in; requiring that the successor query is never issued pins the
+     * ORDER, which is what makes the absence decisive.
+     *
+     * <p>⚠️ Assumptions: the reference cannot reach this state either, which is why the outcome is
+     * not-found rather than a new condition of this migration's own. {@code READ-NEXT-AUTH-RECORD} at
+     * L493 to L519 issues an UNQUALIFIED get-next, which advances from the position a successful
+     * get-unique established; a retrieval that found nothing leaves no position to advance from.
+     */
+    @Test
+    @DisplayName("a forward step from an absent anchor is not found and attempts no step")
+    void aForwardStepFromAnAbsentAnchorIsNotFoundAndAttemptsNoStep() {
+        when(this.details.findById(any(PendingAuthDetailKey.class))).thenReturn(Optional.empty());
+
+        assertThatExceptionOfType(NoSuchElementException.class).isThrownBy(() ->
+                this.service.readNext(selectorFor(row()), SUBJECT));
+
+        verify(this.details, never()).findOlderThan(anyLong(), anyInt(), anyInt(), any(Limit.class));
+        verify(this.details, never()).findNewerThan(any(), any(), any(), any(Limit.class));
     }
 
     /**

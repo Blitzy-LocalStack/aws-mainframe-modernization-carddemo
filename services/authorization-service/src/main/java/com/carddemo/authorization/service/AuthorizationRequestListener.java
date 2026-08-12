@@ -17,9 +17,11 @@ import com.carddemo.common.codec.CsvAuthCodec.AuthRequest;
 import com.carddemo.common.messaging.MessageExpiry;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.observability.FailureSummary;
 import com.carddemo.common.observability.LogSafeText;
 import io.awspring.cloud.sqs.annotation.SqsListener;
 import jakarta.validation.ConstraintViolationException;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -698,9 +700,7 @@ public class AuthorizationRequestListener {
             // redeliver and then dead-letter, which is the treatment every other permanent input fault
             // on this wire already receives.
             String replyQueueUrl = requireAllowlistedReplyDestination(message);
-            requireDeclaredWireFormat(message);
-            AuthRequest request = CsvAuthCodec.decodeRequest(message.getPayload());
-            requireDeclaredContract(request);
+            AuthRequest request = requireDecodableRequest(message);
             Optional<PendingAuthDetail> alreadyDecided = existingDecision(request);
             if (alreadyDecided.isPresent()) {
                 // WHY : Assumptions: the queue suppresses duplicates only inside its deduplication
@@ -903,6 +903,58 @@ public class AuthorizationRequestListener {
             throw new CsvAuthCodec.AuthMessageFormatException("the request declares "
                     + HEADER_CONTENT_TYPE + " " + LogSafeText.sanitize(declared) + "; this consumer"
                     + " decodes " + CONTENT_TYPE_CSV + " only");
+        }
+    }
+
+    /**
+     * Decodes one request, recording a named refusal before letting a wire-format fault propagate.
+     *
+     * <p><strong>Purpose.</strong> Wraps the three steps that turn a delivered payload into a request this
+     * consumer can act on -- the declared-format check, the positional decode, and the published-contract
+     * check -- so that all three report a violation the same way.
+     *
+     * <p>⚠️ Refactoring Rationale: this method exists because a malformed payload was the one permanent
+     * input fault on this wire that reached an operator as nothing but a frame chain. The sibling faults
+     * all name themselves: an absent reply destination logs {@code reason=no-reply-destination}, a
+     * destination outside the allowlist logs {@code reason=destination-not-allowlisted} with the
+     * allowlist's size, an unparseable expiry logs {@code reason=expiry-unparseable} with the value's
+     * length. A wire-format fault logged nothing at all, so the only record was the container's own
+     * failure line naming a codec frame -- which tells a reader that the codec refused something and not
+     * WHAT it refused, on the fault whose cause is most often a producer that changed a field width.
+     *
+     * <p>⚠️ Assumptions: the refusal's own message is safe to log through the plain summary rendering
+     * rather than the digit-redacting one, and the reason is a property of the codec rather than a
+     * judgement about this line. {@code CsvAuthCodec} composes every field diagnostic through a single
+     * gate that appends the offending VALUE only when the field is not in its sensitive set, and treats an
+     * unidentified field as sensitive -- so the card number, the expiry, the amount, the merchant fields
+     * and the transaction identifier are all withheld at the source. What reaches this line is the
+     * copybook field name and the constraint it breached, which is exactly what a producer needs to be
+     * told.
+     *
+     * <p>⚠️ Trade-offs: the fault is logged and then RETHROWN unchanged, so the delivery outcome is
+     * untouched -- the message is not acknowledged, it redelivers, and it dead-letters at the fifth
+     * receive, which is the correct treatment for a payload no retry can fix and the treatment every other
+     * permanent input fault here already gets. The cost is that one fault produces two lines: this named
+     * one and the container's own. Swallowing it to avoid that would delete the message under the
+     * acknowledgement mode this module pins, which would lose the only copy of a payload an operator needs
+     * to read from the dead-letter queue.
+     *
+     * @param message the received message whose payload is to be decoded; must not be {@code null}
+     * @return the decoded request, never {@code null}
+     * @throws CsvAuthCodec.AuthMessageFormatException if the format attribute is absent or names another
+     *     format, if the payload does not decode against the published positional record, or if the
+     *     decoded request violates the published contract
+     */
+    private AuthRequest requireDecodableRequest(Message<String> message) {
+        try {
+            requireDeclaredWireFormat(message);
+            AuthRequest request = CsvAuthCodec.decodeRequest(message.getPayload());
+            requireDeclaredContract(request);
+            return request;
+        } catch (CsvAuthCodec.AuthMessageFormatException malformed) {
+            LOG.warn("event=auth.request.refused reason=wire-format-invalid detail={}",
+                    FailureSummary.of(malformed));
+            throw malformed;
         }
     }
 
@@ -1195,11 +1247,27 @@ public class AuthorizationRequestListener {
             Optional<AccountContextClient.Account> account, AuthRequest request,
             AuthorizationDecisionService.Decision decision) {
         PendingAuthSummary created = new PendingAuthSummary(accountId, xref.customerId());
-        account.ifPresent(read -> created.refreshLimits(read.creditLimit(), read.cashCreditLimit()));
+        // WHY : ⚠️ Refactoring Rationale: every value entering the seeded row passes through the summary's
+        //       own money domain first, where they were assigned as they arrived. Three of the four are
+        //       WIDER at source than this segment stores them: the account master's two limits are
+        //       PIC S9(10)V99 at cpy/CVACT01Y.cpy L8 and L9 and the requested amount is PIC S9(10)V99 at
+        //       cpy/CIPAUDTY.cpy L34, against this segment's PIC S9(09)V99 at cpy/CIPAUSMY.cpy L23 to L26.
+        //       An out-of-domain value reached the insert and the database refused the whole statement, so
+        //       the message's unit of work rolled back, the requester received no decision at all, and the
+        //       request dead-lettered after five receives -- an account was simply unable to transact. The
+        //       domain type saturates rather than truncating, and passing each value through the reporting
+        //       helper is what makes the reduction visible rather than silent.
+        //       Assumptions: reducing here cannot change the stored result, because the entity's own setters
+        //       reduce again after their arithmetic; what it changes is that the FIELD is named in the log.
+        account.ifPresent(read -> created.refreshLimits(
+                narrowedToSummaryDomain(read.creditLimit(), "creditLimit"),
+                narrowedToSummaryDomain(read.cashCreditLimit(), "cashCreditLimit")));
         if (decision.approved()) {
-            created.recordApproved(decision.approvedAmount().amount());
+            created.recordApproved(narrowedToSummaryDomain(decision.approvedAmount().amount(),
+                    "approvedAuthAmount"));
         } else {
-            created.recordDeclined(request.transactionAmount().amount());
+            created.recordDeclined(narrowedToSummaryDomain(request.transactionAmount().amount(),
+                    "declinedAuthAmount"));
         }
         // WHY : Assumptions: the seeded object is a PARAMETER SOURCE and never becomes managed, because
         //       the statement binds its sixteen components and inserts them itself. That is what keeps a
@@ -1271,14 +1339,23 @@ public class AuthorizationRequestListener {
         //       add a contribution to a row that no longer exists.
         if (account.isPresent()) {
             AccountContextClient.Account read = account.get();
+            // WHY : ⚠️ Refactoring Rationale: both limits are reduced to the summary's own domain before the
+            //       statement runs, where they were passed through as the account context reported them. The
+            //       account master's limit is PIC S9(10)V99 and this segment's is PIC S9(09)V99, so a limit
+            //       the account context can legally hold overflowed the column -- and the failure was total:
+            //       the update rolled the whole decision back, so an account with a large limit could not
+            //       process ANY authorization, not even a small one, and the requester received nothing at
+            //       all. The reduction is reported by field below so a saturated limit is traceable.
             requireSummaryChanged(this.summaries.refreshStoredLimits(accountId,
-                    read.creditLimit(), read.cashCreditLimit()));
+                    narrowedToSummaryDomain(read.creditLimit(), "creditLimit"),
+                    narrowedToSummaryDomain(read.cashCreditLimit(), "cashCreditLimit")));
         }
 
         AuthorizationDecisionService.Decision confirmed = proposed;
         if (proposed.approved()
                 && this.summaries.reserveApprovedAuthorization(accountId,
-                        proposed.approvedAmount().amount()) == 0) {
+                        proposed.approvedAmount().amount(),
+                        PendingAuthSummary.MONEY_MAX_MAGNITUDE) == 0) {
             // WHY : Refactoring Rationale: an approval is applied by a statement QUALIFIED on the same credit
             //       check the decision made, and a zero row count SUPERSEDES the approval rather than being
             //       treated as a missing row. The unguarded statement that stood here made the accumulation
@@ -1312,9 +1389,41 @@ public class AuthorizationRequestListener {
             // advances, which is exactly the row the reference would hold had it decided the two requests in
             // sequence -- the second reads the first's contribution and declines for want of funds.
             requireSummaryChanged(this.summaries.addDeclinedAuthorization(accountId,
-                    request.transactionAmount().amount()));
+                    request.transactionAmount().amount(),
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE));
         }
         return confirmed;
+    }
+
+    /**
+     * Reduces one value to the summary segment's own money domain, reporting the reduction.
+     *
+     * <p>Purpose: the values this segment accumulates arrive from WIDER fields. The account master's two
+     * limits are {@code PIC S9(10)V99} at {@code app/cpy/CVACT01Y.cpy} L8 and L9 and the requested and approved
+     * amounts are {@code PIC S9(10)V99} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} L34 and L35, while every money member of
+     * this segment is {@code PIC S9(09)V99} at {@code cpy/CIPAUSMY.cpy} L23 to L26 and L29 to L30 -- one
+     * decimal order narrower. The reference program performs the same narrowing implicitly, with a plain
+     * {@code MOVE} at {@code cbl/COPAUA0C.cbl} L810 and L811 and a plain {@code ADD} at its L821, both of
+     * which discard high-order digits and report nothing. This method performs it as a SATURATION and
+     * reports it, which is divergence D-AUTH-SUMMARY-MONEY-DOMAIN.</p>
+     *
+     * <p>Assumptions: the warning names the FIELD and the bound and never the value, because a limit and an
+     * authorization amount are both customer data and this line reaches durable diagnostics. What an
+     * operator needs from it is that a value was too wide for the segment and which member it was; the
+     * request itself is identified by the correlation identifier the shared filter carries on every line of
+     * this message's processing.</p>
+     *
+     * @param value the value about to be stored on the summary; must not be {@code null}
+     * @param field the summary member reported when the value is reduced; must not be {@code null}
+     * @return the value, or the segment's greatest storable magnitude when the value exceeds it
+     */
+    private static BigDecimal narrowedToSummaryDomain(BigDecimal value, String field) {
+        if (PendingAuthSummary.exceedsStoredDomain(value)) {
+            LOG.warn("event=auth.summary.money-narrowed field={} bound={}", field,
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE);
+        }
+        return PendingAuthSummary.narrowedToStoredDomain(value);
     }
 
     /**

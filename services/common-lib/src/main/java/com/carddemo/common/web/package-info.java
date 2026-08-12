@@ -336,7 +336,7 @@
  * error                              7
  * web                                4
  * security                           9
- * observability                      3
+ * observability                      4
  * time                               1
  * validation                         2
  * messaging                          3
@@ -348,13 +348,13 @@
  * meter filter, the money codec module and the error advice, in every service:
  *
  * <pre>
- * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 3 + time 1 + validation 2 + messaging 4 + control 4 = 43
+ * root 1 + money 2 + codec 6 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 4 + control 4 = 44
  * </pre>
  *
  * <p>Adding the eleven charters gives 53:
  *
  * <pre>
- * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 4 + time 2 + validation 3 + messaging 5 + control 5 = 54
+ * root 2 + money 3 + codec 7 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 5 + control 5 = 55
  * </pre>
  *
  * <p>This package's own share is:

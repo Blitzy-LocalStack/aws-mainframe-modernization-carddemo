@@ -430,6 +430,13 @@ public class PendingAuthDetailService {
      * normal outcome into an exceptional one, and a {@code null} would carry the verbatim message
      * nowhere.
      *
+     * <p>⚠️ Assumptions: an EXHAUSTED chain and an ABSENT ANCHOR are two different outcomes and are
+     * reported differently -- the first as the end-of-data message on a 200, the second as the same
+     * not-found condition {@link #read} raises. The distinction belongs to the caller: exhaustion means
+     * the authorization it is showing is the oldest one, while an absent anchor means the authorization it
+     * is showing no longer exists, and a client told the first when the second is true keeps a stale row
+     * on display with nothing to tell it to refresh.
+     *
      * @param selector the sealed selector of the authorization currently being shown; must not be
      *     {@code null}
      * @param subject the authenticated principal the selector was issued to; must not be {@code null}
@@ -437,12 +444,37 @@ public class PendingAuthDetailService {
      *     {@link #LAST_AUTHORIZATION_REACHED}, never {@code null}
      * @throws NullPointerException if either argument is {@code null}
      * @throws PendingAuthViewMapper.InvalidSelectorException if the selector cannot be redeemed
+     * @throws NoSuchElementException if the selector redeems to a key that names no row, which is the
+     *     anchor this step would advance from
      */
     @Transactional(readOnly = true)
     public NextAuthorization readNext(String selector, String subject) {
         Objects.requireNonNull(selector, "selector must not be null");
         Objects.requireNonNull(subject, "subject must not be null");
         PendingAuthDetailKey key = this.mapper.openKey(selector, subject);
+
+        // WHY : ⚠️ Refactoring Rationale: the anchor is READ before the step, and it previously was not.
+        //       Without it this method stepped from a position that need not exist: a selector whose row
+        //       the expiry sweep had removed was answered 200 with the next older authorization, while the
+        //       two sibling reads on the same selector answered 404. A caller therefore received a
+        //       plausible authorization it had not asked for, with nothing in the answer to say that the
+        //       one it did ask for was gone -- and the 404 the document publishes for this route was
+        //       unreachable, because the only other outcome is the end-of-data arm below.
+        // WHY : ⚠️ Assumptions: this is faithful to the reference rather than merely contract-driven.
+        //       READ-NEXT-AUTH-RECORD at L493 to L519 issues an unqualified get-next, which advances from
+        //       the position an earlier successful get-unique established; there is no position to advance
+        //       from when that retrieval found nothing, so the reference cannot reach its get-next with a
+        //       missing anchor either.
+        // WHY : ⚠️ Trade-offs: one extra primary-key lookup per forward step, inside the same read-only
+        //       transaction. The alternative -- inferring the anchor's existence from the successor query
+        //       -- cannot distinguish an anchor the sweep removed from an anchor that is genuinely the
+        //       oldest row, and those two states must answer 404 and 200 respectively.
+        // WHY : ⚠️ Assumptions: the diagnostic is the SAME sentence #read raises, deliberately, so the
+        //       three reads of one selector are indistinguishable in their absence reporting; it names
+        //       neither the account nor the clock values for the reason recorded on that method.
+        this.details.findById(key)
+                .orElseThrow(() -> new NoSuchElementException(
+                        "the selector names no pending authorization"));
 
         List<PendingAuthDetail> next = this.details.findOlderThan(
                 key.getAccountId(), key.getAuthDate(), key.getAuthTime(), NEXT_AUTHORIZATION_LIMIT);

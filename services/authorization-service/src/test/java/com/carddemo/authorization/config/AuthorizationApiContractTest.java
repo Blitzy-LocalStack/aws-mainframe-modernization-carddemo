@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -55,6 +56,18 @@ class AuthorizationApiContractTest {
 
     /** The parsed contract, loaded once because it is immutable for the run. */
     private static final Map<String, Object> CONTRACT = loadContract();
+
+    /**
+     * The keys an OpenAPI path item may declare an operation under.
+     *
+     * <p>Assumptions: a path item also carries non-operation keys -- {@code parameters}, {@code summary},
+     * {@code $ref} -- so a walk that treated every child as an operation would descend into a sequence and
+     * fail obscurely. This set is the filter, and it names all eight methods the specification allows rather
+     * than only the five this contract currently uses, so a path served by {@code HEAD} or {@code OPTIONS}
+     * later is covered without editing it.</p>
+     */
+    private static final Set<String> OPERATION_KEYS =
+            Set.of("get", "put", "post", "delete", "patch", "head", "options", "trace");
 
     /**
      * Returns the declared member names of the paged-listing request body.
@@ -107,6 +120,16 @@ class AuthorizationApiContractTest {
      * either of the first two would pass silently while asserting nothing at all.</p>
      */
     private static final String WITHDRAWN_PAGING_RULE = "sent together or not at all";
+
+    /**
+     * The withdrawn boundary claim, held as a constant for the same reason as the paging rule above.
+     *
+     * <p>⚠️ Assumptions: the phrase is the exact one the description carried, so the withdrawal notice and
+     * the absence assertion cannot drift apart. It is quoted rather than paraphrased because a paraphrase
+     * would let the original sentence return under its own wording while this constant still matched
+     * nothing.</p>
+     */
+    private static final String WITHDRAWN_BOUNDARY_RULE = "still carries the rows that were on display";
 
     /**
      * The four summary members that are composed from the customer master rather than stored on the segment.
@@ -663,6 +686,145 @@ class AuthorizationApiContractTest {
                 .as("3.1 removed the nullable keyword, so a member using it is published non-nullable")
                 .isEmpty();
     }
+
+    /**
+     * The published boundary member describes the envelope the service actually sends at a boundary.
+     *
+     * <p>⚠️ Refactoring Rationale: the description said "the page above still carries the rows that were on
+     * display", and the service sends the opposite: a move already at a boundary answers an EMPTY page with
+     * both cursors null and no forward availability, on both arms. A client generated from that sentence
+     * renders whatever the page member holds, so it blanked its table at exactly the moment the reference
+     * screen leaves the rows where they are. The behaviour is correct and the sentence was not: section
+     * 0.7.1 removed the structure that let the reference redisplay a screen, so "leave the rows in place" is
+     * an instruction to the client and cannot be a claim about the response.
+     *
+     * <p>⚠️ Assumptions: the withdrawn sentence is asserted absent from the NORMATIVE text and present in
+     * the description as a whole, which is the same split {@link #publishedPagingRuleStatesTheAsymmetry}
+     * makes and for the same reason -- a withdrawal has to be able to quote what it withdraws, or a client
+     * author who acted on the old wording cannot tell which of the two statements to trust.
+     *
+     * <p>⚠️ Assumptions: the recovery path is asserted too, not just the correction. The boundary envelope
+     * carries no cursor, so a client that overwrote its state from it has discarded its own position; a
+     * corrected description that did not say how to get back would leave that client with no route other
+     * than guessing.
+     */
+    @Test
+    @DisplayName("the published boundary member describes the empty envelope the service sends")
+    void publishedBoundaryMemberDescribesTheEmptyEnvelope() {
+        String published = String.valueOf(mapping(mapping(schema("PendingAuthListResponse"), "properties"),
+                "screenMessage").get("description"));
+
+        assertThat(normativeHalfOf(published))
+                .as("the normative text must state that no rows accompany a boundary sentence")
+                .contains("page.items is empty")
+                .contains("page.firstKey and page.lastKey are null")
+                .doesNotContain(WITHDRAWN_BOUNDARY_RULE);
+        assertThat(normativeHalfOf(published))
+                .as("the recovery path must be published, since the boundary envelope carries no cursor")
+                .contains("re-issuing the request with no cursor and no direction");
+        assertThat(published)
+                .as("the withdrawal must SAY what it withdraws, or a reader cannot tell which to trust")
+                .contains(WITHDRAWN_BOUNDARY_RULE);
+    }
+
+    /**
+     * Every published operation declares the dispatch refusals the framework can answer it with.
+     *
+     * <p>Purpose: a method the dispatcher does not map on a path it does map, and a body media type an
+     * operation does not consume, are refused by the framework before any handler in this module runs. Both
+     * are therefore responses the service produces on every operation whether or not the document says so,
+     * and a client generated from a document that omits them has no typed branch for a status it will
+     * receive the first time a caller sends the wrong verb or the wrong {@code Content-Type}.</p>
+     *
+     * <p>Refactoring Rationale: this loop reads the operation set from the document rather than listing the
+     * five operations, because the obligation belongs to every operation the contract declares -- including
+     * one added after this test was written. Listing them would leave a sixth operation unchecked until
+     * someone remembered to extend the list, which is the failure mode this whole class exists to close.</p>
+     *
+     * <p>Assumptions: the 415 obligation is conditioned on the operation declaring a {@code requestBody},
+     * and the absence half is asserted as well. A body-less operation cannot produce a media-type refusal --
+     * there is no body to negotiate a type for -- so publishing 415 on one would document a response the
+     * service cannot send, which is the same class of defect in the opposite direction.</p>
+     */
+    @Test
+    @DisplayName("every operation publishes the dispatch refusals the framework can answer with")
+    void everyOperationPublishesTheDispatchRefusals() {
+        Map<String, Object> paths = mapping(CONTRACT, "paths");
+
+        assertThat(paths).as("the document must declare at least one path to make this loop meaningful").isNotEmpty();
+        for (String path : paths.keySet()) {
+            Map<String, Object> item = mapping(paths, path);
+            for (String method : item.keySet()) {
+                if (!OPERATION_KEYS.contains(method)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(item, method);
+                Map<String, Object> responses = mapping(operation, "responses");
+
+                assertThat(responses)
+                        .as("%s %s must publish 405 -- the dispatcher answers it for any other verb on this path",
+                                method, path)
+                        .containsKey("405");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s consumes a body, so the media-type refusal is reachable and must be published",
+                                    method, path)
+                            .containsKey("415");
+                } else {
+                    assertThat(responses)
+                            .as("%s %s consumes no body, so a published 415 documents a response it cannot send",
+                                    method, path)
+                            .doesNotContainKey("415");
+                }
+            }
+        }
+    }
+
+    /**
+     * The two dispatch-refusal responses declare the header a client needs to recover from each.
+     *
+     * <p>Purpose: neither refusal is actionable from its body alone. A 405 tells a caller its verb was wrong
+     * and the {@code Allow} header tells it which verb to use; a 415 tells it its media type was wrong and
+     * the {@code Accept} header tells it which type to send. Both headers are marked required, because the
+     * shared advice composes each from the dispatcher's own handler mappings and omits it only when the
+     * framework reports no alternatives at all -- a state this service's mappings cannot produce.</p>
+     *
+     * <p>Refactoring Rationale: the code constants are compared rather than restated, so a code renumbered
+     * in the shared kernel fails here instead of leaving the document describing a body no client will
+     * match. This is the same guard the 401 and 403 descriptions already carry, extended to the two statuses
+     * that were previously answered as 500 with a code naming an abend.</p>
+     */
+    @Test
+    @DisplayName("the dispatch refusals declare the recovery header each one needs")
+    void dispatchRefusalsDeclareTheirRecoveryHeaders() {
+        Map<String, Object> methodHeaders = mapping(response("MethodNotAllowed"), "headers");
+        Map<String, Object> mediaTypeHeaders = mapping(response("UnsupportedMediaType"), "headers");
+
+        assertThat(methodHeaders).containsKeys(CorrelationIdFilter.CORRELATION_ID_HEADER, HttpHeaders.ALLOW);
+        assertThat(mapping(methodHeaders, HttpHeaders.ALLOW).get("required"))
+                .as("a 405 without Allow leaves a client no way to learn which verb to send")
+                .isEqualTo(Boolean.TRUE);
+        assertThat(mediaTypeHeaders).containsKeys(CorrelationIdFilter.CORRELATION_ID_HEADER, HttpHeaders.ACCEPT);
+        assertThat(mapping(mediaTypeHeaders, HttpHeaders.ACCEPT).get("required"))
+                .as("a 415 without Accept leaves a client no way to learn which media type to send")
+                .isEqualTo(Boolean.TRUE);
+
+        assertThat(String.valueOf(response("MethodNotAllowed").get("description")))
+                .as("the 405 description must name the code and sentence the shared advice renders")
+                .contains(ApiError.CODE_METHOD_NOT_ALLOWED)
+                .contains(GlobalExceptionHandler.MESSAGE_METHOD_NOT_ALLOWED);
+        assertThat(String.valueOf(response("UnsupportedMediaType").get("description")))
+                .as("the 415 description must name the code and sentence the shared advice renders")
+                .contains(ApiError.CODE_UNSUPPORTED_MEDIA_TYPE)
+                .contains(GlobalExceptionHandler.MESSAGE_UNSUPPORTED_MEDIA_TYPE);
+
+        assertThat(mapping(mapping(response("MethodNotAllowed"), "content"), "application/json").toString())
+                .as("both refusals carry the shared problem body rather than a bespoke shape")
+                .contains("ApiError");
+        assertThat(mapping(mapping(response("UnsupportedMediaType"), "content"), "application/json").toString())
+                .contains("ApiError");
+    }
+
 
     /**
      * Collects the location of every occurrence of a key anywhere beneath a node.

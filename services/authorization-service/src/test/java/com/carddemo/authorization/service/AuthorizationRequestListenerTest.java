@@ -169,6 +169,16 @@ class AuthorizationRequestListenerTest {
     private static final long CUSTOMER_ID = 999_999_999L;
 
     /**
+     * The bound the accumulator statements saturate their running totals at.
+     *
+     * <p>Assumptions: the verifications name this constant rather than {@code any(BigDecimal.class)},
+     * because WHICH bound the listener passes is part of what is under test -- a caller that passed the
+     * wider {@code Money.MAX_MAGNITUDE} would let a value the column cannot hold reach the database, and a
+     * lax matcher would not notice.</p>
+     */
+    private static final BigDecimal CEILING = PendingAuthSummary.MONEY_MAX_MAGNITUDE;
+
+    /**
      * The window size these tests configure, small enough to close several windows cheaply.
      *
      * <p>Assumptions: three rather than the production default of 500. The bound under test is the
@@ -654,8 +664,8 @@ class AuthorizationRequestListenerTest {
         //       asserting the declined one was. The two arms write different columns, and a decline that
         //       advanced the approved total would overstate the credit an account has committed -- which
         //       is exactly the confusion the two separate statements exist to prevent.
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
     }
 
     /**
@@ -1277,8 +1287,8 @@ class AuthorizationRequestListenerTest {
         //       because the same test first drove an APPROVED request through the listener, so a decline
         //       that reached the approved statement would be invisible to a per-arm assertion made only
         //       once.
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"));
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("6000.00"), CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
     }
 
     /**
@@ -1457,11 +1467,117 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries, never()).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
-        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
         verify(this.summaries).refreshStoredLimits(ACCOUNT_ID, new BigDecimal("5000.00"),
                 new BigDecimal("500.00"));
         verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+    }
+
+    /**
+     * An account whose limit is wider than the summary segment still transacts, on both write arms.
+     *
+     * <p>⚠️ Purpose: this is the failure the money-domain reduction was added for, and its shape is worth
+     * stating because the symptom points away from the cause. {@code ACCT-CREDIT-LIMIT} is
+     * {@code PIC S9(10)V99} at {@code app/cpy/CVACT01Y.cpy} L8 and this segment's limit is
+     * {@code PIC S9(09)V99} at {@code app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy} L23, so an account
+     * legally holding a limit of one thousand million carried a value the summary's own column could not
+     * store. The write was refused with a numeric-overflow error, the refusal rolled back the message's
+     * whole unit of work, and the requester received NO decision -- for ANY amount, however small. After
+     * five receives the request dead-lettered. The account was simply unable to authorize.</p>
+     *
+     * <p>Assumptions: BOTH arms are asserted in one case because the two store the limit by different means
+     * -- the insert arm assigns it onto the seeded instance and the replace arm passes it to a statement --
+     * so a reduction applied to one and not the other leaves half the accounts still failing. The
+     * approved-amount statement is asserted to carry the SEGMENT's bound rather than any bound, because
+     * passing the wider {@code Money.MAX_MAGNITUDE} would let the running total reach a value the column
+     * cannot hold and would reintroduce the same overflow one authorization later.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an account limit wider than the segment is reduced on both write arms, and still decides")
+    void anAccountLimitWiderThanTheSegmentStillDecides() {
+        when(this.accounts.findCardXref(CARD_NUM)).thenReturn(
+                Optional.of(new AccountContextClient.CardXref(ACCOUNT_ID, CUSTOMER_ID)));
+        when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(
+                Optional.of(new AccountContextClient.Account(new BigDecimal("1000000000.00"),
+                        new BigDecimal("9999999999.99"), new BigDecimal("0.00"))));
+        when(this.accounts.customerExists(CUSTOMER_ID)).thenReturn(true);
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
+
+        ArgumentCaptor<PendingAuthSummary> created = ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).insertSummaryIfAbsent(created.capture());
+        assertThat(created.getValue().getCreditLimit())
+                .as("the insert arm stores the segment's greatest magnitude, not the account's own value")
+                .isEqualByComparingTo(CEILING);
+        assertThat(created.getValue().getCashLimit()).isEqualByComparingTo(CEILING);
+        assertEquals(1, created.getValue().getApprovedAuthCount().intValue(),
+                "the decision itself is unaffected: the amount fits the limit and is approved");
+
+        clearInvocationsKeepingStubs();
+        PendingAuthSummary stored = new PendingAuthSummary(ACCOUNT_ID, CUSTOMER_ID);
+        stored.refreshLimits(new BigDecimal("1000000000.00"), new BigDecimal("9999999999.99"));
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(stored));
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class),
+                any(BigDecimal.class))).thenReturn(1);
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("100.99"), "TXN000000000009"), ALLOWED_REPLY_QUEUE));
+
+        verify(this.summaries).refreshStoredLimits(ACCOUNT_ID, CEILING, CEILING);
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"),
+                CEILING);
+    }
+
+    /**
+     * A requested amount wider than the summary segment is answered rather than rolled back.
+     *
+     * <p>⚠️ Purpose: the requested amount is {@code PIC S9(10)V99} at
+     * {@code app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy} L34 and the declined total it accumulates
+     * into is {@code PIC S9(09)V99} at {@code cpy/CIPAUSMY.cpy} L30, so a request for one thousand million
+     * -- which the wire contract's own {@code PIC +9(10).99} at {@code cpy/CCPAURQY.cpy} L27 admits --
+     * overflowed the total on its own. The requester received no decline; it received nothing, and the
+     * message dead-lettered.</p>
+     *
+     * <p>Assumptions: the reply's REASON is asserted, not merely the absence of a failure, because the
+     * correct outcome here is a business answer and an insufficient-funds decline is what the reference
+     * program produces for an amount past the limit. Asserting only that no exception escaped would pass
+     * against an implementation that silently dropped the request.</p>
+     *
+     * <p>Assumptions: the stored total is asserted at the segment's bound rather than at the requested
+     * amount, which is the reduction, and the DETAIL row is asserted to keep the amount whole -- the detail
+     * table's own column is a decimal order wider, so the request is not lost, only its contribution to a
+     * running aggregate is bounded.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a requested amount wider than the segment is declined and recorded, never rolled back")
+    void aRequestedAmountWiderThanTheSegmentIsAnswered() {
+        givenResolvableCard();
+        when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        this.listener.onRequest(
+                messageFor(requestFor(Money.of("1000000000.00")), ALLOWED_REPLY_QUEUE));
+
+        assertEquals(AuthorizationDecisionService.DeclineReason.INSUFFICIENT_FUND.responseReason(),
+                reasonOfOnlyReply(),
+                "an amount past the account's limit is declined, exactly as a narrower one would be");
+        ArgumentCaptor<PendingAuthSummary> created = ArgumentCaptor.forClass(PendingAuthSummary.class);
+        verify(this.summaries).insertSummaryIfAbsent(created.capture());
+        assertEquals(1, created.getValue().getDeclinedAuthCount().intValue(),
+                "the contribution reaches the summary, which is what the overflow prevented entirely");
+        assertThat(created.getValue().getDeclinedAuthAmount())
+                .as("the running total saturates at the segment's own bound")
+                .isEqualByComparingTo(CEILING);
+        ArgumentCaptor<PendingAuthDetail> recorded = ArgumentCaptor.forClass(PendingAuthDetail.class);
+        verify(this.details).save(recorded.capture());
+        assertThat(recorded.getValue().getTransactionAmount())
+                .as("the detail column is PIC S9(10)V99, so the requested amount is stored whole")
+                .isEqualByComparingTo(new BigDecimal("1000000000.00"));
     }
 
     /**
@@ -1503,13 +1619,13 @@ class AuthorizationRequestListenerTest {
         // WHY : Assumptions: the summary read above has ample room, so the decision service PROPOSES an
         //       approval. That is what makes this case about the reservation rather than about the decision:
         //       a fixture without room would decline before the statement ever ran.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
                 .thenReturn(0);
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
 
         ArgumentCaptor<PendingAuthDetail> superseded = ArgumentCaptor.forClass(PendingAuthDetail.class);
         verify(this.details).save(superseded.capture());
@@ -1553,7 +1669,7 @@ class AuthorizationRequestListenerTest {
         givenResolvableCard();
         when(this.accounts.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
                 .thenReturn(0);
 
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
@@ -1592,7 +1708,7 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(messageFor(requestFor(Money.of("100.99")), ALLOWED_REPLY_QUEUE));
 
         verify(this.summaries).insertSummaryIfAbsent(any(PendingAuthSummary.class));
-        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"));
+        verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, new BigDecimal("100.99"), CEILING);
         verify(this.outbox).save(any(AuthReplyOutbox.class));
     }
 
@@ -1634,9 +1750,9 @@ class AuthorizationRequestListenerTest {
         //       into a decline, which is a decided outcome rather than a fault. The refusal therefore has
         //       to come from the decline's contribution, which is the statement that addresses the row
         //       whatever the decision turned out to be.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
                 .thenReturn(0);
-        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class)))
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
                 .thenReturn(0);
 
         IllegalStateException refused = assertThrows(IllegalStateException.class,
@@ -1679,9 +1795,9 @@ class AuthorizationRequestListenerTest {
         //       engine re-evaluates the credit check against the row as it stands -- so a zero from it is
         //       not "no such row" but "the headroom went", and the case that drives that answer stubs it
         //       to zero explicitly rather than relying on this default.
-        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class)))
+        when(this.summaries.reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class)))
                 .thenReturn(1);
-        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class))).thenReturn(1);
+        when(this.summaries.addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class))).thenReturn(1);
     }
 
     /**
@@ -2342,7 +2458,7 @@ class AuthorizationRequestListenerTest {
         //       whole token is observable twice over: on the row it was decided from and in the total it
         //       moved.
         verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, saved.getValue()
-                .getTransactionAmount());
+                .getTransactionAmount(), CEILING);
 
         clearInvocationsKeepingStubs();
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
@@ -2413,7 +2529,7 @@ class AuthorizationRequestListenerTest {
         assertEquals("1000.10", saved.getValue().getTransactionAmount().toPlainString());
 
         ArgumentCaptor<BigDecimal> accumulated = ArgumentCaptor.forClass(BigDecimal.class);
-        verify(this.summaries).reserveApprovedAuthorization(anyLong(), accumulated.capture());
+        verify(this.summaries).reserveApprovedAuthorization(anyLong(), accumulated.capture(), any(BigDecimal.class));
         assertEquals(Money.SCALE, accumulated.getValue().scale());
         assertEquals("1000.10", accumulated.getValue().toPlainString());
 
@@ -2475,8 +2591,8 @@ class AuthorizationRequestListenerTest {
         ArgumentCaptor<PendingAuthDetail> approved = ArgumentCaptor.forClass(PendingAuthDetail.class);
         verify(this.details).save(approved.capture());
         verify(this.summaries).reserveApprovedAuthorization(ACCOUNT_ID, approved.getValue()
-                .getApprovedAmount());
-        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class));
+                .getApprovedAmount(), CEILING);
+        verify(this.summaries, never()).addDeclinedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
 
         clearInvocationsKeepingStubs();
         when(this.summaries.findByAccountId(ACCOUNT_ID)).thenReturn(Optional.of(summaryWithRoom()));
@@ -2488,14 +2604,14 @@ class AuthorizationRequestListenerTest {
         verify(this.details).save(declined.capture());
         assertEquals(0, BigDecimal.ZERO.compareTo(declined.getValue().getApprovedAmount()),
                 "a decline approves nothing, so its approved amount is the literal zero of L689");
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("7000.00"));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("7000.00"), CEILING);
         // WHY : Assumptions: the declined total takes the amount the requester ASKED for, which on a
         //       decline is not the amount the row records as approved. Asserting the two are different is
         //       what makes the asymmetry observable rather than merely described.
         assertThat(new BigDecimal("7000.00"))
                 .as("the amount the declined total accumulates is not the amount the row approved")
                 .isNotEqualByComparingTo(declined.getValue().getApprovedAmount());
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
     }
 
     /**
@@ -2557,8 +2673,8 @@ class AuthorizationRequestListenerTest {
         this.listener.onRequest(
                 messageFor(requestFor(Money.of("200.99"), "TXN000000000002"), ALLOWED_REPLY_QUEUE));
 
-        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"));
-        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class));
+        verify(this.summaries).addDeclinedAuthorization(ACCOUNT_ID, new BigDecimal("200.99"), CEILING);
+        verify(this.summaries, never()).reserveApprovedAuthorization(anyLong(), any(BigDecimal.class), any(BigDecimal.class));
     }
 
     /**
@@ -2797,6 +2913,152 @@ class AuthorizationRequestListenerTest {
             listenerLogger.setLevel(previousLevel);
         }
     }
+
+    /**
+     * A malformed payload is recorded with a named reason and a condition, and still propagates.
+     *
+     * <p>⚠️ Purpose: this is the fault that reached an operator as nothing but a frame chain. Every other
+     * permanent input fault on this wire already names itself in the log -- the sibling case above asserts
+     * the allowlist refusal -- so a payload the codec cannot read was the one condition whose only record
+     * was the container's own failure line naming a codec frame. That line says the codec refused
+     * something; it does not say what, on the fault whose overwhelmingly common cause is a producer that
+     * changed a field's width.</p>
+     *
+     * <p>⚠️ Assumptions: the mutilation removes a cents digit from the amount, which is the SENSITIVE
+     * field, and that choice is what makes the case about disclosure as well as about diagnosis. The
+     * condition has to reach the line -- an operator must be told which field was at fault and what the
+     * constraint was -- while the field's VALUE must not, and the two requirements are only jointly
+     * satisfiable because the codec gates the value at its source. Mutilating a non-sensitive field would
+     * have asserted the diagnosis half alone and passed under an implementation that quoted every value.
+     * </p>
+     *
+     * <p>⚠️ Assumptions: the card number carried by the SAME payload is asserted absent as well as the
+     * amount. The refusal is raised inside the decode of one field, but the payload it was decoding holds
+     * the card number in an earlier position, so an implementation that logged the record rather than the
+     * refusal would satisfy an assertion about the amount alone.</p>
+     *
+     * <p>⚠️ Trade-offs: the refusal is asserted to propagate as the SAME instance, not merely as the same
+     * type. Logging a fault and then continuing is the failure mode that would delete this message: the
+     * container acknowledges on a normal return, so a handler that recorded the fault and swallowed it
+     * would remove the only copy of a payload an operator needs to read from the dead-letter queue. The
+     * identity assertion is what states that the record was added beside the propagation rather than in
+     * place of it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a malformed payload is recorded with a named reason and its condition, and rethrown")
+    void aMalformedPayloadIsRecordedWithANamedReasonAndStillPropagates() {
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.WARN);
+        try {
+            String widestRecord = linesOf(AMOUNT_VARIANTS_FIXTURE).get(1);
+            Message<String> mutilated =
+                    wireMessage(widestRecord.replace("+9999999999.99", "+9999999999.9")).build();
+
+            AuthMessageFormatException refusal = assertThrows(AuthMessageFormatException.class,
+                    () -> this.listener.onRequest(mutilated));
+
+            assertThat(captured.list)
+                    .as("a payload fault with no named record is the fault this case exists to prevent")
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(recorded -> assertThat(recorded)
+                            .contains("event=auth.request.refused")
+                            .contains("reason=wire-format-invalid")
+                            .contains("PA-RQ-TRANSACTION-AMT"));
+            assertThat(captured.list)
+                    .as("the field's own value, and the card number beside it, must both be withheld")
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .noneSatisfy(recorded -> assertThat(recorded)
+                            .containsAnyOf("9999999999.9", FIXTURE_CARD_NUM));
+            assertThat(refusal.getMessage())
+                    .as("the refusal itself must still name the field, since the dead letter is read by"
+                            + " hand")
+                    .contains("PA-RQ-TRANSACTION-AMT");
+            verify(this.details, never()).save(any(PendingAuthDetail.class));
+            verify(this.outbox, never()).save(any(AuthReplyOutbox.class));
+            verify(this.summaries, never()).save(any(PendingAuthSummary.class));
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+            listenerLogger.setLevel(previousLevel);
+        }
+    }
+
+    /**
+     * An undeclared and a foreign payload format each reach the log under the same named reason.
+     *
+     * <p>⚠️ Purpose: the format checks and the positional decode are three separate refusal sites, and an
+     * operator reading a log has no way to tell which of the three was reached from a frame chain. Routing
+     * all three through one reason is what makes a single query find every payload this consumer could not
+     * read, so this asserts the two format arms reach it and not only the decode arm the sibling case
+     * covers.</p>
+     *
+     * <p>⚠️ Assumptions: the foreign value is quoted in the record, deliberately, and it is asserted to be
+     * quoted in its SANITISED rendering rather than raw. The distinction between this value and the reply
+     * destination the sibling case withholds is what the value IS: a media type is a low-cardinality
+     * protocol declaration that names what a producer believes it sent, and it is the whole diagnosis when
+     * a producer's header library changes. A destination is an address a requester chose, and naming it
+     * would echo an attacker's chosen text. Both are sanitised; only one is quoted.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an undeclared and a foreign payload format both reach the log under one reason")
+    void bothFormatRefusalsReachTheLogUnderTheSameReason() {
+        Logger listenerLogger =
+                (Logger) LoggerFactory.getLogger(AuthorizationRequestListener.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        listenerLogger.addAppender(captured);
+        Level previousLevel = listenerLogger.getLevel();
+        listenerLogger.setLevel(Level.WARN);
+        try {
+            String payload = CsvAuthCodec.encodeRequest(requestFor(Money.of("100.99")));
+            Message<String> undeclared = MessageBuilder.withPayload(payload)
+                    .setHeader(AuthorizationRequestListener.HEADER_REPLY_TO, ALLOWED_REPLY_QUEUE)
+                    .build();
+
+            assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(undeclared));
+
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(recorded -> assertThat(recorded)
+                            .contains("event=auth.request.refused")
+                            .contains("reason=wire-format-invalid")
+                            .contains(AuthorizationRequestListener.HEADER_CONTENT_TYPE));
+
+            captured.list.clear();
+            String foreign = "application/json\nevent=auth.request.accepted";
+            Message<String> other = wireMessage(payload)
+                    .setHeader(AuthorizationRequestListener.HEADER_CONTENT_TYPE, foreign)
+                    .build();
+
+            assertThrows(AuthMessageFormatException.class, () -> this.listener.onRequest(other));
+
+            assertThat(captured.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anySatisfy(recorded -> assertThat(recorded)
+                            .contains("reason=wire-format-invalid")
+                            .contains("application/json"));
+            assertThat(captured.list)
+                    .as("a requester-supplied media type must not reach a log line with its newline"
+                            + " intact, or the injected event name would read as a real one")
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .noneSatisfy(recorded -> assertThat(recorded).contains(foreign));
+            verifyNoInteractions(this.accounts);
+        } finally {
+            listenerLogger.detachAppender(captured);
+            captured.stop();
+            listenerLogger.setLevel(previousLevel);
+        }
+    }
+
 
     /**
      * The window at its production default admits five hundred and one requests, not five hundred.

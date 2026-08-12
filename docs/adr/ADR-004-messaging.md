@@ -740,6 +740,43 @@ service itself enforces does not. There is no configuration that reproduces
 1. **Carry the expiry instant as a message attribute — `expiresAt`.** The producer
    computes the instant rather than a duration, so the value survives queue time and
    clock differences between producer and consumer without needing a countdown.
+
+   > ⚠️ Assumptions: **the instant is computed at the moment of the send, from the
+   > window the deciding transaction chose — not fixed when that transaction
+   > committed.** The baseline sets a *duration* on the descriptor immediately before
+   > its put, at
+   > [`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl)
+   > **L750**, and the queue manager begins counting it from the put. Sending the
+   > instant a decision-time computation produced would therefore mistranslate the
+   > semantic in one direction only, and fatally: a reply committed at *T* with a
+   > five-second window but first sent at *T + 7s* — one transport retry is enough —
+   > would go out carrying a deadline already in the past, and the consumer, honouring
+   > the attribute exactly as part 2 directs, would discard it on arrival. Any delay
+   > at all would become guaranteed non-delivery of a reply the committed decision
+   > says is owed. The window is preserved and the origin moves, so a requester's five
+   > seconds stays five seconds however many attempts precede the send.
+   >
+   > Trade-offs: the attribute consequently stops being evidence of how long a reply
+   > has been owed, because a retried reply is stamped afresh. That evidence is not
+   > lost — it is a named `auth.reply.late` warning carrying the deadline that passed,
+   > plus the outbox row's own creation instant and attempt count — and it belongs
+   > there rather than in a field whose only consumer is deciding whether to act on
+   > the message in front of it.
+   >
+   > ⚠️ Refactoring Rationale: a **producer**-side expiry check was also removed, and
+   > it is named here because it read as an implementation of this record and was the
+   > opposite of one. The reply publisher treated a passed deadline as terminal — it
+   > marked the row published without sending anything and stamped
+   > `expired before publication` on it. Since the stamped window and the first retry
+   > backoff are both five seconds, *every* reply that failed one attempt was
+   > discarded that way, and the retention sweep — whose predicate is that same
+   > publication column — then deleted the row. Expiry is enforced **by the consumer**
+   > in this design, per part 2; a producer applying it as well applies the rule twice,
+   > and the second application destroys the outbox guarantee that §0.4.3 of the
+   > technical specification states as *a reply is published for every committed
+   > authorization*. A reply that cannot be delivered within its attempt budget is now
+   > abandoned instead: the row keeps a null publication instant, is excluded from the
+   > sweep, and is logged at error.
 2. **The consumer honours it by dropping the message and logging the drop.** The
    log record is not optional bookkeeping. Assumptions: a silently dropped reply and
    a lost reply are indistinguishable from outside the consumer — both present as a

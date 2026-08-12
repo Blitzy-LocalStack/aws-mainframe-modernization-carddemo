@@ -19,6 +19,8 @@ import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.oauth2.server.resource.web.BearerTokenAuthenticationEntryPoint;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.security.web.firewall.RequestRejectedException;
+import org.springframework.security.web.firewall.RequestRejectedHandler;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -148,6 +150,47 @@ public final class ApiErrorSecurityHandlers {
      */
     public static AccessDeniedHandler accessDeniedHandler(Clock clock) {
         return new ApiErrorAccessDeniedHandler(clock);
+    }
+
+    /**
+     * Builds the handler that answers a request the HTTP firewall refuses to route.
+     *
+     * <p>⚠️ Refactoring Rationale: without this handler such a request was answered
+     * <b>401 {@link #CODE_UNAUTHENTICATED} with an EMPTY correlation identifier in the body</b>, to a
+     * caller holding a perfectly valid token. The chain of events is worth recording because none of its
+     * steps is obviously wrong on its own. The firewall rejects the address — a doubled path separator is
+     * the case observed — and the framework's default rejection handler calls {@code sendError}, which
+     * makes the container perform an internal ERROR dispatch to its error path. On that dispatch the
+     * bearer-token filter does not run, because it is a once-per-request filter and those skip error
+     * dispatches by default, so the request arrives anonymous; the chain's deny-by-default rule then
+     * refuses it and the unauthenticated entry point answers. The 400 the firewall decided is replaced by
+     * a 401 that misdescribes both the fault and the caller. Answering the rejection HERE means no error
+     * dispatch happens at all, so nothing can overwrite the status and nothing depends on which filters a
+     * container replays.</p>
+     *
+     * <p>Assumptions: the correlation identifier is populated on this path, and that is a consequence of
+     * filter ORDER rather than of anything this handler does. The correlation filter is registered at
+     * {@code HIGHEST_PRECEDENCE + 1}, ahead of the security chain, so its logging context is still
+     * established when the firewall rejects — whereas on an error dispatch it is not replayed at all,
+     * which is exactly why the body carried an empty identifier before.</p>
+     *
+     * <p>Assumptions: the answer is <b>400</b> with {@link ApiError#CODE_VALIDATION}, matching the
+     * unreadable-body advice. A firewall rejection is a statement about the request line, so it belongs
+     * with the other malformed-request refusals rather than with the authorisation family; and it is
+     * deliberately NOT a 404, because a 404 would assert something about which paths exist for a request
+     * whose address was never resolved.</p>
+     *
+     * <p>Assumptions: the rejection's own message is neither rendered nor logged. The framework composes
+     * it from the offending URL, and on this system a path segment can carry a primary account number, so
+     * the masked request path is used instead — the same rule every other handler in this class applies.
+     * </p>
+     *
+     * @param clock the clock the rendered body reads its failure instant from; must not be {@code null}
+     * @return the handler, never {@code null}
+     * @throws NullPointerException if {@code clock} is {@code null}
+     */
+    public static RequestRejectedHandler requestRejectedHandler(Clock clock) {
+        return new ApiErrorRequestRejectedHandler(clock);
     }
 
     /**
@@ -335,6 +378,56 @@ public final class ApiErrorSecurityHandlers {
 
             writeProblem(request, response, HttpServletResponse.SC_FORBIDDEN,
                     GlobalExceptionHandler.CODE_FORBIDDEN, GlobalExceptionHandler.MESSAGE_FORBIDDEN,
+                    this.clock);
+        }
+    }
+
+    /**
+     * Answers a request the HTTP firewall refuses to route with HTTP 400 and the problem shape.
+     *
+     * <p>Assumptions: the sentence and the code are the ones
+     * {@link GlobalExceptionHandler#onUnreadableBody} already publishes for a request that could not be
+     * read, so a request line the firewall refuses and a body the parser refuses are indistinguishable
+     * from outside. That is the intended equivalence: both mean "this request could not be understood",
+     * and a client corrects either by sending a well-formed request.</p>
+     */
+    public static final class ApiErrorRequestRejectedHandler implements RequestRejectedHandler {
+
+        /**
+         * The clock the rendered body reads its failure instant from.
+         */
+        private final Clock clock;
+
+        /**
+         * Creates the handler.
+         *
+         * @param clock the clock the rendered body reads its failure instant from; must not be
+         *     {@code null}
+         * @throws NullPointerException if {@code clock} is {@code null}
+         */
+        public ApiErrorRequestRejectedHandler(Clock clock) {
+            this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        }
+
+        /**
+         * Renders the refusal.
+         *
+         * @param request the request the firewall refused, read only for its path
+         * @param response the response to refuse on
+         * @param failure the rejection the firewall raised; its class is logged and its message — which
+         *     the framework composes from the offending URL — is never logged or rendered
+         * @throws java.io.IOException if writing the body fails
+         */
+        @Override
+        public void handle(HttpServletRequest request, HttpServletResponse response,
+                RequestRejectedException failure) throws java.io.IOException {
+
+            LOG.warn("event=api.request.rejected code={} status=400 path={} exception={}",
+                    ApiError.CODE_VALIDATION, CardNumberMasker.maskEmbeddedCardNumbers(
+                            request.getRequestURI()), failure.getClass().getName());
+
+            writeProblem(request, response, HttpServletResponse.SC_BAD_REQUEST,
+                    ApiError.CODE_VALIDATION, GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST,
                     this.clock);
         }
     }

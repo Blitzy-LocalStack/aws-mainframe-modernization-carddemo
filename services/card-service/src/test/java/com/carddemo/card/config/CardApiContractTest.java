@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.card.api.CardController;
+import com.carddemo.card.dto.CardPageQuery;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.security.SealedSelector;
@@ -11,6 +12,8 @@ import com.carddemo.common.web.CorrelationIdFilter;
 import java.io.InputStream;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -729,6 +732,22 @@ class CardApiContractTest {
                         + " contracts")
                 .containsExactly("next", "previous");
         assertThat(direction.get("default")).isEqualTo("next");
+
+        // WHY : Refactoring Rationale: the enumeration above was declared and UNENFORCED, which was
+        //   reported against the service: every spelling outside it read as the default and was answered
+        //   with a forward page and no complaint. The expression the request record now declares is
+        //   asserted to admit exactly the two published values and nothing else, so the document and the
+        //   running constraint cannot state two vocabularies. Composing the expression FROM this list
+        //   would satisfy the assertion whatever either side said, which is why the two are compared
+        //   rather than derived from one another.
+        assertThat(values)
+                .allSatisfy(published -> assertThat(published)
+                        .as("the published direction %s must satisfy the enforced domain", published)
+                        .matches(CardPageQuery.DIRECTION_DOMAIN));
+        assertThat(List.of("NEXT", "Previous", "PREVIOUS", "sideways", "", " previous", "previous "))
+                .as("no other spelling may satisfy the enforced domain")
+                .allSatisfy(rejected -> assertThat(rejected)
+                        .doesNotMatch(CardPageQuery.DIRECTION_DOMAIN));
     }
 
     /**
@@ -876,6 +895,132 @@ class CardApiContractTest {
                 .as("and the masked rendering the mapper actually produces must still be accepted")
                 .isTrue();
 
+    }
+
+    /**
+     * Asserts every request schema is closed AND that this module is configured to enforce the closure.
+     *
+     * <p>Purpose: a schema declaring {@code additionalProperties: false} is a promise about what a body
+     * may carry, and the library default is to discard an undeclared member silently, so the declaration
+     * and the configuration are two halves of one rule. Runtime testing found them apart: a search body
+     * carrying three undeclared members -- {@code pageNumber}, {@code size} and {@code offset}, the shape
+     * of an offset paging model this service does not implement -- was answered 200 with the default
+     * page, so a client that had guessed wrong got a plausible answer and no way to learn it had.</p>
+     */
+    // WHY : Assumptions: the configuration is read from this module's own application.yml rather than
+    //       from a running context, so the case fails if the key is deleted from the file a deployment
+    //       actually loads. A context-based assertion would pass on a mapper some test fixture had
+    //       configured and would say nothing about the deployed service.
+    // WHY : Trade-offs: the two halves are asserted in ONE case rather than two. They are separable
+    //       facts, but neither is worth anything alone -- an enforced-but-open schema refuses nothing and
+    //       a closed-but-unenforced schema documents a refusal that does not happen -- so a single case
+    //       that fails on either is the honest granularity.
+    @Test
+    @DisplayName("every request schema is closed and this module enforces the closure")
+    void everyRequestSchemaIsClosedAndTheClosureIsEnforced() {
+        Map<String, Object> schemas = mapping(mapping(this.contract, "components"), "schemas");
+
+        for (String requestSchema : List.of("CardPageQuery", "CardLookupRequest", "CardUpdateRequest")) {
+            assertThat(mapping(schemas, requestSchema).get("additionalProperties"))
+                    .as("%s is a request body schema and must be closed", requestSchema)
+                    .isEqualTo(false);
+        }
+
+        assertThat(configuredJacksonDeserialization().get("fail-on-unknown-properties"))
+                .as("the closure the schemas declare has to be enforced by this module's own"
+                        + " configuration, because the library default discards an undeclared member")
+                .isEqualTo(true);
+    }
+
+    /**
+     * Asserts the three transport refusals this service can produce are declared on the operations that
+     * can produce them, each with the {@code ApiError} shape.
+     *
+     * <p>Purpose: all three were undeclared while the shared advice could not produce them either, so
+     * every one was answered as HTTP 500 with a CRITICAL severity. Declaring them and handling them are
+     * two halves of one correction, and this case holds the declaration half.</p>
+     */
+    // WHY : Assumptions: 405 and 406 are required on EVERY operation and 415 only on the three that
+    //       accept a body, because that is the difference between them: any path can be addressed with a
+    //       verb it does not publish and any request can name an unacceptable Accept, whereas a route
+    //       taking no body has no content type to refuse.
+    @Test
+    @DisplayName("the transport refusals are declared where they can occur")
+    void theTransportRefusalsAreDeclaredWhereTheyCanOccur() {
+        Map<String, Object> paths = mapping(this.contract, "paths");
+        int operations = 0;
+
+        for (Map.Entry<String, Object> path : paths.entrySet()) {
+            Map<String, Object> methods = mapping(paths, path.getKey());
+            for (String method : methods.keySet()) {
+
+                // WHY : Assumptions: a path item carries members that are not operations -- a shared
+                //       description, a shared parameter list -- so the operation is identified by
+                //       carrying an operationId rather than by the key not being one of those. Naming the
+                //       exclusions instead would need amending every time a path item gained a member.
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (!operation.containsKey("operationId")) {
+                    continue;
+                }
+                operations++;
+                Map<String, Object> responses = mapping(operation, "responses");
+                assertThat(responses)
+                        .as("%s %s must declare both transport refusals every route can produce",
+                                method, path.getKey())
+                        .containsKeys("405", "406");
+                if (operation.containsKey("requestBody")) {
+                    assertThat(responses)
+                            .as("%s %s accepts a body, so it can refuse the body's media type",
+                                    method, path.getKey())
+                            .containsKey("415");
+                }
+            }
+        }
+
+        assertThat(operations)
+                .as("the census is not vacuous; every published operation was examined")
+                .isEqualTo(5);
+
+        Map<String, Object> declared = mapping(mapping(this.contract, "components"), "responses");
+        assertThat(declared)
+                .containsKeys("MethodNotAllowed", "NotAcceptable", "UnsupportedMediaType");
+        assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
+                .as("a 405 names the methods the route does publish, which is what a client acts on")
+                .containsKey("Allow");
+    }
+
+    /**
+     * Reads this module's configured Jackson deserialization settings from its own base configuration.
+     *
+     * @return the mapping beneath {@code spring.jackson.deserialization}; never {@code null}
+     * @throws IllegalStateException if the file is absent from the source tree, or if it does not carry
+     *     the mapping, either of which means the setting this case asserts is not configured at all
+     */
+    // WHY : Assumptions: the file is read from the SOURCE tree rather than from the classpath, because
+    //       the classpath copy is the build output and reading it would let a stale target directory pass
+    //       a case about a file a deployment loads. The path is resolved relative to the module the test
+    //       runs in, which is where the surefire working directory points.
+    private static Map<String, Object> configuredJacksonDeserialization() {
+        Path configuration = Path.of("src", "main", "resources", "application.yml");
+        if (!Files.isRegularFile(configuration)) {
+            throw new IllegalStateException(
+                    "this module's base configuration is absent at " + configuration.toAbsolutePath());
+        }
+
+        try (InputStream stream = Files.newInputStream(configuration)) {
+            Object parsed = new Yaml().load(stream);
+            if (!(parsed instanceof Map)) {
+                throw new IllegalStateException(configuration + " is not a mapping");
+            }
+            @SuppressWarnings("unchecked")
+            Map<String, Object> document = (Map<String, Object>) parsed;
+            return mapping(mapping(mapping(document, "spring"), "jackson"), "deserialization");
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException(configuration + " could not be read", failure);
+        }
     }
 
     /**

@@ -3,16 +3,17 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Seven compilation units sit in this directory: this charter and the six configuration classes
- * {@code DataSourceConfig}, {@code InternalIdentityConfig}, {@code MessagingIdentityConfig},
- * {@code OpenApiConfig}, {@code SecurityConfig} and {@code SqsConfig}. Every class name, file name
+ * <p>Eight compilation units sit in this directory: this charter and the seven configuration classes
+ * {@code DataSourceConfig}, {@code InternalIdentityConfig}, {@code JsonReadConfig},
+ * {@code MessagingIdentityConfig}, {@code OpenApiConfig}, {@code SecurityConfig} and
+ * {@code SqsConfig}. Every class name, file name
  * and count here is a measurement of that directory, and the marker line is re-measured on every
  * build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so a seventh class arriving without an entry here fails the build:</p>
+ * so an eighth class arriving without an entry here fails the build:</p>
  *
  * <pre>
- * this directory: 7 java files = 6 classes + 1 charter
+ * this directory: 8 java files = 7 classes + 1 charter
  * </pre>
  *
  * <p>Assumptions: the shared-kernel types named further down, and the profile configuration this
@@ -44,11 +45,26 @@
  * the COBOL parity oracle treats a warning-level aggregate as its green state belongs to that suite
  * alone, and it is never carried into a Maven, Checkstyle, Surefire or Failsafe result on this side.
  *
- * <h2>The six configuration classes</h2>
+ * <h2>The seven configuration classes</h2>
  *
- * <p>Target contract: this package is to hold exactly six {@code @Configuration} classes, each with
+ * <p>Target contract: this package is to hold exactly seven {@code @Configuration} classes, each with
  * a narrow and separately testable responsibility. The enumeration below is the closed set assigned
- * to it, and it is now also a measurement: six files beside this one carry that annotation.</p>
+ * to it, and it is now also a measurement: seven files beside this one carry that annotation.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the count reads seven where it read six. {@code JsonReadConfig} was
+ * ADDED, and it is recorded as an addition rather than a correction -- six was accurate for the tree it
+ * was measured against. It holds the request reader to the character domains the published contract
+ * declares: a JSON number reaching a member the document declares {@code type: string} was CONVERTED
+ * and accepted, so a numeric account scope was answered rather than refused. It is a class in this
+ * package rather than a key in the sibling {@code application.yml} for one reason, and the reason is
+ * the exception to the paragraph further down about values living in the resources channel: the single
+ * property that withdraws scalar coercion withdraws it SYMMETRICALLY, and the opposite direction is
+ * load-bearing here, because money crosses every boundary of this migration as a string and is read
+ * into an exact decimal. An asymmetric refusal is not expressible as a property, so it is expressed as
+ * a bean. Assumptions: the two keys that complete the same decision -- the undeclared-member refusal
+ * and the duplicate-member refusal -- DO live in {@code application.yml}, and
+ * {@code config/JsonReadConfigTest} asserts that the packaged document really sets them, so the half
+ * held here and the half held there cannot drift apart unnoticed.</p>
  *
  * <p>Refactoring Rationale: a seventh configuration class, {@code MessagingTokenConfig}, was DELETED
  * from this package rather than repointed, and the deletion is recorded because a reader may find the
@@ -134,6 +150,15 @@
  *       separate -- one authenticates this service to a sibling service, the other derives queue
  *       metadata -- so one class holding both would make rotating either require reasoning about
  *       both.</li>
+ *   <li>{@link JsonReadConfig} refuses a non-textual scalar where the published contract declares a
+ *       character field, so {@code {"accountId":10000000101}} is answered as a malformed body rather
+ *       than converted into the eleven digits the pattern constraint would then accept. ⚠️ Assumptions:
+ *       it declares the refusal for the textual target family and for the integer, floating-point and
+ *       boolean input shapes only, and NOT as a withdrawal of scalar coercion, because the reverse
+ *       direction carries every amount this migration moves -- money arrives as a string and is read
+ *       into an exact decimal, on this context's cross-context account read among others. It is the
+ *       only class here that configures the reader; the two sibling refusals, of an undeclared member
+ *       and of a member named twice, are feature keys in the sibling {@code application.yml}.</li>
  * </ul>
  *
  * <h2>Deliberately absent from this package</h2>

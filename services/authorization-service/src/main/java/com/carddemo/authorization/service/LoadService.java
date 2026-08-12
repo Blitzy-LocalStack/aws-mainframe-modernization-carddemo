@@ -8,6 +8,8 @@ import com.carddemo.authorization.mapper.PendingAuthSummaryMapper;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.codec.PackedDecimalCodec;
+import com.carddemo.common.observability.FailureSummary;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -397,14 +399,130 @@ public class LoadService {
         Objects.requireNonNull(rootImages, "rootImages must not be null");
         Objects.requireNonNull(childRecords, "childRecords must not be null");
 
-        LoadOutcome roots = loadSummaries(rootImages);
-        LoadOutcome children = loadDetails(childRecords);
+        LoadOutcome roots;
+        LoadOutcome children;
+        // WHY : ⚠️ Refactoring Rationale: a refusal is now RECORDED here before it propagates, and it
+        //       previously was not. A malformed record raised its refusal from deep inside the decode, and
+        //       the only line an operator saw was the maintenance runner's, which names the job and the
+        //       chain of types. Two facts were therefore missing from the record of the one failure that
+        //       needs both: WHICH record of the extract was refused, and WHAT was wrong with it. The first
+        //       lives in the refusal type as a field, the second in its cause's message, and neither
+        //       reached a log line -- so an operator held a file of half a million records and a type name.
+        // WHY : ⚠️ Assumptions: this catches the LOCATED refusal types only and lets everything else pass
+        //       untouched. A stream that cannot be read, or a whole-file length that is not a multiple of
+        //       the stride, is a fault of the file rather than of a record, and inventing an ordinal for it
+        //       would name a record that is not at fault. Those keep reaching the runner as they did.
+        // WHY : ⚠️ Assumptions: the message is rendered through the digit-redacting summary and not the
+        //       plain one, because the cause here is composed by a MAPPER over a record's own bytes and can
+        //       quote the account identifier the record carries. That value is one this context's
+        //       observability contract names as inadmissible in a durable diagnostic, and the sibling
+        //       assertion in {@code AuthorizationDiagnosticDisclosureTest} holds this class to it.
+        // WHY : ⚠️ Assumptions: three catch clauses rather than one multi-catch, because a multi-catch
+        //       resolves its variable to the three types' common SUPERtype -- which is the platform's own
+        //       illegal-argument type and declares no ordinal accessor. Each clause therefore reads the
+        //       ordinal from the type that carries it and hands it to one reporting method, so the three
+        //       lines are identical in shape without the ordinal being fetched reflectively or parsed back
+        //       out of a message.
+        try {
+            roots = loadSummaries(rootImages);
+            children = loadDetails(childRecords);
+        } catch (MalformedParentKeyException prefix) {
+            throw reportRefusedRecord(prefix.getRecordOrdinal(), prefix);
+        } catch (MalformedSegmentException segment) {
+            throw reportRefusedRecord(segment.getRecordOrdinal(), segment);
+        } catch (UnresolvedParentException unresolved) {
+            // WHY : ⚠️ Assumptions: this type is reported here too, although the method that raises it
+            //       already writes a line of its own naming the ordinal. What that line does not carry is
+            //       the detail field, and the event name here is shared by all three, so one query finds
+            //       every refused record whatever refused it.
+            throw reportRefusedRecord(unresolved.getRecordOrdinal(), unresolved);
+        } catch (IllegalArgumentException fileFault) {
+            // WHY : ⚠️ Refactoring Rationale: a fault of the FILE is now reported too, under its own event
+            //       and with no ordinal, and it was measured before it was written: handing this loader an
+            //       extract one byte short produced a run whose whole record was a chain of type names
+            //       ending at the record reader. The reader's own message names the stride the file failed
+            //       to be a multiple of, which is the sentence that turns "the load failed" into "you were
+            //       handed a truncated file", and it reached no log at all.
+            // WHY : ⚠️ Assumptions: this clause is LAST among the illegal-argument arms, and the ordering
+            //       is what makes it mean "of the file". Both located record refusals above are subtypes of
+            //       this type, so they are matched first and never reach here; what remains is a fault the
+            //       reader raised about the extract as a whole, for which no single record is at fault.
+            throw reportRefusedExtract(fileFault);
+        } catch (UncheckedIOException unreadable) {
+            // WHY : ⚠️ Assumptions: an unreadable stream is reported through the same file-scope event as
+            //       the length fault above, rather than being left to the caller, because the two are the
+            //       same class of fault from an operator's position: the extract could not be consumed and
+            //       no record is to blame. It is a separate clause only because this type is not an
+            //       illegal argument and so cannot share one.
+            throw reportRefusedExtract(unreadable);
+        }
         LoadOutcome total = roots.combinedWith(children);
 
         LOG.info("extract load complete roots={} children={} read={} inserted={} alreadyPresent={}",
                 roots.read(), children.read(), total.read(), total.inserted(),
                 total.alreadyPresent());
         return total;
+    }
+
+    /**
+     * Records one refused extract record, naming its position and its condition, and returns the refusal.
+     *
+     * <p>⚠️ Assumptions: the refusal is RETURNED for the caller to throw rather than thrown here, so the
+     * raise site stays visible at the call site and the compiler still sees the {@code throw}. That is the
+     * same convention the codec in the shared kernel uses for its own field failures, deliberately, so a
+     * reader who has followed one has followed both.
+     *
+     * <p>⚠️ Assumptions: the detail is rendered through the digit-redacting summary. The cause of a record
+     * refusal is composed by a mapper over that record's bytes and can quote the account identifier it
+     * carries, which this context's observability contract names as inadmissible in a durable diagnostic;
+     * the redaction replaces every run of three or more digits, so the field name and the constraint reach
+     * the line and the values do not.
+     *
+     * @param ordinal the one-based position of the refused record within its extract
+     * @param refusal the refusal to record and return; must not be {@code null}
+     * @return the same refusal, so the caller can throw it and keep the raise site at the fault
+     */
+    private static RuntimeException reportRefusedRecord(int ordinal, RuntimeException refusal) {
+        LOG.error("event=authorization.load.record-refused recordOrdinal={} fault={} detail={}",
+                ordinal, ThrowableDigest.of(refusal), FailureSummary.redactedOf(refusal));
+        return refusal;
+    }
+
+    /**
+     * Records one refused EXTRACT, naming its condition and deliberately naming no record.
+     *
+     * <p>⚠️ Purpose: this is the file-scope companion of {@link #reportRefusedRecord(int, RuntimeException)}
+     * and it exists for the same complaint about a different fault. A truncated extract, or one that cannot
+     * be read at all, previously reached an operator as a chain of type names ending at the record reader;
+     * the sentence that says WHICH stride the file failed to be a multiple of was composed, raised and never
+     * logged.
+     *
+     * <p>⚠️ Assumptions: no ordinal is rendered, and the absence is the point rather than an omission. When
+     * a file's total length is not a multiple of its stride, every record in it may be well formed, so any
+     * ordinal this line named would send a reader to inspect bytes that are correct. A separate event name
+     * is what lets the two be told apart in a query: one asks which record was refused, the other asks which
+     * file was.
+     *
+     * <p>⚠️ Trade-offs: the condition is rendered through the digit-redacting summary, as the record-scope
+     * companion's is, and here that has a visible cost worth stating rather than discovering. These messages
+     * are composed in this class and name a stride and a byte count rather than a customer, so the redaction
+     * hashes the harmless 206 along with anything harmful: the line reads "a whole number of ###-byte
+     * records". It is still rendered that way for two reasons. A location can reach this field -- an object
+     * key or a filesystem path carries digits, and the extract locations are caller-supplied -- and a rule
+     * that could tell a record length from an account identifier would have to understand the message, which
+     * is composed in a dozen places. What the reader needs from this line survives the hashing: the file is
+     * not a whole number of records, so it was truncated or handed to the wrong reader. The exact stride is a
+     * layout constant, and it is carried unhashed by the RAISED message, which is where an exact figure
+     * belongs.
+     *
+     * @param <E> the refusal's own type, preserved so the caller's {@code throw} stays exact
+     * @param refusal the file-scope refusal to record and return; must not be {@code null}
+     * @return the same refusal, so the caller can throw it and keep the raise site at the fault
+     */
+    private static <E extends RuntimeException> E reportRefusedExtract(E refusal) {
+        LOG.error("event=authorization.load.extract-refused fault={} detail={}",
+                ThrowableDigest.of(refusal), FailureSummary.redactedOf(refusal));
+        return refusal;
     }
 
     /**

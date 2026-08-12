@@ -401,6 +401,34 @@ public interface PendingAuthDetailRepository
             @Param("authDate") Integer authDate, @Param("authTime") Integer authTime, Limit limit);
 
     /**
+     * Counts the authorizations still recorded beneath one account.
+     *
+     * <p><strong>Purpose.</strong> The expiry sweep removes a summary only once nothing remains beneath it,
+     * and this is the read that establishes "nothing remains". It exists because the summary's own counters
+     * cannot answer that question: they are running aggregates that the sweep itself decrements, that an
+     * extract load restores from a SEPARATE file from the children, and that the schema admits negative
+     * values for -- so a summary can carry zero on both counters while real, unexpired authorizations sit
+     * beneath it. The detail table's foreign key cascades on delete, so a parent removed in that state takes
+     * live rows with it.</p>
+     *
+     * <p>Assumptions: the count is issued INSIDE the sweep's own transaction, after that transaction's child
+     * deletes. The provider flushes pending changes before running a query against the table they touch, so
+     * the figure returned already excludes the rows this window deleted and includes any a concurrent
+     * authorization committed -- which is precisely the population the cascade would destroy, and precisely
+     * what a subtraction of two in-memory tallies could not see.</p>
+     *
+     * <p>Alternatives Considered: deriving the survivor count arithmetically as "children read minus children
+     * deleted", which needs no query at all. Rejected because the sweep walks each account newest-first from
+     * a fixed starting position, so an authorization committed after that walk began carries a newer key than
+     * anything the walk will visit and is therefore invisible to it -- the arithmetic would report zero
+     * survivors for an account that had just acquired one, and the cascade would then delete it.</p>
+     *
+     * @param accountId the account whose remaining authorizations are counted; must not be {@code null}
+     * @return how many authorizations the table currently holds for that account, zero when it holds none
+     */
+    long countByIdAccountId(Long accountId);
+
+    /**
      * Reads the authorizations immediately preceding a stated position, oldest of them first.
      *
      * <p>Refactoring Rationale: the reference program has no backward retrieval of any kind, and

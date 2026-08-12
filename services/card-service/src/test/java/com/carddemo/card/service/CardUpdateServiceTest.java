@@ -20,6 +20,7 @@ import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.error.RecordConflictException;
+import com.carddemo.common.security.MaskedCardNumber;
 import com.carddemo.common.security.SealedSelector;
 import com.carddemo.common.validation.FieldValidationFlag;
 import java.io.IOException;
@@ -1263,14 +1264,28 @@ class CardUpdateServiceTest {
         assertThat(stored.getVersion()).isEqualTo(STORED_VERSION);
         when(this.cards.findById(cardNumberOf(record))).thenReturn(Optional.of(stored));
 
+        // WHY : Refactoring Rationale: the refusal is asserted to be the card-specific SUBTYPE and to
+        //       carry the refreshed card, where this case previously asserted the shared type alone. The
+        //       published conflict body declares that card, and the shared type has no member able to hold
+        //       it, so the subtype is what makes the declared body composable. The base type is still
+        //       asserted through it -- an instance check on the subtype implies one on the parent -- so
+        //       the kind and the version this case already owned are unchanged.
+        // WHY : Assumptions: the card's version is asserted to equal the STORED version rather than the
+        //       submitted one. That is the whole value of the member: a caller resubmits against the
+        //       version the row now holds, and a card echoing the caller's own stale number back would
+        //       send it into the same refusal again.
         assertThatThrownBy(() -> this.service.update(selectorFor(record), new CardUpdateRequest(
                 "Layla Ullrich", "N", NEUTRAL_MONTH, NEUTRAL_YEAR, STALE_VERSION)))
-                .isInstanceOf(RecordConflictException.class)
+                .isInstanceOf(CardRecordConflictException.class)
                 .satisfies(failure -> {
-                    RecordConflictException conflict = (RecordConflictException) failure;
+                    CardRecordConflictException conflict = (CardRecordConflictException) failure;
                     assertThat(conflict.kind())
                             .isEqualTo(RecordConflictException.Kind.STALE_VERSION);
                     assertThat(conflict.currentVersion()).isEqualTo((long) STORED_VERSION);
+                    assertThat(conflict.card()).isNotNull();
+                    assertThat(conflict.card().version()).isEqualTo(STORED_VERSION);
+                    assertThat(conflict.card().displayCardNumber())
+                            .matches(MaskedCardNumber.DOMAIN);
                 });
 
         verify(this.cards, never()).saveAndFlush(any(Card.class));

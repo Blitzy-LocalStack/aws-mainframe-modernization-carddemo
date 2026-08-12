@@ -160,6 +160,8 @@ services/card-service/
 |   |-- application-dev.yml
 |   |-- application-prod.yml
 |   |-- db/migration/V1__card.sql        objects inside the card schema only
+|   |-- db/migration/V2__card_num_digit_domain.sql
+|   |                                    card_num character-domain check
 |   |-- openapi/card-api.yaml            OpenAPI 3.1 contract of record
 |-- src/test/
     |-- java/com/carddemo/card/**        22 test classes, package-info per package
@@ -272,13 +274,16 @@ to them. The one COMMAREA field with no envelope member is the screen ordinal at
 navigation state.
 
 **Backward availability is not a component of the envelope, and
-`CardListService.backwardAvailable` answers expressibility rather than
-availability.** It reports whether the page names a position a backward request
-could be issued from -- which is `firstKey` being present -- and that is
-deliberately not a claim that a row waits there. The two questions are separated
-because only one of them is a property of the page: whether a row waits at that
-position is a property of where the CALLER stands in the walk, and the reference
-keeps exactly that on the terminal side. `app/cbl/COCRDLIC.cbl:237-238` declares
+`CardListService.backwardAvailable(page, openingPage)` composes it from two facts:
+the page's leading position and the caller's own opening-page state.** The first
+half -- `firstKey` being present -- reports only that a backward request could be
+ADDRESSED from the page, and on its own it is not a claim that a row waits there;
+every page carrying rows names its own first row, so reading the answer off the
+page alone reported a backward step as available on the opening page, the one page
+the reference refuses it from. The second half therefore arrives as an argument.
+The two facts are separated because only one of them is a property of the page:
+whether a row waits at that position is a property of where the CALLER stands in
+the walk, and the reference keeps exactly that on the terminal side. `app/cbl/COCRDLIC.cbl:237-238` declares
 the one-digit page ordinal with `88 CA-FIRST-PAGE VALUE 1`, `:902-903` raises
 `'NO PREVIOUS PAGES TO DISPLAY'` on that condition **without reading anything**,
 and `:492` and `:508` move the ordinal as the two paging keys are pressed. A
@@ -289,6 +294,21 @@ reference's own notice at `:1301-1302`. What the envelope owes such a client is
 the position to seek from, and its canonical constructor admits `hasNext == true`
 only alongside a present `lastKey` so a caller told to continue always holds the
 position to continue from.
+
+**A backward request issued from the opening page anyway keeps the caller's rows.**
+`CardListService.list` answers a backward read that finds no row before its cursor
+with the page beginning AT that cursor, never with an empty page, because that is
+what the reference does when the key is pressed regardless of the ordinal: the arm
+at `app/cbl/COCRDLIC.cbl:443-444` pairs the backward key with the first-page
+condition, moves the page's own first card number into the record identifier at
+`:445-446`, performs **`9000-READ-FORWARD`** at `:449-450` and sends the map at
+`:451-452`, while `:901-903` adds `'NO PREVIOUS PAGES TO DISPLAY'`. Re-reading the
+opening page is the same page: the backward query returned nothing strictly less
+than the cursor within the narrowing, so the cursor names the lowest key that
+narrowing holds. The empty envelope therefore remains reachable only where it is
+the truth -- an empty table, or a narrowing that matches nothing -- which is the
+state the reference reports through `WS-NO-RECORDS-FOUND` at `:1241-1244` rather
+than through a paging key.
 
 ### Optimistic concurrency, and HTTP 409
 
@@ -483,6 +503,21 @@ client's card module is written against it rather than against the Java. The
 document is also served at run time by `springdoc`, so a client can detect a
 drifted contract without reading the repository.
 
+Three addresses serve it: `/card-api.yaml` is the hand-authored contract above,
+`/v3/api-docs` is the document generated from the controllers, and
+`/swagger-ui.html` is the browser view of the first. **All three require a bearer
+token carrying either CardDemo group** -- they are granted by a documentation rule
+in `SecurityConfig`, so an unauthenticated fetch is refused with `401` exactly as
+every other route is. They were reachable by nobody until that rule was added: the
+chain ends in a deny-all catch-all and named no documentation path, so a configured,
+generated and packaged document answered `403` to every valid token. The rule is
+held to the configuration by `ContractPublicationTest`, which reads the three
+addresses out of `application.yml` and requires that a chain pattern cover each of
+them, so moving a `springdoc` key cannot quietly un-publish the document again.
+Because the grant is by authority, opening `/swagger-ui.html` straight in a browser
+is refused -- a navigation carries no token -- which is the accepted cost of not
+publishing the API description anonymously.
+
 | Method | Path | Authority required | Success | Error statuses |
 |---|---|---|---|---|
 | `POST` | `/api/v1/cards/search` | user | `200` | `400`, `401`, `403`, `500` |
@@ -509,6 +544,16 @@ chain of inline matchers, so the rules can be enumerated by a test. The
 administrative route admits the administrator authority only; the collection and
 the card subtree admit the user authority, which the administrator authority also
 satisfies.
+
+That table holds the **published operations** only. The chain grants four groups in
+total and the other three are stated separately: health openly, because a
+load-balancer probe presents no token; `/actuator/info` and `/actuator/prometheus`
+by loopback network position, because their only consumer is the task-local
+collector, which presents none either; and the documentation addresses above by the
+user authority. Keeping the documentation paths out of the operation table is
+deliberate -- that table is compared against the contract's operation list in both
+directions, and a documentation path inside it would be read as an operation the
+contract had failed to declare.
 
 **No endpoint, no request parameter and no DTO in this module exposes an offset or
 a page-number pagination control.** Paging is by key only. The list request body is
@@ -567,7 +612,7 @@ comparison; and `idx_cards_account_id` is the target of `CARDAIX`.
 
 ### Migration ownership
 
-`src/main/resources/db/migration/V1__card.sql` owns **only the objects inside the
+This module owns **two** migrations, and both own **only the objects inside the
 `card` schema**. The schema itself, the database role that owns it and the grants
 that role holds are bootstrapped once by
 `data-migration/sql/V0__schemas_and_roles.sql`, outside any service. The runtime
@@ -575,10 +620,31 @@ configuration reflects that split: Flyway is pointed at the `card` schema and is
 configured not to create schemas, so a migration run cannot silently bring a
 schema into existence that the bootstrap did not authorise.
 
-**There is no `V2__` migration in this module.** The `V2__` seed migration in this
-migration belongs to the reference bounded context, which owns the lookup data. A
-`V2__` here would be a second, competing definition of the same numbered version
-inside a different schema.
+| Version | File | What it installs |
+|---|---|---|
+| V1 | `src/main/resources/db/migration/V1__card.sql` | The `card.cards` table, its primary key, its `NOT NULL` and domain constraints, and `idx_cards_account_id` |
+| V2 | `src/main/resources/db/migration/V2__card_num_digit_domain.sql` | `ck_cards_card_num_digits`, closing the `card_num` character domain to exactly sixteen digit characters |
+
+**Why the check arrived as V2 rather than as an edit to V1.** V1 declares
+`card_num CHAR(16)` and states in its own text that a shorter or non-numeric value
+is outside the contract, but it installs no constraint saying so, so the column
+accepted values the API cannot render: an alphabetic sixteen, and a fifteen-digit
+value that the fixed-width column pads with a blank. Runtime testing found the
+consequence — such a row could not be masked into the shape the listing row
+publishes, and the browse answered every caller with a server failure. V1 is **not**
+edited to add the check, because V1's checksum is recorded in the Flyway history
+table of every database already migrated and altering an applied migration makes
+`flyway validate` fail there; V1's own header instructs that a correction arrives as
+a new version. Assumptions: this module's `V2__` and `reference-service`'s
+`V2__seed_reference.sql` do not collide — a version number is scoped to the history
+table of the schema it is applied into, so each context numbers independently.
+
+**Applying V2 to a database that already holds a non-conforming row.** The
+constraint is added validating, not `NOT VALID`, so the migration fails rather than
+admitting a row it cannot render. List the offending rows first with
+`SELECT card_num, account_id FROM card.cards WHERE card_num !~ '^[0-9]{16}$';` and
+correct or remove each one; the migration's own header carries the same procedure at
+its point of use.
 
 ### Flyway needs two coordinates, not one
 
@@ -896,8 +962,8 @@ guarantee is checked.
 | `api/CardControllerTest` | MockMvc over a hand-assembled web context | The administrator and ordinary-caller split on the card-detail route, both directions; that an unauthenticated request is challenged rather than served; that a token carrying no recognised group reaches no card route; that a masked read discloses only the last four digits; that a stale revision is answered with the reference sentence; and that every asserted sentence fits the program-side message width |
 | `service/CardListServiceTest` | unit | A forward step resumes past the last returned key; a backward step resumes before the first returned key; the row beyond the window discovers a further page; a row arriving between two requests is neither hidden nor repeated; and the browse window is seven rows |
 | `service/CardUpdateServiceTest` | unit | Every transcribed validation gate, including that all four gates run so every fault is reported, that the summary sentence follows the reference gate order, that a refused submission is never written, and that a stale token is refused even when nothing would change |
-| `repository/CardRepositoryIT` | Testcontainers | The account-keyed access path that replaces `CARDAIX`, the keyed read, forward and backward keyset paging, the concurrent-insert boundary, empty results, and that the migration was applied |
-| `mapper/CardMapperTest` | unit | That no serialised body carries the verification value, that the card number is masked on every non-administrative body, that the administrative disclosure returns it whole, that no body carries the record's trailing padding, and that both identifiers travel as digit strings with leading zeros intact |
+| `repository/CardRepositoryIT` | Testcontainers | The account-keyed access path that replaces `CARDAIX`, the keyed read, forward and backward keyset paging, the concurrent-insert boundary, empty results, that both migrations were applied in version order, and that `ck_cards_card_num_digits` refuses a stored key outside the sixteen-digit domain while admitting a conforming one |
+| `mapper/CardMapperTest` | unit | That no serialised body carries the verification value, that the card number is masked on every non-administrative body, that the administrative disclosure returns it whole, that no body carries the record's trailing padding, that both identifiers travel as digit strings with leading zeros intact, and that a stored key outside the published domain costs its own listing row rather than the whole page while a single-card read still refuses |
 
 **`CardControllerTest` does not use `@WebMvcTest`, and cannot.** It builds an
 `AnnotationConfigWebApplicationContext` itself, registers the controller and the

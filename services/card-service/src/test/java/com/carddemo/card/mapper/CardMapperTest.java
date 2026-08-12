@@ -3,6 +3,9 @@ package com.carddemo.card.mapper;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.card.domain.Card;
 import com.carddemo.card.domain.EncryptedCvv;
 import com.carddemo.card.dto.CardDetail;
@@ -26,6 +29,9 @@ import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.LoggerFactory;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
@@ -1037,5 +1043,164 @@ class CardMapperTest {
                     .matches(stored -> stored < LOWEST_MONTH || stored > HIGHEST_MONTH,
                             "outside the inclusive domain the baseline admits");
         }
+    }
+
+    /**
+     * Confirms a stored key outside the published card-number domain costs its own row and not the page.
+     *
+     * <p>Purpose: runtime testing reported that one such row denied the whole listing -- every caller of
+     * the browse received a server failure and no rows at all, including callers narrowing to accounts
+     * the offending row has nothing to do with. This case is the executable statement that a page is
+     * served instead, with the unrenderable row absent from it and every other row intact.</p>
+     *
+     * @param poisonKey the sixteen stored characters spliced over a conforming record's key, supplied as
+     *     the two shapes runtime testing was able to insert before the domain was closed at the column
+     * @throws IOException if the boundary fixture cannot be read from the classpath
+     */
+    // WHY : Assumptions: the two shapes are the ones a fixed-width character column admits and a
+    //       sixteen-digit domain does not: sixteen alphabetic characters, and a fifteen-digit value
+    //       padded to the declared width with a blank. They are spliced over a CONFORMING fixture
+    //       record's leading sixteen characters rather than published as a fixture of their own, because
+    //       the fixture register at src/test/resources/fixtures/README.md censuses every file in that
+    //       directory and a row this class only ever hands to a converter never reaches a table -- so a
+    //       registered file would carry an obligation the case does not need.
+    // WHY : Trade-offs: the omitted row's ACCOUNT is asserted absent from the page, rather than only the
+    //       row count being asserted lower. A count alone would pass if the conversion dropped some
+    //       other row and kept this one, which is the failure the case exists to exclude.
+    @ParameterizedTest(name = "stored key [{0}]")
+    @ValueSource(strings = {"ABCDEFGHIJKLMNOP", "111122223333444 "})
+    @DisplayName("a stored key outside the published domain costs its own row and not the page")
+    void aStoredKeyOutsideThePublishedDomainCostsItsOwnRowAndNotThePage(String poisonKey)
+            throws IOException {
+        List<String> records = recordsFrom(EXPIRY_BOUNDS);
+        assertThat(records).hasSizeGreaterThan(1);
+
+        List<Card> stored = new ArrayList<>();
+        for (String record : records) {
+            stored.add(cardFrom(record));
+        }
+        Card unrenderable = cardFrom(poisonKey + records.get(0).substring(CARD_NUM_END));
+        stored.add(unrenderable);
+
+        String leadingPosition = stored.get(0).getCardNum()
+                + this.mapper.toDetail(stored.get(0)).accountId();
+        String firstToken = sealedCursor(leadingPosition);
+        String lastToken = sealedCursor(sealablePositionOf(unrenderable));
+
+        PageResponse<CardSummary> page = this.mapper.toSummaryPage(
+                PageResponse.ofRows(stored, firstToken, lastToken, true));
+
+        assertThat(page.items())
+                .as("every renderable row is served and only the unrenderable one is absent")
+                .hasSize(stored.size() - 1)
+                .extracting(CardSummary::displayCardNumber)
+                .allMatch(masked -> masked.matches(MaskedCardNumber.DOMAIN));
+        assertThat(page.firstKey()).isEqualTo(firstToken);
+        assertThat(page.lastKey()).isEqualTo(lastToken);
+        assertThat(page.hasNext())
+                .as("the further-page answer is the caller's and is not revised by an omission")
+                .isTrue();
+        assertThat(this.json.writeValueAsString(page))
+                .as("no part of the unrenderable stored key reaches the serialised envelope")
+                .doesNotContain(poisonKey.strip());
+    }
+
+    /**
+     * Confirms a request naming exactly one unrenderable card is refused rather than answered emptily.
+     *
+     * <p>Purpose: the omission above is a property of the PAGED conversion only. A single-card read has
+     * no remaining rows to serve, so its refusal is the honest answer and a body with members missing
+     * would be read by a caller as a card that has none.</p>
+     *
+     * @throws IOException if the positive-control fixture cannot be read from the classpath
+     */
+    // WHY : Assumptions: the refusal asserted here is the one the RESPONSE RECORD raises, not one this
+    //       class adds. CardSummary and CardDetail each guard their masked component against
+    //       MaskedCardNumber.DOMAIN in their own constructors, so the single-row conversions need no
+    //       branch of their own to refuse -- and adding one would put a second statement of the same
+    //       rule in front of the first.
+    @Test
+    @DisplayName("a single-card read still refuses a stored key it cannot render")
+    void aSingleCardReadStillRefusesAStoredKeyItCannotRender() throws IOException {
+        Card unrenderable = cardFrom(
+                "ABCDEFGHIJKLMNOP" + recordsFrom(POSITIVE_CONTROL).get(0).substring(CARD_NUM_END));
+
+        assertThatThrownBy(() -> this.mapper.toSummary(unrenderable))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> this.mapper.toDetail(unrenderable))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /**
+     * Confirms the record of an omitted row carries no part of the stored key.
+     *
+     * <p>Purpose: a value reaching that branch is not a card number, but it is a value from the card
+     * master and may be a mistyped or mis-offset one, so a record quoting it would write cardholder
+     * credential material into the one destination the masking everywhere else in this class exists to
+     * keep it out of.</p>
+     *
+     * @throws IOException if the positive-control fixture cannot be read from the classpath
+     */
+    // WHY : Assumptions: the account identifier and the stored width ARE asserted present, rather than
+    //       the record merely being asserted free of the key. An operator has to be able to find the row
+    //       with the query the migration's own header states, and a warning naming neither would report
+    //       that something was dropped without saying which row -- which is a record that costs
+    //       retention and buys nothing.
+    // WHY : Assumptions: the appender is attached and detached inside this case rather than in the
+    //       shared setup, because it is the only case that reads the operational record and a shared
+    //       appender would collect events from every other one.
+    @Test
+    @DisplayName("the record of an omitted row names the account and no part of the key")
+    void theRecordOfAnOmittedRowNamesTheAccountAndNoPartOfTheKey() throws IOException {
+        String poisonKey = "ABCDEFGHIJKLMNOP";
+        Card unrenderable = cardFrom(
+                poisonKey + recordsFrom(POSITIVE_CONTROL).get(0).substring(CARD_NUM_END));
+        ch.qos.logback.classic.Logger mapperLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CardMapper.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        mapperLogger.addAppender(captured);
+
+        try {
+            this.mapper.toSummaryPage(
+                    PageResponse.ofRows(List.of(unrenderable),
+                            sealedCursor(sealablePositionOf(unrenderable)),
+                            sealedCursor(sealablePositionOf(unrenderable)), false));
+        } finally {
+            mapperLogger.detachAppender(captured);
+            captured.stop();
+        }
+
+        List<String> rendered = captured.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
+        assertThat(rendered)
+                .as("the omission is recorded once, naming the account and the stored width")
+                .hasSize(1)
+                .allSatisfy(line -> assertThat(line)
+                        .contains("accountId=" + unrenderable.getAccountId())
+                        .contains("storedWidth=" + poisonKey.length()));
+        assertThat(rendered)
+                .as("no substring of the stored key of four characters or more is quoted")
+                .allSatisfy(line -> {
+                    for (int start = 0; start + 4 <= poisonKey.length(); start++) {
+                        assertThat(line).doesNotContain(poisonKey.substring(start, start + 4));
+                    }
+                });
+    }
+
+    /**
+     * Renders the keyset position of one stored card without requiring it to be renderable.
+     *
+     * @param card the stored card to derive a position from, which must not be {@code null}
+     * @return the stored card number followed by the account identifier rendered at its declared width
+     */
+    // WHY : Assumptions: the account identifier is rendered here rather than being taken from
+    //       toDetail(Card), because a card this method is asked about may be one no conversion will
+    //       accept. The width is the eleven of CARD-ACCT-ID PIC 9(11) at app/cpy/CVACT02Y.cpy:6, which
+    //       is the same width the mapper publishes it at, so the position is the one the browse holds.
+    private static String sealablePositionOf(Card card) {
+        return card.getCardNum() + String.format("%011d", card.getAccountId());
     }
 }

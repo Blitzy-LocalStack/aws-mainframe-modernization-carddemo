@@ -290,8 +290,24 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * the row's existence is established before the statement runs and a zero can only mean the headroom
      * went. A caller without that guarantee must establish it first.</p>
      *
+     * <p>⚠️ Assumptions: the approved total and the credit balance are SATURATED at the ceiling the caller
+     * supplies, being the greatest magnitude those columns can hold. The guard above bounds this statement's
+     * ADDEND against the account's own headroom and so cannot bound the RUNNING TOTAL, because the limit the
+     * headroom is measured from is itself stored in one of these narrower columns and is refreshed from a
+     * wider account-master field. So a high-limit account reaches the column's bound by accumulation while
+     * every individual authorization it approved was inside its limit, and without the saturation the
+     * numeric-overflow error that follows rolls back a decision the requester never receives. The reference
+     * reaches the same bound by discarding high-order digits at {@code cbl/COPAUA0C.cbl} L815 and L817; the
+     * choice of saturation over that is argued on {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}.
+     *
+     * <p>Assumptions: only the UPPER bound is expressed, because this statement only ever adds and its
+     * addend is a non-negative approved amount, so neither member can be driven below the column's negative
+     * bound here. The expiry sweep's statement, which subtracts, bounds both ends.
+     *
      * @param accountId the account whose summary receives the reservation; must not be {@code null}
      * @param amount the approved amount to reserve against the account's limit; must not be {@code null}
+     * @param ceiling the greatest magnitude the approved total and the credit balance may reach, being
+     *     {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}; must not be {@code null}
      * @return {@code 1} when the limit still admitted the amount and the contribution was applied,
      *     {@code 0} when it did not -- or when the account carries no summary at all
      */
@@ -299,14 +315,18 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
     @Query("""
             update PendingAuthSummary s
                set s.approvedAuthCount = s.approvedAuthCount + 1,
-                   s.approvedAuthAmount = s.approvedAuthAmount + :amount,
-                   s.creditBalance = s.creditBalance + :amount,
+                   s.approvedAuthAmount = case
+                       when s.approvedAuthAmount + :amount > :ceiling then :ceiling
+                       else s.approvedAuthAmount + :amount end,
+                   s.creditBalance = case
+                       when s.creditBalance + :amount > :ceiling then :ceiling
+                       else s.creditBalance + :amount end,
                    s.cashBalance = 0
              where s.accountId = :accountId
                and s.creditLimit - s.creditBalance >= :amount
             """)
     int reserveApprovedAuthorization(@Param("accountId") Long accountId,
-            @Param("amount") BigDecimal amount);
+            @Param("amount") BigDecimal amount, @Param("ceiling") BigDecimal ceiling);
 
     /**
      * Adds one declined authorization's contribution to an account's summary, atomically.
@@ -317,19 +337,38 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * paragraph, which moves it on the approved arm only. A declined authorization consumes no credit,
      * so advancing the balance would overstate what the account has committed.
      *
+     * <p>⚠️ Assumptions: the running total is SATURATED at the ceiling the caller supplies, which is the
+     * greatest magnitude the column can hold. This statement is the most exposed of the three additive ones:
+     * the approved arm is qualified on the account's own headroom, so its addend cannot exceed a limit that
+     * itself fits the column, while a decline has no such gate and adds a {@code PIC S9(10)V99} requested
+     * amount to a {@code PIC S9(09)V99} total whatever its size. Without the saturation a single request of
+     * one thousand million raised a numeric-overflow error that rolled the whole decision back, so the
+     * requester received no answer at all and the message dead-lettered after five receives -- and repeated
+     * in-domain declines could reach the same state by accumulation. The reference reaches its own version of
+     * this bound by discarding high-order digits at {@code cbl/COPAUA0C.cbl} L821; the choice of saturation
+     * over that is argued on {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}.
+     *
+     * <p>Assumptions: only the UPPER bound is expressed, because the addend on this path is never negative
+     * -- the wire contract refuses a negative requested amount -- so the sum cannot fall below the column's
+     * negative bound through this statement. The expiry sweep's statement, which subtracts, bounds both ends.
+     *
      * @param accountId the account whose summary receives the contribution; must not be {@code null}
      * @param amount the requested amount to add to the declined total; must not be {@code null}
+     * @param ceiling the greatest magnitude the declined total may reach, being
+     *     {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}; must not be {@code null}
      * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
      */
     @Modifying
     @Query("""
             update PendingAuthSummary s
                set s.declinedAuthCount = s.declinedAuthCount + 1,
-                   s.declinedAuthAmount = s.declinedAuthAmount + :amount
+                   s.declinedAuthAmount = case
+                       when s.declinedAuthAmount + :amount > :ceiling then :ceiling
+                       else s.declinedAuthAmount + :amount end
              where s.accountId = :accountId
             """)
     int addDeclinedAuthorization(@Param("accountId") Long accountId,
-            @Param("amount") BigDecimal amount);
+            @Param("amount") BigDecimal amount, @Param("ceiling") BigDecimal ceiling);
 
     /**
      * Removes an expired authorization's contribution from an account's summary, atomically.
@@ -347,27 +386,49 @@ public interface PendingAuthSummaryRepository extends JpaRepository<PendingAuthS
      * because the purge reverses a whole account's expired children in one pass and the reference
      * paragraph subtracts accumulated totals rather than stepping one at a time.
      *
+     * <p>⚠️ Assumptions: both totals are SATURATED at the supplied bound in BOTH directions, because this
+     * statement subtracts and the amounts it subtracts come from the wider columns of
+     * {@code pending_auth_detail}. An authorization of {@code PIC S9(10)V99} reversed out of a
+     * {@code PIC S9(09)V99} total drives the result an order of magnitude below the column's negative bound,
+     * and the numeric-overflow error that produced abended the whole run: earlier windows stayed committed,
+     * the table was left partly purged, and no further retention could ever complete while such a row
+     * existed. Saturating keeps the sweep running over the rest of the table. The reversal is allowed to go
+     * negative within the domain, which is divergence D-G recorded on {@code PurgeJob} -- the bound is the
+     * column's, not a floor at zero.
+     *
      * @param accountId the account whose summary is reduced; must not be {@code null}
      * @param approvedCount how many approved authorizations are being reversed; must not be negative
      * @param approvedAmount their total amount; must not be {@code null}
      * @param declinedCount how many declined authorizations are being reversed; must not be negative
      * @param declinedAmount their total amount; must not be {@code null}
+     * @param ceiling the greatest magnitude either total may reach, being
+     *     {@code PendingAuthSummary.MONEY_MAX_MAGNITUDE}; must not be {@code null}
+     * @param floor the negation of {@code ceiling}, supplied rather than computed in the statement because
+     *     the query language has no unary negation of a parameter; must not be {@code null}
      * @return {@code 1} when the account had a summary and it was updated, {@code 0} when it had none
      */
     @Modifying
     @Query("""
             update PendingAuthSummary s
                set s.approvedAuthCount = s.approvedAuthCount - :approvedCount,
-                   s.approvedAuthAmount = s.approvedAuthAmount - :approvedAmount,
+                   s.approvedAuthAmount = case
+                       when s.approvedAuthAmount - :approvedAmount > :ceiling then :ceiling
+                       when s.approvedAuthAmount - :approvedAmount < :floor then :floor
+                       else s.approvedAuthAmount - :approvedAmount end,
                    s.declinedAuthCount = s.declinedAuthCount - :declinedCount,
-                   s.declinedAuthAmount = s.declinedAuthAmount - :declinedAmount
+                   s.declinedAuthAmount = case
+                       when s.declinedAuthAmount - :declinedAmount > :ceiling then :ceiling
+                       when s.declinedAuthAmount - :declinedAmount < :floor then :floor
+                       else s.declinedAuthAmount - :declinedAmount end
              where s.accountId = :accountId
             """)
     int reverseExpiredAuthorizations(@Param("accountId") Long accountId,
             @Param("approvedCount") int approvedCount,
             @Param("approvedAmount") BigDecimal approvedAmount,
             @Param("declinedCount") int declinedCount,
-            @Param("declinedAmount") BigDecimal declinedAmount);
+            @Param("declinedAmount") BigDecimal declinedAmount,
+            @Param("ceiling") BigDecimal ceiling,
+            @Param("floor") BigDecimal floor);
 
     /**
      * Loads one account's summary without holding its row.

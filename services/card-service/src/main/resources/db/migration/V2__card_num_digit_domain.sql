@@ -1,0 +1,150 @@
+-- =============================================================================
+-- services/card-service/src/main/resources/db/migration/V2__card_num_digit_domain.sql
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Closes the value domain of card.cards.card_num to exactly sixteen digit
+--   characters, by adding one named check constraint,
+--   ck_cards_card_num_digits.
+--
+--   V1__card.sql declares the column CHAR(16) NOT NULL and records at its
+--   lines 172 to 174 that "a value shorter than sixteen is a defect to be
+--   refused, not a shorter name to be stored" -- yet no constraint enforced
+--   either half of that sentence. CHAR pads a shorter value with blanks
+--   rather than refusing it, and it admits any character at all, so two
+--   shapes the record layout cannot express were storable: a value whose
+--   characters are not digits, and a value shorter than the declared width.
+--
+--   The width and the character class are not this file's choice. CARD-NUM
+--   is PIC X(16) at app/cpy/CVACT02Y.cpy:5 and the cluster keys on all
+--   sixteen of those bytes from offset zero at app/jcl/CARDFILE.jcl:54, so
+--   the width is part of the contract; every one of the fifty records in
+--   app/data/ASCII/carddata.txt carries sixteen digits in those positions,
+--   and app/cbl/COCRDLIC.cbl:139-141 declares the value numerically and
+--   redefines it as characters, which is what fixes the character class as
+--   digits rather than as arbitrary text.
+--
+-- Parameters:
+--   A migration takes no arguments, so its inputs are the Flyway state and
+--   configuration it is applied under. All of them are declared in sibling
+--   resources rather than here, and each is identical to the ones V1 names
+--   in its own header: spring.flyway.schemas and spring.flyway.default-schema
+--   pin the target schema and the history table's home,
+--   spring.flyway.locations pins discovery at classpath:db/migration, and the
+--   executing role is the schema's owner because ALTER TABLE requires it.
+--
+--   - Applied-version state: the schema history table in schema card.
+--     Version 2 is the identifier that decides whether this script runs; a
+--     history row already recording it means this file is skipped. A database
+--     carrying only V1 receives this script on the next start, which is the
+--     whole point of it arriving as a second version rather than as an edit.
+--
+-- Return values:
+--   One schema object, and nothing besides.
+--
+--   - Check constraint ck_cards_card_num_digits on card.cards.card_num.
+--
+--   Deliberately absent: no column is added, altered, widened or dropped; no
+--   index is created; no row is written, corrected or deleted; and no
+--   privilege changes. The table's shape, its two existing constraints and
+--   its secondary index are exactly as V1 left them.
+--
+-- Exceptions or errors:
+--   1. Non-conforming rows already stored. PostgreSQL validates a check
+--      constraint against existing rows as it adds it, so this script FAILS
+--      on a table that already holds a key outside the domain, and the
+--      service does not start. That is the intended outcome for a card
+--      master rather than an inconvenience: a key that is not sixteen digits
+--      is not a card number, and serving a table known to hold one would
+--      answer some callers with rows whose identity the contract cannot
+--      express. An operator locates them with
+--          SELECT card_num, account_id FROM card.cards
+--           WHERE card_num !~ '^[0-9]{16}$';
+--      and corrects or removes them at source -- the loader that wrote them
+--      is data-migration/src/carddemo_migration/loaders/aurora.py, whose
+--      COPY of the fixed-width extract is the other writer of this column --
+--      before starting the service again. NOT VALID was considered and
+--      rejected: it would admit the constraint while leaving the stored
+--      counter-examples in place, so the endpoint that cannot render them
+--      would keep failing while the schema reported the domain closed.
+--   2. Insufficient privilege. ALTER TABLE requires the table's owner, which
+--      is the role V0__schemas_and_roles.sql establishes for this schema and
+--      the role each per-service migration is expected to run as. Applying
+--      this script as any other role fails naming the table.
+--   3. Checksum immutability. V1's own header, at its lines 111 to 118,
+--      instructs that a correction arrives as a new versioned migration and
+--      never as an edit, because Flyway refuses a script whose checksum
+--      changed after it was applied. This file is that correction. V1 is
+--      therefore left byte-identical, and the sentence in it that records
+--      "there is no second migration in this module" was true when written
+--      and is superseded here rather than edited there -- editing it would
+--      abort startup on every database that already carries V1.
+--   4. No destructive path exists. clean is disabled by the profile overlay,
+--      and this script contains no clean, no drop and no truncate.
+--
+-- Provenance:
+--   Every app/** path cited in this file is REFERENCE-ONLY and is never
+--   modified by this migration or by anything else in the migrated trees.
+--   The COBOL baseline is the specification this schema encodes, and it
+--   keeps running: the migration adds a path, it does not remove one.
+--
+--   Primary sources: app/cpy/CVACT02Y.cpy:5 for the field declaration;
+--   app/jcl/CARDFILE.jcl:54 for the key width and offset;
+--   app/cbl/COCRDLIC.cbl:139-141 for the numeric-and-character declaration
+--   of the same value; and app/data/ASCII/carddata.txt as the seed extract
+--   the domain was measured against. The target-side reader of the column is
+--   services/card-service/src/main/java/com/carddemo/card/mapper/CardMapper.java,
+--   whose published masked rendering is what a non-conforming key cannot
+--   satisfy.
+--
+--   Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md, whose SQL
+--   section requires this header block plus a rationale on each non-obvious
+--   constraint, and records that nothing in the build inspects a migration's
+--   comments.
+-- =============================================================================
+
+-- WHY : Refactoring Rationale: the domain is closed in the SCHEMA and not
+--       only in the service, for the reason V1 already gives at its lines
+--       358 to 366 about the status domain: the migration ETL loads this
+--       table directly with COPY, so a rule that lives only in application
+--       code is never reached by a bulk load. Runtime testing showed what
+--       that gap cost. A single stored key outside the domain -- an
+--       alphabetic sixteen, or a fifteen-digit value blank-padded into
+--       CHAR(16) -- cannot satisfy the masked rendering the response
+--       contract publishes for every listing row, so the record that carries
+--       it refuses construction and the WHOLE page fails for EVERY caller,
+--       not merely the row at fault. Closing the domain here is what makes
+--       V1's own statement about this column true at the point data enters,
+--       rather than at the point it leaves.
+-- WHY : Assumptions: this is an ADDITION to what the storage platform
+--       offered rather than a repair of anything in the baseline. A VSAM
+--       KSDS keys on sixteen bytes and constrains their character class not
+--       at all -- app/csd/CARDDEMO.CSD:31 and :33 define the cluster
+--       JOURNAL(NO) RECOVERY(NONE), so the platform had nowhere to express a
+--       domain and no program written against it could ask for one. The
+--       baseline holds the invariant emergently, through the extract it is
+--       loaded from; the relational target can declare it, so it does.
+-- WHY : Assumptions: the expression is a POSIX regular expression rather
+--       than a LIKE pattern or a length-plus-numeric pair. A LIKE pattern
+--       would need sixteen bracketed character ranges and would read as
+--       nothing in particular; a numeric cast would accept a value with
+--       leading or trailing blanks, which is exactly the fifteen-digit case
+--       this refuses, and would also accept a sign or a decimal point. One
+--       anchored expression states the width and the character class
+--       together, and it is the same expression the operator query in the
+--       header above uses to find counter-examples.
+-- WHY : Assumptions: the constraint is named explicitly for the reason V1
+--       records for its own two at :347-355 -- a named constraint is quoted
+--       back to whatever has to recognise it, and matching on a
+--       server-generated name would tie that to a string no file in the
+--       repository declares. The name follows the sibling's ck_<table>_<what>
+--       shape.
+-- WHY : Trade-offs: the check is added VALIDATED, which takes a lock on the
+--       table and reads every row while it is added. On this table that cost
+--       is small and is paid once at a deployment, and what it buys is the
+--       guarantee an unvalidated constraint cannot give: that the rows the
+--       service is about to serve are inside the domain its responses can
+--       express. The failure mode that choice creates is the loud one
+--       described in the header, which is the one a card master should have.
+ALTER TABLE card.cards
+    ADD CONSTRAINT ck_cards_card_num_digits
+        CHECK (card_num ~ '^[0-9]{16}$');

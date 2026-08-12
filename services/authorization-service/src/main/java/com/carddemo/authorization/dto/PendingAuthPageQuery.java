@@ -102,8 +102,26 @@ public record PendingAuthPageQuery(
      * bound-body path sorts by MEMBER and its sort is stable, so two entries for one member keep the
      * provider's order and there is no hook to order within a member -- the fix had to make the second
      * violation not arise rather than sort it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the widening was {@code ^$} and admitted only the EMPTY string, which
+     * left the reasoning above true of exactly one of the values the presence constraint refuses. The
+     * presence constraint is {@code @NotBlank}, so it refuses every all-whitespace value, and eleven
+     * spaces -- which is precisely what a fixed-width screen field sends when the operator leaves it
+     * untouched -- therefore failed BOTH constraints and produced the two entries this widening exists to
+     * prevent. The observed rejection carried two entries for {@code accountId}, both stating BLANK, the
+     * second carrying the numeric sentence, so a client rendering per-member errors showed the field
+     * complaining twice. Admitting any all-whitespace value restores the invariant the paragraphs above
+     * assert: at most one violation per member per request, whatever blank shape arrives.</p>
+     *
+     * <p>Assumptions: this widened form is deliberately NOT published in the OpenAPI document, whose
+     * {@code AccountId} schema keeps the strict {@code ^[0-9]{11}$} with an eleven-character length.
+     * The two are describing different things and reconciling them would be wrong: the published pattern
+     * states what a caller must SEND, and blanks are not acceptable input, whereas this constant exists
+     * only to keep one refusal from being counted twice by a validation provider whose per-member
+     * evaluation order is unspecified. Publishing the whitespace alternative would tell a client that a
+     * blank scope is admissible when the request is refused either way.</p>
      */
-    public static final String ACCOUNT_ID_DOMAIN = "^$|^[0-9]{11}$";
+    public static final String ACCOUNT_ID_DOMAIN = "^\\s*$|^[0-9]{11}$";
 
     /**
      * The two directions the paging vocabulary admits.

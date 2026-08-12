@@ -1,6 +1,7 @@
 package com.carddemo.card.api;
 
 import com.carddemo.card.dto.AdminCardDetail;
+import com.carddemo.card.dto.CardConflictError;
 import com.carddemo.card.dto.CardDetail;
 import com.carddemo.card.dto.CardLookupRequest;
 import com.carddemo.card.dto.CardPageQuery;
@@ -8,17 +9,25 @@ import com.carddemo.card.dto.CardSummary;
 import com.carddemo.card.dto.CardUpdateRequest;
 import com.carddemo.card.service.CardAdminViewService;
 import com.carddemo.card.service.CardListService;
+import com.carddemo.card.service.CardRecordConflictException;
 import com.carddemo.card.service.CardUpdateService;
 import com.carddemo.card.service.CardViewService;
 import com.carddemo.common.control.OnlineWriteGateExempt;
+import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.web.PageResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import java.security.Principal;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -218,6 +227,16 @@ public class CardController {
     private final CardUpdateService writes;
 
     /**
+     * Composes the shared half of a conflict body, so this class composes only the card-specific half.
+     *
+     * <p>Assumptions: the shared advice is held as a collaborator rather than reached statically, because
+     * it carries the deployment's clock and reads the request's correlation identity. Holding it is what
+     * lets the extended conflict body below reuse the code, the sentence selection, the subsystem, the
+     * correlation identity, the masked path and the timestamp instead of restating any of them.</p>
+     */
+    private final GlobalExceptionHandler conflicts;
+
+    /**
      * Binds the read service and the update service.
      *
      * <p>Assumptions: both collaborators arrive through the constructor and neither is assignable
@@ -233,19 +252,30 @@ public class CardController {
      * message reached a caller. Wiring the view services and withdrawing the duplicates leaves one
      * implementation of each read, and it is the implementation whose messages match the reference.</p>
      *
+     * <p>Refactoring Rationale: four collaborators became five. The fifth is the shared error advice, and
+     * it is required rather than optional: the extended conflict body this class composes has to carry the
+     * same code, sentence, subsystem, correlation identity, masked path and timestamp as every other
+     * conflict in the migration, and the advice is where all six are decided. An optional collaborator
+     * would mean a conflict body assembled two different ways depending on wiring, which is the
+     * divergence this arrangement exists to prevent.</p>
+     *
      * @param reads the service serving the browse; must not be {@code null}
      * @param views the service serving the two masked single-card reads; must not be {@code null}
      * @param adminViews the service serving the one read that discloses a full account number; must not
      *     be {@code null}
      * @param writes the service serving the edit; must not be {@code null}
+     * @param conflicts the shared error advice, which composes the shared half of a conflict body; must
+     *     not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public CardController(CardListService reads, CardViewService views,
-            CardAdminViewService adminViews, CardUpdateService writes) {
+            CardAdminViewService adminViews, CardUpdateService writes,
+            GlobalExceptionHandler conflicts) {
         this.reads = Objects.requireNonNull(reads, "reads");
         this.views = Objects.requireNonNull(views, "views");
         this.adminViews = Objects.requireNonNull(adminViews, "adminViews");
         this.writes = Objects.requireNonNull(writes, "writes");
+        this.conflicts = Objects.requireNonNull(conflicts, "conflicts");
     }
 
     /**
@@ -275,12 +305,18 @@ public class CardController {
      * to show.
      *
      * <p>Alternatives Considered: a fifth envelope member reporting whether a previous page exists.
-     * Rejected because the shared envelope declares exactly four members and backward availability is already
-     * derivable from one of them -- {@link CardListService#backwardAvailable(PageResponse)} reads it as
-     * the presence of the leading cursor. Assumptions: a caller can only step backward from a page it
-     * reached by stepping forward, so the opening page is the one with nothing before it, which is the
-     * condition the reference tests as {@code 88 CA-FIRST-PAGE VALUE 1} at
-     * {@code app/cbl/COCRDLIC.cbl:238}.
+     * Rejected because the shared envelope declares exactly four members and every consumer of it
+     * declares the same four. Backward availability is instead composed by
+     * {@link CardListService#backwardAvailable(PageResponse, boolean)} from the envelope's leading cursor
+     * AND the caller's own opening-page state, and the second half is the caller's to supply: a caller
+     * can only step backward from a page it reached by stepping forward, so the opening page is the one
+     * with nothing before it, which is the condition the reference tests as
+     * {@code 88 CA-FIRST-PAGE VALUE 1} at {@code app/cbl/COCRDLIC.cbl:238} over an ordinal it keeps on
+     * the terminal side. Refactoring Rationale: this paragraph previously recorded the answer as
+     * derivable from the envelope ALONE, which was wrong and was reported as a defect -- every page
+     * carrying rows names its own first row, so that reading offered a backward step from the opening
+     * page. The migrated home of the ordinal is the browser client's navigation state, and
+     * {@code ui/src/screens/cardList} holds it and withholds the backward key on the first page.
      *
      * <p>Assumptions: both narrowings of this operation are OPTIONAL, and the reference says so by the
      * value it pre-sets each edit to rather than in a comment. {@code 2210-EDIT-ACCOUNT.} at
@@ -406,6 +442,14 @@ public class CardController {
      * caller holding it directly agree; over HTTP a present-but-empty member is already refused upstream
      * by the member's own published pattern, which admits eleven digits and nothing shorter.
      *
+     * <p>Assumptions: eleven zero digits are a THIRD spelling of the same answer, and this method
+     * produces it by arithmetic rather than by a test of its own -- the value parses to zero, and
+     * {@code CardListService}'s narrowing gate reads zero as not supplied because
+     * {@code app/cbl/COCRDLIC.cbl:1007-1009} places {@code CC-ACCT-ID-N EQUAL ZEROS} in the same
+     * disjunction as low values and spaces and sends all three to the same not-supplied exit. So a
+     * caller sending zeros is listing across all accounts, exactly as the reference screen does with a
+     * zero-filled filter field. The gate records why refusing it instead was rejected.
+     *
      * @param accountId the account narrowing exactly as the request body carried it, or {@code null} when
      *     the caller sent none
      * @return the narrowing as the integer the read service expects, or {@code null} when the caller
@@ -521,8 +565,9 @@ public class CardController {
      *     edit, which the shared advice renders as HTTP 400 carrying the per-field array
      * @throws NoSuchElementException if the selector opens cleanly but names no stored card, which the
      *     shared advice renders as HTTP 404
-     * @throws RecordConflictException if the stored row has moved on from the submitted version, which
-     *     the shared advice renders as HTTP 409 carrying the reference sentence
+     * @throws CardRecordConflictException if the stored row has moved on from the submitted version,
+     *     which {@link #onCardRecordConflict(RecordConflictException, HttpServletRequest)} renders as
+     *     HTTP 409 carrying the reference sentence and the card as it now stands
      */
     @PutMapping(path = CARD_PATH, consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
@@ -553,5 +598,103 @@ public class CardController {
     public AdminCardDetail getAdminCardDetail(@PathVariable(name = "cardKey") String cardKey) {
 
         return this.adminViews.viewForAdministrator(cardKey);
+    }
+
+    /**
+     * Renders a stale-revision refusal as the extended conflict body this contract declares.
+     *
+     * <p>Refactoring Rationale: this handler exists because {@code CardConflictError} in
+     * {@code src/main/resources/openapi/card-api.yaml} declares a member the shared problem shape has no
+     * room for, and the route was answering with the shared shape alone. Runtime testing found what a
+     * caller received instead: a 409 whose only report of the current state was the version number placed
+     * in the field entry's message position, where the document's own example shows the reference sentence
+     * there and the version inside a {@code card} object. Following the document therefore led a client to
+     * a member that was never sent, and reading the entry led it to a bare number where a sentence was
+     * promised.</p>
+     *
+     * <p>Assumptions: the shared renderer composes the whole of the shared half, and this method changes
+     * exactly two things about the result. That division is the point of injecting the advice rather than
+     * assembling a body here: the code, the sentence selection, the relational subsystem, the correlation
+     * identity, the masked path and the timestamp all stay stated once, in the class every other context
+     * answers a conflict through, so this handler cannot drift from them. What it changes is the field
+     * entry's message -- to the sentence the contract shows -- and the addition of the card.</p>
+     *
+     * <p>Trade-offs: the entry's message becomes the sentence, so the version no longer appears in it.
+     * That is the point rather than a loss: the version moves to {@code card.version}, where it is typed
+     * as a number beside the rest of the refreshed state instead of being a number formatted into a help
+     * string. The shared renderer is deliberately NOT changed to match, because a service with no
+     * refreshed representation to send has that entry as its only channel for the version, and taking it
+     * away would leave those contexts reporting a conflict with no way to say what to retry against.</p>
+     *
+     * <p>Assumptions: this handler claims the BASE contention type and not only the card-specific subtype,
+     * so every conflict this context raises returns the extended body -- the refreshed card where the
+     * condition has one, and the member present and null where it does not. The alternative was to claim
+     * the subtype alone and leave the other three conditions to the shared advice, which returns a body
+     * with no such member at all; the contract's own examples for those conditions show {@code card:
+     * null}, so claiming the base type is what makes the document literally true of every conflict a
+     * caller can receive here.</p>
+     *
+     * <p>Trade-offs: one condition still returns the shared shape without the member, and it is worth
+     * naming rather than leaving as a surprise. A conflict the STORE reports -- a provider optimistic-lock
+     * failure raised by the flush rather than by this context's own comparison -- is converted to a
+     * conflict inside the shared advice and answered there, so it never propagates to this handler. The
+     * member is optional in the schema, so such a body is still a valid response; what it loses is the
+     * refreshed card, which the advice has no way to obtain because a provider exception does not carry
+     * the row. Closing that would mean the advice re-reading a row it knows nothing about.</p>
+     *
+     * @param failure the contention this context raised. When it is the card-specific subtype it carries
+     *     the card as it stood at detection; for any other kind it carries none, and the member is
+     *     rendered null
+     * @param request the request being answered, passed through to the shared renderer for its path and
+     *     nothing else
+     * @return HTTP 409 carrying the shared problem shape with the reference sentence in its version entry,
+     *     and the refreshed card where the condition has one; never {@code null}
+     * @throws IllegalStateException if the shared renderer returns no body, which no path produces and
+     *     which would mean the shared conflict contract had changed underneath this method
+     */
+    @ExceptionHandler(RecordConflictException.class)
+    public ResponseEntity<CardConflictError> onCardRecordConflict(
+            RecordConflictException failure, HttpServletRequest request) {
+
+        ApiError shared = this.conflicts.onRecordConflict(failure, request).getBody();
+        if (shared == null) {
+            throw new IllegalStateException(
+                    "the shared conflict renderer returned no body, so no conflict body can be composed");
+        }
+
+        // WHY : Assumptions: the entry is REPLACED rather than appended to, so the array still carries
+        //       exactly one entry for one field. Two entries for the version -- one holding the number the
+        //       shared renderer wrote and one holding the sentence -- would make an array length no longer
+        //       equal the count of faulted fields, which is the property every consumer of this member
+        //       relies on.
+        // WHY : Assumptions: the field NAME is taken from the entry the shared renderer produced rather
+        //       than written here, so the two cannot disagree about what the entry is keyed on. The
+        //       renderer owns that key, and a literal here would be a second declaration of it.
+        List<ApiError.FieldError> fieldErrors = shared.fieldErrors().stream()
+                .map(entry -> new ApiError.FieldError(entry.field(), entry.state(),
+                        CardUpdateService.MESSAGE_RECORD_CHANGED))
+                .toList();
+
+        // WHY : Trade-offs: the shape is rebuilt through its canonical constructor with the SAME
+        //       timestamp the shared renderer stamped, rather than through a factory that would stamp a
+        //       new one. Two timestamps for one refusal is the kind of difference that costs an hour when
+        //       a support conversation compares a client's copy of a body against a log line; reusing the
+        //       stamped value also means this method needs no clock of its own to keep in step with the
+        //       one the advice holds.
+        ApiError body = new ApiError(shared.code(), shared.secondaryCode(), shared.message(),
+                shared.severity(), shared.subsystem(), shared.status(), shared.correlationId(),
+                shared.path(), shared.timestamp(), fieldErrors, shared.abend());
+
+        // WHY : Assumptions: the card is taken from the refusal by a TYPE test, so a condition that
+        //       carries no refreshed row renders the member as null rather than this method having to know
+        //       which kinds carry one. Selecting on the kind instead would put a second statement of that
+        //       correspondence here, and it would go stale the moment a fifth kind is added.
+        CardDetail refreshed = failure instanceof CardRecordConflictException carrying
+                ? carrying.card()
+                : null;
+
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new CardConflictError(body, refreshed));
     }
 }

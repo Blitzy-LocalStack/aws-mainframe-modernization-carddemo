@@ -213,13 +213,35 @@ class AuthorizationDiagnosticDisclosureTest {
      * the identifier's place and this asserts it is still there. The two halves together are what make the
      * rewrite reviewable: one forbids the value, the other forbids an empty message.</p>
      *
-     * @throws AssertionError if a skip or refusal diagnostic carries no record ordinal
+     * <p>⚠️ Refactoring Rationale: the expected count moved from three to four when the extract load began
+     * RECORDING a refused record rather than letting the refusal propagate unlogged. It is asserted as an
+     * exact figure and not a lower bound, deliberately, because the loop below only checks the templates it
+     * finds: a fifth record-scope template added without an ordinal would fail, but one added and then
+     * silently REMOVED would leave the remaining four passing, and an exact figure is what makes that
+     * removal visible. Raising this number is the correct response to a new located diagnostic; lowering it
+     * is a review question.</p>
+     *
+     * <p>⚠️ Assumptions: the diagnostics are PARTITIONED by scope rather than tested by one rule, and the
+     * file-scope arm asserts the ordinal is ABSENT. When an extract's total length is not a multiple of its
+     * stride every record in it may be well formed, so an ordinal on that line would send a reader to
+     * inspect bytes that are correct -- inventing one is the defect, not the remedy. Writing this as a
+     * single rule over every line mentioning a refusal would have forced the file-scope line either to
+     * carry a fabricated ordinal or to be renamed around the assertion, and both would have made the rule
+     * weaker than it looks.</p>
+     *
+     * @throws AssertionError if a record-scope diagnostic carries no record ordinal, or if a file-scope
+     *     diagnostic invents one
      */
     @Test
-    @DisplayName("each skipped or refused load diagnostic still names the record ordinal")
+    @DisplayName("record-scope load diagnostics name the ordinal and file-scope diagnostics do not")
     void eachSkipOrRefusalDiagnosticNamesTheRecordOrdinal() {
         List<String> located = new ArrayList<>();
+        List<String> fileScope = new ArrayList<>();
         for (String call : loggerInvocations(LOAD_SERVICE)) {
+            if (call.contains("extract-refused")) {
+                fileScope.add(call);
+                continue;
+            }
             if (call.contains("skipped") || call.contains("refused")) {
                 assertThat(call)
                         .as("a skip or refusal diagnostic that does not locate its record")
@@ -228,8 +250,68 @@ class AuthorizationDiagnosticDisclosureTest {
             }
         }
         assertThat(located)
-                .as("skip and refusal diagnostics in %s", LOAD_SERVICE)
-                .hasSize(3);
+                .as("record-scope skip and refusal diagnostics in %s", LOAD_SERVICE)
+                .hasSize(4);
+        assertThat(fileScope)
+                .as("file-scope refusal diagnostics in %s", LOAD_SERVICE)
+                .hasSize(1);
+        assertThat(fileScope.get(0))
+                .as("no record is at fault in a whole-file refusal, so none may be named")
+                .doesNotContain("recordOrdinal")
+                .contains("fault={}")
+                .contains("detail={}");
+    }
+
+    /**
+     * The refused-record diagnostic names both the fault's type chain and its redacted condition.
+     *
+     * <p>⚠️ Purpose: an ordinal alone locates the record but says nothing about what was wrong with it,
+     * which was the second half of the same complaint -- an operator holding a rejected extract had a
+     * position and a type name and no statement of the condition. This asserts the line still carries both
+     * complements: the type chain, which says where the refusal was raised, and the condition, which says
+     * what the record violated.</p>
+     *
+     * <p>⚠️ Assumptions: the condition is asserted to be rendered through the DIGIT-REDACTING summary and
+     * not the plain one, and that distinction is the whole safety of the line. A record refusal is composed
+     * by a mapper reading that record's own bytes, so its message can quote the eleven-digit account
+     * identifier the record carries -- a value this context's observability contract names as inadmissible
+     * in a durable diagnostic, and the value every other case in this class exists to keep out. The plain
+     * renderer masks a sixteen-digit card number and nothing narrower, so it would have admitted exactly
+     * that identifier. Asserting the renderer by name is what stops a later edit from reaching for the
+     * shorter method and reintroducing the disclosure with every source-text assertion above still green.
+     * </p>
+     *
+     * <p>⚠️ Assumptions: this also asserts that NO governed source renders a failure through the plain
+     * renderer, rather than only checking the one line that exists today. The rule being protected is a
+     * property of the whole group -- these three classes walk the two tables and report on rows -- so a
+     * second reporting site added to any of them must reach for the redacting form too, and a case scoped
+     * to a single template could not say so.</p>
+     *
+     * @throws AssertionError if the refusal diagnostic loses either complement, or if any governed source
+     *     renders a failure through the plain summary renderer
+     */
+    @Test
+    @DisplayName("the refused-record diagnostic names the fault chain and its redacted condition")
+    void theRefusedRecordDiagnosticNamesTheFaultAndItsRedactedCondition() {
+        List<String> refusals = new ArrayList<>();
+        for (String call : loggerInvocations(LOAD_SERVICE)) {
+            if (call.contains("authorization.load.record-refused")) {
+                refusals.add(call);
+            }
+        }
+        assertThat(refusals).as("refused-record diagnostics in %s", LOAD_SERVICE).hasSize(1);
+        assertThat(refusals.get(0))
+                .contains("fault={}")
+                .contains("detail={}")
+                .contains("ThrowableDigest.of(")
+                .contains("FailureSummary.redactedOf(");
+
+        for (String source : GOVERNED_SOURCES) {
+            assertThat(strippedSource(source))
+                    .as("%s must render a failure through the redacting summary, never the plain one",
+                            source)
+                    .doesNotContain("FailureSummary.of(");
+        }
     }
 
     /**

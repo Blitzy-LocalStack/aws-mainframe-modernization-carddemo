@@ -5,8 +5,10 @@ import com.carddemo.authorization.domain.PendingAuthSummary;
 import com.carddemo.authorization.repository.PendingAuthDetailRepository;
 import com.carddemo.authorization.repository.PendingAuthSummaryRepository;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.observability.ThrowableDigest;
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.Year;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
@@ -480,7 +482,14 @@ public class PurgeJob {
     private PurgeWindow commitWindow(long startAfterAccountId, int windowOrdinal,
             PurgeParameters parameters) {
         try {
-            return this.transactions.execute(status -> purgeWindow(startAfterAccountId, parameters));
+            return this.transactions.execute(
+                    status -> purgeWindow(startAfterAccountId, windowOrdinal, parameters));
+        } catch (PurgeAbendException located) {
+            // WHY : Refactoring Rationale: a refusal that already names the account position within the
+            //       window is passed through UNWRAPPED, because wrapping it again would bury the more
+            //       precise position behind the less precise one and would add a link to the cause chain
+            //       that carries nothing the outer link does not already say.
+            throw located;
         } catch (RuntimeException failure) {
             // WHY : Trade-offs: the cause is attached rather than absorbed, and the message names only the
             //       position the run reached. Naming the position is what makes a failed run resumable by
@@ -539,12 +548,17 @@ public class PurgeJob {
      * the walk would not terminate.
      *
      * @param startAfterAccountId the account identifier this window seeks strictly above
+     * @param windowOrdinal the one-based position of this window in the run, named in a failure so that a
+     *     refusal locates itself without naming the account it reached
      * @param parameters the run parameters, supplying the window size and the expiry threshold; never
      *     {@code null}
      * @return what this window read and removed, where it stopped, and whether the walk is finished; never
      *     {@code null}
+     * @throws PurgeAbendException if the work beneath one summary fails, naming that summary's position
+     *     within this window and carrying {@link #ABEND_EXIT_STATUS}
      */
-    private PurgeWindow purgeWindow(long startAfterAccountId, PurgeParameters parameters) {
+    private PurgeWindow purgeWindow(long startAfterAccountId, int windowOrdinal,
+            PurgeParameters parameters) {
         List<Long> page = this.summaries.findAccountIdsAboveOrderByAccountIdAsc(
                 Long.valueOf(startAfterAccountId), Limit.of(parameters.checkpointFrequency()));
         if (page.isEmpty()) {
@@ -568,7 +582,34 @@ public class PurgeJob {
                         accountOrdinal);
                 continue;
             }
-            outcome = outcome.combinedWith(purgeSummary(summary.get(), parameters, accountOrdinal));
+            // WHY : ⚠️ Refactoring Rationale: a failure beneath one summary is located to THAT summary
+            //       before it leaves the window, where previously it reached the enclosing boundary naming
+            //       only the window. A window holds up to the checkpoint frequency of summaries, so a
+            //       failure could name a range rather than a row, and the run's own progress lines name
+            //       windows too -- an operator therefore had no way to narrow the failure any further than
+            //       the run had already reported. The account's per-run ordinal narrows it to one summary,
+            //       and the debug line this method's callee writes for each account carries the same
+            //       ordinal, so the two correlate.
+            // WHY : Assumptions: the ordinal is used and the account identifier is NOT, which is the same
+            //       rule every line and every message in this class follows -- an exception message reaches
+            //       a log, a monitor and often a ticket, none of which protects a customer identifier.
+            try {
+                outcome = outcome.combinedWith(purgeSummary(summary.get(), parameters, accountOrdinal));
+            } catch (RuntimeException failure) {
+                // WHY : Assumptions: the position is LOGGED here as well as carried on the refusal, because
+                //       the two reach different readers. The refusal's own message reaches whatever catches
+                //       it -- the task entry point translates it into an exit status and records a
+                //       message-free digest, since a wrapped driver message can quote key values and on
+                //       this schema those are a card number and a transaction identifier. A named event
+                //       carrying only ordinals and the fault's type chain is safe to write, and it is what
+                //       an operator reads to decide which window to re-run.
+                LOG.error("event=authorization.purge.abend windowOrdinal={} accountOrdinal={}"
+                        + " exitStatus={} failure={}", windowOrdinal, accountOrdinal, ABEND_EXIT_STATUS,
+                        ThrowableDigest.of(failure));
+                throw new PurgeAbendException("purge ended at exit status " + ABEND_EXIT_STATUS
+                        + " on summary " + accountOrdinal + " of window " + windowOrdinal
+                        + "; the whole window is rolled back and earlier windows stand", failure);
+            }
         }
         return new PurgeWindow(outcome, lastAccountId, page.size() < parameters.checkpointFrequency());
     }
@@ -599,6 +640,12 @@ public class PurgeJob {
      * across two transactions, or reversing afterwards as a compensation, would both introduce a state the
      * reference does not have - a removed authorization whose parent still counts it, or the reverse - and
      * a reader of the summary screen would see totals that disagree with the rows beneath them.
+     *
+     * <p>Assumptions: the {@code detailsDeleted} figure this returns is EXACT, and it is exact because the
+     * summary delete below is withheld while any child remains. Every removal is therefore performed by the
+     * loop that counts it, and the foreign key's cascade -- which removes rows without passing through that
+     * loop, and so cannot be counted by it -- is left with nothing to remove. A run's statistics and the
+     * rows it took are the same set.
      *
      * @param summary the summary to process; never {@code null}
      * @param parameters the run parameters, supplying the business date and the expiry threshold; never
@@ -640,7 +687,8 @@ public class PurgeJob {
             for (PendingAuthDetail child : chunk) {
                 afterDate = child.getId().getAuthDate();
                 afterTime = child.getId().getAuthTime();
-                if (!hasExpired(child, parameters.businessDate(), parameters.expiryDays())) {
+                if (!hasExpired(child, parameters.businessDate(), parameters.expiryDays(),
+                        accountOrdinal)) {
                     continue;
                 }
                 reversal.accumulate(child);
@@ -669,7 +717,7 @@ public class PurgeJob {
         //       computed in the database removes the lost update without taking a lock, which is the
         //       same non-locking discipline this service's charter requires of every other write.
         if (reversal.isPresent()) {
-            reversal.applyTo(this.summaries, accountId);
+            reversal.applyTo(this.summaries, summary, accountOrdinal);
         }
 
         // WHY : Refactoring Rationale: BOTH counters are tested, which is divergence D-F recorded on this
@@ -694,16 +742,45 @@ public class PurgeJob {
         //       flooring a negative number cannot change the outcome of a test for at-most-zero.
         int remainingApproved = summary.getApprovedAuthCount() - reversal.approvedCount();
         int remainingDeclined = summary.getDeclinedAuthCount() - reversal.declinedCount();
-        boolean summaryDeleted = remainingApproved <= 0 && remainingDeclined <= 0;
+        boolean countersExhausted = remainingApproved <= 0 && remainingDeclined <= 0;
+
+        // WHY : ⚠️ Refactoring Rationale: the counter test is no longer SUFFICIENT on its own, and the
+        //       second condition closes a data-loss path. The detail table's foreign key cascades on
+        //       delete, so removing a summary removes every authorization beneath it -- and the counters
+        //       this decision was taken from can reach zero while live, UNEXPIRED authorizations remain:
+        //       the sweep itself decrements them and the schema admits their negative half, an extract
+        //       load restores summaries and children from two SEPARATE files so a partial load commits
+        //       one without the other, and nothing reconciles them afterwards. In that state the previous
+        //       guard deleted the parent and the cascade silently took rows this run had judged NOT to
+        //       have expired, while the run's statistics reported none removed, because a cascade is
+        //       invisible to the tally the loop keeps. Requiring the child table itself to be empty makes
+        //       the destructive step conditional on the thing that is actually at risk.
+        // WHY : Assumptions: the remaining population is READ rather than computed, for the reason
+        //       recorded on the repository method -- an authorization committed after this account's walk
+        //       began carries a newer key than the walk will visit, so subtracting the loop's own tallies
+        //       would report zero survivors for an account that had just acquired one.
+        // WHY : Assumptions: BOTH conditions are kept rather than replacing the counters with the row
+        //       count. The counter test is the reference program's own guard at {@code cbl/CBPAUP0C.cbl}
+        //       L156 as divergence D-F widens it, so dropping it would delete summaries the reference
+        //       leaves standing -- an account whose every authorization expired but whose counters still
+        //       record them is exactly the row the reference keeps. The row count only ever WITHHOLDS a
+        //       delete the counters would have allowed; it never causes one.
+        long remainingChildren = this.details.countByIdAccountId(accountId);
+        boolean summaryDeleted = countersExhausted && remainingChildren == 0;
         if (summaryDeleted) {
-            // WHY : Assumptions: any authorization still beneath this summary goes with it, which is what
-            //       the reference hierarchical delete does -- removing a root removes its dependents -- and
-            //       what the detail table's foreign key reproduces with its cascade. That case is reachable
-            //       only from an extract whose counters understated its children, and leaving those rows
-            //       behind would strand them with no parent for the key to satisfy.
             this.summaries.delete(summary);
             LOG.debug("summary deleted, nothing pending beneath it accountOrdinal={}",
                     accountOrdinal);
+        } else if (countersExhausted) {
+            // WHY : Assumptions: the withheld delete is REPORTED rather than passed over silently,
+            //       because the counters and the rows disagreeing is a reconciliation fault an operator
+            //       should know about even though this run handled it safely. The line names the account's
+            //       per-run ordinal and the two figures that disagreed, and no account identifier, which
+            //       is the discipline every other line this class writes follows.
+            LOG.warn("event=authorization.purge.summary-retained reason=children-remain"
+                    + " accountOrdinal={} remainingChildren={} remainingApproved={}"
+                    + " remainingDeclined={}", accountOrdinal, remainingChildren, remainingApproved,
+                    remainingDeclined);
         }
         return new PurgeOutcome(1, summaryDeleted ? 1 : 0, childrenRead, detailsDeleted);
     }
@@ -782,13 +859,62 @@ public class PurgeJob {
         /**
          * Applies the whole accumulated reversal to one summary row in a single statement.
          *
+         * <p>⚠️ Assumptions: the statement is given the bound of the summary's own money domain in BOTH
+         * directions, and it needs both because it SUBTRACTS. The amounts being reversed were read from
+         * {@code pending_auth_detail}, whose two money columns are {@code PIC S9(10)V99} at
+         * {@code cpy/CIPAUDTY.cpy} L34 to L35, and they are being taken out of a {@code PIC S9(09)V99}
+         * total -- so one authorization an order of magnitude wider than the total drives the result past
+         * the column's NEGATIVE bound. Unbounded, that raised a numeric-overflow error which abended the
+         * whole sweep: windows already committed stayed committed, the table was left partly purged, and no
+         * later run could ever complete while such a row existed. Bounding keeps the sweep running over the
+         * rest of the table.</p>
+         *
+         * <p>Assumptions: the negation is passed as a parameter rather than written into the statement
+         * because the query language has no unary negation of a bind parameter, so
+         * {@code - :ceiling} is not expressible there.</p>
+         *
+         * <p>Assumptions: the reduction is REPORTED before the statement runs, and it is detected here
+         * rather than inside the statement because a modifying query returns only a row count and cannot
+         * say which of its four assignments was clamped. The line names the field and the account's per-run
+         * ordinal and never an amount or an identifier, which is the discipline every other line this class
+         * writes follows.</p>
+         *
          * @param summaries the boundary the arithmetic statement is issued through; must not be
          *     {@code null}
-         * @param accountId the account whose summary is reversed; must not be {@code null}
+         * @param summary the summary being reversed, read for its pre-reversal totals so that a reduction
+         *     can be reported against the field it applies to; must not be {@code null}
+         * @param accountOrdinal this account's one-based position within the current window, which is how
+         *     the reduction is located without naming the account
          */
-        void applyTo(PendingAuthSummaryRepository summaries, Long accountId) {
-            summaries.reverseExpiredAuthorizations(accountId, this.approvedCount, this.approvedAmount,
-                    this.declinedCount, this.declinedAmount);
+        void applyTo(PendingAuthSummaryRepository summaries, PendingAuthSummary summary,
+                int accountOrdinal) {
+            reportNarrowing("approvedAuthAmount",
+                    summary.getApprovedAuthAmount().subtract(this.approvedAmount), accountOrdinal);
+            reportNarrowing("declinedAuthAmount",
+                    summary.getDeclinedAuthAmount().subtract(this.declinedAmount), accountOrdinal);
+            summaries.reverseExpiredAuthorizations(summary.getAccountId(), this.approvedCount,
+                    this.approvedAmount, this.declinedCount, this.declinedAmount,
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE,
+                    PendingAuthSummary.MONEY_MAX_MAGNITUDE.negate());
+        }
+
+        /**
+         * Warns when one member of the reversal will be reduced to the column's bound.
+         *
+         * <p>Assumptions: the amount ITSELF is never logged, only the field it was about to be stored in
+         * and the bound that will be stored instead. An authorization amount is transaction detail, and a
+         * maintenance log is read by more people than the data is.</p>
+         *
+         * @param field the member whose stored value will be reduced; must not be {@code null}
+         * @param reversed the value the subtraction produces before any bound is applied; must not be
+         *     {@code null}
+         * @param accountOrdinal this account's one-based position within the current window
+         */
+        private static void reportNarrowing(String field, BigDecimal reversed, int accountOrdinal) {
+            if (PendingAuthSummary.exceedsStoredDomain(reversed)) {
+                LOG.warn("event=authorization.purge.money-narrowed field={} accountOrdinal={} bound={}",
+                        field, accountOrdinal, PendingAuthSummary.MONEY_MAX_MAGNITUDE);
+            }
         }
     }
 
@@ -813,29 +939,75 @@ public class PurgeJob {
      * @param businessDate the run's business date, which is a parameter rather than a clock read so a
      *     rerun produces the same result; must not be {@code null}
      * @param expiryDays how many days old an authorization must be to have expired
+     * @param accountOrdinal this account's one-based position within the current window, passed through so
+     *     that a clamped ordinal date can be reported against a locatable account without naming it
      * @return {@code true} when the authorization is at or past the expiry threshold
      */
-    private static boolean hasExpired(PendingAuthDetail child, LocalDate businessDate, int expiryDays) {
-        LocalDate authorizedOn = calendarDateOf(child.getId().getAuthDate().intValue());
+    private static boolean hasExpired(PendingAuthDetail child, LocalDate businessDate, int expiryDays,
+            int accountOrdinal) {
+        LocalDate authorizedOn = calendarDateOf(child.getId().getAuthDate().intValue(), accountOrdinal);
         return ChronoUnit.DAYS.between(authorizedOn, businessDate) >= expiryDays;
     }
 
     /**
-     * Converts a five-digit ordinal date into the calendar date it denotes.
+     * Converts a five-digit ordinal date into the calendar date it denotes, for every value the column
+     * admits.
      *
      * <p>Assumptions: this conversion is the whole of divergence D-E. Differencing two calendar dates is
      * what makes 31 December and 1 January one day apart instead of the 636 a plain subtraction of their
      * ordinals yields at {@code cbl/CBPAUP0C.cbl} L282, and it removes the four-digit ceiling that
      * program's {@code WS-DAY-DIFF} field imposes at its L47.
      *
+     * <p>⚠️ Refactoring Rationale: this decode is now TOTAL over the stored domain, and the change closes a
+     * defect that could disable retention for the whole table. The schema deliberately admits day 366 for
+     * EVERY two-digit year -- {@code ck_pending_auth_detail_auth_date_domain} in
+     * {@code db/migration/V1__authorization.sql} bounds the day component at 366 and its own recorded
+     * reasoning is that resolving the leap year would need a century pivot the baseline never chose, so
+     * "admitting the wider of the two cannot lose a real row". This method DOES pivot, at
+     * {@link #ORDINAL_DATE_CENTURY}, so the two disagreed about exactly one value per non-leap year: an
+     * ordinal such as {@code 99366} is stored without complaint and then resolved as day 366 of 2099, which
+     * is not a leap year. {@code LocalDate.ofYearDay} raises for it, {@link #hasExpired} decodes EVERY child
+     * before testing expiry, and the raise propagates as {@link PurgeAbendException} -- so one such row,
+     * reachable through {@code --job=load-authorizations} from an extract, ended every purge run for every
+     * account on every business date, leaving the table to grow without bound while earlier windows stayed
+     * committed.
+     *
+     * <p>Assumptions: the resolution is applied HERE and the constraint is deliberately NOT tightened. A
+     * check expressing leap years would contradict the reasoning recorded on that constraint and would
+     * reject a genuine leap-day authorization whose century the schema cannot know; and it could not repair
+     * a row already stored under the wider domain, which the decode must still be able to read. Making the
+     * reader total fixes the condition for stored and future rows alike.
+     *
+     * <p>Alternatives Considered: skipping such a row with a warning and leaving it in place. Rejected
+     * because a row nothing can decode is a row nothing can ever expire, so it would accumulate silently --
+     * the same unbounded growth in a quieter form. Clamping to the last day the resolved year HAS is the
+     * conservative reading of the value: day 366 of a 365-day year names its end, so the row expires no
+     * EARLIER than the stored ordinal could possibly mean and the reversal arithmetic beneath it is
+     * unaffected.
+     *
      * @param ordinalDate a two-digit year followed by a three-digit day of year, as one integer
-     * @return the calendar date that ordinal denotes in {@link #ORDINAL_DATE_CENTURY}
-     * @throws java.time.DateTimeException if the day of year is outside the range the resolved year admits,
-     *     which the key type's own domain check already excludes for any stored row
+     * @param accountOrdinal this account's one-based position within the current window, named in the
+     *     warning so an operator can locate the row without an account identifier reaching the log
+     * @return the calendar date that ordinal denotes in {@link #ORDINAL_DATE_CENTURY}, with a day of year
+     *     past the resolved year's length taken as its final day; never {@code null}
      */
-    private static LocalDate calendarDateOf(int ordinalDate) {
-        return LocalDate.ofYearDay(ORDINAL_DATE_CENTURY + ordinalDate / ORDINAL_YEAR_DIVISOR,
-                ordinalDate % ORDINAL_YEAR_DIVISOR);
+    private static LocalDate calendarDateOf(int ordinalDate, int accountOrdinal) {
+        int year = ORDINAL_DATE_CENTURY + ordinalDate / ORDINAL_YEAR_DIVISOR;
+        int dayOfYear = ordinalDate % ORDINAL_YEAR_DIVISOR;
+        int lengthOfYear = Year.of(year).length();
+        if (dayOfYear > lengthOfYear) {
+            // WHY : Assumptions: the line names the STORED ORDINAL and the account's per-run ordinal and
+            //       nothing else, which is the same discipline every other line this class writes follows
+            //       -- an eleven-digit account identifier in a maintenance log is a durable copy of a
+            //       customer identifier outside the store that protects it. The ordinal pair is what an
+            //       operator needs to find the row: the run's own progress lines carry the same account
+            //       ordinal, and the stored date is a key column they can select on.
+            LOG.warn("event=authorization.purge.ordinal-date-clamped accountOrdinal={} storedDate={}"
+                    + " dayOfYear={} lengthOfYear={}", accountOrdinal, ordinalDate, dayOfYear,
+                    lengthOfYear);
+            dayOfYear = lengthOfYear;
+        }
+        return LocalDate.ofYearDay(year, dayOfYear);
     }
 
     /**

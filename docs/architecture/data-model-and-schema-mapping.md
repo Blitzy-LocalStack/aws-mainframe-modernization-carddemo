@@ -1502,6 +1502,33 @@ Note the two `S9(04) COMP` counters at L27–L28: these are **binary**, two byte
 each, not packed, so the reader must not hand them to the packed codec. They are the
 only binary fields in either segment.
 
+> ⚠️ Trade-offs: **all six money columns above are `NUMERIC(11,2)`, which is one
+> decimal order narrower than the columns and fields they receive values from, and the
+> narrowing is resolved at the write boundary rather than by widening the column.**
+> The segment declares `S9(09)V99` for every money field, so rule T1 derives precision
+> 11 — while `pending_auth_detail` two tables down derives precision **12** from its own
+> `S9(10)V99` pictures at [`CIPAUDTY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUDTY.cpy)
+> L34–L35, and the account master's `ACCT-CREDIT-LIMIT` and `ACCT-CASH-CREDIT-LIMIT` are
+> `S9(10)V99` at [`app/cpy/CVACT01Y.cpy`](../../app/cpy/CVACT01Y.cpy) L8–L9. So a value
+> this segment legally receives — a limit copied from the account master, or an
+> authorization amount accumulated into a running total — can be **too wide for the column
+> that stores it**, and the two widths are the copybooks' own, not this migration's.
+> **Widening these six columns to precision 12 was considered and rejected**, because T1
+> makes the picture normative and the sibling transaction context already recorded the same
+> refusal as `D-BILLPAY-AMOUNT-WIDTH-REFUSED`. Instead every write path reduces the value
+> to ±999,999,999.99 by **saturation**, published once as
+> `PendingAuthSummary.MONEY_MAX_MAGNITUDE` and passed into the three arithmetic statements
+> that accumulate, reporting the reduction by field name. **The accepted cost** is that a
+> running total on an account transacting near a thousand million understates itself, which
+> is registered as `D-AUTH-SUMMARY-MONEY-DOMAIN` in
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) together with why
+> saturation is preferred to the baseline's own high-order truncation. What it replaced was
+> worse than either: the unreduced value reached the engine, which refused the statement with
+> SQLSTATE `22003` and rolled the whole decision back, so the requester received no reply at
+> all and the request dead-lettered. **The decision itself is unaffected** — it is taken from
+> the full-width account limit and the full-width requested amount before any reduction — and
+> `pending_auth_detail` stores the authorization amount whole.
+
 > Trade-offs: **the five-slot array becomes five discrete columns, not a
 > PostgreSQL array.** `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` at
 > [`CIPAUSMY.cpy`](../../app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy) L22

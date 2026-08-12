@@ -172,6 +172,78 @@ public class UserController {
     private static final String MESSAGE_CONFIRMATION_REQUIRED =
             "Confirm the deletion to delete this user ...";
 
+    /**
+     * The sentence reported when the path identifier is blank.
+     *
+     * <p>⚠️ Refactoring Rationale: the four parameter constraints on this class carried NO sentence of
+     * their own, so bean validation's own defaults reached the response body while every member of every
+     * request record beside them carried an authored one. Measured against the running service, a caller
+     * was answered {@code 'must not be null'}, {@code 'must be true'}, {@code 'size must be between 0 and
+     * 256'}, {@code 'size must be between 0 and 8'} and {@code 'must match "next|previous"'} -- five
+     * refusals in the framework's voice, in the same {@code fieldErrors} array as the reference's own
+     * wording, and two of them disclosing a bound the caller has no business reading out of an error.</p>
+     *
+     * <p>Assumptions: this sentence deliberately reuses the identifier wording the create record
+     * publishes for its own blank case, because it reports the same condition about the same field and a
+     * caller should not have to learn that the path spelling and the body spelling of one refusal differ.
+     * It is declared here rather than shared from that record because that record's constants are private
+     * to it, and a path segment is not one of its members.</p>
+     */
+    private static final String MESSAGE_USER_ID_REQUIRED = "User ID can NOT be empty...";
+
+    /**
+     * The sentence reported when the path identifier is longer than the key it names.
+     *
+     * <p>Assumptions: the width is interpolated from {@link #USER_ID_MAX_LENGTH} rather than written as a
+     * digit, so the sentence and the constraint that raises it cannot come to state different numbers.
+     * The wording matches the create record's over-length sentence for the same reason the blank one
+     * above does.</p>
+     *
+     * <p>Trade-offs: this sentence DOES name the width, where the two below deliberately name no bound.
+     * The difference is whose limit it is: eight characters is the published shape of a user identifier,
+     * declared in the contract and derived from the reference record, so a caller already knows it and is
+     * helped by being reminded. A cursor's maximum length is an internal property of the token format,
+     * and a direction's regular expression is an implementation detail of how the domain is enforced --
+     * neither belongs in an error a caller reads.</p>
+     */
+    private static final String MESSAGE_USER_ID_TOO_LONG =
+            "User ID must be at most " + USER_ID_MAX_LENGTH + " characters...";
+
+    /**
+     * The sentence reported when the supplied page cursor is longer than this service will open.
+     *
+     * <p>Assumptions: the sentence names NO length, and the omission is the point. The bound exists to
+     * refuse an oversized value before it reaches the sealer, and it is a property of the token format
+     * rather than of anything the caller composes: every cursor a caller can legitimately hold came from
+     * a previous page of this same listing, so a caller cannot act on a number and a caller who could is
+     * constructing tokens by hand. Naming the figure would publish the parser's limit into an error body
+     * for no reader who benefits.</p>
+     *
+     * <p>Assumptions: the sentence tells the caller what to DO -- ask for the first page -- because that
+     * is the one recovery available. A cursor this service will not open cannot be repaired by editing
+     * it, so an instruction to correct the value would be advice a caller cannot take.</p>
+     */
+    private static final String MESSAGE_CURSOR_TOO_LONG =
+            "Page position is not valid. Please start again ...";
+
+    /**
+     * The sentence reported when the paging direction is neither of the two admitted values.
+     *
+     * <p>Assumptions: the two values ARE named, where the cursor sentence above names no bound, and the
+     * distinction is between a domain and a limit. A direction is chosen by the caller from a closed set
+     * of two words, so naming them is what makes the refusal actionable in one round trip; a length is a
+     * ceiling the caller cannot choose against.</p>
+     *
+     * <p>Assumptions: the words are written out rather than interpolated from {@link #DIRECTION_DOMAIN},
+     * because that constant is a regular expression and rendering it into a sentence would put its
+     * alternation metacharacter in front of a caller -- which is precisely the disclosure the framework's
+     * own default made. The duplication is bounded rather than unbounded: {@code AuthApiContractTest}
+     * pins the contract's own enumeration to exactly these two values, so the domain cannot be widened
+     * without failing that test and bringing this sentence under review in the same change.</p>
+     */
+    private static final String MESSAGE_DIRECTION_DOMAIN =
+            "Page direction must be next or previous ...";
+
     /** The key the confirmation refusal is attributed to, being the parameter's own name. */
     private static final String FIELD_CONFIRMED = "confirmed";
 
@@ -268,11 +340,15 @@ public class UserController {
      */
     @GetMapping
     public PageResponse<UserSummary> listUsers(
+            // WHY : Assumptions: every constraint on this class's parameters carries an explicit message,
+            //       for the reason recorded on MESSAGE_USER_ID_REQUIRED: without one, bean validation's
+            //       own default text reaches the caller in the same fieldErrors array as the reference's
+            //       authored wording, and two of the defaults published an internal bound.
             @RequestParam(name = "cursor", required = false)
-            @Size(max = CursorToken.MAX_TOKEN_LENGTH)
+            @Size(max = CursorToken.MAX_TOKEN_LENGTH, message = MESSAGE_CURSOR_TOO_LONG)
             String cursor,
             @RequestParam(name = "direction", required = false)
-            @Pattern(regexp = DIRECTION_DOMAIN)
+            @Pattern(regexp = DIRECTION_DOMAIN, message = MESSAGE_DIRECTION_DOMAIN)
             String direction,
             Principal principal) {
 
@@ -381,8 +457,8 @@ public class UserController {
     @GetMapping(path = SINGLE_USER_SUBPATH)
     public UserResponse getUser(
             @PathVariable(name = "userId")
-            @NotBlank
-            @Size(max = USER_ID_MAX_LENGTH)
+            @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+            @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG)
             String userId) {
 
         return this.users.read(userId);
@@ -431,8 +507,8 @@ public class UserController {
     @PutMapping(path = SINGLE_USER_SUBPATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public UserResponse updateUser(
             @PathVariable(name = "userId")
-            @NotBlank
-            @Size(max = USER_ID_MAX_LENGTH)
+            @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+            @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG)
             String userId,
             @Valid @RequestBody UpdateUserRequest request) {
 
@@ -522,12 +598,19 @@ public class UserController {
     @DeleteMapping(path = SINGLE_USER_SUBPATH)
     public ResponseEntity<Void> deleteUser(
             @PathVariable(name = "userId")
-            @NotBlank
-            @Size(max = USER_ID_MAX_LENGTH)
+            @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
+            @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG)
             String userId,
             @RequestParam(name = FIELD_CONFIRMED, required = false)
-            @NotNull
-            @AssertTrue
+            // WHY : Assumptions: BOTH constraints carry the SAME sentence, and the sameness is
+            //       deliberate. An absent confirmation and a confirmation of false are one condition to
+            //       the caller -- the deletion was not confirmed -- and the recovery is identical, so
+            //       distinguishing them would tell a caller which of two ways it failed to confirm
+            //       without telling it anything more to do about it. It is also the sentence this
+            //       method's own direct-call guard raises, so an in-process caller and an HTTP caller
+            //       are told the same thing.
+            @NotNull(message = MESSAGE_CONFIRMATION_REQUIRED)
+            @AssertTrue(message = MESSAGE_CONFIRMATION_REQUIRED)
             Boolean confirmed) {
 
         // WHY : Assumptions: the affirmative value is re-checked here as well as by the constraint, and

@@ -336,6 +336,103 @@ class ProfileConfigurationTopologyTest {
     }
 
     /**
+     * Verifies no document in this module re-declares the dispatch set the shared defaults install.
+     *
+     * <p>Purpose: the shared document narrows the security filter's dispatch set to {@code REQUEST, ASYNC},
+     * dropping the framework's third entry, {@code ERROR}. That narrowing is what stops a container error
+     * dispatch from being authorized a second time as an anonymous request and answered 401 by this chain's
+     * closing {@code denyAll()}. Any document in this module that names the key at all overrides the shared
+     * value wholesale, because a list property is replaced rather than merged.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the sibling case above asserts what an overlay must not pin, and it names
+     * deployment values -- keys whose presence discloses an endpoint. This key is a different hazard: a
+     * plausible, well-meant re-declaration of a security setting that happens to reinstate the arm the
+     * shared default removed. Naming it here is cheaper than discovering it from a 401 that a malformed path
+     * produced in production.</p>
+     *
+     * <p>Assumptions: all three documents are checked, base and both overlays, because the base document is
+     * loaded for every profile and an override there would apply everywhere. The claim is ABSENCE, so the
+     * shared value's own content is asserted where it lives, in the shared kernel's own defaults test.</p>
+     *
+     * @param resource the packaged document to check
+     * @throws IOException if the resource cannot be read
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/application.yml", "/application-dev.yml", "/application-prod.yml"})
+    @DisplayName("no document re-declares the security filter dispatch set the shared defaults narrow")
+    void noDocumentRedeclaresTheSecurityFilterDispatchSet(String resource) throws IOException {
+        assertThat(flatten(document(resource)))
+                .as("%s would replace the shared REQUEST, ASYNC narrowing wholesale, reinstating the "
+                        + "ERROR dispatch this chain answers 401 for", resource)
+                .doesNotContainKey("spring.security.filter.dispatcher-types");
+    }
+
+    /**
+     * The driver-error logger, whose message on a constraint violation is the failing row itself.
+     *
+     * <p>⚠️ Assumptions: this is a THIRD logger beside the statement and bind-parameter loggers the two
+     * documents already pin, and it is the only one of the three that governs the FAILURE path. The two
+     * others keep values out of the log while inserts are succeeding; this one is what a driver reaches for
+     * when one does not.</p>
+     */
+    private static final String DRIVER_ERROR_LOGGER = "logging.level.org.hibernate.orm.jdbc.error";
+
+    /**
+     * The two loggers whose levels keep bound values and statement text out of the log on the success path.
+     */
+    private static final List<String> VALUE_BEARING_LOGGERS = List.of(
+            "logging.level.org.hibernate.orm.jdbc.bind", "logging.level.org.hibernate.SQL");
+
+    /**
+     * The failure-path driver logger is pinned above its value-bearing level, in the base and in production.
+     *
+     * <p>⚠️ Purpose: this pin was reached by measurement, not by reading. Planting a check constraint that
+     * one insert violated showed that this logger writes the driver's whole message at {@code WARN}, and a
+     * constraint violation's driver message is the FAILING ROW -- so the account identifier, the primary
+     * account number, the amount, the merchant identifier and the merchant name all appeared in clear on one
+     * line, in a service whose two sibling pins were both correctly set. Those two govern the success path
+     * and do nothing here, which is why an inspection of them could not have found this.
+     *
+     * <p>⚠️ Assumptions: the assertion is that the level is {@code ERROR} exactly, not merely that some
+     * level is declared. {@code WARN} is where the value-bearing output is emitted, so {@code WARN} or
+     * anything below it reinstates the disclosure, and {@code OFF} would silence a future diagnostic on the
+     * same category that carries no row at all. {@code ERROR} is the single level that suppresses the row
+     * and keeps everything above it.
+     *
+     * <p>⚠️ Assumptions: the dev overlay is asserted NOT to declare the key, which is the opposite
+     * requirement from production and is deliberate. That overlay states its own convention -- restating a
+     * value the base already pins would create a second place it could be changed -- and it raises this
+     * project's own package root to DEBUG, so an overlay that named this logger at all would be the obvious
+     * place for a future edit to raise it while chasing a database fault against a dev database loaded from
+     * the baseline extract, which holds the same class of data as production.
+     *
+     * <p>⚠️ Trade-offs: the two sibling pins are asserted alongside, in every document that declares
+     * either. The three are one control expressed in three keys, and the failure mode this guards is an edit
+     * that adds the new pin while removing an old one -- which would read as an improvement in a diff.
+     *
+     * @throws IOException if a packaged document cannot be read
+     */
+    @Test
+    @DisplayName("the driver-error logger is pinned to ERROR in the base and production documents")
+    void theDriverErrorLoggerIsPinnedAboveItsValueBearingLevel() throws IOException {
+        for (String resource : List.of("/application.yml", "/application-prod.yml")) {
+            Map<String, Object> flat = flatten(document(resource));
+            assertThat(flat)
+                    .as("%s must pin the logger whose message is the failing row", resource)
+                    .containsEntry(DRIVER_ERROR_LOGGER, "ERROR");
+            for (String sibling : VALUE_BEARING_LOGGERS) {
+                assertThat(flat)
+                        .as("%s must keep the success-path pin %s beside the failure-path pin",
+                                resource, sibling)
+                        .containsEntry(sibling, "WARN");
+            }
+        }
+        assertThat(flatten(document("/application-dev.yml")))
+                .as("the dev overlay must inherit the base pin rather than offering a place to lower it")
+                .doesNotContainKey(DRIVER_ERROR_LOGGER);
+    }
+
+    /**
      * Flattens a configuration document into dotted keys.
      *
      * @param tree the parsed document

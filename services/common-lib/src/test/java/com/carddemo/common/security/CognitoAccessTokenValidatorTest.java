@@ -100,6 +100,50 @@ class CognitoAccessTokenValidatorTest {
     }
 
     /**
+     * Confirms a token whose scope claim is ABSENT is refused, so the scope requirement cannot fail open.
+     *
+     * <p>Purpose: the sibling case above supplies a claim naming the wrong scope, which exercises the
+     * membership test. This case supplies no claim at all, which exercises the branch BEFORE it -- and
+     * that branch is the one whose failure mode is silent. A requirement that refuses a wrong value and
+     * admits a missing one is worse than no requirement, because every token minted without the claim
+     * passes while the configuration still reads as enforced.</p>
+     *
+     * <p>Refactoring Rationale: this case was added because a review reported the requirement as failing
+     * open on an absent claim. It does not, and the report's own evidence turned out to be a harness
+     * artefact -- the token generator substituted the required scope whenever it was asked for an empty
+     * one, so the token it labelled "no scope" carried the scope. The behaviour was therefore correct and
+     * UNPINNED: no case in this class covered the absent claim, so a later simplification of the guard
+     * could have introduced the fail-open the review described without failing a single test. Pinning it
+     * is the whole value of this case.</p>
+     *
+     * <p>Assumptions: the blank forms are asserted alongside the absent one because they reach the same
+     * branch and a reader should not have to infer that they do. A producer that emits the claim with an
+     * empty value, or with only separators, has granted nothing, so all three are one condition.</p>
+     */
+    @Test
+    @DisplayName("a token whose scope claim is absent or blank is refused, never admitted")
+    void tokenWithAbsentOrBlankScopeIsRefused() {
+        // Assumptions: the absent case is expressed by OMITTING the key rather than by mapping it to
+        //   null, because the claim map this type is built from rejects a null value -- and because a
+        //   claim mapped to null and a claim never set are the same thing to the reader that asks for it.
+        List<Jwt> withoutAnyScope = List.of(
+                token(Map.of("token_use", "access", "client_id", CLIENT_ID)),
+                token(Map.of("token_use", "access", "client_id", CLIENT_ID, "scope", "")),
+                token(Map.of("token_use", "access", "client_id", CLIENT_ID, "scope", "   ")));
+
+        for (Jwt candidate : withoutAnyScope) {
+            OAuth2TokenValidatorResult result = validator().validate(candidate);
+
+            assertThat(result.hasErrors())
+                    .as("a token granting no scope must be refused, not admitted")
+                    .isTrue();
+            assertThat(result.getErrors().iterator().next().getDescription())
+                    .as("the refusal names the requirement that was not met")
+                    .contains("none of the scopes");
+        }
+    }
+
+    /**
      * Confirms a token carrying the required scope among several is accepted, since the claim is a
      * space-delimited set rather than a single value.
      */
