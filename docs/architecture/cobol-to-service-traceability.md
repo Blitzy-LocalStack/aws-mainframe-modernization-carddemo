@@ -2379,7 +2379,11 @@ a register of this size stays true.
   malformed submission is discovered only when the reader consumes it.
 * **Target behaviour.** `ReportSubmissionResponse` returns an execution identifier
   synchronously on acceptance, and a refused submission is an error response rather
-  than a discarded record.
+  than a discarded record. That identifier is the execution **name**, which is the value
+  the execution-status operation is addressed by; the orchestration handle in full is
+  composed service-side from the configured state machine and is not published, so the
+  caller learns exactly the identity it can act on and nothing about the account or the
+  region that ran the report.
 * **Category.** Documented divergence — submission acknowledgement.
 * **Why the difference is accepted.** The queue-and-internal-reader mechanism has no
   cloud analogue and is retired ([§5.1](#51-retired-with-an-analogue--function-preserved-mechanism-replaced));

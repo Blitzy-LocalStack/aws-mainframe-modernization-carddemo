@@ -2106,12 +2106,23 @@ export interface ReportRequest {
 /**
  * A started report execution.
  *
- * Assumptions: `executionArn` is the orchestrator's identity for the run, and it has no counterpart in
+ * Assumptions: `executionName` is the orchestrator's identity for the run, and it has no counterpart in
  * the baseline: writing job-control text to the transient data queue returned no identity at all, so an
- * operator had to find the job by name. A caller may quote this value to support.
+ * operator had to find the job by name. A caller polls the run with it through `readReportExecution`,
+ * and may quote it to support.
+ *
+ * Refactoring Rationale: ⚠️ this member was `executionArn`, the orchestration handle in full, and the
+ * two halves of the lifecycle did not meet. The status operation is addressed by NAME -- it composes
+ * the handle from the state machine it is configured with -- so the only value a submission gave a
+ * caller was the one value that operation refuses: sent as a path value, an ARN's colons and slashes
+ * are percent-encoded into a single segment and answered with HTTP 400. A submitted report could
+ * therefore be started and never polled. The service composed the name on both accepted paths and
+ * discarded it; `reporting-api.yaml` now publishes it here, and withdraws the ARN rather than
+ * publishing both -- it had no consumer, and it carries the account identifier and region of the
+ * deployment that ran the report.
  */
 export interface ReportSubmission {
-  readonly executionArn: string;
+  readonly executionName: string;
   readonly reportName: string;
   readonly shortName: string;
   readonly longName: string;
@@ -2121,13 +2132,25 @@ export interface ReportSubmission {
 }
 
 /**
- * Which of the two submission outcomes occurred, discriminated so neither can be read as the other.
+ * Which of the THREE submission outcomes occurred, discriminated so none can be read as another.
  *
- * Assumptions: the discriminant is derived from the HTTP status, which the contract makes normative --
- * 201 for a started execution and 200 for a declined confirmation. The baseline cannot draw this
- * distinction at all: inside `SUBMIT-JOB-TO-INTRDR` at `app/cbl/CORPT00C.cbl` L462, the branch for a
- * declined confirmation at L480 to L483 sets the same error flag as a validation failure and supplies
- * no message, so the screen redisplays cleared with no indication of which occurred.
+ * Assumptions: the discriminant is the response body's own `outcome` member and NOT the HTTP status.
+ * The contract answers 201 for a started execution and 200 for BOTH turns that start nothing -- a
+ * declined confirmation and a confirmation not yet answered -- so a status separates the started arm
+ * from the other two and cannot separate those two from each other. The status still corroborates the
+ * started arm, which `submitTransactionReport` checks, but it decides nothing on its own.
+ *
+ * Refactoring Rationale: ⚠️ this documentation described TWO outcomes and named the status as the
+ * discriminant, and both statements outlived the union beneath them: `UNANSWERED` was added when the
+ * service stopped refusing an unanswered confirmation with 400 and began answering 200 with the
+ * baseline's prompt. A reader following the old description would have written the very reading the
+ * client was corrected for -- treating every non-201 as a cancellation, which reports "you cancelled"
+ * to a caller that had merely left the confirmation blank and drops the prompt naming the report.
+ *
+ * Assumptions: the baseline cannot draw this distinction at all: inside `SUBMIT-JOB-TO-INTRDR` at
+ * `app/cbl/CORPT00C.cbl` L462, the branch for a declined confirmation at L480 to L483 sets the same
+ * error flag as a validation failure and supplies no message, so the screen redisplays cleared with no
+ * indication of which occurred.
  */
 export type ReportSubmissionOutcome =
   | { readonly outcome: 'DECLINED'; readonly message: null }
@@ -2139,11 +2162,16 @@ export type ReportSubmissionOutcome =
     };
 
 /**
- * The submission body itself, as the contract publishes it for both statuses.
+ * The submission body itself, as the contract publishes it for all THREE outcomes.
+ *
+ * Refactoring Rationale: ⚠️ this said "for both statuses", counting the two HTTP statuses as though they
+ * were the outcomes. There are three outcomes across two statuses -- `STARTED` at 201, `DECLINED` and
+ * `UNANSWERED` both at 200 -- and this interface is the wire body of every one of them, which is why its
+ * `outcome` member is the full three-value union and its other two members are nullable.
  *
  * Refactoring Rationale: the declined arm above carried a `preview` member typed on a
  * `ReportSubmissionPreview` interface, and both are withdrawn. The published
- * `ReportSubmissionOutcome` schema requires exactly `submitted`, `message` and `submission` and
+ * `ReportSubmissionOutcome` schema requires exactly `outcome`, `message` and `submission` and
  * forbids additional properties, and no `ReportSubmissionPreview` schema exists in the document at
  * all -- so the withdrawn shape described a body the service has never emitted, naming a report and
  * both range bounds a caller would have read as `undefined`. The message is nullable on the declined

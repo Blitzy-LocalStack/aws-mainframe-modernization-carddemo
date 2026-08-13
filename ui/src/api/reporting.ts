@@ -42,7 +42,7 @@
  * selected by a sixteen-digit primary account number, which may not travel in a target: the edge
  * access log records a target in full before any application code runs and the browser retains it in
  * history, so a number placed there reaches two stores no application-side control can redact. A
- * request body is recorded by neither. `lookupCardByNumber` in `ui/src/api/cards.ts` takes the same
+ * request body is recorded by neither. `lookupCard` in `ui/src/api/cards.ts` takes the same
  * decision for the same reason.
  *
  * Why a rendered statement arrives as a pair of locations
@@ -155,13 +155,20 @@ const COLLECT_STATEMENT_ARTIFACT: ContractOperation = {
  * lifecycles were given a read side. A submission returned a handle nothing consumed and a statement
  * answer carried locations no caller could open, so this client could show a submitted state and
  * nothing after it. The three are a run's status, the report document and a statement document.
+ *
+ * Refactoring Rationale: ⚠️ the run's status and the report document are listed in THIS order because
+ * that is the order `reporting-api.yaml` declares its paths in -- `/reports/executions/{executionName}`
+ * precedes `/reports/transaction-report/artifact` there. The two were the other way round, which made
+ * the sentence above false about the one property it asserts. The order is not decorative: a reader
+ * comparing this manifest with the document reads them side by side, and a claim of declaration order
+ * that does not hold is worse than no claim, because it invites the comparison and then misdirects it.
  */
 export const REPORTING_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
   SUBMIT_TRANSACTION_REPORT,
   LIST_TRANSACTION_REPORT_LINES,
   READ_TRANSACTION_REPORT_TOTALS,
-  COLLECT_REPORT_ARTIFACT,
   READ_REPORT_EXECUTION,
+  COLLECT_REPORT_ARTIFACT,
   GENERATE_STATEMENT,
   LIST_STATEMENT_TRANSACTIONS,
   COLLECT_STATEMENT_ARTIFACT,
@@ -178,6 +185,31 @@ const ARTIFACT_SELECTOR_SHAPE = '[A-Za-z0-9_-]{22}';
 
 /** The one path parameter the artifact operation declares, spelled once for both uses below. */
 const ARTIFACT_SELECTOR_PARAMETER = 'selector';
+
+/**
+ * The media type both document operations must ASK for, and the header they ask in.
+ *
+ * Refactoring Rationale: ⚠️ these two calls sent the client's own `Accept: application/json` and were
+ * answered HTTP 406 before either handler ran. Both handlers declare
+ * `produces = APPLICATION_OCTET_STREAM_VALUE` -- `ReportController.collectReportArtifact` and
+ * `StatementController.collectArtifact` -- and this contract publishes that one media type on each, so
+ * a request accepting only JSON is unsatisfiable by construction. `responseType: 'blob'` did not and
+ * cannot help: it tells the transport how to MATERIALISE a body that has already arrived and sets no
+ * request header at all, which is exactly why the defect was invisible to a reader checking that the
+ * bytes were left undecoded.
+ *
+ * Assumptions: the value is stated once here and overridden per call rather than widened on the shared
+ * client. Adding it to the singleton's defaults would make every one of the fifty-three operations
+ * announce that it accepts octet-stream, and the two that produce bytes are the only two that do -- a
+ * JSON operation that started answering bytes would then be accepted silently instead of refused.
+ *
+ * Alternatives Considered: removing the client's JSON default so each call states its own. Rejected
+ * because fifty-one calls would then have to repeat one header, and the one that forgot would negotiate
+ * whatever a gateway chose to send.
+ */
+const OCTET_STREAM_ACCEPT: Readonly<Record<string, string>> = {
+  Accept: 'application/octet-stream',
+};
 
 /**
  * Matches a statement artifact location in the form a statement ANSWER publishes it, capturing the
@@ -279,19 +311,24 @@ const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
  *   case -- and each submission starts a distinct run, which is what allows one report to be produced
  *   again over one range. At most forty characters, and only letters, digits, hyphens and
  *   underscores; anything else is refused with HTTP 400.
- * @returns {Promise<ReportSubmissionOutcome>} `STARTED` carrying the execution handle -- its
- *   `executionArn` identity and the resolved bounds the run received -- when the service accepted a
- *   run, otherwise `DECLINED` carrying only the sentence, which is null because the reference writes
- *   none when a confirmation is declined. This NEVER resolves to the report itself: the document is
- *   assembled asynchronously and is read afterwards through `listTransactionReportLines` and
- *   `readTransactionReportTotals`, or collected from the locations a statement reports.
+ * @returns {Promise<ReportSubmissionOutcome>} One of THREE outcomes, read from the body's own
+ *   `outcome` member. `STARTED` carries the execution handle -- its `executionName`, which
+ *   `readReportExecution` is addressed by, and the resolved bounds the run received -- together with
+ *   the submitted sentence. `DECLINED` is the caller answering no and carries a null sentence, because
+ *   the reference writes none when a confirmation is declined. `UNANSWERED` is a confirmation left
+ *   blank: nothing was started, nothing was declined, and the sentence is the reference's own prompt
+ *   naming the report, so a screen asks again rather than reporting a cancellation. This NEVER resolves
+ *   to the report itself: the document is assembled asynchronously and is polled through
+ *   `readReportExecution`, read through `listTransactionReportLines` and `readTransactionReportTotals`,
+ *   and collected through `collectReportArtifact`.
  * @throws {RangeError} If a started run arrives without the handle or the sentence the contract
- *   requires alongside it.
+ *   requires alongside it, or if an unanswered turn arrives without the prompt.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
- *   HTTP 400 when no type was marked, the confirmation answer was absent or unrecognised, or a
- *   supplied submission key was malformed; 401 without a usable token; 403 without the required
- *   authority; 503 while the environment is not accepting mutating work, in which case nothing was
- *   applied and the same request succeeds unchanged once it reopens; and 500 otherwise.
+ *   HTTP 400 when no type was marked, the confirmation answer was UNRECOGNISED -- a blank answer is
+ *   the `UNANSWERED` outcome at 200 and not a refusal -- or a supplied submission key was malformed;
+ *   401 without a usable token; 403 without the required authority; 503 while the environment is not
+ *   accepting mutating work, in which case nothing was applied and the same request succeeds unchanged
+ *   once it reopens; and 500 otherwise.
  */
 export async function submitTransactionReport(
   request: ReportRequest,
@@ -337,9 +374,15 @@ export async function submitTransactionReport(
   }
 
   // WHY : Refactoring Rationale: the handle is read from `body.submission` rather than from the body
-  //       itself. An earlier revision cast the whole body to the handle type, which looked for
-  //       `executionArn` one level above where the contract declares it, so every member of a started
-  //       run read as undefined while the call still reported success.
+  //       itself. An earlier revision cast the whole body to the handle type, which looked for the
+  //       handle one level above where the contract declares it, so every member of a started run read
+  //       as undefined while the call still reported success.
+  // WHY : ⚠️ Assumptions: the handle a caller receives carries `executionName`, which is exactly what
+  //       `readReportExecution` below takes. It carried the orchestration ARN in full, and the pair did
+  //       not compose: that operation is addressed by name, so a caller polling with what it had been
+  //       given had the ARN's colons and slashes percent-encoded into one segment and was refused with
+  //       HTTP 400. Starting a report and then observing it is one flow, and a handle that cannot be
+  //       replayed to the next operation in that flow is not a handle.
   // WHY : Alternatives Considered: asserting both members with a type assertion, which is what this
   //       did once the nesting was addressed, and substituting an empty sentence for an absent one.
   //       The assertion was rejected because it states a guarantee without checking it, so a service
@@ -506,9 +549,16 @@ export async function listStatementTransactions(
 
 /**
  * Reports what became of one submitted report run.
- * @param {string} executionName - The execution NAME a submission returned, never an ARN. The service
- *   composes the ARN from its own configured state machine, so a name is all a caller can supply and
- *   all it needs to.
+ *
+ * Refactoring Rationale: ⚠️ this read is composable with the submission above, and it was not. It takes
+ * the execution NAME, which is what the contract publishes on this path; the submission answered with
+ * the orchestration ARN in full, so the value a caller held was the one value this operation refuses --
+ * percent-encoded into a single segment and answered with HTTP 400 on the published shape. Both sides
+ * were corrected rather than one bent to the other: `ReportSubmission.executionName` is now the handle
+ * a submission returns, and this parameter is unchanged.
+ * @param {string} executionName - The execution NAME a submission returned in
+ *   `ReportSubmission.executionName`, never an ARN. The service composes the ARN from its own
+ *   configured state machine, so a name is all a caller can supply and all it needs to.
  * @returns {Promise<ReportExecutionStatus>} The orchestration status, the two instants, the three
  *   coordinates when the run was started through this surface, and the document's location and write
  *   instant once the run has succeeded and the store holds it.
@@ -536,7 +586,9 @@ export async function readReportExecution(executionName: string): Promise<Report
  *   HTTP 400 for a type outside the published set or a malformed bound, 401 without a usable token,
  *   403 without the required authority, 404 when no document exists for those coordinates -- which is
  *   the answer both for a run that never happened and for one whose document a lifecycle rule has
- *   expired -- and 500 otherwise.
+ *   expired -- and 500 otherwise. A refusal arrives as JSON even though the success body is bytes, and
+ *   `./client` decodes it back into the shared document, so the `fieldErrors` of a 400 survive here as
+ *   they do on every other operation.
  */
 export async function collectReportArtifact(
   reportType: string,
@@ -545,6 +597,12 @@ export async function collectReportArtifact(
 ): Promise<Blob> {
   const response = await getApiClient().get<Blob>(requestPath(COLLECT_REPORT_ARTIFACT), {
     params: { type: reportType, startDate, endDate },
+    // Assumptions: the two members below are BOTH required and neither substitutes for the other.
+    //   {@link OCTET_STREAM_ACCEPT} decides whether the service answers at all -- without it this
+    //   operation's only published media type is unacceptable to the request and Spring refuses with
+    //   406 before the handler runs -- while `responseType` decides what the transport does with the
+    //   bytes once they arrive. Sending one without the other fails in a way the other cannot report.
+    headers: OCTET_STREAM_ACCEPT,
     responseType: 'blob',
   });
   return response.data;
@@ -560,7 +618,9 @@ export async function collectReportArtifact(
  *   value from another response being sent to this operation.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
  *   HTTP 400 for a selector outside the published shape, 401 without a usable token, 403 without the
- *   required authority, 404 when the selector names no stored document, and 500 otherwise.
+ *   required authority, 404 when the selector names no stored document, and 500 otherwise. As with the
+ *   report document above, a refusal arrives as JSON while the success body is bytes, and `./client`
+ *   decodes it back into the shared document.
  */
 export async function collectArtifact(location: string): Promise<Blob> {
   // WHY : Assumptions: the location is MATCHED against the form a statement answer publishes, and the
@@ -583,7 +643,12 @@ export async function collectArtifact(location: string): Promise<Blob> {
 
   const response = await getApiClient().get<Blob>(
     requestPath(COLLECT_STATEMENT_ARTIFACT, { [ARTIFACT_SELECTOR_PARAMETER]: selector }),
-    { responseType: 'blob' },
+    // Assumptions: the statement document is negotiated on exactly the terms the report document is,
+    //   and for the same reason: `StatementController.collectArtifact` declares one produced media type
+    //   and it is not JSON, so the shared client's default Accept made this operation unsatisfiable.
+    //   The two calls share {@link OCTET_STREAM_ACCEPT} rather than each spelling the media type, so a
+    //   correction to one cannot leave the other behind.
+    { headers: OCTET_STREAM_ACCEPT, responseType: 'blob' },
   );
   return response.data;
 }

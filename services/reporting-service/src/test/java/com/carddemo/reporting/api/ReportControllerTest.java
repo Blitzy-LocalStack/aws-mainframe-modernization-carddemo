@@ -101,7 +101,15 @@ class ReportControllerTest {
      */
     private static final String REPORT_PREFIX = "reports/transaction-detail/";
 
-    /** An execution name of the shape this service composes. */
+    /**
+     * An execution name of the shape this service composes.
+     *
+     * <p>⚠️ Refactoring Rationale: this constant now serves the SUBMISSION stubs as well as the
+     * status stubs, where those two stubbed an execution ARN literal. The submission response
+     * publishes the execution name -- the value the status path is addressed by -- so one constant
+     * across both is what shows the two operations agreeing on a spelling; two literals of different
+     * kinds is the disagreement a review found in the shipped contract.
+     */
     private static final String EXECUTION_NAME = "carddemo-monthly-20220701-20220731-a1b2c3d4";
 
     /** When a described run started. */
@@ -206,7 +214,7 @@ class ReportControllerTest {
                 .thenReturn(ReportExecutionService.Confirmation.CONFIRMED);
         when(executions.start(any(), eq("Monthly"), eq(start), eq(end), any()))
                 .thenReturn(new ReportSubmissionResponse(
-                        "arn:aws:states:us-east-1:000000000000:execution:m:Monthly-1",
+                        EXECUTION_NAME,
                         "Monthly",
                         "Monthly Transaction Report",
                         "Monthly Transaction Detail Report",
@@ -221,6 +229,14 @@ class ReportControllerTest {
                 .andExpect(jsonPath("$.outcome").value("STARTED"))
                 .andExpect(jsonPath("$.message")
                         .value("Monthly" + ReportController.SUBMITTED_SUFFIX))
+                // WHY : ⚠️ Assumptions: the HANDLE is asserted by name, and it is the member this
+                //       response exists to deliver. A review found the submission publishing an
+                //       execution ARN while the status operation is addressed by name, so a caller
+                //       could start a run and never poll it; asserting the report type alone left the
+                //       one member that closes the lifecycle unchecked. The value is the same constant
+                //       the status cases address their requests with.
+                .andExpect(jsonPath("$.submission.executionName").value(EXECUTION_NAME))
+                .andExpect(jsonPath("$.submission.executionArn").doesNotExist())
                 .andExpect(jsonPath("$.submission.reportName").value("Monthly"));
     }
 
@@ -247,7 +263,7 @@ class ReportControllerTest {
                 .thenReturn(ReportExecutionService.Confirmation.CONFIRMED);
         when(executions.start(any(), eq("Monthly"), eq(start), eq(end), any()))
                 .thenReturn(new ReportSubmissionResponse(
-                        "arn:aws:states:us-east-1:000000000000:execution:m:Monthly-1",
+                        EXECUTION_NAME,
                         "Monthly",
                         "Monthly Transaction Report",
                         "Monthly Transaction Detail Report",

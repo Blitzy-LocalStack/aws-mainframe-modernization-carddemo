@@ -400,8 +400,18 @@ function apiTimeoutMs(): number {
  * `X-Correlation-Id` — the default below, so an unset variable still agrees with the services. A
  * mismatch is the worst failure mode available here because nothing reports it: every request still
  * succeeds, the filter simply mints its own identifier, and the browser's value never reaches the
- * logging context, so traces stop joining up silently. Keeping the name configurable lets both sides
- * of that contract move together instead of requiring a rebuilt bundle to follow a server rename.
+ * logging context, so traces stop joining up silently.
+ *
+ * ⚠️ Assumptions: the variable does NOT let the two halves of that contract move independently, and an
+ * earlier note here claiming it spared a rebuilt bundle was wrong on both halves. The server's name is a
+ * `public static final String` literal, deliberately not configurable — the constant's own Javadoc
+ * records that a header name differing between two deployments is how the contract breaks silently — so
+ * a rename there is a source change and a redeploy. And `import.meta.env` is inlined by Vite at BUILD
+ * time, as `./runtimeConfig.ts` records for the base URL, so the browser half of a rename needs a rebuilt
+ * bundle whatever this variable holds. Trade-offs: what the variable actually buys is that the browser
+ * half is then a build setting rather than an edit to this module, and that a mistyped name fails loudly
+ * at startup on the token check below instead of joining the silent-mismatch failure mode above. What it
+ * costs is the appearance of a deploy-time knob, which is why the limit is written down here.
  *
  * Assumptions: correlating a request/reply pair by an identifier the initiator supplies is the
  * baseline's own mechanism rather than an addition. The authorization consumer saves the request's
@@ -491,9 +501,13 @@ export function newCorrelationId(): string {
  * local copy changes what the browser draws and nothing about what it is permitted to do.
  *
  * Assumptions: an absent token is a NORMAL condition, not an error, so no header is attached at all
- * rather than one carrying an empty or undefined bearer. Sign-on is the one unauthenticated request
- * in the system, and a service reading `Authorization: Bearer undefined` would refuse it as a
- * malformed credential — reporting a rejected token where the operator has not yet presented one.
+ * rather than one carrying an empty or undefined bearer. ⚠️ It is normal because THREE published
+ * operations are reached before any token exists — `signOn`, `answerSignOnChallenge` and
+ * `refreshTokens`, the only three operations in the whole published surface that declare `security: []`
+ * in `services/auth-service/src/main/resources/openapi/auth-api.yaml`, each presenting its credential in
+ * the request body instead. A service reading `Authorization: Bearer undefined` would refuse any of them
+ * as a malformed credential — reporting a rejected token where the operator has not yet presented one,
+ * or, on the refresh, signing an operator out for arriving a moment late.
  *
  * Refactoring Rationale: the stored token is attached CONDITIONALLY on the request's own metadata,
  * and the condition is checked first. A request marked {@link WITHOUT_STORED_SESSION} has the header
@@ -607,6 +621,17 @@ const CODE_TIMEOUT = 'CARDDEMO-UI-TIMEOUT';
 
 /** Problem code for a request that received no response at all. */
 const CODE_NO_RESPONSE = 'CARDDEMO-UI-NETWORK';
+
+/**
+ * Matches a media type that carries a JSON document, including the problem-document variant.
+ *
+ * Assumptions: the test is on the type and subtree rather than on an exact string, because a service
+ * may answer `application/json`, `application/json;charset=UTF-8` or `application/problem+json`, and
+ * all three carry the document {@link isApiError} narrows. Parameters after the semicolon are ignored
+ * rather than parsed: nothing here reads the charset, since the decode below goes through the
+ * platform's own text reader.
+ */
+const JSON_MEDIA_TYPE = /^application\/(?:[\w.+-]+\+)?json(?:\s*;.*)?$/iu;
 
 /**
  * The Axios error codes that mean the configured timeout expired.
@@ -850,6 +875,94 @@ function diagnosticFor(
 }
 
 /**
+ * Narrows a response body to the two members needed to read a `Blob`, without an `instanceof` test.
+ *
+ * Assumptions: the test is STRUCTURAL, and `body instanceof Blob` is deliberately not used. That test is
+ * false for a genuine blob whenever the value was constructed in a different realm from the one this
+ * module's `Blob` binding resolves in, and the test environment is exactly such a case: `ui/vitest.config.ts`
+ * runs the suite in jsdom, whose `Blob` global is jsdom's own, while the body a failed request carries is
+ * built by the platform `fetch` implementation underneath it. Measured: the constructor of that value
+ * reports `Blob` and carries both `type` and `text`, and `instanceof` still answers false -- so an
+ * `instanceof` guard would leave the decode below dead in every test while working in a browser, which is
+ * the worst arrangement available: a gate that passes because it never runs.
+ *
+ * Assumptions: the two members tested are the two this module uses -- the declared media type and the
+ * text reader -- so the narrowing asserts exactly what it consumes rather than an identity. A value
+ * carrying both is readable as a document whatever built it.
+ * @param {unknown} body - A response body of unknown shape.
+ * @returns {Blob | undefined} The same value narrowed to a `Blob`, or nothing when it is not one.
+ */
+function asBlobLike(body: unknown): Blob | undefined {
+  if (typeof body !== 'object' || body === null) {
+    return undefined;
+  }
+  const candidate = body as { type?: unknown; text?: unknown };
+  if (typeof candidate.type !== 'string' || typeof candidate.text !== 'function') {
+    return undefined;
+  }
+  return body as Blob;
+}
+
+/**
+ * Recovers the body of a failed response in a form {@link isApiError} can narrow.
+ *
+ * Purpose: two operations in this package ask for their body as a `Blob`, because they collect a
+ * document whose bytes must not be decoded. Axios materialises EVERY body of such a request according
+ * to that setting, including the ones a service sends to refuse it — so a JSON problem document
+ * arrives as a `Blob` rather than as an object.
+ *
+ * Refactoring Rationale: ⚠️ without this step those two operations lost every refusal a service
+ * described. The document arrived as a `Blob`, failed the object test in {@link isApiError} for the
+ * shape of its container rather than for its contents, and was replaced by a synthesised
+ * `CARDDEMO-UI-BODY` — discarding the service's code, its sentence, its `fieldErrors` array and its
+ * abend detail, and reporting a described refusal as an unrecognised response. A 400 naming the
+ * offending parameter became "the body was not a problem document".
+ *
+ * Assumptions: only a JSON-typed `Blob` is decoded, and the media type is read from the `Blob` itself
+ * with the response header as the fallback — Axios copies the header onto the `Blob`, but a transport
+ * that left it blank would otherwise stop the decode. A `Blob` of any other type is returned
+ * untouched, which is deliberate on two counts: a successful octet-stream body never reaches this
+ * function at all, and an error body that really is bytes is not read into memory in order to discover
+ * that it is not a document.
+ *
+ * Assumptions: a decode that fails for any reason yields the original value, so the caller still
+ * synthesises its `CARDDEMO-UI-BODY` document. Malformed JSON and an unreadable `Blob` are the same
+ * outcome from a caller's point of view -- a response whose body cannot be read as a problem -- and
+ * distinguishing them would add a classification no screen can act on differently.
+ *
+ * Trade-offs: this makes the rejection path asynchronous, which is why {@link normaliseFailureAndThrow}
+ * is an `async` function. The cost is one microtask on every failure, including the ones that need no
+ * decoding; the alternative was decoding inside the two calling operations, which would put the shared
+ * problem contract in two client modules and leave a third binary call added later without it.
+ * @param {TransportFailure} failure - The rejected Axios failure, with a response or without one.
+ * @returns {Promise<unknown>} The body as received, or the value parsed out of a JSON-typed `Blob`.
+ */
+async function failureBody(failure: TransportFailure): Promise<unknown> {
+  const body: unknown = failure.response?.data;
+  const blob = asBlobLike(body);
+  if (blob === undefined) {
+    return body;
+  }
+
+  const declared =
+    blob.type.length > 0
+      ? blob.type
+      : (headerValue(failure.response?.headers, 'Content-Type') ?? '');
+  if (!JSON_MEDIA_TYPE.test(declared)) {
+    return body;
+  }
+
+  try {
+    return JSON.parse(await blob.text()) as unknown;
+  } catch {
+    // Assumptions: the guard covers the read as well as the parse, because a body whose backing data is
+    //   gone rejects rather than returning malformed text, and a rejection escaping here would replace
+    //   the failure the caller is waiting for with an unrelated one.
+    return body;
+  }
+}
+
+/**
  * Normalises one Axios failure into the single shape every caller handles.
  *
  * Assumptions: a service's problem document is used AS IT STANDS when the body carries the members a
@@ -864,9 +977,13 @@ function diagnosticFor(
  * clients and twenty-one screens would each need three branches, and the branch nobody writes is the
  * one for the proxy failure that only happens in a deployed environment.
  * @param {TransportFailure} failure - The rejected Axios failure, with a response or without one.
+ * @param {unknown} body - The response body as {@link failureBody} recovered it, which is the received
+ *   value for every ordinary request and the decoded document for a `Blob`-typed request a service
+ *   refused. It is passed in rather than read from the failure because recovering it is asynchronous
+ *   and this classification is not.
  * @returns {ApiRequestError} The normalised failure, classified into one of four kinds.
  */
-function normaliseFailure(failure: TransportFailure): ApiRequestError {
+function normaliseFailure(failure: TransportFailure, body: unknown): ApiRequestError {
   const correlationId = correlationIdOf(failure);
   // WHY : Assumptions: the target is withheld HERE, at the one place it enters a document a caller
   //       can serialise, rather than at each of the two construction sites below. Both sites reach the
@@ -877,16 +994,14 @@ function normaliseFailure(failure: TransportFailure): ApiRequestError {
   //       nine or more, keep the last four of a card-width run, preserve length -- so that a browser
   //       diagnostic lines up character for character against a gateway access record. Rejected as the
   //       weaker of the two: it withholds digits only, so a non-numeric selector such as a sealed
-  //       cursor, and any query or fragment, would survive it, whereas the published-template mask
-  //       admits a segment only when a contract publishes it as a literal and drops the query and
-  //       fragment outright. PUBLISHED_PATH_SEGMENTS is asserted complete by contracts.test.ts, so the
-  //       set this depends on cannot drift silently. The cost accepted is that a masked browser target
-  //       no longer has the same length as the one the gateway logged.
+  //       cursor, and any query or fragment, would survive it, whereas the operation-template mask
+  //       admits a segment only where every template that could have composed the target declares a
+  //       literal, and drops the query and fragment outright. The cost accepted is that a masked
+  //       browser target no longer has the same length as the one the gateway logged.
   const target = maskedTarget(failure.config?.url ?? '');
   const response = failure.response;
 
   if (response !== undefined) {
-    const body: unknown = response.data;
     if (isApiError(body)) {
       return new ApiRequestError(
         'PROBLEM',
@@ -1005,23 +1120,31 @@ function invalidateSessionOnUnauthorized(
  * losing both its type and its stack. `reporting.test.ts` asserts that a client-side guard still
  * reaches its caller as a `RangeError` for exactly this reason.
  *
- * Alternatives Considered: `Promise.reject(...)`, and an `async` function that throws. The first is
- * refused by `prefer-promise-reject-errors` for the pass-through branch, whose reason is `unknown`;
- * the second is refused by `require-await`, because it would contain no `await`. A SYNCHRONOUS throw
- * satisfies both with no exemption: Axios invokes this handler inside its own promise chain, so a
- * throw here becomes a rejected promise carrying this exact reason.
+ * Refactoring Rationale: ⚠️ this handler is `async`, and it was synchronous. The reason it changed is
+ * {@link failureBody}: the two document operations ask for their body as a `Blob`, so a service's
+ * problem document arrives on those two as a `Blob` and has to be READ before it can be recognised,
+ * and reading one is asynchronous. The paragraph withdrawn from here argued for a synchronous throw on
+ * the ground that `Promise.reject` is refused by `prefer-promise-reject-errors` for the pass-through
+ * branch and an `async` function with no `await` is refused by `require-await`. The first half still
+ * holds and is why nothing here calls `Promise.reject`; the second no longer applies, because this
+ * function now awaits the body recovery on every path. A `throw` inside an `async` function is a
+ * rejected promise carrying this exact reason, so the contract every caller sees is unchanged.
  * @param {unknown} failure - Whatever Axios rejected with; not necessarily an `Error`.
- * @returns {never} Never returns normally.
+ * @returns {Promise<never>} Never resolves; the returned promise always rejects.
  * @throws {ApiRequestError} For every transport failure, carrying the classification and the problem
  *   document.
  * @throws {unknown} Unchanged, for a rejection raised before a request was attempted.
  */
-function normaliseFailureAndThrow(failure: unknown): never {
+async function normaliseFailureAndThrow(failure: unknown): Promise<never> {
   if (!axios.isAxiosError<unknown, unknown>(failure)) {
     throw failure;
   }
   recordServerDate(headerValue(failure.response?.headers, 'Date'));
-  const normalised = normaliseFailure(failure);
+  // Assumptions: the body is recovered before the classification and on EVERY failure, not only on the
+  //   two operations that request a `Blob`. A conditional recovery would have to know which requests
+  //   asked for one, which is per-call configuration this handler deliberately does not read -- and the
+  //   recovery is a no-op for every body that is not a JSON-typed `Blob`.
+  const normalised = normaliseFailure(failure, await failureBody(failure));
   invalidateSessionOnUnauthorized(failure, normalised);
   throw normalised;
 }
@@ -1150,85 +1273,103 @@ export function resetApiClient(): void {
 export const API_PATH_PREFIX = '/api/v1';
 
 /**
- * Every literal path segment the seven published contracts use, and nothing else.
+ * Every operation template a target has been composed for, each already split into its segments.
  *
- * Assumptions: this is an ALLOW-LIST, and a segment absent from it is treated as a value. The
- * alternative was a shape rule -- keep a segment of lower-case letters and hyphens, mask the rest --
- * which is shorter but has a hole: a sealed cursor or an artifact selector is twenty-two URL-safe
- * characters, and one that happened to be all lower-case letters would be kept in the clear. An
- * allow-list has no such case, because a value is kept only when it EQUALS a published literal, and no
- * value this system puts in a target can: identifiers are digits, user identifiers and state codes are
- * upper case, and execution names carry digits.
+ * Purpose: this is the vocabulary {@link maskedTarget} narrows against. An entry is the contract path of
+ * one operation with the version prefix removed and its placeholders intact, for example
+ * `/auth/users/{userId}`, so a masked target can be derived from the TEMPLATE the request addressed
+ * rather than from the values it carried.
  *
- * Assumptions: `v1` is a member like any other. It is a literal segment of every published path, so it
- * is listed rather than special-cased, which keeps this set exactly what the documents say and lets the
- * gate compare the two for equality.
+ * Assumptions: it is populated by {@link requestPath}, which is the one function that composes a target
+ * in this package -- measured, forty-nine call sites across the seven client modules dispatch all
+ * fifty-three published operations, the difference being `browse` in `reference.ts`, one generic helper
+ * that composes five list operations from the operation it is given -- and the operation arrives there as
+ * an ARGUMENT. That is what makes the registry dependency-neutral: this module learns each template
+ * without importing the module that declares it, so there is no import edge from here to the seven
+ * clients and no cycle. It is also what makes the registry sufficient at the moment it is read, because a
+ * target can only reach a failure after `requestPath` composed it.
  *
- * Assumptions: the set is stated here as data rather than derived from the client modules' operation
- * manifests, because those modules import this one -- reading their manifests here would close an
- * import cycle through every one of the seven. `ui/src/api/contracts.test.ts` reads the seven documents
- * from disk and asserts this set equals their literal segments, so the statement is machine-checked
- * against its source instead of being maintained by hand.
+ * Assumptions: bounded by the number of distinct path TEMPLATES the application composes -- measured,
+ * forty-two across the seven manifests, fewer than the fifty-three operations because an entry is keyed
+ * by the template and a path publishing both a read and a write contributes one. Traffic does not enter
+ * into it: a thousand card reads add one entry. Nothing is ever removed, and {@link resetApiClient}
+ * deliberately does not clear it: a template is contract data, not configuration, so discarding it
+ * between clients would only make masking depend on which requests a session happened to make first.
+ *
+ * Refactoring Rationale: ⚠️ this registry REPLACES a set of published literal segments that masking used
+ * as an allow-list, keeping any segment whose VALUE appeared in it. A review established that as an
+ * information disclosure: a path parameter admitting arbitrary text -- `UserIdPath` in `auth-api.yaml`
+ * permits one to eight printable characters, case-folded -- carries values that can equal a route word,
+ * so `getUser('admin')` dispatched `/auth/users/admin`, every segment was allow-listed, and the real
+ * identifier survived into an enumerable `ApiError.path` on any network, proxy or unexpected-body
+ * failure. The rejected reasoning behind the allow-list held that recovering the template would close an
+ * import cycle; it would have, read as an import, and this registry gets the same information by
+ * inversion instead.
  */
-export const PUBLISHED_PATH_SEGMENTS: ReadonlySet<string> = new Set([
-  'accounts',
-  'admin',
-  'api',
-  'artifact',
-  'artifacts',
-  'auth',
-  'authorizations',
-  'billpay',
-  'card-cross-references',
-  'card-xrefs',
-  'cards',
-  'challenge',
-  'copy-last',
-  'customers',
-  'date-evaluations',
-  'disclosure-groups',
-  'display',
-  'executions',
-  'fraud',
-  'lines',
-  'lookup',
-  'lookup-by-account',
-  'maintenance-actions',
-  'next',
-  'record',
-  'reference',
-  'refresh',
-  'reports',
-  'screen',
-  'search',
-  'search-by-account',
-  'signon',
-  'statements',
-  'totals',
-  'transaction-categories',
-  'transaction-report',
-  'transaction-types',
-  'transactions',
-  'update',
-  'us-phone-area-codes',
-  'us-state-zip-prefixes',
-  'us-states',
-  'users',
-  'v1',
-  'view',
-]);
+const composedOperationTemplates = new Map<string, readonly string[]>();
+
+/**
+ * Records one operation template so a failure on it can be reported without its values.
+ *
+ * Assumptions: the split is done once, when the template is first seen, rather than on each failure. A
+ * failure path is the worst place to do avoidable work, and the segments of a template never change.
+ * @param {string} template - The operation's contract path with the version prefix removed and its
+ *   placeholders intact.
+ * @returns {void} Nothing; the effect is the recorded template.
+ */
+function rememberOperationTemplate(template: string): void {
+  if (!composedOperationTemplates.has(template)) {
+    composedOperationTemplates.set(template, template.split('/'));
+  }
+}
 
 /**
  * What stands in a masked target where a value stood.
  *
  * Assumptions: one generic marker rather than the parameter's published name -- `{accountId}`,
- * `{selector}` and so on. Alternatives Considered: recovering the exact template by matching the target
- * against every operation manifest, which would name the parameter. Rejected for the same reason the
- * segment set is data here: it would close an import cycle. And the name adds nothing a reader of a
- * diagnostic needs, because what matters is that a value stood in that position, not what the contract
- * calls it.
+ * `{selector}` and so on. The name is available now that masking works from templates, and it is still
+ * not used: a target may match more than one template, and two templates can publish different names
+ * for the same position, so a name would have to be chosen from among them. Alternatives Considered:
+ * rendering the matched template's own placeholder text where exactly one template matches and this
+ * marker otherwise. Rejected because a diagnostic would then vary in kind with how many operations share
+ * a shape, which is a fact about the contract rather than about the failure, and what a reader needs is
+ * that a value stood in that position.
  */
 const MASKED_SEGMENT = '{id}';
+
+/** Matches a template segment that stands for a value rather than for a published literal. */
+const TEMPLATE_PLACEHOLDER_SEGMENT = /^\{[A-Za-z][A-Za-z0-9]*\}$/u;
+
+/**
+ * Reports whether one recorded template could have produced the given target segments.
+ *
+ * Assumptions: a template matches when it has the same number of segments and every LITERAL segment of
+ * it equals the target's segment in that position; a placeholder position matches anything, because a
+ * value is percent-encoded by {@link requestPath} and so can never introduce a segment boundary of its
+ * own. Comparing segment counts first is what makes that true: the target's shape is the template's
+ * shape, so position `n` of one describes position `n` of the other.
+ * @param {readonly string[]} template - One recorded template, already split into segments.
+ * @param {readonly string[]} segments - The dispatched target's segments, free of query and fragment.
+ * @returns {boolean} `true` when the target could have been composed from that template.
+ */
+function templateCouldHaveComposed(
+  template: readonly string[],
+  segments: readonly string[],
+): boolean {
+  if (template.length !== segments.length) {
+    return false;
+  }
+  return template.every(
+    /**
+     * Reports whether one template segment admits the target segment in the same position.
+     * @param {string} candidate - One template segment, literal or placeholder.
+     * @param {number} index - Its position, shared with the target's segments.
+     * @returns {boolean} `true` for a placeholder, or for a literal equal to the target's segment.
+     */
+    (candidate: string, index: number): boolean =>
+      TEMPLATE_PLACEHOLDER_SEGMENT.test(candidate) || candidate === segments[index],
+  );
+}
 
 /**
  * Reduces a request target to the masked template of the operation it addressed.
@@ -1238,6 +1379,31 @@ const MASKED_SEGMENT = '{id}';
  * transaction identifiers, sealed cursors, opaque artifact selectors and query values, so copying one
  * into that document would put every one of them wherever the document goes -- a browser console, a
  * bug report, a support attachment -- for a failure no service ever saw.
+ *
+ * Refactoring Rationale: ⚠️ a segment is kept only where the TEMPLATE the request addressed declares a
+ * literal, and it used to be kept wherever the segment's own VALUE appeared in a set of published route
+ * words. That test was an information disclosure and not merely a loose approximation: a path parameter
+ * whose domain includes route words -- a user identifier is one to eight printable characters, folded to
+ * upper case -- produces a target every segment of which is allow-listed, so `getUser('admin')` reported
+ * `/auth/users/admin` and disclosed the very identifier the mask exists to withhold. Deciding by
+ * position removes the whole class: a value cannot be mistaken for a literal, because nothing about the
+ * value is consulted.
+ *
+ * Assumptions: where more than one template matches, a position is kept only if EVERY matching template
+ * declares a literal there. Measured, four published positions genuinely collide -- `/cards/lookup` and
+ * `/cards/search` with `/cards/{cardKey}`, `/authorizations/search` with `/authorizations/{key}`, and
+ * `/transactions/copy-last` with `/transactions/{transactionId}` -- so a target such as `/cards/lookup`
+ * is ambiguous between a literal route and a parameter whose value happens to be that word. Masking the
+ * ambiguity costs a route name in a diagnostic; keeping it would restore the disclosure this change
+ * removes, on exactly the values an attacker would choose. The census is pinned by
+ * `theMaskedLiteralCensusIsUnchanged` in `ui/src/api/contracts.test.ts`, so a new collision arrives as a
+ * failing case rather than as a silently less precise diagnostic.
+ *
+ * Assumptions: a target matching NO recorded template has every non-empty segment masked. Every target
+ * this package dispatches is composed by {@link requestPath}, which records its template first, so an
+ * unmatched target is one no operation of this application produced -- and about such a target nothing
+ * is known, so nothing in it can be asserted to be a literal. Trade-offs: the route name is lost in that
+ * case, which is accepted because the alternative is guessing which of its segments are safe.
  *
  * Assumptions: the query and the fragment are DROPPED rather than masked. A masked query would still
  * disclose which parameters were sent and how many, and no diagnostic needs that: the operation is
@@ -1257,19 +1423,46 @@ const MASKED_SEGMENT = '{id}';
 function maskedTarget(target: string): string {
   const withoutFragment = target.split('#', 1)[0] ?? '';
   const withoutQuery = withoutFragment.split('?', 1)[0] ?? '';
+  const segments = withoutQuery.split('/');
+
+  const candidates = [...composedOperationTemplates.values()].filter(
+    /**
+     * Reports whether one recorded template describes the dispatched target.
+     * @param {readonly string[]} template - One recorded template's segments.
+     * @returns {boolean} `true` when it could have composed the target.
+     */
+    (template: readonly string[]): boolean => templateCouldHaveComposed(template, segments),
+  );
+
   /**
-   * Keeps one segment when the contracts publish it as a literal, and masks it otherwise.
+   * Keeps one segment only where every matching template declares a literal in that position.
    *
-   * Assumptions: the empty segment is kept, because it is what separates two slashes and dropping it would
-   * change the shape of the path rather than mask a value.
+   * Assumptions: the empty segment is kept, because it is what separates two slashes and dropping it
+   * would change the shape of the path rather than mask a value.
    * @param {string} segment - One path segment, already free of any query or fragment.
+   * @param {number} index - Its position, compared with the same position of each candidate template.
    * @returns {string} The segment itself, or {@link MASKED_SEGMENT} where a value stood.
    */
-  function maskSegment(segment: string): string {
-    return segment === '' || PUBLISHED_PATH_SEGMENTS.has(segment) ? segment : MASKED_SEGMENT;
+  function maskSegment(segment: string, index: number): string {
+    if (segment === '') {
+      return segment;
+    }
+    if (candidates.length === 0) {
+      return MASKED_SEGMENT;
+    }
+    const literalEverywhere = candidates.every(
+      /**
+       * Reports whether one candidate template declares a literal in the position under test.
+       * @param {readonly string[]} template - One matching template's segments.
+       * @returns {boolean} `true` when its segment at this position is not a placeholder.
+       */
+      (template: readonly string[]): boolean =>
+        !TEMPLATE_PLACEHOLDER_SEGMENT.test(template[index] ?? ''),
+    );
+    return literalEverywhere ? segment : MASKED_SEGMENT;
   }
 
-  return withoutQuery.split('/').map(maskSegment).join('/');
+  return segments.map(maskSegment).join('/');
 }
 
 /** Matches one path-template placeholder, for example `{cardSelector}`. */
@@ -1339,6 +1532,16 @@ export function requestPath(
       );
     }
   }
+
+  // WHY : Assumptions: the template is recorded HERE, after both refusals and before the target is
+  //       returned, which is what lets {@link maskedTarget} report a failure by position instead of by
+  //       value. Recording it before the refusals would enter templates for requests that were never
+  //       dispatched; recording it at the call sites would be forty-nine chances to forget, and the one
+  //       that forgot would silently fall back to a fully-masked path.
+  // WHY : Assumptions: what is recorded is the TEMPLATE and never the composed target, so no parameter
+  //       value is retained anywhere by this module. A registry keyed by target would grow with traffic
+  //       and would hold the very values the mask exists to withhold.
+  rememberOperationTemplate(template);
   return target;
 }
 
@@ -1638,9 +1841,12 @@ export function isApiError(value: unknown): value is ApiError {
 /**
  * The reading direction every contract applies to a cursor that arrives without one.
  *
- * Assumptions: forward is the six contracts' own default and is stated here once rather than in each
- * client, because a default spelled per module is a default that can come to differ per module while
- * every module still looks right on its own.
+ * Assumptions: ⚠️ forward is the default all SEVEN contracts declare, not six. Every one of them
+ * publishes `default: next` on the direction its browser-facing paged operations take — six through a
+ * shared `PageDirection` schema and account-api inline on `listAccountCardCrossReferences` — and this
+ * client addresses paged operations in all seven. It is stated here once rather than in each client,
+ * because a default spelled per module is a default that can come to differ per module while every
+ * module still looks right on its own; the seven local constants this replaced were copies of it.
  */
 const DEFAULT_PAGE_DIRECTION: PageDirection = 'next';
 
@@ -1658,17 +1864,24 @@ const DEFAULT_PAGE_DIRECTION: PageDirection = 'next';
  * with the direction assigned inside the block. That silently rewrote the caller's request into a
  * different one: a screen asking to step BACKWARD from nowhere received the opening page and rendered
  * it as though the step had been taken, so a paging defect surfaced as rows that did not move rather
- * than as an error. Every contract declares the pair asymmetrically -- a cursor without a direction is
- * read forward, a direction without a cursor is refused with 400 keyed on the direction -- so the
- * combination has a defined answer on the service side and had none here.
+ * than as an error.
+ *
+ * Assumptions: ⚠️ every contract declares the pair asymmetrically -- a cursor without a direction is read
+ * forward -- but they do NOT agree on the reverse combination, and that disagreement is the reason the
+ * rule belongs here rather than being left to the service. Measured across the seven documents: auth,
+ * card, reference and authorization publish that a direction with no cursor is refused with 400 keyed on
+ * the direction; account publishes the opposite for `listAccountCardCrossReferences`, returning the
+ * opening page whichever direction is named; and reporting and transaction publish no answer for it at
+ * all. Deferring to the service would therefore give a screen three different behaviours for one caller
+ * mistake, two of them silent.
  *
  * Alternatives Considered: modelling each query as a discriminated union that admits the pair only
  * together, which would move the refusal to compile time and is the stronger form. Rejected for now
  * because the cursor and the direction are separate optional members of seven published request
  * schemas, and a union would either change those wire shapes or add a client-only shape that no
  * contract describes -- while `ui/src/api/contracts.test.ts` holds every client shape to its contract
- * member for member. A runtime refusal keeps the published shapes exact and still turns a guaranteed
- * 400 into an immediate, attributable error.
+ * member for member. A runtime refusal keeps the published shapes exact and still turns a request whose
+ * answer varies by service into an immediate, attributable error.
  *
  * Trade-offs: this is deliberately NOT a substitute for the service's own validation. The service
  * remains the authority on whether a cursor can be opened at all -- it is sealed against the query,

@@ -24,9 +24,16 @@ import org.junit.jupiter.api.Test;
  */
 class ReportSubmissionOutcomeTest {
 
-    /** A run description to pair with a submitted outcome, so the cross-check has something to see. */
+    /**
+     * A run description to pair with a submitted outcome, so the cross-check has something to see.
+     *
+     * <p>⚠️ Refactoring Rationale: the handle is an execution NAME and was an execution ARN. The
+     * response contract now publishes the name -- the value the status operation is addressed by -- and
+     * refuses a value carrying a character outside the orchestration's alphabet, which an ARN's colons
+     * are, so an ARN here would no longer construct at all.
+     */
     private static final ReportSubmissionResponse ACCEPTED_RUN = new ReportSubmissionResponse(
-            "arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1",
+            "monthly-2022-07-01-2022-07-31-Zm9vYmFy",
             "Monthly",
             "MONTHLY",
             "Monthly Transaction Report",

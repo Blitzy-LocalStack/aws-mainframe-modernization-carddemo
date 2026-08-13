@@ -53,6 +53,13 @@ interface DispatchedRequest {
   //   the default is a JSON parse -- would corrupt the very artifact the golden-master comparison
   //   checks byte for byte, and nothing else in this file could detect that.
   responseType: string;
+  // Assumptions: ⚠️ the request HEADERS are recorded, and they were not. Recording the response type
+  //   alone was what let a defect through in exactly this file's subject matter: the two document
+  //   operations asked for their bytes undecoded and still sent the shared client's
+  //   `Accept: application/json`, so both handlers -- each declaring octet-stream as its only produced
+  //   media type -- answered 406 before running. The response type is what the transport does with a
+  //   body; the Accept header is what decides whether there is one.
+  headers: Record<string, string>;
 }
 
 let dispatched: DispatchedRequest[] = [];
@@ -77,6 +84,34 @@ function parseBody(data: unknown): unknown {
 }
 
 /**
+ * Reduces Axios request headers to a plain record keyed by lower-cased name.
+ *
+ * Assumptions: names are lower-cased because a header name is case-insensitive on the wire while the
+ * spelling a caller used survives on the request object -- the shared client sets `Accept` from its own
+ * defaults and this module overrides it per call, so a case comparing the given spelling would be
+ * asserting which of the two wrote it rather than what was sent.
+ *
+ * Assumptions: only primitive values are carried across. Axios's header bag is typed with an index
+ * signature returning `any` and can hold a function for a lazily-computed header; a stringified
+ * function would compare equal to nothing and reads in a failure message as noise.
+ * @param {AxiosRequestConfig} config - The request configuration after the client's interceptors ran.
+ * @returns {Record<string, string>} One entry per header carrying a primitive value.
+ */
+function headersOf(config: AxiosRequestConfig): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const source: unknown = config.headers;
+  if (typeof source !== 'object' || source === null) {
+    return headers;
+  }
+  for (const [name, value] of Object.entries(source as Record<string, unknown>)) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      headers[name.toLowerCase()] = String(value);
+    }
+  }
+  return headers;
+}
+
+/**
  * Records one dispatched request and answers it without a network call.
  *
  * Assumptions: the recorded URL is the one Axios was asked for rather than the fully resolved one,
@@ -98,6 +133,7 @@ async function captureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse
     //   on whitespace that neither this module nor the contract has any opinion about.
     body: parseBody(config.data),
     responseType: config.responseType ?? '',
+    headers: headersOf(config),
   });
   return Promise.resolve({
     data: nextBody,
@@ -153,6 +189,41 @@ const HTML_ARTIFACT_LOCATION = '/api/v1/reports/statements/artifacts/9tB4mE7kXw2
 
 /** One execution name, shaped as the reporting service mints them from a run's start instant. */
 const EXECUTION_NAME = 'carddemo-transaction-report-2022-07-18T22-10-31Z';
+
+/**
+ * The media type both document operations must ask for.
+ *
+ * Assumptions: spelled here as a literal rather than imported from the client module, so this file
+ * states what the wire must carry independently of the constant the module happens to hold it in. A
+ * shared constant would let a rename change both sides at once and assert nothing.
+ */
+const OCTET_STREAM = 'application/octet-stream';
+
+/**
+ * Reports whether one recorded request asked for its body undecoded.
+ *
+ * Assumptions: named rather than written inline at the two filters below, because
+ * `jsdoc/require-jsdoc` selects a function expression in every position and a block comment attached to
+ * an inline argument is moved by Prettier onto the preceding expression.
+ * @param {DispatchedRequest} request - One recorded request.
+ * @returns {boolean} `true` when the request asked the transport for a blob.
+ */
+function asksForBytes(request: DispatchedRequest): boolean {
+  return request.responseType === 'blob';
+}
+
+/**
+ * Reports whether one recorded request expects a JSON document rather than bytes.
+ *
+ * Assumptions: written as the complement of {@link asksForBytes} rather than as a second rule, so the
+ * two filters below partition the eight dispatches with no request able to fall into both or neither --
+ * which is the property that makes the counts they assert add up to the whole module.
+ * @param {DispatchedRequest} request - One recorded request.
+ * @returns {boolean} `true` when the request did not ask the transport for a blob.
+ */
+function answersADocument(request: DispatchedRequest): boolean {
+  return !asksForBytes(request);
+}
 
 /**
  * The body a run-status read answers with, carrying only the member these assertions read.
@@ -222,6 +293,13 @@ async function submitsToThePublishedReportPath(): Promise<void> {
  * three published turns answer 200, so a boolean beside a status cannot tell a declined confirmation
  * from one not yet answered -- which is exactly the confusion the client made when it read the status
  * alone.
+ *
+ * Refactoring Rationale: ⚠️ the handle carries `executionName` and carried an `executionArn` literal.
+ * The ARN was the defect this fixture had to stop reproducing: the status operation takes a NAME, so a
+ * fixture that answered an ARN agreed with the client it was written against and with nothing the
+ * lifecycle could actually do. The name here is {@link EXECUTION_NAME}, the same constant the status
+ * case addresses its request with, which is what lets `composesTheStatusReadFromTheSubmittedHandle`
+ * assert the two operations meet instead of asserting each in isolation.
  * @returns {Record<string, unknown>} The 201 body: the outcome, the composed sentence, and the nested
  *   handle.
  */
@@ -230,7 +308,7 @@ function startedSubmissionBody(): Record<string, unknown> {
     outcome: 'STARTED',
     message: 'Monthly report submitted for printing ...',
     submission: {
-      executionArn: 'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
+      executionName: EXECUTION_NAME,
       reportName: 'Monthly',
       shortName: 'MONTHLY',
       longName: 'Monthly Transaction Report',
@@ -261,10 +339,43 @@ async function readsAStartedExecutionFromTheCreatedStatus(): Promise<void> {
   if (outcome.outcome !== 'STARTED') {
     throw new Error('the created status must be read as a started execution');
   }
-  expect(outcome.submission.executionArn).toBe(
-    'arn:aws:states:us-east-1:000000000000:execution:carddemo-report:1',
-  );
+  expect(outcome.submission.executionName).toBe(EXECUTION_NAME);
   expect(outcome.message).toBe('Monthly report submitted for printing ...');
+}
+
+/**
+ * Asserts the handle a submission returns is the value the status read is addressed by.
+ *
+ * Purpose: this is the case a lifecycle whose two halves do not meet cannot pass, and no single-operation
+ * assertion can replace it. The submission previously answered with the orchestration ARN in full while
+ * this read takes a NAME, so both operations were individually correct against their own schemas and the
+ * flow between them was impossible: the ARN reaches the target percent-encoded into one segment and is
+ * refused on the published shape. The handle is therefore taken FROM the submission's answer and handed
+ * straight to the read, with no literal in between -- a literal on both sides would pass with the two
+ * spellings still disagreeing.
+ *
+ * Assumptions: the composed target is asserted as well as the request being made, because the shape of
+ * the failure being ruled out is a target carrying `%3A` where the contract publishes a name.
+ */
+async function composesTheStatusReadFromTheSubmittedHandle(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = startedSubmissionBody();
+  const outcome = await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
+  if (outcome.outcome !== 'STARTED') {
+    throw new Error('the created status must be read as a started execution');
+  }
+
+  // Assumptions: the recorded dispatches are cleared so the status read is the one under assertion,
+  //   for the same reason the statement-collect case clears them: reading the second of two would
+  //   assert its position in a list rather than the target it addressed.
+  dispatched = [];
+  nextStatus = HTTP_OK;
+  nextBody = RUN_STATUS_BODY;
+  const status = await readReportExecution(outcome.submission.executionName);
+  const request = onlyRequest();
+  expect(request.url).toBe(`/reports/executions/${EXECUTION_NAME}`);
+  expect(request.url).not.toContain('%3A');
+  expect(status.executionName).toBe(EXECUTION_NAME);
 }
 
 /**
@@ -483,15 +594,17 @@ async function refusesAnUnmaskedCardNumberInAnyTransactionRow(): Promise<void> {
 }
 
 /**
- * Asserts every path this module composes begins with the gateway-published prefix.
+ * Calls every operation this module publishes once, in the contract's own declaration order.
  *
- * Assumptions: this is asserted across all eight operations together rather than left implicit in the
- * per-operation assertions, because the property is about the whole module: the gateway publishes
- * only `ANY /api/v1/reports` and `ANY /api/v1/reports/{proxy+}` for this service, so a path this
- * module composed outside that prefix would be answered by the gateway's own 404 with no integration
- * attempted — a failure that looks like an outage rather than a client defect.
+ * Refactoring Rationale: this sequence was the body of the prefix case below and is now shared with the
+ * negotiation case beside it. Two whole-module properties are asserted over the same eight dispatches --
+ * that every target sits under the gateway's published prefix, and that exactly the two document
+ * operations negotiate a byte stream -- and duplicating the sequence would let the two drift, so that a
+ * ninth operation added to one would be absent from the other and the missing coverage would be
+ * invisible.
+ * @returns {Promise<void>} Resolves once all eight operations have been dispatched and recorded.
  */
-async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
+async function dispatchEveryOperation(): Promise<void> {
   nextStatus = HTTP_CREATED;
   nextBody = startedSubmissionBody();
   await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
@@ -515,10 +628,63 @@ async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
   nextBody = STORED_DOCUMENT_BYTES;
   await collectReportArtifact('monthly', '2022-07-01', '2022-07-31');
   await collectArtifact(PLAIN_TEXT_ARTIFACT_LOCATION);
+}
+
+/**
+ * Asserts every path this module composes begins with the gateway-published prefix.
+ *
+ * Assumptions: this is asserted across all eight operations together rather than left implicit in the
+ * per-operation assertions, because the property is about the whole module: the gateway publishes
+ * only `ANY /api/v1/reports` and `ANY /api/v1/reports/{proxy+}` for this service, so a path this
+ * module composed outside that prefix would be answered by the gateway's own 404 with no integration
+ * attempted — a failure that looks like an outage rather than a client defect.
+ */
+async function composesEveryPathUnderTheReportsPrefix(): Promise<void> {
+  await dispatchEveryOperation();
 
   expect(dispatched).toHaveLength(8);
   for (const request of dispatched) {
     expect(request.url.startsWith('/reports')).toBe(true);
+  }
+}
+
+/**
+ * Asserts exactly the two document operations negotiate bytes and the other six negotiate JSON.
+ *
+ * Purpose: ⚠️ this is the module-wide half of the negotiation contract, and it is what a binary
+ * operation added later cannot quietly omit. Asserting the Accept header only at the two call sites
+ * that have one would leave a third document operation free to ship with the shared client's JSON
+ * default and be refused with 406 in a deployed environment -- which is precisely how the two here were
+ * shipped. Stated as a partition of all eight operations, the case fails on a new blob request that
+ * does not negotiate AND on a JSON request that starts asking for bytes.
+ *
+ * Assumptions: the partition is keyed on the requested response type rather than on a list of operation
+ * names, so the rule is "every request that asks for undecoded bytes accepts a byte stream" rather than
+ * "these two operations do". A list would have to be edited by the same author who forgot the header.
+ */
+async function everyDocumentOperationNegotiatesABinaryBody(): Promise<void> {
+  await dispatchEveryOperation();
+
+  expect(dispatched).toHaveLength(8);
+  const binary = dispatched.filter(asksForBytes);
+  const json = dispatched.filter(answersADocument);
+
+  expect(binary).toHaveLength(2);
+  for (const request of binary) {
+    expect(
+      request.headers.accept,
+      `${request.url} asks for undecoded bytes, so it must accept a byte stream: both artifact` +
+        ' handlers publish octet-stream as their only produced media type and answer 406 to a' +
+        ' JSON-only Accept before running',
+    ).toBe(OCTET_STREAM);
+  }
+
+  expect(json).toHaveLength(6);
+  for (const request of json) {
+    expect(
+      request.headers.accept,
+      `${request.url} answers a JSON document, so it must keep the shared client's own Accept`,
+    ).toBe('application/json');
   }
 }
 
@@ -545,6 +711,13 @@ async function readsARunStatusFromThePublishedExecutionPath(): Promise<void> {
  * Assumptions: the three coordinates travel as query parameters exactly as given, because this
  * document is addressed by the range it covers rather than by an opaque selector -- a report names no
  * account, so there is nothing in those coordinates to withhold from a target.
+ *
+ * Assumptions: ⚠️ the ACCEPT header is asserted beside the response type, and it is the assertion this
+ * case was missing. `ReportController.collectReportArtifact` declares
+ * `produces = APPLICATION_OCTET_STREAM_VALUE`, so a request accepting only JSON -- which is what the
+ * shared client sends by default -- is refused with 406 before the handler runs. `responseType: 'blob'`
+ * sets no request header, so the two members are independent and only one of them decides whether the
+ * service answers at all.
  */
 async function collectsTheReportDocumentFromItsCoordinates(): Promise<void> {
   nextStatus = HTTP_OK;
@@ -559,6 +732,7 @@ async function collectsTheReportDocumentFromItsCoordinates(): Promise<void> {
     endDate: '2022-07-31',
   });
   expect(request.responseType).toBe('blob');
+  expect(request.headers.accept).toBe(OCTET_STREAM);
 }
 
 /**
@@ -596,6 +770,11 @@ async function collectsAStatementDocumentFromItsAnswer(): Promise<void> {
   expect(request.method).toBe('get');
   expect(request.url).toBe('/reports/statements/artifacts/0oL2fQ8xVn4tKpR7wZbY1s');
   expect(request.responseType).toBe('blob');
+  // Assumptions: ⚠️ the statement document negotiates on the same terms the report document does, and
+  //   it is asserted here rather than only in the module-wide case below, because
+  //   `StatementController.collectArtifact` publishes octet-stream as its one produced media type and a
+  //   JSON-only Accept is refused with 406 before the handler runs.
+  expect(request.headers.accept).toBe(OCTET_STREAM);
 }
 
 /**
@@ -656,12 +835,20 @@ function reportingClientContract(): void {
     readsARunStatusFromThePublishedExecutionPath,
   );
   it(
+    'composes the status read from the submitted handle',
+    composesTheStatusReadFromTheSubmittedHandle,
+  );
+  it(
     'collects the report document from its coordinates',
     collectsTheReportDocumentFromItsCoordinates,
   );
   it('collects a statement document from its answer', collectsAStatementDocumentFromItsAnswer);
   it('refuses a location no answer could have carried', refusesALocationNoAnswerCouldHaveCarried);
   it('composes every path under the reports prefix', composesEveryPathUnderTheReportsPrefix);
+  it(
+    'negotiates a binary body on exactly the two document operations',
+    everyDocumentOperationNegotiatesABinaryBody,
+  );
 }
 
 describe('reporting client contract', reportingClientContract);

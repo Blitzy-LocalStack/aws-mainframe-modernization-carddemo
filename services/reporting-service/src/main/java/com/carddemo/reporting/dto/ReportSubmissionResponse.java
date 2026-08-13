@@ -16,8 +16,9 @@ import java.util.regex.Pattern;
  * output location or a record count, because none of those exists at the moment of acceptance: the
  * report the reference job produces is written into {@code FD-REPTFILE-REC PIC X(133)} at
  * {@code app/cbl/CBTRN03C.cbl} L85, and not one of its lines has been written when this value is
- * returned. The caller observes progress through {@code executionArn}, which is the handle the
- * orchestration assigns to the accepted run.
+ * returned. The caller observes progress through {@code executionName}, which is the name the
+ * orchestration accepted the run under and the value the status operation of
+ * {@code com.carddemo.reporting.api} is addressed by.
  *
  * <p>The report's own identity and the two range bounds are echoed back rather than left for the
  * caller to reconstruct. Echoing the bounds is not redundant with the request, and the preset
@@ -39,7 +40,7 @@ import java.util.regex.Pattern;
  *
  * <h2>Decisions taken on this type</h2>
  *
- * <p>Refactoring Rationale: {@code executionArn} replaces the reference submission mechanism rather
+ * <p>Refactoring Rationale: {@code executionName} replaces the reference submission mechanism rather
  * than carrying it across, and what was wrong with that mechanism is nameable in three specific
  * places. The reference program submits the report by writing 80-position card images to a CICS
  * transient data queue: {@code app/cbl/CORPT00C.cbl} assembles the cards in working storage at L83
@@ -61,19 +62,37 @@ import java.util.regex.Pattern;
  * a failure to. Third, the contract is an 80-position card image rather than a typed parameter set,
  * so a malformed card is discovered only when the reader consumes it.
  *
- * <p>{@code executionArn} is instead a durable, addressable orchestration handle returned
+ * <p>{@code executionName} is instead a durable, addressable orchestration handle returned
  * synchronously on acceptance, so the caller holds an identity it can observe and a refused
  * submission is an error response rather than a discarded record. The reference writes card images
  * and returns nothing; the Java returns a handle; the difference is registered as
  * <b>D-REPORT-HANDLE</b> in {@code docs/architecture/cobol-to-service-traceability.md}, which owns
  * that register. This file cites the entry and defines no entry in it.
  *
- * <p>Assumptions: {@code executionArn} is the one component with no width bound, because no
- * artifact declares a width for it. It has no reference counterpart at all, the submission it
- * replaces having returned no identity, and its length is a property of the orchestration that
- * issues it, so asserting a width here would state a contract that no artifact supports. It is also
- * opaque: this record neither builds nor reads it, and no account identifier, region, queue name,
- * state machine name or endpoint appears anywhere in this file.
+ * <p>⚠️ Refactoring Rationale: the handle this record returns is the execution NAME, and it was the
+ * execution ARN in full. A review established that the ARN made the accepted run unobservable in
+ * practice: the status operation of {@code com.carddemo.reporting.api} is addressed by name -- it
+ * composes the ARN itself from the state machine it is configured with -- so the only value a caller
+ * held was the one value that operation does not accept, and a caller passing it received a refusal
+ * against a shape it had been handed. The name was already computed on both accepted paths and
+ * discarded. Two further properties make the withdrawal the right correction rather than merely a
+ * sufficient one: an ARN carries the account identifier and the region of the deployment that ran the
+ * report, which is infrastructure detail no caller of this surface has a use for, and it carries no
+ * information the name lacks, since the service derives the one from the other deterministically.
+ *
+ * <p>Alternatives Considered: returning both, which is the smaller edit and keeps any consumer of the
+ * ARN working. Rejected on evidence rather than on principle -- there is no such consumer: the ARN
+ * was read by this record's own tests and by nothing else in the repository, so retaining it would
+ * publish a component whose only stated purpose was to be quoted, while the name is quotable and is
+ * additionally usable. A component that no caller needs is also a component a later reader must
+ * assume is load-bearing.
+ *
+ * <p>Assumptions: {@code executionName} is bounded at {@value #EXECUTION_NAME_WIDTH} positions and to
+ * the alphabet the orchestration admits, and that bound is the orchestration's own rather than a
+ * copybook's -- the submission this component replaces returned no identity, so there is no reference
+ * field to read a width from. It is nonetheless opaque to this record: the value is composed
+ * elsewhere, nothing here parses it, and no account identifier, region, queue name, state machine
+ * name or endpoint appears anywhere in this file.
  *
  * <p>Assumptions: all seven components are {@code String}, and for the two bounds that is a reading
  * of the reference rather than a convenience. The range is compared as characters and not as dates.
@@ -206,10 +225,12 @@ import java.util.regex.Pattern;
  * argument list of its own and raises nothing, so of the four docstring elements only purpose and
  * parameters apply to this block; the seven component parameters follow.
  *
- * @param executionArn the {@code String} orchestration handle assigned to the accepted run, never
- *     {@code null} and never blank; it is the value through which the caller observes progress, it
- *     is opaque to this record, and it has no reference counterpart, the submission it replaces
- *     having returned no identity at all
+ * @param executionName the {@code String} orchestration handle assigned to the accepted run, never
+ *     {@code null} and never blank; it is the value through which the caller observes progress --
+ *     the status operation of {@code com.carddemo.reporting.api} takes exactly this value -- it is
+ *     opaque to this record, it is bounded at the {@value #EXECUTION_NAME_WIDTH} positions the
+ *     orchestration admits, and it has no reference counterpart, the submission it replaces having
+ *     returned no identity at all
  * @param reportName the {@code String} resolved report type spelled exactly as the reference spells
  *     it, one of {@code 'Monthly'}, {@code 'Yearly'} or {@code 'Custom'} as assigned at
  *     {@code app/cbl/CORPT00C.cbl} L214, L240 and L433, within the 10 positions
@@ -233,13 +254,33 @@ import java.util.regex.Pattern;
  *     and carried opaquely, an all-blank value of that width being legitimate
  */
 public record ReportSubmissionResponse(
-        @NotBlank String executionArn,
+        @NotBlank @Size(max = EXECUTION_NAME_WIDTH) String executionName,
         @Size(max = REPORT_NAME_WIDTH) String reportName,
         @Size(max = SHORT_NAME_WIDTH) String shortName,
         @Size(max = LONG_NAME_WIDTH) String longName,
         @Size(max = DATE_WIDTH) String startDate,
         @Size(max = DATE_WIDTH) String endDate,
         @Size(max = TimestampFormatter.TIMESTAMP_LENGTH) String submittedAt) {
+
+    /**
+     * Positions the orchestration admits for an execution name.
+     *
+     * <p>Assumptions: 80 is the orchestration's own published limit on an execution name and is
+     * therefore the one width in this record that is NOT read from a copybook -- the submission
+     * mechanism this component replaces returned no identity, so there is no reference field to read.
+     * The same figure is what {@code reporting-api.yaml} publishes as the {@code ExecutionName}
+     * schema and what {@code com.carddemo.reporting.service.ReportExecutionService} derives its
+     * submission-key ceiling from, so a value this record accepts is a value that operation can be
+     * addressed with.
+     *
+     * <p>Alternatives Considered: importing the service's own constant so the figure has one
+     * declaration. Rejected because it would point a dependency from this package at the service
+     * package that constructs its values, inverting the direction every other type here follows and
+     * putting a response shape behind a service class. The compensating discipline is the one the
+     * copybook widths already use: the figure is stated once, in this constant, with its provenance
+     * beside it.
+     */
+    private static final int EXECUTION_NAME_WIDTH = 80;
 
     /**
      * Positions the reference declares for the report type name.
@@ -346,6 +387,21 @@ public record ReportSubmissionResponse(
     private static final Pattern ISO_DATE = Pattern.compile("[0-9]{4}-[0-9]{2}-[0-9]{2}");
 
     /**
+     * Alphabet an execution name is composed from: letters, digits, hyphens and underscores.
+     *
+     * <p>Assumptions: the set is the orchestration's, and it is asserted here because the name is the
+     * one component that travels back out as a path segment. A value carrying a character outside this
+     * set would compose a target the status operation refuses -- its own path parameter publishes this
+     * same alphabet -- so a caller would receive a handle it could not use, which is the defect the
+     * name was introduced to close and not a new one to reintroduce.
+     *
+     * <p>Trade-offs: the shape is compiled once into this constant for the same reason the bound shape
+     * above is, rather than handed to {@link String#matches(String)} on a path that runs once per
+     * accepted request.
+     */
+    private static final Pattern EXECUTION_NAME_SHAPE = Pattern.compile("[A-Za-z0-9_-]+");
+
+    /**
      * Accepts the seven resolved values and refuses any that this service should not have produced.
      *
      * <p>Assumptions: the seven components are checked independently and in the order the header
@@ -361,8 +417,9 @@ public record ReportSubmissionResponse(
      * work belonging to {@code com.carddemo.reporting.mapper} at the point the 133-column header
      * line is built.
      *
-     * @param executionArn the {@code String} orchestration handle to store; refused when absent or
-     *     blank
+     * @param executionName the {@code String} orchestration handle to store; refused when absent,
+     *     blank, longer than the {@value #EXECUTION_NAME_WIDTH} positions the orchestration admits, or
+     *     carrying a character outside the alphabet it composes names from
      * @param reportName the {@code String} resolved report type to store; refused unless it is one
      *     of the three values the reference assigns at {@code app/cbl/CORPT00C.cbl} L214, L240 and
      *     L433
@@ -377,14 +434,14 @@ public record ReportSubmissionResponse(
      * @param submittedAt the {@code String} acceptance timestamp to store; refused unless it is
      *     exactly {@link TimestampFormatter#TIMESTAMP_LENGTH} characters, a width that an all-blank
      *     value satisfies
-     * @throws IllegalArgumentException if the handle is absent or blank, if the report type is not
-     *     one of the three reference values, if either header name is absent or exceeds its
-     *     declared width, if either bound is absent or is not 10 characters in the separated form,
-     *     or if the timestamp is absent or is not exactly
+     * @throws IllegalArgumentException if the handle is absent, blank, over-long or outside the
+     *     orchestration's alphabet, if the report type is not one of the three reference values, if
+     *     either header name is absent or exceeds its declared width, if either bound is absent or is
+     *     not 10 characters in the separated form, or if the timestamp is absent or is not exactly
      *     {@link TimestampFormatter#TIMESTAMP_LENGTH} characters
      */
     public ReportSubmissionResponse {
-        executionArn = requireContent(executionArn, "executionArn");
+        executionName = requireExecutionName(executionName);
         reportName = requireReferenceReportName(reportName);
         shortName = requireAtMost(shortName, SHORT_NAME_WIDTH, "shortName");
         longName = requireAtMost(longName, LONG_NAME_WIDTH, "longName");
@@ -402,11 +459,12 @@ public record ReportSubmissionResponse(
     /**
      * Returns the orchestration handle through which the caller observes the accepted run.
      *
-     * @return the {@code String} handle, never {@code null} and never blank, opaque to this record
-     *     and carrying no width bound because no artifact declares one for it
+     * @return the {@code String} execution name, never {@code null} and never blank, opaque to this
+     *     record, within the {@value #EXECUTION_NAME_WIDTH} positions the orchestration admits, and
+     *     exactly the value the status operation of {@code com.carddemo.reporting.api} is addressed by
      */
-    public String executionArn() {
-        return executionArn;
+    public String executionName() {
+        return executionName;
     }
 
     /**
@@ -472,7 +530,7 @@ public record ReportSubmissionResponse(
     }
 
     /**
-     * Requires a component to carry content, used for the one component that has no width bound.
+     * Requires a component to carry content, used for the one component absence would make useless.
      *
      * <p>Alternatives Considered: absence is tested with {@link String#isBlank()} rather than with
      * the shared kernel's input-absence test. That test reads a value as absent only when it is
@@ -500,6 +558,43 @@ public record ReportSubmissionResponse(
         }
 
         return value;
+    }
+
+    /**
+     * Requires the orchestration handle to be a name the status operation can be addressed by.
+     *
+     * <p>Assumptions: three properties are asserted in the order a maintainer can act on them --
+     * content, then width, then alphabet -- so an absent handle is reported as absent, an over-long
+     * one names both lengths, and only a value that is present and short enough is measured against
+     * the alphabet. Testing the alphabet first would report a shape fault for a value whose real
+     * defect was its length.
+     *
+     * <p>Assumptions: this check exists because the handle is the one component that travels back out
+     * as a path segment. Every other component is read and rendered; this one is REPLAYED, so a value
+     * this record accepted but the status path refuses would hand a caller an unusable handle -- which
+     * is the defect that withdrew the ARN, and re-admitting it through a lax check would restore it in
+     * a form that is harder to see.
+     *
+     * @param value the {@code String} execution name as the service supplied it, which may be
+     *     {@code null}
+     * @return the same {@code String} unchanged, once it is known to be addressable
+     * @throws IllegalArgumentException if the value is absent, blank, longer than
+     *     {@value #EXECUTION_NAME_WIDTH} positions, or carries a character outside the alphabet the
+     *     orchestration composes names from
+     */
+    private static String requireExecutionName(String value) {
+        String name = requireAtMost(
+                requireContent(value, "executionName"), EXECUTION_NAME_WIDTH, "executionName");
+
+        if (!EXECUTION_NAME_SHAPE.matcher(name).matches()) {
+            // Assumptions: the refusal describes the admitted alphabet and does NOT reproduce the
+            //   offending name, on the same ground the absent-handle refusal above gives: a message
+            //   quoting an identifier is a message that can be copied somewhere it was not meant to go.
+            throw new IllegalArgumentException(
+                    "executionName must carry only letters, digits, hyphens and underscores");
+        }
+
+        return name;
     }
 
     /**

@@ -38,7 +38,6 @@ import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
 import software.amazon.awssdk.services.sfn.model.ExecutionDoesNotExistException;
 import software.amazon.awssdk.services.sfn.model.ExecutionAlreadyExistsException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
-import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
 
 /**
  * Starts an on-demand transaction-report run for the report-request screen.
@@ -76,9 +75,9 @@ import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
  * readiness to check to the region would be false too.</p>
  *
  * <p>The replacement answers exactly that. A {@code states:StartExecution} call accepts typed input
- * rather than card images, returns an execution ARN that makes the run addressable afterwards, and
- * raises on refusal instead of discarding it, so a submission this class cannot place can no longer
- * be lost quietly. The silence is the one property deliberately NOT reproduced. None of this
+ * rather than card images, is started under a name this class composes and hands back so that the run
+ * is addressable afterwards, and raises on refusal instead of discarding it, so a submission this
+ * class cannot place can no longer be lost quietly. The silence is the one property deliberately NOT reproduced. None of this
  * disparages or retires the baseline path: the migration adds a path, it does not remove one.</p>
  *
  * <h2>Assumptions: the request payload collapses seventeen card images into typed values</h2>
@@ -1084,8 +1083,10 @@ public class ReportExecutionService {
      *     Supplying one makes a re-sent request a duplicate the orchestrator refuses; omitting one makes
      *     every submission a distinct run. See {@code executionName} for why the choice is the
      *     caller's
-     * @return a description of the accepted run, carrying the execution ARN a caller observes it
-     *     through; never {@code null}
+     * @return a description of the accepted run, carrying the execution NAME a caller observes it
+     *     through -- the value {@link #describeExecution(String)} and the status operation in front of
+     *     it are addressed by, never the ARN, whose withdrawal is reasoned at the return statement
+     *     below; never {@code null}
      * @throws NullPointerException if the request, the report name or either bound is {@code null}; the
      *     submission key is the one argument that may be absent
      * @throws ClientInputException if the request does not carry a confirming answer, so that nothing
@@ -1093,9 +1094,9 @@ public class ReportExecutionService {
      *     carries a character or a length an execution name may not hold
      * @throws IllegalStateException if the orchestrator refuses the start, which is the loud failure
      *     that replaces the discarded write and is raised from the guarded call below rather than
-     *     declared by it; and, for the one refusal that is not a failure -- a name already in use --
-     *     only when the configured machine ARN is not the plain shape an execution handle can be
-     *     derived from, since every other such refusal is answered with the existing run
+     *     declared by it. The one refusal that is not a failure -- a name already in use -- never
+     *     reaches here at all: it is answered with the run that already holds the name, under every
+     *     configured state machine, because the answer is that name and no ARN is derived for it
      * @throws IllegalArgumentException if the assembled description is one the response contract
      *     refuses, which has two reachable causes worth naming because neither is visible from this
      *     method's own statements: a {@code reportName} that is not one of the three the baseline
@@ -1161,9 +1162,14 @@ public class ReportExecutionService {
         String submissionKey = suppliedKey == null ? currentSubmissionKey() : suppliedKey;
         String executionName = executionName(reportName, startDate, endDate, submissionKey);
 
-        StartExecutionResponse started;
         try {
-            started = sfnClient.startExecution(StartExecutionRequest.builder()
+            // WHY : ⚠️ Refactoring Rationale: the start response is DISCARDED where it was assigned to
+            //       a local and read for its execution ARN. Since the handle this method returns is the
+            //       name it composed above, the response carries nothing this method needs: its ARN is
+            //       derivable from that name, and holding a local nobody reads would leave a reader
+            //       looking for the use. The call is still made inside the guard, because what matters
+            //       here is that it either succeeded or raised.
+            sfnClient.startExecution(StartExecutionRequest.builder()
                     .stateMachineArn(stateMachineArn)
                     .name(executionName)
                     .input(executionInput)
@@ -1189,22 +1195,21 @@ public class ReportExecutionService {
             //       would need a describe call whose only product is a timestamp, and the stamp
             //       documents when THIS request was accepted, which is what a caller correlating its
             //       own retry against its own log needs.
-            String existing = executionArnOf(executionName);
-            if (existing == null) {
-                // WHY : Assumptions: the ARN could not be derived, which happens only for a
-                //       configured machine ARN that is qualified by a version or an alias, and the
-                //       failure is reported rather than guessed at. Answering a handle this method
-                //       assembled wrongly would give a caller an identifier that resolves to
-                //       nothing, which is worse than the loud failure.
-                LOG.error("event=report.submission.duplicate.unresolved reportName={}"
-                        + " startDate={} endDate={} failure={}",
-                        reportName, startDate, endDate, ThrowableDigest.of(alreadyStarted));
-                throw new IllegalStateException(
-                        "a " + reportName + " report submission was already started but its handle"
-                                + " could not be derived from the configured state machine",
-                        alreadyStarted);
-            }
-
+            // WHY : ⚠️ Refactoring Rationale: the handle answered here is the execution NAME, and the
+            //       derivation of an ARN from it -- together with the failure this arm raised when that
+            //       derivation was impossible -- is WITHDRAWN. The derivation existed only to fill the
+            //       component this record no longer carries, so keeping it would compute a value
+            //       nothing reads and keep a failure mode alive for a value nobody would receive. The
+            //       name is the same one the colliding first attempt was started under, which is
+            //       precisely why the collision happened, so no derivation is needed to answer it.
+            // WHY : Assumptions: withdrawing that failure makes the two accepted paths agree rather
+            //       than diverge, which is the point worth stating because it looks like a lost check.
+            //       The condition it reported -- a configured machine ARN qualified by a version or an
+            //       alias, from which no execution ARN can be composed -- was never detected on a
+            //       FRESH start at all: that path answered 201 and left the qualification to surface on
+            //       the first status read, where describeExecution below still raises it loudly. A
+            //       check that fired on a duplicate and not on a first submission reported a
+            //       deployment-configuration fault on whichever request happened to be a retry.
             // WHY : Assumptions: this is an INFO record and not a warning, because nothing failed --
             //       a retry was recognised and folded onto the run it was retrying. The submission
             //       key is recorded because it is the only field that ties the two requests together,
@@ -1215,7 +1220,7 @@ public class ReportExecutionService {
                     reportName, startDate, endDate, submissionKey, executionName);
 
             return new ReportSubmissionResponse(
-                    existing,
+                    executionName,
                     reportName,
                     ReportBandLayouts.REPORT_SHORT_NAME,
                     ReportBandLayouts.REPORT_LONG_NAME,
@@ -1261,8 +1266,19 @@ public class ReportExecutionService {
                     refused);
         }
 
+        // WHY : ⚠️ Refactoring Rationale: the handle returned is the execution NAME this method
+        //       composed, and it was `started.executionArn()`. A review established that the ARN left
+        //       the accepted run unobservable: describeExecution below -- and the status operation that
+        //       calls it -- is addressed by NAME and composes the ARN itself from the configured
+        //       machine, so the one value a caller held was the one value that operation does not
+        //       accept. The name was already in scope here and was discarded instead.
+        // WHY : Alternatives Considered: returning both. Rejected because the ARN had no consumer
+        //       anywhere in the repository outside this module's own tests, and it carries the account
+        //       identifier and the region of the deployment that ran the report -- infrastructure
+        //       detail a caller of this surface has no use for. The reasoning is recorded once on
+        //       ReportSubmissionResponse and is not restated here.
         return new ReportSubmissionResponse(
-                started.executionArn(),
+                executionName,
                 reportName,
                 ReportBandLayouts.REPORT_SHORT_NAME,
                 ReportBandLayouts.REPORT_LONG_NAME,
@@ -1383,11 +1399,19 @@ public class ReportExecutionService {
      * Reports what became of one accepted submission, and where its artifact is when there is one.
      *
      * <p>⚠️ Refactoring Rationale: this is the operation the submission handle existed for and did not have.
-     * A review found that {@code executionArn} was returned to a caller and consumed by nothing: there was
+     * A review found that the handle was returned to a caller and consumed by nothing: there was
      * no way to learn whether a run was still going, had succeeded or had failed, and no way to reach the
      * document it produced. The reference has the same gap for the same reason -- it writes card images to a
      * transient data queue and receives no identity back at all -- so this is a documented improvement
      * rather than a port, registered as D-REPORT-LIFECYCLE-OBSERVABLE.
+     *
+     * <p>⚠️ Refactoring Rationale: a second review then found that this operation and the submission did
+     * not MEET. The submission returned the execution ARN in full while this one is addressed by name, so
+     * a caller held the one value it could not use here and its only recourse -- sending the ARN -- was
+     * percent-encoded into a single segment and refused for its shape. {@link ReportSubmissionResponse}
+     * now carries {@code executionName}, exactly the value this method takes, and the ARN is withdrawn
+     * from that response because it is composed here from the configured machine and was read by nothing
+     * else.
      *
      * <p>Assumptions: the caller names the execution by its NAME and never by an ARN, and the ARN is
      * composed here from the configured state machine. That is a security property rather than a

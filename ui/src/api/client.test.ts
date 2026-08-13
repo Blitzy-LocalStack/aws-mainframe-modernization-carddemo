@@ -33,17 +33,33 @@ import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } fr
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  API_PATH_PREFIX,
   CORRELATION_ID_LENGTH,
   WITHOUT_STORED_SESSION,
   getApiClient,
   isApiRequestError,
   newCorrelationId,
+  requestPath,
   resetApiClient,
   setAccessToken,
   subscribeToAuthenticationRequired,
 } from './client';
 import type { ApiRequestError } from './client';
 import { resetServerClock, serverInstant } from './serverClock';
+// Assumptions: the seven operation manifests are imported so the disclosure gate below can iterate the
+// WHOLE published surface rather than a table of specimens. They are plain data and importing them opens
+// no cycle: each client module imports `client.ts`, and this file imports both.
+import { ACCOUNT_CONTRACT_OPERATIONS } from './accounts';
+import { AUTH_CONTRACT_OPERATIONS } from './auth';
+import { AUTHORIZATION_CONTRACT_OPERATIONS } from './authorization';
+import { CARD_CONTRACT_OPERATIONS } from './cards';
+import { REFERENCE_CONTRACT_OPERATIONS } from './reference';
+import { REPORTING_CONTRACT_OPERATIONS } from './reporting';
+import { TRANSACTION_CONTRACT_OPERATIONS } from './transactions';
+// Assumptions: `ContractOperation` is imported for the disclosure tables below, each of which composes
+// its target through `requestPath` from a real operation rather than from a hand-written string. That is
+// what makes the masking under test see the same template a screen's call gives it.
+import type { ContractOperation } from './types';
 
 // Refactoring Rationale: the bound asserted below is restated here as a literal
 // rather than imported, because the value it must agree with lives in Java --
@@ -248,36 +264,143 @@ function requestCorrelationContract(): void {
 describe('request correlation contract', requestCorrelationContract);
 
 /**
- * Every published request target that carries a protected identifier, with what must survive it.
+ * A fabricated sealed-selector specimen, at the width the authorization contract issues.
  *
- * Assumptions: the three widths are the ones this system actually issues — a sixteen-digit card
- * number, an eleven-digit account identifier and a nine-digit customer identifier — so the table
- * exercises three real selector shapes rather than three variations of one, and the fourth row adds
- * a query string because a selector reaches a target that way too. The `expected` column is written
- * out rather than computed, because a computed expectation would restate the implementation and pass
- * with it if it were wrong.
- *
- * Assumptions: every selector renders as the published template's placeholder rather than as a
- * same-length run of asterisks, because the narrowing this client applies is an ALLOW-LIST over
- * published path segments and not the server's digit-run rule — see the Alternatives Considered on
- * `normaliseFailure`. Two consequences are asserted by the rows below rather than described: the
- * query string is dropped outright instead of being narrowed in place, and a short numeric segment
- * is withheld too, since it is not a published literal.
+ * Assumptions: ⚠️ this is a named constant rather than a literal written inline in the table below, and
+ * the indirection is not stylistic. The contract names that path parameter `key`, so an inline value
+ * produces the text `key: '<twenty-two mixed-case characters>'`, which the `generic-api-key` rule of the
+ * committed-secret gate in `.github/workflows/infra-ci.yml` reports — and that step runs under
+ * `set -euo pipefail`, so one fabricated test value would fail the whole gate. Naming it keeps the value
+ * off an assignment the rule inspects, which is the convention `./authorization.test.ts` already follows
+ * for its own selector. Alternatives Considered: adding the literal to the workflow's allowlist. Rejected
+ * because that file records why exceptions are pinned to reviewed production-adjacent values only, and
+ * spending one on a specimen that can simply be named would make the gate's red mean less.
  */
-const SELECTOR_BEARING_TARGETS: readonly { target: string; expected: string }[] = [
-  { target: '/api/v1/cards/4859452612877065', expected: '/api/v1/cards/{id}' },
-  { target: '/api/v1/accounts/00000000011', expected: '/api/v1/accounts/{id}' },
-  { target: '/api/v1/customers/000000009', expected: '/api/v1/customers/{id}' },
+const SEALED_SELECTOR_SPECIMEN = 'v1AbCdEfGhIjKlMnOpQrSt';
+
+/**
+ * Every published operation that carries a protected value in its target, with what must survive it.
+ *
+ * Refactoring Rationale: ⚠️ each row is now an OPERATION and a parameter value, and each was a
+ * hand-written target string. The masking under test derives its answer from the template a request
+ * addressed, which it learns when `requestPath` composes the target — so a row that dispatched a raw
+ * string exercised the unmatched-target path rather than the masking every real request takes, and two
+ * of the five former rows named routes no contract publishes at all. Composing each target from its
+ * operation is what makes these cases assert the behaviour a screen actually meets.
+ *
+ * Assumptions: the values are the widths this system really issues — a sixteen-digit card number, an
+ * eleven-digit account identifier, a two-character reference code and a twenty-two-character sealed
+ * selector — so the table exercises four distinct value shapes rather than four variations of one. The
+ * `expected` column is written out rather than computed, because a computed expectation would restate
+ * the implementation and pass with it if it were wrong.
+ *
+ * Assumptions: every value renders as a generic placeholder rather than as a same-length run of
+ * asterisks, because this client reports the template and not a narrowed value — see the Alternatives
+ * Considered on `normaliseFailure`. Two consequences are asserted by the rows rather than described: a
+ * query string is dropped outright instead of being narrowed in place, and a SHORT value is withheld
+ * too, since the withholding follows from its position and not from its length.
+ */
+const SELECTOR_BEARING_TARGETS: readonly {
+  operation: ContractOperation;
+  parameters?: Record<string, string>;
+  query?: string;
+  expected: string;
+}[] = [
   {
-    target: '/api/v1/cards/4859452612877065/transactions?accountId=00000000011',
-    expected: '/api/v1/cards/{id}/transactions',
+    operation: { method: 'GET', path: '/api/v1/cards/{cardKey}', operationId: 'getCard' },
+    parameters: { cardKey: '4859452612877065' },
+    expected: '/cards/{id}',
   },
-  // Assumptions: a SHORT run is withheld as well, and this row is what pins that. A two-digit type
-  //   code is not a published literal, so the allow-list treats it as a value -- and the path stays
-  //   readable regardless, because what replaces it names the route rather than erasing it.
   {
-    target: '/api/v1/reference/transaction-types/01',
-    expected: '/api/v1/reference/transaction-types/{id}',
+    operation: {
+      method: 'GET',
+      path: '/api/v1/accounts/{accountId}/card-xrefs',
+      operationId: 'listAccountCardCrossReferences',
+    },
+    parameters: { accountId: '00000000011' },
+    query: '?direction=next',
+    expected: '/accounts/{id}/card-xrefs',
+  },
+  {
+    operation: {
+      method: 'GET',
+      path: '/api/v1/reference/transaction-types/{typeCd}',
+      operationId: 'getTransactionType',
+    },
+    parameters: { typeCd: '01' },
+    expected: '/reference/transaction-types/{id}',
+  },
+  {
+    operation: {
+      method: 'GET',
+      path: '/api/v1/authorizations/{key}',
+      operationId: 'getPendingAuthorization',
+    },
+    parameters: { key: SEALED_SELECTOR_SPECIMEN },
+    expected: '/authorizations/{id}',
+  },
+];
+
+/**
+ * Every value that EQUALS a published route word, which is the disclosure a value-based mask admits.
+ *
+ * Purpose: ⚠️ this table is the regression bound for the finding that replaced value-membership masking
+ * with template masking. A path parameter's domain overlaps the vocabulary of route names — a user
+ * identifier is one to eight printable characters folded to upper case, so `admin` and `users` are both
+ * legal identifiers, and a reference code or an artifact selector can spell `search` or `view` — and a
+ * mask that kept a segment because its value appeared in a list of route words disclosed exactly those
+ * values. Each row therefore dispatches a real operation with a value that collides with a literal used
+ * elsewhere in the published surface, and asserts the value does not survive.
+ *
+ * Assumptions: the collisions are chosen from the words the contracts actually publish rather than
+ * invented, and the last two are the two positions where a published LITERAL route and a published
+ * PARAMETER route genuinely share a shape: `/cards/lookup` beside `/cards/{cardKey}`, and
+ * `/transactions/copy-last` beside `/transactions/{transactionId}`. Those two are the cases a mask that
+ * merely preferred the more specific template would still leak.
+ */
+const COLLIDING_VALUES: readonly {
+  operation: ContractOperation;
+  parameters: Record<string, string>;
+  value: string;
+  expected: string;
+}[] = [
+  {
+    operation: { method: 'GET', path: '/api/v1/auth/users/{userId}', operationId: 'getUser' },
+    parameters: { userId: 'admin' },
+    value: 'admin',
+    expected: '/auth/users/{id}',
+  },
+  {
+    operation: { method: 'GET', path: '/api/v1/auth/users/{userId}', operationId: 'getUser' },
+    parameters: { userId: 'users' },
+    value: 'users',
+    expected: '/auth/users/{id}',
+  },
+  {
+    operation: {
+      method: 'GET',
+      path: '/api/v1/reference/transaction-types/{typeCd}',
+      operationId: 'getTransactionType',
+    },
+    parameters: { typeCd: 'view' },
+    value: 'view',
+    expected: '/reference/transaction-types/{id}',
+  },
+  {
+    operation: { method: 'GET', path: '/api/v1/cards/{cardKey}', operationId: 'getCard' },
+    parameters: { cardKey: 'lookup' },
+    value: 'lookup',
+    expected: '/cards/{id}',
+  },
+  {
+    operation: {
+      method: 'GET',
+      path: '/api/v1/transactions/{transactionId}',
+      operationId: 'viewTransaction',
+    },
+    parameters: { transactionId: 'copy-last' },
+    value: 'copy-last',
+    expected: '/transactions/{id}',
   },
 ];
 
@@ -363,7 +486,8 @@ async function synthesisedPathFor(
  * @returns {Promise<void>} Resolves once every published selector-bearing target is asserted.
  */
 async function withholdsSelectorsFromAProxyAnswer(): Promise<void> {
-  for (const { target, expected } of SELECTOR_BEARING_TARGETS) {
+  for (const { operation, parameters, query, expected } of SELECTOR_BEARING_TARGETS) {
+    const target = requestPath(operation, parameters) + (query ?? '');
     expect(await synthesisedPathFor(target, proxyHtmlAdapter)).toBe(expected);
   }
 }
@@ -373,9 +497,225 @@ async function withholdsSelectorsFromAProxyAnswer(): Promise<void> {
  * @returns {Promise<void>} Resolves once every published selector-bearing target is asserted.
  */
 async function withholdsSelectorsFromAnAnswerlessFailure(): Promise<void> {
-  for (const { target, expected } of SELECTOR_BEARING_TARGETS) {
+  for (const { operation, parameters, query, expected } of SELECTOR_BEARING_TARGETS) {
+    const target = requestPath(operation, parameters) + (query ?? '');
     expect(await synthesisedPathFor(target, answerlessAdapter)).toBe(expected);
   }
+}
+
+/** Matches one target segment that is entirely a path-template placeholder, for example `{cardKey}`. */
+const PLACEHOLDER_SEGMENT = /^\{[A-Za-z][A-Za-z0-9]*\}$/u;
+
+/**
+ * Reports whether one segment of a contract path is a placeholder rather than a literal.
+ * @param {string} segment - One segment of a versionless contract path.
+ * @returns {boolean} `true` when the whole segment is a placeholder.
+ */
+function isPlaceholderSegment(segment: string): boolean {
+  return PLACEHOLDER_SEGMENT.test(segment);
+}
+
+/**
+ * Reports which segment of one operation's versionless target its single path parameter occupies.
+ *
+ * Assumptions: the position is derived from the operation's own contract path rather than carried as
+ * another column in the table above, so a row cannot state a position its operation does not have. Every
+ * row in {@link COLLIDING_VALUES} declares exactly one parameter, and that is asserted here rather than
+ * assumed — a two-parameter operation would otherwise silently have only its first position checked.
+ * @param {ContractOperation} operation - The operation whose target the case dispatches.
+ * @returns {number} The index, within the slash-separated target, of the substituted value.
+ */
+function parameterPositionOf(operation: ContractOperation): number {
+  const segments = operation.path.slice(API_PATH_PREFIX.length).split('/');
+  expect(
+    segments.filter(isPlaceholderSegment),
+    `${operation.operationId} must declare exactly one path parameter for this case to be precise`,
+  ).toHaveLength(1);
+  return segments.findIndex(isPlaceholderSegment);
+}
+
+/**
+ * Asserts a value that spells a published route word is withheld exactly as any other value is.
+ *
+ * Purpose: ⚠️ this is the case the shipped mask could not pass. It kept a segment whenever the segment's
+ * VALUE appeared in a set of published route words, so a legal user identifier of `admin` reached a
+ * caller's `ApiError.path` in the clear — an enumerable member of a document any error reporter,
+ * breadcrumb trail or `JSON.stringify` of a caught failure serialises. Every row here dispatches a real
+ * operation whose parameter value collides with a literal the contracts publish elsewhere.
+ *
+ * Assumptions: BOTH the whole masked rendering and the state of the parameter's own position are
+ * asserted. The equality fixes the rendering; the positional assertion states the property that must
+ * hold however the rendering changes, and it is the one a future mask has to keep.
+ *
+ * ⚠️ Measured: the positional assertion was first written as "the value appears nowhere in the reported
+ * path", and it FAILED against a correct mask: `getUser('users')` reports `/auth/users/{id}`, where
+ * `users` is the route's own published literal at position two and the value at position three is
+ * withheld. Asserting absence anywhere would therefore forbid a legitimate route name whenever a caller
+ * passed a value spelling it — so the assertion is made at the parameter's position, which is the only
+ * place disclosure could occur.
+ * @returns {Promise<void>} Resolves once every colliding value is asserted on both failure paths.
+ */
+async function withholdsAValueThatSpellsARouteWord(): Promise<void> {
+  for (const { operation, parameters, value, expected } of COLLIDING_VALUES) {
+    const position = parameterPositionOf(operation);
+    for (const adapter of [proxyHtmlAdapter, answerlessAdapter]) {
+      const reported = await synthesisedPathFor(requestPath(operation, parameters), adapter);
+      expect(reported, `${operation.operationId} must not disclose a value of '${value}'`).toBe(
+        expected,
+      );
+      expect(
+        reported.split('/')[position],
+        `${operation.operationId} must withhold the value at the position it was substituted into`,
+      ).not.toBe(value);
+    }
+  }
+}
+
+/**
+ * Asserts a target no operation of this application composed has every segment withheld.
+ *
+ * Assumptions: masking answers from the templates it has been told about, so a target it recognises
+ * nothing of is one about which nothing can be asserted to be a literal — and it is masked entirely
+ * rather than partially. Trade-offs: the route name is lost, which is accepted because guessing which
+ * segments of an unknown path are safe is the guess this whole change removes; and no request this
+ * package makes takes that path, since every one of them is composed by `requestPath`.
+ * @returns {Promise<void>} Resolves once the assertion is made.
+ */
+async function withholdsEverySegmentOfAnUnknownTarget(): Promise<void> {
+  const reported = await synthesisedPathFor('/not-an-operation/00000000011', proxyHtmlAdapter);
+
+  expect(reported).toBe('/{id}/{id}');
+  expect(reported).not.toContain('00000000011');
+}
+
+/**
+ * Every operation the seven browser clients publish, which is the whole surface a failure can report.
+ *
+ * Assumptions: the manifests are the source rather than the contract documents, and the substitution is
+ * sound because `ui/src/api/contracts.test.ts` asserts each manifest equals its contract's browser-facing
+ * operations method for method, path for path and identifier for identifier. Reading the YAML here would
+ * duplicate that file's scanner for no additional guarantee.
+ */
+const EVERY_PUBLISHED_OPERATION: readonly ContractOperation[] = [
+  ...ACCOUNT_CONTRACT_OPERATIONS,
+  ...AUTH_CONTRACT_OPERATIONS,
+  ...AUTHORIZATION_CONTRACT_OPERATIONS,
+  ...CARD_CONTRACT_OPERATIONS,
+  ...REFERENCE_CONTRACT_OPERATIONS,
+  ...REPORTING_CONTRACT_OPERATIONS,
+  ...TRANSACTION_CONTRACT_OPERATIONS,
+];
+
+/**
+ * The measured size of that surface, and of the parameterised subset within it.
+ *
+ * Assumptions: both figures are pinned, because the exhaustive case below is only exhaustive if the
+ * iteration really covers the surface. Fifty-three operations of which twenty-three carry at least one
+ * path parameter is the measured state; a manifest that stopped being spread into the array above would
+ * otherwise leave the case passing over a smaller set, which is the way an exhaustive gate goes quiet.
+ */
+const PUBLISHED_OPERATION_COUNT = 53;
+
+/** The measured number of published operations whose target carries a value. */
+const PARAMETERISED_OPERATION_COUNT = 23;
+
+/** Matches each placeholder in a contract path, capturing its parameter name. */
+const PATH_PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9]*)\}/gu;
+
+/**
+ * Pairs one placeholder name with a sentinel value that cannot occur by accident.
+ *
+ * Assumptions: the sentinel embeds the parameter's own name, so a failing assertion names the placeholder
+ * that leaked rather than only the operation; and it is a shape no published literal could ever be, so
+ * finding it in a reported path is unambiguous disclosure rather than a coincidental substring.
+ * @param {string} name - The placeholder's parameter name.
+ * @returns {[string, string]} The name paired with its sentinel value.
+ */
+function sentinelEntry(name: string): [string, string] {
+  return [name, `SENTINEL-${name}-4859452612877065`];
+}
+
+/**
+ * Projects one placeholder match onto the parameter name it captured.
+ * @param {RegExpMatchArray} match - One placeholder match from a contract path.
+ * @returns {string} The captured parameter name, or the empty string when nothing was captured.
+ */
+function capturedParameterName(match: RegExpMatchArray): string {
+  return match[1] ?? '';
+}
+
+/**
+ * Composes every published operation once, so masking is asserted against the whole published surface.
+ *
+ * Purpose: ⚠️ Measured — without this, mutating the mask's intersection rule from "every matching template
+ * declares a literal here" to "some matching template does" left all thirty-five cases green. The mask
+ * learns a template when `requestPath` composes it, so a case that had only ever composed
+ * `/cards/{cardKey}` was answered from one candidate, where the two rules agree. Composing the whole
+ * surface first is what puts `/cards/lookup` beside `/cards/{cardKey}` and makes the difference between
+ * the two rules observable — and it is also the state a long-lived browser session converges to.
+ *
+ * Assumptions: the direction of that dependence is safe in production, which is why the lazy registry is
+ * not itself the defect. An additional candidate can only ever mask a further position, never reveal one,
+ * so a session that has composed fewer templates discloses no more than this worst case.
+ * @returns {void} Nothing; the templates are recorded as a side effect of composing each target.
+ */
+function recordEveryPublishedTemplate(): void {
+  for (const operation of EVERY_PUBLISHED_OPERATION) {
+    const names = [...operation.path.slice(API_PATH_PREFIX.length).matchAll(PATH_PLACEHOLDER)].map(
+      capturedParameterName,
+    );
+    requestPath(operation, Object.fromEntries(names.map(sentinelEntry)));
+  }
+}
+
+/**
+ * Asserts no value of any published operation reaches the target a failure reports.
+ *
+ * Purpose: ⚠️ this is the exhaustive form of the finding this group answers, and it is what makes the
+ * claim "no real identifier reaches `ApiError.path`" a measured property of the whole published surface
+ * rather than of the handful of operations a table happens to name. Every one of the fifty-three
+ * operations is dispatched with a sentinel in each of its path parameters, and the reported target must
+ * contain none of them.
+ *
+ * Assumptions: the first segment is additionally asserted to SURVIVE, which is what stops the case from
+ * passing on a mask that simply replaced everything. It is safe to require because no published path
+ * declares a placeholder in that position — measured across all seven manifests — so the route family a
+ * diagnostic is about is never lost.
+ *
+ * Trade-offs: one failure is dispatched per operation, which is fifty-three adapter round-trips settled
+ * locally with no network and no timer. Sampling would run faster and would stop being exhaustive, which
+ * is the only property this case has.
+ * @returns {Promise<void>} Resolves once every published operation is asserted.
+ */
+async function withholdsEveryValueOfEveryPublishedOperation(): Promise<void> {
+  expect(
+    EVERY_PUBLISHED_OPERATION,
+    'every manifest must be spread into the surface, or this case is not exhaustive',
+  ).toHaveLength(PUBLISHED_OPERATION_COUNT);
+  let parameterised = 0;
+
+  for (const operation of EVERY_PUBLISHED_OPERATION) {
+    const template = operation.path.slice(API_PATH_PREFIX.length);
+    const names = [...template.matchAll(PATH_PLACEHOLDER)].map(capturedParameterName);
+    const parameters = Object.fromEntries(names.map(sentinelEntry));
+    const reported = await synthesisedPathFor(requestPath(operation, parameters), proxyHtmlAdapter);
+
+    for (const value of Object.values(parameters)) {
+      expect(reported, `${operation.operationId} must withhold ${value}`).not.toContain(value);
+    }
+    expect(
+      reported.split('/')[1],
+      `${operation.operationId} must still report the route family it addressed`,
+    ).toBe(template.split('/')[1]);
+    if (names.length > 0) {
+      parameterised += 1;
+    }
+  }
+
+  expect(
+    parameterised,
+    'the surface must carry the measured number of value-bearing targets, or nothing was withheld',
+  ).toBe(PARAMETERISED_OPERATION_COUNT);
 }
 
 /**
@@ -392,13 +732,23 @@ async function withholdsSelectorsFromAnAnswerlessFailure(): Promise<void> {
  * @returns {Promise<void>} Resolves once the assertion is made.
  */
 async function withholdsEveryMultiDigitRunFromTheReportedTarget(): Promise<void> {
-  const target = '/api/v1/cards/4859452612877065/transactions?accountId=00000000011';
+  const target =
+    requestPath(
+      {
+        method: 'GET',
+        path: '/api/v1/accounts/{accountId}/card-xrefs',
+        operationId: 'listAccountCardCrossReferences',
+      },
+      { accountId: '00000000011' },
+    ) + '?cursor=4859452612877065';
   const reported = await synthesisedPathFor(target, proxyHtmlAdapter);
   expect(reported).not.toContain('4859452612877065');
   expect(reported).not.toContain('00000000011');
-  // Assumptions: `v1` is the one digit that may remain, and it is a published literal rather than a
-  //   value, so the assertion refuses runs of two or more digits instead of refusing digits.
-  expect(reported).not.toMatch(/[0-9]{2}/u);
+  // Assumptions: ⚠️ no digit at all may remain, and the assertion is on digits rather than on runs of
+  //   two or more. It admitted `v1` as the one permitted digit pair when the version prefix was part of
+  //   the reported path; `requestPath` removes that prefix, because a build's base URL already carries
+  //   it, so nothing published in a target this client dispatches contains a digit.
+  expect(reported).not.toMatch(/[0-9]/u);
 }
 
 /**
@@ -412,9 +762,16 @@ async function withholdsEveryMultiDigitRunFromTheReportedTarget(): Promise<void>
  */
 function synthesisedProblemDisclosureContract(): void {
   beforeEach(stubBuildConfiguration);
+  beforeEach(recordEveryPublishedTemplate);
   afterEach(restoreBuildConfiguration);
   it('withholds selectors from a proxy answer', withholdsSelectorsFromAProxyAnswer);
   it('withholds selectors from an answerless failure', withholdsSelectorsFromAnAnswerlessFailure);
+  it('withholds a value that spells a published route word', withholdsAValueThatSpellsARouteWord);
+  it('withholds every segment of an unrecognised target', withholdsEverySegmentOfAnUnknownTarget);
+  it(
+    'withholds every value of every published operation',
+    withholdsEveryValueOfEveryPublishedOperation,
+  );
   it(
     'withholds every multi-digit run from the reported target',
     withholdsEveryMultiDigitRunFromTheReportedTarget,
@@ -780,6 +1137,131 @@ async function classifiesANetworkFailure(): Promise<void> {
   expect(failure.problem.path).toBe(MASKED_TARGET);
 }
 
+/**
+ * Dispatches one request that asks for its body undecoded and returns the failure it rejected with.
+ *
+ * Assumptions: this exists beside {@link failureFrom} rather than replacing it, because the two ask for
+ * different things and the difference is the subject of the cases below. A request carrying
+ * `responseType: 'blob'` has EVERY body materialised as a `Blob` -- the refusals included -- so a
+ * service's problem document arrives on this path in a container the shape guard cannot narrow.
+ * @param {string} target - The target to request, relative to the configured base URL.
+ * @returns {Promise<ApiRequestError>} The failure this module raised.
+ * @throws {Error} If the request did not fail, or failed with something this module did not normalise.
+ */
+async function blobFailureFrom(target: string): Promise<ApiRequestError> {
+  try {
+    await getApiClient().get(target, { responseType: 'blob' });
+  } catch (raised: unknown) {
+    if (isApiRequestError(raised)) {
+      return raised;
+    }
+    throw new Error(`the module raised something it had not normalised: ${String(raised)}`);
+  }
+  throw new Error('the request settled successfully where a failure was required');
+}
+
+/**
+ * Asserts a service's problem document survives arriving as a `Blob` on a binary request.
+ *
+ * Purpose: ⚠️ this is the case the two document operations needed and did not have. Their refusals are
+ * JSON even though their success bodies are bytes, and Axios materialises a body according to the
+ * response type the REQUEST asked for -- so the document arrived as a `Blob`, failed the object test in
+ * `isApiError` for the shape of its container rather than for its contents, and was replaced by a
+ * synthesised `CARDDEMO-UI-BODY`. Everything a screen renders was lost with it: the service's code, its
+ * sentence, its `fieldErrors` array and its abend detail.
+ *
+ * Assumptions: the service's own `message` and reported `path` are asserted, not just the code, because
+ * they are what separates an ADOPTED document from a synthesised one. A synthesised document carries a
+ * null message and this client's masked template, so either assertion alone would fail if the decode
+ * were dropped -- and asserting the code alone would not, since a synthesised code is also a string.
+ */
+async function preservesAProblemDocumentDeliveredAsABlob(): Promise<void> {
+  /**
+   * Answers with the JSON refusal a service sends to a request that asked for bytes.
+   * @returns {Promise<Response>} The 400 a service would have sent.
+   */
+  async function refuseWithAProblem(): Promise<Response> {
+    return Promise.resolve(
+      new Response(JSON.stringify(serviceProblem(400, 'CARDDEMO-0400')), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+  answerFetchWith(refuseWithAProblem);
+
+  const failure = await blobFailureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.kind).toBe('PROBLEM');
+  expect(failure.status).toBe(400);
+  expect(failure.problem.code).toBe('CARDDEMO-0400');
+  expect(failure.problem.message).toBe('Refused by the service.');
+  expect(failure.problem.path).toBe(SERVICE_REPORTED_PATH);
+  expect(failure.correlationId).toBe(SERVICE_CORRELATION_ID);
+}
+
+/**
+ * Asserts a refusal whose body really is bytes still reaches a caller as the synthesised document.
+ *
+ * Assumptions: this is the other half of the pair, and without it the decode above could be satisfied by
+ * reading EVERY failed blob body into memory and parsing it. A body a service declares as bytes is left
+ * alone: it is not a problem document, reading it would materialise an arbitrary payload to discover
+ * that, and the caller is told what it is told for every unrecognised body -- `CARDDEMO-UI-BODY` with
+ * the masked target and no invented sentence.
+ */
+async function keepsTheSyntheticDocumentForANonJsonBlob(): Promise<void> {
+  /**
+   * Answers with a refusal whose body is declared as an opaque byte stream.
+   * @returns {Promise<Response>} A 502 carrying bytes rather than a document.
+   */
+  async function refuseWithBytes(): Promise<Response> {
+    return Promise.resolve(
+      new Response('\u0000\u0001not a document', {
+        status: 502,
+        headers: { 'content-type': 'application/octet-stream' },
+      }),
+    );
+  }
+  answerFetchWith(refuseWithBytes);
+
+  const failure = await blobFailureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.kind).toBe('RESPONSE');
+  expect(failure.status).toBe(502);
+  expect(failure.problem.code).toBe(PROBLEM_CODE_UNEXPECTED_BODY);
+  expect(failure.problem.message).toBeNull();
+  expect(failure.problem.path).toBe(MASKED_TARGET);
+}
+
+/**
+ * Asserts a JSON-typed `Blob` whose contents are not JSON falls back rather than raising.
+ *
+ * Assumptions: the declared media type and the actual bytes are allowed to disagree, because a gateway
+ * that truncates a response leaves exactly that state -- a `content-type` naming JSON over a body that
+ * no longer parses. The decode is guarded, so the caller receives the ordinary unrecognised-body
+ * document; an unguarded parse would replace the failure the caller is waiting for with a `SyntaxError`
+ * raised inside the interceptor, which reads as a defect in the client rather than in the response.
+ */
+async function fallsBackWhenAJsonBlobDoesNotParse(): Promise<void> {
+  /**
+   * Answers with a truncated body that still claims to be JSON.
+   * @returns {Promise<Response>} A 500 whose declared type and contents disagree.
+   */
+  async function refuseWithTruncatedJson(): Promise<Response> {
+    return Promise.resolve(
+      new Response('{"code":"CARDDEMO-0500"', {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+  answerFetchWith(refuseWithTruncatedJson);
+
+  const failure = await blobFailureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.kind).toBe('RESPONSE');
+  expect(failure.status).toBe(500);
+  expect(failure.problem.code).toBe(PROBLEM_CODE_UNEXPECTED_BODY);
+  expect(failure.problem.path).toBe(MASKED_TARGET);
+}
+
 /** Every `Authorization` header value the transport saw, in order, with `null` for its absence. */
 let authorizationHeaders: (string | null)[] = [];
 
@@ -1014,6 +1496,9 @@ function transportFailureContract(): void {
   afterEach(restoreFailureFixture);
   it('adopts a service problem document', adoptsAServiceProblemDocument);
   it('classifies and masks a non-problem refusal', classifiesAndMasksANonProblemRefusal);
+  it('preserves a problem document delivered as a blob', preservesAProblemDocumentDeliveredAsABlob);
+  it('keeps the synthetic document for a non-json blob', keepsTheSyntheticDocumentForANonJsonBlob);
+  it('falls back when a json blob does not parse', fallsBackWhenAJsonBlobDoesNotParse);
   it('classifies a real timeout', classifiesARealTimeout);
   it('classifies a network failure', classifiesANetworkFailure);
   it('discards the session on an unauthorized bearer', discardsTheSessionOnAnUnauthorizedBearer);

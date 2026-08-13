@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.reporting.dto.ReportRequest;
+import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -22,6 +23,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.ExecutionAlreadyExistsException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
 import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
 
@@ -238,6 +240,51 @@ class ReportSubmissionNamingTest {
                 .doesNotHaveDuplicates();
     }
 
+    // WHY : ⚠️ Assumptions: the handle is asserted on BOTH accepted paths, and this is the second of
+    //       them, because a review found the submission answering a value the status operation cannot be
+    //       addressed by and the two paths build their answer independently. A fix applied to the fresh
+    //       start alone would leave a retried submission -- the one a client makes precisely when it has
+    //       lost the first answer and most needs a usable handle -- carrying the old value, and nothing
+    //       else in this module exercises the duplicate arm at all.
+    /**
+     * Asserts a fresh start answers with the name it started the run under.
+     */
+    @Test
+    @DisplayName("a fresh start answers with the name the run was started under")
+    void aFreshStartAnswersWithTheStartedName() {
+        ReportSubmissionResponse accepted = submit("monthly-2022-07-fresh");
+
+        assertThat(accepted.executionName())
+                .as("the handle a caller polls with must be the name the orchestrator accepted")
+                .isEqualTo(startedNames(1).get(0));
+    }
+
+    /**
+     * Asserts a submission the orchestrator refuses as a duplicate answers with that run's own name.
+     *
+     * <p>Assumptions: the refusal is the orchestrator's own {@code ExecutionAlreadyExists}, which is what
+     * a retry carrying the key of an accepted attempt receives. It is answered rather than raised -- the
+     * whole point of deriving a name from a submission key -- and the name it is answered with is the one
+     * the colliding start was made under, which is why the collision happened at all.
+     *
+     * <p>Assumptions: no exception is expected, and the case would fail loudly rather than silently if
+     * one were raised, because the assertion runs after the call.
+     */
+    @Test
+    @DisplayName("a duplicate submission answers with the name of the run that holds it")
+    void aDuplicateSubmissionAnswersWithTheHeldName() {
+        when(sfnClient.startExecution(any(StartExecutionRequest.class)))
+                .thenThrow(ExecutionAlreadyExistsException.builder()
+                        .message("Execution Already Exists")
+                        .build());
+
+        ReportSubmissionResponse deduplicated = submit("monthly-2022-07-retry-1");
+
+        assertThat(deduplicated.executionName())
+                .as("a retry must be folded onto the run it retries, named by that run's own name")
+                .isEqualTo(startedNames(1).get(0));
+    }
+
     /**
      * Submits a confirmed monthly report over a fixed range.
      *
@@ -245,10 +292,16 @@ class ReportSubmissionNamingTest {
      * separate concern with its own cases and holding it fixed here keeps every assertion about the name
      * about the name alone.
      *
+     * <p>⚠️ Refactoring Rationale: the acknowledgement is RETURNED where this helper discarded it. Every
+     * case here reads the name out of the captured request, which is still the right subject for a name
+     * composed privately -- but the response now carries that same name as the handle a caller polls
+     * with, so a case asserting the two agree needs the value this helper was throwing away.
+     *
      * @param idempotencyKey the submission key to send, or {@code null} to send none
+     * @return the acknowledgement the service answered with; never {@code null}
      */
-    private void submit(String idempotencyKey) {
-        service.start(
+    private ReportSubmissionResponse submit(String idempotencyKey) {
+        return service.start(
                 confirmedMonthlyRequest(),
                 ReportExecutionService.MONTHLY_REPORT_NAME,
                 LocalDate.of(2022, 7, 1),

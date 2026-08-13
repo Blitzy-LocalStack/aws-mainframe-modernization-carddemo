@@ -680,7 +680,7 @@ public class ReportController {
      * Reports what became of one submitted report, and where to collect it once it exists.
      *
      * <p>⚠️ Refactoring Rationale: this operation is what the submission handle was for. A review found
-     * that {@code executionArn} was returned and consumed by nothing: a caller could not tell a run still
+     * that the handle was returned and consumed by nothing: a caller could not tell a run still
      * going from one that had failed, and the produced document was reachable by no operation at all. The
      * two date-range operations beside this one report the CURRENT contents of the ledger, which is not the
      * same thing as the report a particular run rendered -- so reading them was never an answer to "did my
@@ -690,6 +690,14 @@ public class ReportController {
      * the configured state machine, so nothing a caller sends can reach another machine, another account or
      * another environment -- a guarantee by construction rather than by a prefix check that has to be got
      * right.
+     *
+     * <p>⚠️ Refactoring Rationale: the value this operation takes is now the value the submission
+     * RETURNS, and a second review is what closed that gap. The submission answered with the execution
+     * ARN in full, which this path cannot accept -- a caller sending it had its colons and slashes
+     * percent-encoded into one segment and was refused on the published shape -- so the lifecycle could
+     * be started and never polled. {@code ReportSubmissionResponse.executionName} is the pairing value,
+     * and the ARN is withdrawn from that response rather than accepted here alongside the name: accepting
+     * both would put two spellings of one handle in the contract and would have to state which wins.
      *
      * <p>Assumptions: the artifact location is published only where the store HOLDS the object, so a
      * location this operation returns always resolves. A run that succeeded and whose artifact a lifecycle

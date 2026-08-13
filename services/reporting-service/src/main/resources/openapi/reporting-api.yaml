@@ -3,11 +3,18 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   The OpenAPI 3.1 contract of record for the reporting bounded context. It
-#   settles the five paths, the operation identifiers, every property name and
+#   settles the eight paths, the operation identifiers, every property name and
 #   width, the rendering of money, the paging mechanism and the refusal
 #   behaviour of this context, so that the browser client at
 #   ui/src/api/reporting.ts is written against one published agreement rather
 #   than against a reading of this module's Java.
+#   Refactoring Rationale: this count read FIVE and the document had eight paths
+#   by then. The three that arrived with the read side of the lifecycle -- the
+#   execution status, the report document and the statement document -- were
+#   added without the count above them being moved, so the header understated the
+#   surface it introduces. ReportingApiContractTest pins the eight paths and the
+#   eight operation identifiers, which is what makes this sentence checkable
+#   rather than merely maintained.
 #
 #   Four reference programs are surfaced here, and each is read as the
 #   specification and never modified:
@@ -42,14 +49,26 @@
 #       direction it was issued for.
 #     - One request header, X-Correlation-Id, accepted on every operation and
 #       declared once under components/parameters.
-#     - No path parameter at all, because a primary account number may not
-#       appear in a target and no other row here has a published address.
+#     - Two path parameters, both on the read side of a lifecycle and neither
+#       naming a person: executionName on the execution-status operation, which
+#       is the name a submission returned, and selector on the statement-artifact
+#       operation, which is an opaque token the service minted.
+#       Assumptions: a primary account number still may not appear in a target,
+#       which is why the statement operations select by request body and why the
+#       artifact is reached through a minted token rather than through the card it
+#       was rendered for. The rule is about cardholder values in a target, not
+#       about path parameters as such -- an earlier reading of it stated that this
+#       document declares no path parameter at all, which stopped being true when
+#       the lifecycle reads were added.
 #
 # Return values:
-#     - ReportSubmissionOutcome from the submission operation, at 200 for a
-#       deliberate cancellation and 201 for a started execution. Its nested
-#       ReportSubmissionResponse carries the execution handle and is absent on
-#       the cancellation.
+#     - ReportSubmissionOutcome from the submission operation, at 201 for a
+#       started execution and at 200 for either of the two turns that start
+#       nothing -- a deliberate cancellation and a confirmation not yet answered.
+#       Its own outcome member says which of the three occurred; the status alone
+#       cannot, because two of them share 200. Its nested
+#       ReportSubmissionResponse carries the run's executionName, which the
+#       execution-status operation is addressed by, and is null on both 200 turns.
 #     - TransactionReportLinePage from the detail browse, one bounded page.
 #     - TransactionReportTotals from the totals read, the three bands.
 #     - StatementResponse from the statement operation, carrying the two
@@ -263,14 +282,17 @@ paths:
         NO MESSAGE SET AT ALL, so a cancellation carries no message either --
         this response's message member is null on that branch and nothing is
         composed to stand in for it. A blank or unset confirmation is the third
-        outcome and it is REFUSED with 400, carrying the prompt the baseline
-        composes at L465 to L469 from 'Please confirm to print the ', the report
-        name and ' report...' in the shared problem document with a field error
-        on confirm; it is a request that named no answer rather than an outcome
-        of one, and answering it 200 would report a success for a turn that
-        started nothing and declined nothing. Any other value is likewise
-        answered 400, whose message the baseline composes at L485 to L489 as the
-        quoted value followed by '" is not a valid value to confirm...'.
+        outcome and it is answered with 200 and an outcome of UNANSWERED, whose
+        message member carries the prompt the baseline composes at L465 to L469
+        from 'Please confirm to print the ', the report name and ' report...'. It
+        is a question being asked rather than a fault being reported, which is
+        why it is neither a 400 nor a DECLINED: an earlier revision of this
+        paragraph described it as REFUSED with 400 and a field error on confirm,
+        and that description outlived the behaviour it described. Nothing is
+        started on that turn, so a caller re-submits with an answer. Any other
+        value IS answered 400, whose message the baseline composes at L485 to
+        L489 as the quoted value followed by '" is not a valid value to
+        confirm...'.
 
 
         Repeat submissions are the CALLER's decision. Omitting the
@@ -1982,15 +2004,27 @@ components:
         - message
         - submission
       description: >-
-        The outcome of one submission request, discriminating a started run from
-        a deliberate cancellation. A cancellation is NOT an error and carries no
-        problem document: the baseline branch at app/cbl/CORPT00C.cbl L480 to
-        L483 performs INITIALIZE-ALL-FIELDS, raises the error flag and re-sends
-        the screen with no message at all, so at flag level a cancel is
-        indistinguishable from a validation failure and the screen redisplays
-        cleared with no feedback about which occurred. Separating the two across
-        a status and this member preserves the suppression the flag existed for
-        while giving the caller the feedback a single flag could not carry.
+        The outcome of one submission request, discriminating THREE turns: a
+        started run, a deliberate cancellation, and a confirmation not yet
+        answered. Neither of the latter two is an error and neither carries a
+        problem document, so both are answered 200. The baseline branch for a
+        cancellation at app/cbl/CORPT00C.cbl L480 to L483 performs
+        INITIALIZE-ALL-FIELDS, raises the error flag and re-sends the screen with
+        no message at all, so at flag level a cancel is indistinguishable from a
+        validation failure and the screen redisplays cleared with no feedback
+        about which occurred; the unanswered turn at L464 to L474 composes a
+        question instead. Separating all three across a status and this member
+        preserves the suppression the flag existed for while giving the caller
+        the feedback a single flag could not carry.
+
+
+        Refactoring Rationale: this paragraph named only two turns while the
+        outcome member below already enumerated three, so the schema described
+        its own discriminator incorrectly at the level a reader meets first. It
+        is the same drift the member's own description was corrected for: a
+        reader who stopped here would have read the unanswered turn as a
+        cancellation and reported "you cancelled" to a caller that had merely
+        left the confirmation blank.
       properties:
         outcome:
           type: string
@@ -2071,7 +2105,7 @@ components:
       type: object
       additionalProperties: false
       required:
-        - executionArn
+        - executionName
         - reportName
         - shortName
         - longName
@@ -2101,17 +2135,27 @@ components:
         #       absorbs, and it returned no identity either, so an operator had
         #       to find the job by name. Starting a state machine returns this
         #       durable handle and fails loudly instead.
-        executionArn:
-          type: string
-          minLength: 1
+        # WHY : ⚠️ Refactoring Rationale: this member is the execution NAME and
+        #       was executionArn, the orchestration handle in full. A review
+        #       established that the two halves of the lifecycle did not meet:
+        #       readReportExecution is addressed by ExecutionNamePath, so the
+        #       only value a submission handed back was the one value that
+        #       operation does not accept -- sent as a path value its colons and
+        #       slashes are percent-encoded into a single segment and refused on
+        #       the published shape. The name is what pairs, and it is what the
+        #       service already composed and discarded. Alternatives Considered:
+        #       publishing both. Rejected because the ARN had no consumer at all
+        #       and it embeds the account identifier and region of the deployment
+        #       that ran the report, which no caller of this surface needs; the
+        #       service derives it from this name whenever it needs one.
+        executionName:
+          allOf:
+            - $ref: '#/components/schemas/ExecutionName'
           description: >-
-            The orchestrator's opaque identity for the started execution, to be
-            passed back verbatim when polling. Treat it as opaque: it is a
-            provider-assigned resource name whose internal structure is not part
-            of this contract, and no example of a real one appears in this
-            document because such a name embeds an account identifier.
-          examples:
-            - REDACTED_EXECUTION_HANDLE
+            The name the accepted run was started under, and the value the
+            execution-status operation of this contract is addressed by. Pass it
+            back unchanged; treat it as opaque, since the way this service
+            composes a name is not part of this contract.
         reportName:
           type: string
           maxLength: 10

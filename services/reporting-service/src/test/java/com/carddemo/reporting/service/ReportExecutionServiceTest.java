@@ -567,10 +567,18 @@ class ReportExecutionServiceTest {
      * a business date as a job parameter, so that a run can be repeated to the same output.</p>
      *
      * <p>Assumptions: all four parts of the request are asserted -- the state machine, the name, the
-     * input and the fact that the returned handle is the one the orchestrator gave -- because each can
-     * be wrong on its own. A correct input sent to the wrong machine starts nothing; a correct machine
-     * with a colliding name is refused; and a response whose handle was dropped leaves a caller with
-     * nothing to poll.</p>
+     * input and the fact that the returned handle is the name the run was started UNDER -- because each
+     * can be wrong on its own. A correct input sent to the wrong machine starts nothing; a correct
+     * machine with a colliding name is refused; and a response whose handle was dropped leaves a caller
+     * with nothing to poll.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the returned handle is compared with the name that was SENT, and it
+     * was compared with the orchestrator's execution ARN. A review found the two halves of the lifecycle
+     * unable to meet -- {@code describeExecution} is addressed by name and composes the ARN itself, so
+     * the value this response carried was the one value it does not accept. Comparing the answer with
+     * the captured request is what makes the pairing the subject of the assertion: an implementation that
+     * answered a name of its own, or the ARN again, fails here rather than passing on a literal that
+     * agrees with nothing.</p>
      *
      * <p>Assumptions: the execution NAME is asserted by value, because its whole purpose is that a
      * retry after an abandoned call collides rather than starting the report twice. A name carrying a
@@ -609,7 +617,7 @@ class ReportExecutionServiceTest {
                 "{\"reportType\":\"monthly\",\"startDate\":\"2022-07-01\","
                         + "\"endDate\":\"2022-07-31\"}");
 
-        assertThat(accepted.executionArn()).isEqualTo(EXECUTION_ARN);
+        assertThat(accepted.executionName()).isEqualTo(started.getValue().name());
         assertThat(accepted.reportName()).isEqualTo(ReportExecutionService.MONTHLY_REPORT_NAME);
         assertThat(accepted.startDate()).isEqualTo("2022-07-01");
         assertThat(accepted.endDate()).isEqualTo("2022-07-31");

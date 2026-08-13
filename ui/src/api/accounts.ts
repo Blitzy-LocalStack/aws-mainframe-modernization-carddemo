@@ -387,8 +387,13 @@ export async function readAccountView(accountId: string): Promise<{
  *   state as stored, both protected identifiers already masked, the screen's information and message
  *   lines, the per-field error array the form binds to, and the NEW revision so that consecutive
  *   edits need no intervening read -- `null` when the response carried no entity tag.
- * @throws {RangeError} If no revision is supplied, which the service would otherwise answer as
- *   HTTP 400 naming the absent header.
+ * @throws {RangeError} If the supplied revision is empty. ⚠️ Note what this is NOT: it is not a stand-in
+ *   for the service's refusal of an ABSENT `If-Match`, which is a 400 this function cannot reach because
+ *   it always sends the header. A blank value is sent as a blank header, and the service treats a blank
+ *   precondition as a FAILED one — `requireCurrentRevision` in
+ *   `services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`
+ *   tests `expectedRevision.isBlank()` first and raises the same stale-version conflict — so the answer
+ *   would be 409 with the changed-record sentence, reporting a concurrent edit that never happened.
  * @throws {Error} If the request fails. The rejection is the normalised problem document `./client`
  *   raises, and HTTP 409 is the optimistic-concurrency refusal described above -- its `fieldErrors`
  *   entry is keyed `version` and reports the CURRENT revision, so a caller may re-read and retry
@@ -403,10 +408,19 @@ export async function updateAccount(
   readonly revision: string | null;
 }> {
   if (revision.length === 0) {
-    // Trade-offs: refused here rather than sent as an empty header. The service answers a blank
-    //   precondition with the same 409 it uses for a stale one, which would report a conflict the
-    //   caller never had; failing locally names the real defect, and the cost is one branch that
-    //   duplicates a server-side rule.
+    // Trade-offs: refused here rather than sent as an empty header, and the two ways a precondition can
+    //   be missing have DIFFERENT answers, which is what makes the local refusal worth its one branch.
+    //   An absent `If-Match` is refused by the framework before any account code runs, because
+    //   `AccountController.update` declares it as a required `@RequestHeader`, and that answer is a 400
+    //   naming the header -- self-explanatory, and unreachable from here since this function always sends
+    //   the header. A PRESENT but blank one reaches the business rule instead, where
+    //   `requireCurrentRevision` tests `expectedRevision.isBlank()` before comparing anything and raises
+    //   the same stale-version conflict a genuinely outdated token raises. So the answer to a blank
+    //   revision is a FALSE 409: the screen would show `Record changed by some one else. Please review`
+    //   and offer a re-read for an edit nobody else touched, sending the operator to look for a
+    //   concurrent change that does not exist. Failing locally names the real defect -- a caller that
+    //   lost the revision its read returned -- and the cost is one branch that anticipates a rule the
+    //   service still enforces on its own.
     throw new RangeError('An account edit requires the revision the account read returned.');
   }
 

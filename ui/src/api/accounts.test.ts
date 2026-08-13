@@ -259,9 +259,15 @@ async function submitsAnEditUnderItsPrecondition(): Promise<void> {
 /**
  * Asserts an edit with no revision is refused locally.
  *
- * Assumptions: refusing here is what turns a lost update into an immediate error. A conditional write
- * with no condition is an unconditional write, and the contract answers it with 428 -- but only after the
- * caller has already assembled a hundred-field body.
+ * ⚠️ Assumptions: refusing here is what keeps a lost revision from being reported as somebody else's
+ * edit. This claimed the contract answers a conditionless write with 428, and no operation in any of the
+ * seven contracts publishes that status. What the service actually does is send the header blank —
+ * `updateAccount` always sets it — and `requireCurrentRevision` in `AccountUpdateService` tests
+ * `expectedRevision.isBlank()` before comparing, raising the same stale-version conflict a genuinely
+ * outdated token raises. So the answer is 409 with the changed-record sentence, which is a FALSE conflict:
+ * the operator is sent to look for a concurrent change nobody made. The second assertion below is
+ * therefore part of the claim rather than incidental — nothing is dispatched, so the hundred-field body is
+ * never assembled and no conflict is ever reported.
  */
 async function refusesAnEditWithNoRevision(): Promise<void> {
   await expect(updateAccount(ACCOUNT_EDIT, '')).rejects.toThrow(RangeError);

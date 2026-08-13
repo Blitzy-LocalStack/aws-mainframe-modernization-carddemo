@@ -48,7 +48,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { API_PATH_PREFIX, isApiError, PUBLISHED_PATH_SEGMENTS, requestPath } from './client';
+import { API_PATH_PREFIX, isApiError, requestPath } from './client';
 import type { ContractOperation } from './types';
 import { ACCOUNT_CONTRACT_OPERATIONS } from './accounts';
 import { CARD_CONTRACT_OPERATIONS } from './cards';
@@ -212,28 +212,25 @@ function contractText(service: keyof typeof CONTRACTS): string {
 }
 
 /**
- * Extracts every operation one contract declares.
+ * Extracts every operation one contract declares, paired with the tags it carries.
  *
  * Assumptions: the scan is driven by indentation, which is uniform across all six documents in this
  * repository and is asserted by the non-emptiness checks below rather than assumed. It deliberately
  * understands nothing else about YAML: anchors, aliases, flow mappings and block scalars all appear in
  * these documents and none of them can produce a line matching the three patterns above, because a
  * path key must begin with a slash and a method key must be one of five known words.
- * @param {string} text - The whole contract document.
- * @returns {ContractOperation[]} One entry per declared operation, in document order.
- * @throws {Error} If an operation carries no identifier, which every contract is required to declare.
- */
-function declaredOperations(text: string): ContractOperation[] {
-  return declaredEntries(text).map(justTheOperation);
-}
-
-/**
- * Extracts every operation one contract declares, paired with the tags it carries.
  *
- * Assumptions: this is the single walk and {@link declaredOperations} projects its result, rather than
- * the two scanning the document separately. A second walk keyed by method and path would have to
- * reproduce the indentation rules of the first, and the two copies would then disagree the moment
- * either was corrected.
+ * Assumptions: this is the single walk, and every caller projects its result through
+ * {@link justTheOperation} rather than scanning the document again. A second walk keyed by method and
+ * path would have to reproduce the indentation rules of the first, and the two copies would then
+ * disagree the moment either was corrected.
+ *
+ * Refactoring Rationale: ⚠️ an unparameterised `declaredOperations(text)` projection stood here and is
+ * gone. Its one caller compared the literal path segments of EVERY declared operation, internal reads
+ * included, against a hand-maintained masking vocabulary in `client.ts`; that vocabulary was retired
+ * with the value-based mask that consumed it, so the projection had no remaining consumer. Keeping an
+ * unused helper in place would have left a reader thinking some case still reads the whole document
+ * unfiltered, which is exactly the premise {@link browserFacingOperations} corrects.
  * @param {string} text - The whole contract document.
  * @returns {readonly DeclaredEntry[]} One entry per declared operation, in document order, each with
  *   the tags declared on it.
@@ -732,74 +729,158 @@ function percentEncodesAStructuralValue(): void {
   expect(target).toBe('/authorizations/v1.a%2Fb.c');
 }
 
+/** Matches one path-template segment that is entirely a placeholder, for example `{cardKey}`. */
+const PLACEHOLDER_SEGMENT = /^\{[A-Za-z][A-Za-z0-9]*\}$/u;
+
 /**
- * Asserts the masking vocabulary in `client.ts` is exactly the literal segments the contracts publish.
+ * Every published route word the diagnostic mask cannot report by name, measured from the manifests.
  *
- * Purpose: a failure this client synthesises carries a MASKED template of the target, and the mask keeps a
- * segment only when it appears in {@link PUBLISHED_PATH_SEGMENTS}. That set therefore has to be the
- * documents' own vocabulary: a missing literal turns a route name into `{id}`, which loses the operation a
- * diagnostic is about, and an extra entry would keep a value in the clear -- the disclosure the mask
- * exists to prevent, and the one a reviewer found when the dispatched target was copied through verbatim.
+ * Purpose: ⚠️ this census replaces a gate that compared a hand-maintained set of route words held in
+ * `client.ts` against the words the contracts publish. That set existed because the mask kept a segment
+ * whose VALUE was one of those words, which disclosed every path-parameter value that happened to spell
+ * one — a user identifier is one to eight printable characters, so `admin` and `users` are both legal
+ * identifiers and both survived in the clear. The mask now answers from the operation TEMPLATE a request
+ * composed, so no vocabulary is held anywhere and there is none left to keep honest. What does need
+ * pinning is the single thing the new rule gives up.
  *
- * Assumptions: the set is compared for EQUALITY in both directions rather than for containment, because
- * the two failure modes are different and both matter. The set lives in `client.ts` as data because the
- * client modules import that module, so reading their manifests from it would close an import cycle
- * through all seven; this case is what keeps the data honest.
+ * That rule keeps a segment only where every template that could have composed the dispatched target
+ * declares a literal in that position. Two published templates of the same segment count that agree
+ * wherever both declare a literal are indistinguishable once values are substituted, so a literal facing
+ * a placeholder in such a template is reported as a placeholder rather than by name. Each row below is
+ * one such position. Trade-offs: what is lost is the precision of a diagnostic — `/cards/lookup` reports
+ * as `/cards/{id}` — and what is gained is that no value can be disclosed by resembling a route word,
+ * which is the property this whole rule exists for.
  *
- * Assumptions: `v1` is expected as a member like any other. It is a literal segment of every published
- * path, and special-casing it in the mask would be a second rule to keep in step with this one.
- *
- * Measured: two mutations, two distinct findings. Dropping `card-cross-references` from the set fails with
- * `expected [ 'card-cross-references' ] to deeply equal []`, and adding an account identifier to it fails
- * with `expected [ '00000000011' ] to deeply equal []` -- the second being the disclosure case, which a
- * containment assertion in either direction alone would have passed.
- * @returns {void} Nothing; the case asserts.
- * @throws {Error} If a contract is unreadable.
+ * Assumptions: the rows are MEASURED from the manifests rather than reasoned about, and the case asserts
+ * equality in both directions. A new row means a route was added beside a parameterised one of the same
+ * shape and stopped being nameable in a diagnostic — worth knowing, and worth a collision case in
+ * `client.test.ts`. A missing row means a published route was removed or renamed.
  */
-function theMaskingVocabularyMatchesTheContracts(): void {
-  const published = new Set<string>();
-  for (const service of Object.keys(CONTRACTS) as (keyof typeof CONTRACTS)[]) {
-    for (const operation of declaredOperations(contractText(service))) {
-      for (const segment of operation.path.split('/')) {
-        if (segment !== '' && !(segment.startsWith('{') && segment.endsWith('}'))) {
-          published.add(segment);
-        }
-      }
+const EXPECTED_MASKED_LITERALS: readonly string[] = [
+  '/authorizations/search [2] search <- /authorizations/{key}',
+  '/cards/lookup [2] lookup <- /cards/{cardKey}',
+  '/cards/search [2] search <- /cards/{cardKey}',
+  '/transactions/copy-last [2] copy-last <- /transactions/{transactionId}',
+];
+
+/**
+ * Every distinct path template the browser clients compose, which is what the mask learns from.
+ *
+ * Assumptions: templates are deduplicated and the version prefix removed, because `requestPath` records
+ * exactly that form — one entry per path however many methods it carries. Fifty-three operations reduce
+ * to fewer templates for that reason, and counting operations here would double-count a path that
+ * publishes both a read and a write.
+ * @returns {readonly string[]} Each distinct versionless template, in sorted order.
+ */
+function manifestTemplates(): readonly string[] {
+  const templates = new Set<string>();
+  for (const [, manifest] of BROWSER_CLIENTS) {
+    for (const operation of manifest) {
+      templates.add(operation.path.slice(API_PATH_PREFIX.length));
     }
   }
+  return [...templates].sort();
+}
 
-  expect(published.size, 'the scan must find the published path segments').toBeGreaterThan(0);
-  /**
-   * Reports whether the client's masking vocabulary is missing one published segment.
-   * @param {string} segment - A literal segment the contracts publish.
-   * @returns {boolean} `true` when `client.ts` does not know it.
-   */
-  function isUnknownToTheClient(segment: string): boolean {
-    return !PUBLISHED_PATH_SEGMENTS.has(segment);
+/**
+ * Reports whether one target could have been composed from either of two templates.
+ *
+ * Assumptions: this restates the compatibility question the mask asks, and deliberately not the mask's
+ * answer. Equal segment counts and agreement at every position where both declare a literal is what
+ * makes two templates indistinguishable after substitution; a placeholder is compatible with anything,
+ * because `requestPath` percent-encodes a value and so a value can never introduce a segment boundary.
+ * @param {string} one - One versionless template.
+ * @param {string} other - Another versionless template.
+ * @returns {boolean} `true` when some single target matches both.
+ */
+function couldBothCompose(one: string, other: string): boolean {
+  const left = one.split('/');
+  const right = other.split('/');
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every(
+    /**
+     * Reports whether one position leaves the two templates still indistinguishable.
+     * @param {string} segment - The segment of the first template at this position.
+     * @param {number} index - The position under test.
+     * @returns {boolean} `true` unless both declare a literal and the two literals differ.
+     */
+    (segment: string, index: number): boolean => {
+      const facing = right[index] ?? '';
+      return (
+        PLACEHOLDER_SEGMENT.test(segment) || PLACEHOLDER_SEGMENT.test(facing) || segment === facing
+      );
+    },
+  );
+}
+
+/**
+ * Computes the census of published literals a compatible template makes unreportable.
+ *
+ * Assumptions: every colliding template is listed rather than only the first, and the whole census is
+ * sorted, so the comparison is stable however the manifests are ordered on disk.
+ * @returns {readonly string[]} One row per lost literal, rendered as template, position, word and cause.
+ */
+function maskedLiteralCensus(): readonly string[] {
+  const templates = manifestTemplates();
+  const census: string[] = [];
+
+  for (const template of templates) {
+    template.split('/').forEach(
+      /**
+       * Records one position of one template when a compatible template hides its literal.
+       * @param {string} segment - The segment at this position.
+       * @param {number} index - The position under test.
+       * @returns {void} Nothing; a row is appended when the literal is lost.
+       */
+      (segment: string, index: number): void => {
+        if (segment === '' || PLACEHOLDER_SEGMENT.test(segment)) {
+          return;
+        }
+        /**
+         * Reports whether one other template hides this position behind a placeholder.
+         * @param {string} other - Another versionless template.
+         * @returns {boolean} `true` when it is compatible and declares a placeholder here.
+         */
+        function hidesThisPosition(other: string): boolean {
+          return (
+            other !== template &&
+            couldBothCompose(template, other) &&
+            PLACEHOLDER_SEGMENT.test(other.split('/')[index] ?? '')
+          );
+        }
+
+        for (const other of templates.filter(hidesThisPosition)) {
+          census.push(`${template} [${String(index)}] ${segment} <- ${other}`);
+        }
+      },
+    );
   }
 
-  /**
-   * Reports whether the client's masking vocabulary carries a segment no contract publishes.
-   * @param {string} segment - A member of the client's vocabulary.
-   * @returns {boolean} `true` when no published path uses it.
-   */
-  function isUnpublished(segment: string): boolean {
-    return !published.has(segment);
-  }
+  return census.sort();
+}
 
-  const missing = [...published].filter(isUnknownToTheClient).sort();
-  const extra = [...PUBLISHED_PATH_SEGMENTS].filter(isUnpublished).sort();
+/**
+ * Asserts the set of route words the mask cannot name is exactly the measured census.
+ *
+ * Measured: two mutations, two distinct findings. Publishing `/accounts/summary` beside
+ * `/accounts/{accountId}` adds `'/accounts/summary [2] summary <- /accounts/{accountId}'` to the actual
+ * census and fails, which is the case a maintainer needs to see. Renaming `/cards/lookup` leaves its row
+ * in the expectation and fails from the other side, so neither direction of drift is silent.
+ * @returns {void} Nothing; the case asserts.
+ */
+function theMaskedLiteralCensusIsUnchanged(): void {
+  const templates = manifestTemplates();
 
   expect(
-    missing,
-    'client.ts must know every literal segment the contracts publish, or the mask will replace a route' +
-      ' name with a placeholder and lose the operation a diagnostic is about',
-  ).toEqual([]);
+    templates.length,
+    'the manifests must yield templates for the census to mean anything',
+  ).toBeGreaterThan(0);
   expect(
-    extra,
-    'client.ts must know no segment the contracts do not publish, or the mask will keep a value in the' +
-      ' clear',
-  ).toEqual([]);
+    maskedLiteralCensus(),
+    'a change here means the diagnostic mask just gained or lost a route word it can report by name',
+  ).toEqual([...EXPECTED_MASKED_LITERALS]);
 }
 
 /**
@@ -807,10 +888,7 @@ function theMaskingVocabularyMatchesTheContracts(): void {
  * @returns {void} Nothing; the cases are registered with the runner.
  */
 function requestTargetComposition(): void {
-  it(
-    'masks with exactly the vocabulary the contracts publish',
-    theMaskingVocabularyMatchesTheContracts,
-  );
+  it('names the same masked literals the contracts collide on', theMaskedLiteralCensusIsUnchanged);
   it('refuses a contract path that is not versioned', refusesAnUnversionedPath);
   it('refuses an operation whose placeholder has no value', refusesAnUnsubstitutedPlaceholder);
   it('refuses a parameter the path does not declare', refusesAnUndeclaredParameter);
@@ -1237,6 +1315,83 @@ function everyClientModuleReexportsItsShapes(): void {
 function singleDefinitionPerWireShape(): void {
   it('leaves no wire shape declared in a client module', noClientModuleDeclaresAWireShape);
   it('keeps every client module re-exporting its shapes', everyClientModuleReexportsItsShapes);
+}
+
+/** A call asking the transport to leave the response body undecoded. */
+const BLOB_RESPONSE_TYPE = /responseType: 'blob'/gu;
+
+/** The media type an operation that answers bytes publishes, and the only one such a call may accept. */
+const BINARY_MEDIA_TYPE = 'application/octet-stream';
+
+/**
+ * A call overriding the shared client's Accept with the binary media type, by constant or by literal.
+ *
+ * Assumptions: BOTH spellings are matched. A module that holds the media type in a named constant and a
+ * module that writes it at the call site are equally correct, and a gate that recognised only the form
+ * the current code happens to use would fail the next module for a style difference rather than for a
+ * defect.
+ */
+const BINARY_NEGOTIATION = /headers: OCTET_STREAM_ACCEPT|Accept: 'application\/octet-stream'/gu;
+
+/**
+ * Asserts every client call that asks for undecoded bytes also accepts a byte stream.
+ *
+ * Purpose: ⚠️ a review found both of this package's binary calls asking the transport for a `Blob` while
+ * still sending the shared client's `Accept: application/json`. Each addresses a handler that publishes
+ * `application/octet-stream` as its only produced media type, so the request was unsatisfiable and was
+ * refused with HTTP 406 before the handler ran -- and no static check saw it, because the response type
+ * and the request header are independent settings that read as one concern.
+ *
+ * Assumptions: the rule is expressed over the SOURCE of every client module rather than over a list of
+ * operation names, so it binds a binary call added to any module later. The count of blob requests and
+ * the count of binary negotiations must agree module by module: a new binary call with no header fails
+ * here even if its own test file forgets to assert the header, which is the failure mode this case
+ * exists for.
+ *
+ * Alternatives Considered: deriving the binary operations from the documents' response media types and
+ * checking those specific operations. Rejected because this file reads its contracts as text -- the
+ * reason is recorded at the head of this file -- and the response `content` blocks sit four levels below
+ * the operation keys the scanner understands, so the derivation would need a YAML parser this package
+ * deliberately does not pin. The client-side invariant needs no parser and forbids the same defect.
+ *
+ * Measured: removing the header from one of the two calls fails this case with a count mismatch naming
+ * the module, and fails two cases of `reporting.test.ts` on the dispatched header itself. The two gates
+ * are deliberately different in kind -- one static over every module, one dynamic over the two calls.
+ * @returns {void} Nothing; the case asserts.
+ */
+function everyBinaryCallNegotiatesItsMediaType(): void {
+  let blobRequests = 0;
+
+  for (const name of clientModules()) {
+    const source = clientModuleSource(name);
+    const requested = (source.match(BLOB_RESPONSE_TYPE) ?? []).length;
+    const negotiated = (source.match(BINARY_NEGOTIATION) ?? []).length;
+    blobRequests += requested;
+
+    expect(
+      negotiated,
+      `${name} asks for an undecoded body ${String(requested)} time(s) and accepts` +
+        ` ${BINARY_MEDIA_TYPE} ${String(negotiated)} time(s); a call that asks for bytes while` +
+        " accepting only JSON is refused with 406 before the service's handler runs",
+    ).toBe(requested);
+  }
+
+  expect(
+    blobRequests,
+    'the discovery must find the binary calls this package makes; a scan that matched none would' +
+      ' assert nothing while reporting success',
+  ).toBeGreaterThan(0);
+}
+
+/**
+ * Groups the binary-response negotiation cases.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function binaryResponseNegotiation(): void {
+  it(
+    'accepts a byte stream on every call that asks for one',
+    everyBinaryCallNegotiatesItsMediaType,
+  );
 }
 
 /*
@@ -2283,4 +2438,5 @@ describe('request target composition', requestTargetComposition);
 describe('problem document narrowing', problemDocumentNarrowing);
 describe('wire-type module erasability', wireTypeModuleErasability);
 describe('single definition per wire shape', singleDefinitionPerWireShape);
+describe('binary response negotiation', binaryResponseNegotiation);
 describe('schema and type closure', schemaAndTypeClosure);

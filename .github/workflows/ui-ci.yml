@@ -230,8 +230,19 @@ jobs:
       # no third-party package. The `python3 -V` line makes the interpreter the run
       # actually used visible in the log, so a future image change is diagnosable
       # from the same step that would fail.
+      # ⚠️ Assumptions: this step runs from the REPOSITORY ROOT and overrides the job's
+      # `ui` default, because the gate is repository-wide: it walks every governed tree
+      # and reads `docs/CODE_DOCUMENTATION_STANDARD.md`, both of which are outside
+      # `ui/`. Without the override the invocation resolved to
+      # `ui/config/rule1/rule1_gate.py`, which does not exist, so the step exited 2 with
+      # `can't open file` on every run of this workflow -- the one workflow a change
+      # confined to `ui/**` triggers, which is the reason the paragraph above gives for
+      # having a third copy of the gate at all. The two other copies, in
+      # services-ci.yml and infra-ci.yml, need no override because neither of those jobs
+      # sets a default working directory.
       - name: Run the Rule 1 lexical and consistency gate
         shell: bash
+        working-directory: .
         run: |
           set -euo pipefail
           python3 -V
